@@ -431,7 +431,57 @@ impl ComponentMetaSession {
         Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
-        self.get_component_meta_with_fallthrough(canonical_or_alias, false)
+        self.get_declared_component_meta_with_resolution(canonical_or_alias)
+            .map(|result| result.map(|(analysis, _resolved)| analysis))
+    }
+
+    /// Declared-only component metadata plus the resolved-state sidecar in
+    /// this session's overlay context.
+    pub fn get_declared_component_meta_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        ComponentMetaHostError,
+    > {
+        let _trace = component_meta_trace_scope!(
+            "component_meta_session_declared_query_with_resolution",
+            format!(
+                "backend={:?} owner={}",
+                self.owner.backend, canonical_or_alias
+            ),
+        );
+        match self.owner.backend {
+            TypeExpansionBackend::Verter => self
+                .inner
+                .get_declared_component_meta_with_resolution(canonical_or_alias)
+                .map_err(ComponentMetaHostError::from),
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
+                let Some((canonical, resolved, store_view)) = self
+                    .inner
+                    .resolve_component_meta_state_with_view(
+                        canonical_or_alias,
+                        crate::types::ResolverMode::Expanded,
+                    )
+                    .map_err(ComponentMetaHostError::from)?
+                else {
+                    return Ok(None);
+                };
+                let Some(analysis) = self.get_component_meta_via_external_backend_from_resolved(
+                    &canonical,
+                    &resolved,
+                    false,
+                    Some(&store_view),
+                )?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((analysis, resolved)))
+            }
+        }
     }
 
     fn get_component_meta_with_fallthrough(
@@ -1763,6 +1813,281 @@ mod tests {
     }
 
     #[test]
+    fn declared_component_meta_with_resolution_keeps_resolved_type_registry_sidecar() {
+        let host = make_host();
+        host.upsert_base(
+            "/src/types.ts",
+            r#"type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends Record<string, any>, A> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  appConfig?: A
+}"#,
+        )
+        .unwrap();
+        host.upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+        host.upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './types'
+import theme from './theme'
+
+type Button = ComponentConfig<typeof theme, MissingAppConfig>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+        let session = host.open_session().unwrap();
+        let (_analysis, resolved) = session
+            .get_declared_component_meta_with_resolution("/src/Button.vue")
+            .unwrap()
+            .expect("declared query should return meta plus resolution sidecar");
+
+        let button_entry = resolved
+            .resolved_type_registry
+            .iter()
+            .find(|entry| entry.name == "Button")
+            .expect("declared query should keep the resolved Button registry entry");
+        let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+            panic!(
+                "expected resolved Button helper to materialize as an object, got {:?}",
+                button_entry.type_expr
+            );
+        };
+
+        let variants_member = button_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "variants" => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            })
+            .expect("Button registry entry should keep variants");
+        let TypeExpr::Object(variants_shape) = variants_member else {
+            panic!(
+                "expected Button.variants to materialize as an object, got {:?}",
+                variants_member
+            );
+        };
+        assert!(
+            variants_shape.properties.iter().any(
+                |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+            ),
+            "expected Button.variants to expose color, got {:?}",
+            variants_member
+        );
+    }
+
+    #[test]
+    fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
+        let host = make_host();
+        let session = host.open_session().unwrap();
+
+        // Upsert the owner before its overlay-only helpers. Overlay application
+        // must still leave the owner query seeing the helper files.
+        session
+            .upsert(
+                "/src/Button.vue",
+                r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#
+                    .to_string(),
+            )
+            .unwrap();
+        session
+            .upsert(
+                "/src/tv.ts",
+                r#"type ClassValue = string | number | boolean | null | undefined | ClassValue[] | { [key: string]: any }
+
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: ClassValue
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+type GetComponentAppConfig<A, U extends string, K extends string>
+  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
+
+type ComponentAppConfig<
+  T,
+  A extends Record<string, any>,
+  K extends string,
+  U extends string = 'ui' | 'ui.prose'
+> = A & (
+  U extends 'ui.prose'
+    ? { ui?: { prose?: { [k in K]?: Partial<T> } } }
+    : { [key in Exclude<U, 'ui.prose'>]?: { [k in K]?: Partial<T> } }
+)
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+  U extends 'ui' | 'ui.prose' = 'ui'
+> = {
+  AppConfig: ComponentAppConfig<T, A, K, U>
+  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}"#
+                    .to_string(),
+            )
+            .unwrap();
+        session
+            .upsert(
+                "/src/schema.ts",
+                r#"export interface AppConfig {
+  ui: {
+    button: {
+      variants: {
+        color: {
+          neutral: string
+        }
+      }
+    }
+  }
+}"#
+                .to_string(),
+            )
+            .unwrap();
+        session
+            .upsert(
+                "/src/theme.ts",
+                r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', soft: '' },
+    size: { sm: '', md: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const"#
+                    .to_string(),
+            )
+            .unwrap();
+
+        let (_analysis, resolved) = session
+            .get_declared_component_meta_with_resolution("/src/Button.vue")
+            .unwrap()
+            .expect("overlay-only helper query should return declared meta plus resolution");
+
+        let button_entry = resolved
+            .resolved_type_registry
+            .iter()
+            .find(|entry| entry.name == "Button")
+            .expect("Button helper should be published in the resolved registry");
+        let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+            panic!(
+                "expected Button helper to materialize as an object, got {:?}",
+                button_entry.type_expr
+            );
+        };
+        let variants_member = button_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "variants" => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            })
+            .expect("Button helper should keep variants");
+        let TypeExpr::Object(variants_shape) = variants_member else {
+            panic!(
+                "expected Button.variants to materialize as an object, got {:?}",
+                variants_member
+            );
+        };
+        let color_member = variants_shape
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("Button.variants should keep color");
+        let TypeExpr::Union(color_variants) = color_member else {
+            panic!(
+                "expected Button.variants.color to stay a union surface, got {:?}",
+                color_member
+            );
+        };
+        assert!(
+            color_variants.contains(&TypeExpr::string_literal("primary")),
+            "expected Button.variants.color to include primary, got {:?}",
+            color_member
+        );
+        assert!(
+            color_variants.contains(&TypeExpr::string_literal("secondary")),
+            "expected Button.variants.color to include secondary, got {:?}",
+            color_member
+        );
+        assert!(
+            color_variants.contains(&TypeExpr::string_literal("neutral")),
+            "expected Button.variants.color to include neutral, got {:?}",
+            color_member
+        );
+    }
+
+    #[test]
     fn non_verter_backend_without_expander_errors_instead_of_falling_back() {
         let mut config = crate::types::HostConfig::default();
         config.type_expansion_backend = TypeExpansionBackend::Tsgo;
@@ -2112,8 +2437,11 @@ defineProps<Props>()
         );
     }
 
+    /// The 2005-interface fixture is a large finite import/heritage fan-out,
+    /// not a recursive semantic case. The solver resolves it successfully
+    /// within operational limits. This test verifies that large finite
+    /// type graphs complete without hang or budget error.
     #[test]
-    #[ignore = "walker overflow budget no longer applies — solver path uses frontier budget"]
     fn component_meta_budget_errors_surface_on_new_session_api() {
         let host = make_host();
 
@@ -2172,23 +2500,23 @@ defineProps<Props>()
         );
 
         let session = host.open_session().unwrap();
-        let err = session
+        let meta = session
             .get_component_meta("/src/App.vue")
-            .expect_err("runaway external type resolution should fail explicitly");
+            .expect("large finite heritage graph should resolve successfully")
+            .expect("component meta should be present");
 
-        match err {
-            ComponentMetaHostError::Host(message) => {
-                assert!(
-                    message.contains("external type resolution step budget exceeded"),
-                    "error should explain the traversal cap, got: {message}"
-                );
-                assert!(
-                    message.contains("2000"),
-                    "error should include the configured step cap, got: {message}"
-                );
-            }
-            other => panic!("expected host budget error, got {other:?}"),
-        }
+        // All 2005 interfaces should contribute one prop each
+        assert_eq!(
+            meta.props.len(),
+            import_count,
+            "large finite heritage graph should produce all {import_count} props"
+        );
+        // Spot-check first and last
+        assert_eq!(meta.props[0].name, "p0");
+        assert_eq!(
+            meta.props.last().unwrap().name,
+            format!("p{}", import_count - 1)
+        );
     }
 
     #[test]
@@ -2266,8 +2594,11 @@ defineProps<Props>()
         assert_eq!(result.props[0].name, "label");
     }
 
+    /// With the solver as the sole type expansion authority, the verter backend
+    /// resolves large finite type graphs natively without falling back to an
+    /// external expander. This test verifies native resolution succeeds and
+    /// no external expander requests are made.
     #[test]
-    #[ignore = "walker overflow budget no longer applies — solver path uses frontier budget"]
     fn verter_backend_does_not_fallback_when_native_budget_is_exceeded() {
         let mut config = crate::types::HostConfig::default();
         config.type_expansion_backend = TypeExpansionBackend::Verter;
@@ -2334,20 +2665,20 @@ defineProps<Props>()
         );
 
         let session = host.open_session().unwrap();
-        let err = session
+        let meta = session
             .get_component_meta("/src/App.vue")
-            .expect_err("native backend should surface the native budget failure");
+            .expect("verter backend should resolve large finite graphs natively")
+            .expect("component meta should be present");
 
-        match err {
-            ComponentMetaHostError::Host(message) => {
-                assert!(message.contains("external type resolution step budget exceeded"));
-            }
-            other => panic!("expected host budget error, got {other:?}"),
-        }
+        assert_eq!(
+            meta.props.len(),
+            import_count,
+            "native solver should resolve all {import_count} props"
+        );
         assert_eq!(
             fake.requests.lock().len(),
             0,
-            "native requests must not fall back to the external expander"
+            "native resolution must not fall back to the external expander"
         );
     }
 

@@ -1573,6 +1573,7 @@ defineProps<Props>()
         host: &host,
         store_view: None,
         materialize_symbols: true,
+        route_exports_only: false,
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -1632,6 +1633,7 @@ defineProps<Props>()
         host: &host,
         store_view: None,
         materialize_symbols: true,
+        route_exports_only: false,
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -2129,5 +2131,12 @@ defineEmits<AccordionRootEmits>()
     assert!(
         state.evaluated_types.is_some(),
         "should produce evaluated types"
+    );
+    let reka_entry = host
+        .clone_current_imported_dependency_entry("/node_modules/reka-ui/types.d.ts", None)
+        .expect("Accordion resolution should keep the imported reka-ui entry cached");
+    assert!(
+        reka_entry.snapshot.is_none(),
+        "macro frontier warmup should keep imported declaration files on the shallow cache path",
     );
 }

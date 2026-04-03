@@ -2,7 +2,8 @@
  * @ai-generated - Verifies meta-ui benchmark project preparation and component discovery.
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -16,6 +17,7 @@ import {
   prepareMetaUiProject,
   tryLoadExpectedArtifacts,
 } from "./meta-ui-bench.js";
+import { loadVerterCompatModule } from "./verter-compat.js";
 import { resolveVerterCompatSourceEntry } from "./verter-compat.js";
 
 function writeJson(filePath: string, value: unknown): void {
@@ -207,4 +209,60 @@ describe("createWorkerBackendInstance", () => {
     expect(instance.isAvailable()).toBe(false);
     await instance.dispose();
   });
+});
+
+describe("verter repeated benchmark queries", () => {
+  const defaultUiRoot = parseMetaUiBenchArgs([]).uiRoot;
+  const tablePath = resolve(defaultUiRoot, "src", "runtime", "components", "Table.vue");
+
+  it.runIf(existsSync(tablePath))(
+    "reuses the declared Table.vue resolved state on a repeated query",
+    async () => {
+      const prepared = prepareMetaUiProject(
+        parseMetaUiBenchArgs(["--components=Table.vue", "--expected=none"]),
+      );
+      const table = prepared.componentSnapshots.find(
+        (component) => component.relativePath === "src/runtime/components/Table.vue",
+      );
+      expect(table).toBeDefined();
+
+      const { createCheckerByJson } = await loadVerterCompatModule();
+      const checker = await createCheckerByJson(
+        prepared.uiRoot,
+        {
+          ...prepared.compilerOptions,
+          include: [table!.absolutePath.replace(/\\/g, "/").replace(/\.vue$/, ".vue.ts")],
+        },
+        {
+          forceUseTs: true,
+          schema: { literalBooleanSchema: true },
+          runtimeMode: "dedicated",
+          typeExpansionBackend: "verter",
+        },
+      );
+
+      try {
+        checker.updateFile(table!.absolutePath, table!.transformedSource);
+
+        const firstStartedAt = performance.now();
+        const first = await checker.getComponentMeta(table!.absolutePath);
+        const firstLatencyMs = performance.now() - firstStartedAt;
+        const provenanceAfterFirst = (checker as any)._session.getProvenance();
+
+        const secondStartedAt = performance.now();
+        const second = await checker.getComponentMeta(table!.absolutePath);
+        const secondLatencyMs = performance.now() - secondStartedAt;
+        const provenanceAfterSecond = (checker as any)._session.getProvenance();
+
+        expect(second.props.length).toBe(first.props.length);
+        expect(provenanceAfterSecond.componentMetaResolvedStateRecomputes).toBe(
+          provenanceAfterFirst.componentMetaResolvedStateRecomputes,
+        );
+        expect(secondLatencyMs).toBeLessThan(firstLatencyMs * 2);
+      } finally {
+        checker.close();
+      }
+    },
+    20_000,
+  );
 });

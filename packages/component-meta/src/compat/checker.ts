@@ -9,6 +9,7 @@
  * ```
  */
 
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import {
@@ -109,6 +110,9 @@ function loadNative(): any {
 }
 
 function createWorkspace(rootDir: string): CheckerWorkspace {
+  if (!existsSync(rootDir)) {
+    mkdirSync(rootDir, { recursive: true });
+  }
   const native = loadNative();
   return new native.Workspace([runtimeNormalizePath(rootDir)]);
 }
@@ -130,7 +134,10 @@ export function mapPropMeta(
 ): PropertyMeta {
   const type = preferredCompatPropTypeText(prop, typeRegistry);
   const schema = normalizeOptionalPropSchema(
-    typeDescriptorToSchema(prop.type, options, typeRegistry),
+    applyRawTypeDisplayHintsToSchema(
+      typeDescriptorToSchema(prop.type, options, typeRegistry),
+      prop.rawType,
+    ),
     type,
     prop.required,
   );
@@ -294,6 +301,14 @@ function stripTopLevelUndefinedFromTypeString(type: string): string {
 }
 
 function splitTopLevelTypeUnion(type: string): string[] {
+  return splitTopLevelTypeOperator(type, "|");
+}
+
+function splitTopLevelTypeIntersection(type: string): string[] {
+  return splitTopLevelTypeOperator(type, "&");
+}
+
+function splitTopLevelTypeOperator(type: string, operator: "|" | "&"): string[] {
   const parts: string[] = [];
   let start = 0;
   let parenDepth = 0;
@@ -333,9 +348,12 @@ function splitTopLevelTypeUnion(type: string): string[] {
         }
         break;
       case "|":
+      case "&":
         if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0 && angleDepth === 0) {
-          parts.push(type.slice(start, index).trim());
-          start = index + 1;
+          if (ch === operator) {
+            parts.push(type.slice(start, index).trim());
+            start = index + 1;
+          }
         }
         break;
     }
@@ -343,6 +361,97 @@ function splitTopLevelTypeUnion(type: string): string[] {
 
   parts.push(type.slice(start).trim());
   return parts.filter(Boolean);
+}
+
+function stripSingleOuterParens(type: string): string {
+  const trimmed = type.trim();
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) {
+    return trimmed;
+  }
+
+  let depth = 0;
+  for (let index = 0; index < trimmed.length; index++) {
+    const ch = trimmed[index];
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth === 0 && index < trimmed.length - 1) {
+      return trimmed;
+    }
+  }
+
+  return trimmed.slice(1, -1).trim();
+}
+
+function shouldPreferRawSchemaType(rawType: string, currentType: string | undefined): boolean {
+  const normalizedRaw = normalizeTypeString(stripSingleOuterParens(rawType));
+  const normalizedCurrent = currentType ? normalizeTypeString(currentType) : "";
+  if (!normalizedRaw || normalizedRaw === normalizedCurrent) {
+    return false;
+  }
+  if (normalizedCurrent && shouldPreferDescriptorForProp(normalizedRaw, normalizedCurrent)) {
+    return false;
+  }
+  return (
+    normalizedRaw.includes("<") ||
+    looksLikeIndexedAccessType(normalizedRaw) ||
+    looksLikeBareTypeReference(stripTopLevelUndefinedFromTypeString(normalizedRaw))
+  );
+}
+
+function applyRawTypeDisplayHintsToSchema(
+  schema: PropertyMetaSchema,
+  rawType: string | undefined,
+): PropertyMetaSchema {
+  if (!rawType) {
+    return schema;
+  }
+  return applyRawTypeDisplayHintsToSchemaInner(schema, normalizeTypeString(rawType));
+}
+
+function applyRawTypeDisplayHintsToSchemaInner(
+  schema: PropertyMetaSchema,
+  rawType: string,
+): PropertyMetaSchema {
+  if (typeof schema === "string" || Array.isArray(schema)) {
+    return schema;
+  }
+
+  const raw = stripSingleOuterParens(rawType);
+
+  if (schema.kind === "enum" && Array.isArray(schema.schema)) {
+    const unionParts = splitTopLevelTypeUnion(raw);
+    if (unionParts.length === schema.schema.length) {
+      return {
+        ...schema,
+        ...(shouldPreferRawSchemaType(raw, schema.type) ? { type: normalizeTypeString(raw) } : {}),
+        schema: schema.schema.map((entry, index) =>
+          applyRawTypeDisplayHintsToSchemaInner(entry, unionParts[index] ?? raw),
+        ),
+      };
+    }
+  }
+
+  if (schema.kind === "object" && Array.isArray(schema.schema)) {
+    const intersectionParts = splitTopLevelTypeIntersection(raw);
+    if (intersectionParts.length === schema.schema.length) {
+      return {
+        ...schema,
+        ...(shouldPreferRawSchemaType(raw, schema.type) ? { type: normalizeTypeString(raw) } : {}),
+        schema: schema.schema.map((entry, index) =>
+          applyRawTypeDisplayHintsToSchemaInner(entry, intersectionParts[index] ?? raw),
+        ),
+      };
+    }
+  }
+
+  if ("type" in schema && shouldPreferRawSchemaType(raw, schema.type)) {
+    return {
+      ...schema,
+      type: normalizeTypeString(raw),
+    };
+  }
+
+  return schema;
 }
 
 function shouldPreferDescriptorForProp(rawType: string, descriptorText: string): boolean {
@@ -359,6 +468,7 @@ function compatDescriptorLooksLossy(descriptorText: string): boolean {
   const normalized = stripTopLevelUndefinedFromTypeString(descriptorText).trim();
   return (
     compatRawTypeLooksLossy(normalized) ||
+    normalized.includes("@rec(") ||
     splitTopLevelTypeUnion(normalized).some((part) => part.trim() === "any") ||
     /^(indexedAccess|unknown|object|function|intersection|union|conditional)$/.test(normalized) ||
     /^graphNode\(\d+\)$/.test(normalized)

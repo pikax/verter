@@ -132,6 +132,13 @@ pub trait FrontierHost {
 
     /// Resolve an import specifier from a given file to its canonical ID.
     fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String>;
+
+    /// Route-only traversals stop once they reach the defining export target.
+    /// They still follow alias and reexport edges, but they do not widen into
+    /// the defining symbol's dependency graph.
+    fn route_exports_only(&self) -> bool {
+        false
+    }
 }
 
 impl ExternalTypeFrontier {
@@ -398,6 +405,33 @@ impl ExternalTypeFrontier {
                     }
                 }
 
+                if host.route_exports_only() {
+                    let (body, type_parameters) = state
+                        .type_view()
+                        .symbol(symbol_name)
+                        .map(|symbol| {
+                            (
+                                Some(symbol.raw_body.clone()),
+                                symbol.type_parameters.clone(),
+                            )
+                        })
+                        .unwrap_or_else(|| (None, Vec::new()));
+
+                    return ResolvedSymbol {
+                        canonical_id: pending.canonical_id.clone(),
+                        exported_name: pending.exported_name.clone(),
+                        status: ResolvedSymbolStatus::Resolved,
+                        body,
+                        type_parameters,
+                        unresolved_external: Vec::new(),
+                        route_provenance: Some(ResolvedRouteProvenance {
+                            kind: RouteKind::Direct,
+                            defining_canonical_id: pending.canonical_id.clone(),
+                            defining_name: symbol_name.clone(),
+                        }),
+                    };
+                }
+
                 let (body, type_parameters) = state
                     .type_view()
                     .symbol(symbol_name)
@@ -620,6 +654,7 @@ mod tests {
     struct MockHost {
         files: FxHashMap<String, Arc<ShallowFileState>>,
         resolutions: FxHashMap<(String, String), String>,
+        route_exports_only: bool,
     }
 
     impl MockHost {
@@ -627,6 +662,7 @@ mod tests {
             Self {
                 files: FxHashMap::default(),
                 resolutions: FxHashMap::default(),
+                route_exports_only: false,
             }
         }
 
@@ -653,6 +689,10 @@ mod tests {
             self.resolutions
                 .get(&(from_canonical.to_string(), specifier.to_string()))
                 .cloned()
+        }
+
+        fn route_exports_only(&self) -> bool {
+            self.route_exports_only
         }
     }
 
@@ -1089,6 +1129,45 @@ mod tests {
             final_target,
             ("/src/dep.ts".to_string(), "default".to_string()),
             "frontier should preserve default-export identity across local export aliases"
+        );
+    }
+
+    #[test]
+    fn route_only_frontier_stops_at_defining_export_without_following_symbol_deps() {
+        let mut host = MockHost::new();
+        host.route_exports_only = true;
+        host.add_file(
+            "/src/index.ts",
+            make_state("export { Props } from './types'"),
+        );
+        host.add_file(
+            "/src/types.ts",
+            make_state(
+                "import type { Base } from './base'\nexport interface Props extends Base { label: string }",
+            ),
+        );
+        host.add_file(
+            "/src/base.ts",
+            make_state("export interface Base { id: string }"),
+        );
+        host.add_resolution("/src/index.ts", "./types", "/src/types.ts");
+        host.add_resolution("/src/types.ts", "./base", "/src/base.ts");
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/index.ts".to_string(),
+            exported_name: "Props".to_string(),
+        }]);
+
+        frontier.run(&host).unwrap();
+
+        assert_eq!(
+            frontier.final_target_for(&host, "/src/index.ts", "Props"),
+            Some(("/src/types.ts".to_string(), "Props".to_string())),
+        );
+        assert!(
+            frontier.get_resolved("/src/base.ts", "Base").is_none(),
+            "route-only traversal should not widen into the defining symbol's dependency graph",
         );
     }
 

@@ -56,8 +56,19 @@ pub struct PreparedTypeDecl {
     /// Cross-file symbol references (canonical_id + name pairs).
     pub external_deps: Vec<PreparedExternalDep>,
 
+    /// Pre-resolved name context: maps bare names appearing in the body
+    /// to their resolved root identities. Built at prepare time from the
+    /// defining file's local and import scope. Allows the solver to resolve
+    /// cross-file references without going back to the host for route discovery.
+    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+
     /// Declaration provenance metadata.
     pub provenance: DeclProvenance,
+
+    /// Cache dependency contract for invalidation. Records the defining
+    /// file hash, barrel/reexport participants, and local closure participants
+    /// at preparation time. Used to check if this prepared entry is still valid.
+    pub cache_deps: PreparedCacheDeps,
 }
 
 /// A member in the prepared member index — pre-extracted from the declaration
@@ -150,6 +161,14 @@ pub struct PreparedValueDecl {
 
     /// Cross-file dependencies.
     pub external_deps: Vec<PreparedExternalDep>,
+
+    /// Pre-resolved name context for bare names in type annotations
+    /// attached to this value declaration. Same semantics as
+    /// `PreparedTypeDecl::name_resolution`.
+    pub name_resolution: FxHashMap<String, ResolvedRootIdentity>,
+
+    /// Cache dependency contract for invalidation.
+    pub cache_deps: PreparedCacheDeps,
 }
 
 /// Prepared value declaration kind — broader than `ValueDeclKind` to handle
@@ -175,6 +194,7 @@ impl From<ValueDeclKind> for PreparedValueDeclKind {
             ValueDeclKind::Function => Self::Function,
             ValueDeclKind::AsyncFunction => Self::AsyncFunction,
             ValueDeclKind::Class => Self::Class,
+            ValueDeclKind::Enum => Self::EnumObject,
         }
     }
 }
@@ -236,7 +256,9 @@ impl PreparedTypeDecl {
             member_index: FxHashMap::default(),
             local_deps: Vec::new(),
             external_deps: Vec::new(),
+            name_resolution: FxHashMap::default(),
             provenance: DeclProvenance::default(),
+            cache_deps: PreparedCacheDeps::default(),
         }
     }
 
@@ -283,6 +305,8 @@ impl PreparedValueDecl {
             member_index: FxHashMap::default(),
             enum_members: None,
             external_deps: Vec::new(),
+            name_resolution: FxHashMap::default(),
+            cache_deps: PreparedCacheDeps::default(),
         }
     }
 

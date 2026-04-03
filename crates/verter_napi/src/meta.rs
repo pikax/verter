@@ -1519,11 +1519,14 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
-                .get_component_meta(&canonical_or_alias)
+                .get_component_meta_with_resolution(&canonical_or_alias)
                 .map_err(meta_err)?;
             match result {
-                Some(analysis) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
+                Some((analysis, resolved)) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                        analysis,
+                        Some(&resolved),
+                    );
                     let payload =
                         verter_protocol::component_meta::encode_component_meta_payload(&ffi);
                     Ok(Some(Buffer::from(payload)))
@@ -1566,11 +1569,14 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let result = session
-                .get_declared_component_meta(&canonical_or_alias)
+                .get_declared_component_meta_with_resolution(&canonical_or_alias)
                 .map_err(meta_err)?;
             match result {
-                Some(analysis) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi(analysis);
+                Some((analysis, resolved)) => {
+                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                        analysis,
+                        Some(&resolved),
+                    );
                     let payload =
                         verter_protocol::component_meta::encode_component_meta_payload(&ffi);
                     Ok(Some(Buffer::from(payload)))

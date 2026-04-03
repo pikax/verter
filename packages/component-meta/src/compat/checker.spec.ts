@@ -31,6 +31,10 @@ async function createRuntimeChecker(
   return createCheckerByJson(projectRoot, {});
 }
 
+async function settleNativeProject(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function nativeMetaPayload(filePath: string) {
   return {
     filePath,
@@ -908,9 +912,7 @@ describe("ComponentMetaChecker", () => {
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
     expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
-      resolvePath("/tmp", "Single.vue"),
-    );
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/tmp", "Single.vue"));
     expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
@@ -1043,6 +1045,83 @@ describe("ComponentMetaChecker", () => {
     expect(engine.state).toBe("closed");
     expect(runtime.engineCount).toBe(0);
     shutdownMetaRuntime();
+  });
+
+  it("createCheckerByJson resolves overlay-only imported helpers even when the root does not exist yet", async () => {
+    shutdownMetaRuntime();
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-checker-missing-root-${nextProjectRootId++}`,
+    );
+    rmSync(projectRoot, { recursive: true, force: true });
+
+    const checker = await createCheckerByJson(
+      projectRoot,
+      {},
+      {
+        runtimeMode: "dedicated",
+        typeExpansionBackend: "verter",
+      },
+    );
+
+    checker.updateFile(
+      "types.ts",
+      `type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends Record<string, any>, A> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  appConfig?: A
+}`,
+    );
+    checker.updateFile(
+      "theme.ts",
+      `export default {
+  variants: {
+    color: { primary: '', secondary: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const`,
+    );
+    checker.updateFile(
+      "Button.vue",
+      `<script lang="ts">
+import type { ComponentConfig } from './types'
+import theme from './theme'
+
+type Button = ComponentConfig<typeof theme, MissingAppConfig>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>`,
+    );
+
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Button.vue");
+    const color = meta.props.find((prop) => prop.name === "color");
+
+    expect(color).toBeDefined();
+    expect(color!.type).toContain("primary");
+    expect(color!.type).toContain("secondary");
+    expect(color!.type).not.toContain('Button["variants"]["color"]');
+
+    checker.close();
   });
 
   it("dedicated runtime mode does not reuse benchmark-created engines after dispose", async () => {
@@ -1343,9 +1422,7 @@ defineEmits<{
 
     const meta = await checker.getComponentMeta(canonicalId);
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(
-      resolvePath("/project", canonicalId),
-    );
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/project", canonicalId));
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });

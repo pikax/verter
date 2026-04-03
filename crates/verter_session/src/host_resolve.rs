@@ -531,6 +531,16 @@ impl VerterHost {
             return Some(resolved);
         }
 
+        if import_source.starts_with('.') {
+            let direct = crate::id::resolve_external(owner_canonical, import_source);
+            if let Some(resolved) =
+                self.resolve_eval_dependency_canonical_in_view(direct.as_str(), store_view)
+            {
+                self.cache_dependency_resolution_result(owner_canonical, import_source, &resolved);
+                return Some(resolved);
+            }
+        }
+
         let resolved = self
             .ws()
             .resolve_import(
@@ -1272,6 +1282,7 @@ impl VerterHost {
             host: self,
             store_view,
             materialize_symbols: false,
+            route_exports_only: true,
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
         frontier.seed(std::iter::once(
@@ -1314,6 +1325,9 @@ impl VerterHost {
             host: self,
             store_view,
             materialize_symbols: false,
+            // Frontier discovery stays route-only. Materialization resolves only
+            // the demanded companion targets after the route is known.
+            route_exports_only: true,
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
         let mut inspected_symbols = rustc_hash::FxHashSet::default();
@@ -1459,7 +1473,12 @@ impl VerterHost {
         let adapter = HostFrontierAdapter {
             host: self,
             store_view,
-            materialize_symbols: true,
+            // Frontier routing is already complete before materialization starts.
+            // Keep final-target checks on the same shallow/export-owned path so
+            // package declaration files do not reopen full imported-state
+            // materialization while companion targets are selected.
+            materialize_symbols: false,
+            route_exports_only: false,
         };
         let mut memo = rustc_hash::FxHashMap::default();
         let mut active = rustc_hash::FxHashSet::default();
@@ -3426,6 +3445,7 @@ pub(crate) struct HostFrontierAdapter<'a> {
     pub host: &'a VerterHost,
     pub store_view: Option<&'a crate::resolver_store::HostStoreView>,
     pub materialize_symbols: bool,
+    pub route_exports_only: bool,
 }
 
 impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
@@ -3490,6 +3510,10 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             specifier,
             self.store_view,
         )
+    }
+
+    fn route_exports_only(&self) -> bool {
+        self.route_exports_only
     }
 }
 

@@ -482,6 +482,25 @@ impl MetaProject {
             .get(&session_id)
             .is_some_and(|s| !s.overlays.is_empty())
     }
+
+    fn reapply_overlay_target(&self, session_id: u64, canonical_id: &str) {
+        let sessions = self.sessions.read();
+        let Some(state) = sessions.get(&session_id) else {
+            return;
+        };
+        let Some(SessionOverlay::Upsert { source }) = state.overlays.get(canonical_id) else {
+            return;
+        };
+
+        let req = UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::from(source.as_str()),
+            file_kind: FileKind::from_path(canonical_id),
+            aliases: Vec::new(),
+        };
+        let _ = self.host.upsert(req);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +537,9 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<String, MetaError> {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.resolve_alias_or_canonical(canonical_or_alias))
+        self.with_overlay_target_context(canonical_or_alias, |host| {
+            host.resolve_alias_or_canonical(canonical_or_alias)
+        })
     }
 
     /// Store a file overlay in this session.
@@ -599,7 +620,9 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.get_analysis(canonical_or_alias))
+        self.with_overlay_target_context(canonical_or_alias, |host| {
+            host.get_analysis(canonical_or_alias)
+        })
     }
 
     /// Evaluate component metadata types through this session's overlay view.
@@ -610,7 +633,9 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
     {
         self.check_alive()?;
-        self.with_overlay_context(|host| host.evaluate_types(canonical_or_alias))
+        self.with_overlay_target_context(canonical_or_alias, |host| {
+            host.evaluate_types(canonical_or_alias)
+        })
     }
 
     pub(crate) fn resolve_component_meta_state_with_view(
@@ -626,7 +651,7 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        self.with_overlay_context_view(|host, store_view| {
+        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
             host.resolve_component_meta_in_view(canonical.as_str(), mode, store_view)
                 .map(|resolved| (canonical, resolved, store_view.clone()))
@@ -643,7 +668,7 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
     {
         self.check_alive()?;
-        let resolved = self.with_overlay_context(|host| {
+        let resolved = self.with_overlay_target_context(canonical_or_alias, |host| {
             host.get_component_meta_with_resolution(canonical_or_alias)
         })?;
 
@@ -673,8 +698,25 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
     {
+        self.get_declared_component_meta_with_resolution(canonical_or_alias)
+            .map(|result| result.map(|(analysis, _resolved)| analysis))
+    }
+
+    /// Declared-surface component-meta plus the resolved-meta sidecar in one
+    /// overlay-aware query. This preserves declared-only component semantics
+    /// while keeping the shared resolved type registry available to callers.
+    pub fn get_declared_component_meta_with_resolution(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+        )>,
+        MetaError,
+    > {
         self.check_alive()?;
-        self.with_overlay_context_view(|host, store_view| {
+        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
             let Some(resolved) = host.resolve_component_meta_in_view(
                 canonical.as_str(),
@@ -699,7 +741,7 @@ impl MetaSession {
                 return Err(err);
             }
 
-            Ok(Some(analysis))
+            Ok(Some((analysis, resolved)))
         })?
     }
 
@@ -718,7 +760,7 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        let resolved = self.with_overlay_context(|host| {
+        let resolved = self.with_overlay_target_context(canonical_or_alias, |host| {
             host.get_component_meta_with_resolution(canonical_or_alias)
         })?;
         match resolved {
@@ -827,16 +869,19 @@ impl MetaSession {
     // Internal: run a closure with this session's overlay context applied
     // -----------------------------------------------------------------------
 
-    fn with_overlay_context<T>(&self, f: impl FnOnce(&VerterHost) -> T) -> Result<T, MetaError> {
-        self.with_overlay_context_view(|host, _store_view| f(host))
+    fn with_overlay_target_context<T>(
+        &self,
+        canonical_or_alias: &str,
+        f: impl FnOnce(&VerterHost) -> T,
+    ) -> Result<T, MetaError> {
+        self.with_overlay_target_context_view(canonical_or_alias, |host, _store_view| f(host))
     }
 
-    fn with_overlay_context_view<T>(
+    fn with_overlay_target_context_view<T>(
         &self,
+        canonical_or_alias: &str,
         f: impl FnOnce(&VerterHost, &crate::resolver_store::HostStoreView) -> T,
     ) -> Result<T, MetaError> {
-        // Always acquire the gate. Even overlay-free sessions must ensure
-        // no other session's overlays are left applied in the host.
         let mut gate = self
             .project
             .overlay_gate
@@ -846,13 +891,24 @@ impl MetaSession {
         let has_overlays = self.project.session_has_overlays(self.id);
 
         if !has_overlays {
-            // This session has no overlays — ensure base state is restored
             if let Some(prev_id) = gate.active_session.take() {
                 self.project.revert_session_overlays(prev_id);
             }
         } else {
-            // This session has overlays — context-switch
+            let owner_needs_reapply = gate.active_session != Some(self.id);
             self.project.ensure_session_context(&mut gate, self.id);
+            if owner_needs_reapply && !canonical_or_alias.is_empty() {
+                // Session overlays come from a HashMap, so the owner file can be
+                // upserted before its overlay-only helpers. Reapplying the owner
+                // after the session switch keeps its cached import/dependency
+                // state aligned with the already-applied helper overlays.
+                let canonical = self
+                    .project
+                    .host
+                    .resolve_alias_or_canonical(canonical_or_alias);
+                self.project
+                    .reapply_overlay_target(self.id, canonical.as_str());
+            }
         }
 
         let store_view = self.project.host.resolver_store_view();

@@ -62,7 +62,7 @@ fn log_expand_stage(
     exactness: crate::analysis::type_expand::ExpansionExactness,
     execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
     diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
-    env: &EvalEnv,
+    env: Option<&EvalEnv>,
 ) {
     type_expand_debug(|| {
         format!(
@@ -72,7 +72,8 @@ fn log_expand_stage(
             log.stage,
             log.target,
             log.started.elapsed(),
-            env.steps().saturating_sub(log.start_steps),
+            env.map(|env| env.steps().saturating_sub(log.start_steps))
+                .unwrap_or(0),
             exactness,
             execution_status,
             diagnostics.len(),
@@ -1030,6 +1031,57 @@ pub fn expand_macro_types(
     local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
+    let binding_entries = collect_binding_entries_from_env(env, local_binding_names);
+    expand_macro_types_impl(
+        macros,
+        source,
+        binding_entries.as_slice(),
+        Some(env),
+        solver_host,
+    )
+}
+
+/// Expand macro-backed type annotations using only pre-collected binding type
+/// annotations plus the solver host.
+///
+/// This is the cache-owned production path used by `verter_session`, where
+/// local binding types come from prepared value declarations rather than an
+/// `EvalEnv`.
+pub fn expand_macro_types_with_bindings(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    binding_entries: &[(String, TypeExpr)],
+    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
+) -> crate::analysis::type_expand::ExpandedComponentTypes {
+    expand_macro_types_impl(macros, source, binding_entries, None, solver_host)
+}
+
+fn collect_binding_entries_from_env(
+    env: &EvalEnv,
+    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
+) -> Vec<(String, TypeExpr)> {
+    env.value_symbols
+        .iter()
+        .filter(|(name, _)| {
+            local_binding_names
+                .map(|names| names.contains(name.as_str()))
+                .unwrap_or(true)
+        })
+        .filter_map(|(name, decl)| {
+            decl.type_annotation
+                .as_ref()
+                .map(|ta| (name.clone(), ta.clone()))
+        })
+        .collect()
+}
+
+fn expand_macro_types_impl(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    binding_entries: &[(String, TypeExpr)],
+    mut debug_env: Option<&mut EvalEnv>,
+    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
+) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
         ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
         ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionDiagnostic, ExpansionResult,
@@ -1096,14 +1148,14 @@ pub fn expand_macro_types(
     let mut define_emits_index = 0usize;
     let mut define_slots_index = 0usize;
     let started = Instant::now();
-    let start_steps = env.steps();
+    let start_steps = debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0);
 
     type_expand_debug(|| {
         format!(
             "expand_macro_types:start macros={} source_present={} local_binding_filter={} steps={}",
             macros.len(),
             source.is_some(),
-            local_binding_names.map(|names| names.len()).unwrap_or(0),
+            binding_entries.len(),
             start_steps,
         )
     });
@@ -1115,14 +1167,13 @@ pub fn expand_macro_types(
                 let parsed = parse_type_annotation(type_ann);
                 if !parsed.is_unknown() {
                     let item_started = Instant::now();
-                    let item_start_steps = env.steps();
                     let stage_log = ExpandStageLog {
                         macro_index,
                         macro_kind: m.kind,
                         stage: "prop_field",
                         target: field.name.as_str(),
                         started: item_started,
-                        start_steps: item_start_steps,
+                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(&parsed, solver_host, SolveLimits::default());
@@ -1132,7 +1183,7 @@ pub fn expand_macro_types(
                         expanded.exactness,
                         expanded.execution_status,
                         &expanded.diagnostics,
-                        env,
+                        debug_env.as_deref(),
                     );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
@@ -1155,14 +1206,13 @@ pub fn expand_macro_types(
             {
                 if let Some(lowered) = type_params.get(define_props_index) {
                     let item_started = Instant::now();
-                    let item_start_steps = env.steps();
                     let stage_log = ExpandStageLog {
                         macro_index,
                         macro_kind: m.kind,
                         stage: "define_props",
                         target: "type_param",
                         started: item_started,
-                        start_steps: item_start_steps,
+                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(lowered, solver_host, SolveLimits::default());
@@ -1172,7 +1222,7 @@ pub fn expand_macro_types(
                         shape_result.exactness,
                         shape_result.execution_status,
                         &shape_result.diagnostics,
-                        env,
+                        debug_env.as_deref(),
                     );
                     if !shape_result.value.properties.is_empty()
                         || !shape_result.value.index_signatures.is_empty()
@@ -1194,14 +1244,13 @@ pub fn expand_macro_types(
             {
                 if let Some(lowered) = type_params.get(define_emits_index) {
                     let item_started = Instant::now();
-                    let item_start_steps = env.steps();
                     let stage_log = ExpandStageLog {
                         macro_index,
                         macro_kind: m.kind,
                         stage: "define_emits",
                         target: "type_param",
                         started: item_started,
-                        start_steps: item_start_steps,
+                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(lowered, solver_host, SolveLimits::default());
@@ -1211,7 +1260,7 @@ pub fn expand_macro_types(
                         shape_result.exactness,
                         shape_result.execution_status,
                         &shape_result.diagnostics,
-                        env,
+                        debug_env.as_deref(),
                     );
                     if has_named_shape_surface(&shape_result.value) {
                         result.define_emits.push(ExpandedMacroObjectShape {
@@ -1230,14 +1279,13 @@ pub fn expand_macro_types(
                 let parsed = parse_type_annotation(payload);
                 if !parsed.is_unknown() {
                     let item_started = Instant::now();
-                    let item_start_steps = env.steps();
                     let stage_log = ExpandStageLog {
                         macro_index,
                         macro_kind: m.kind,
                         stage: "emit_field",
                         target: field.name.as_str(),
                         started: item_started,
-                        start_steps: item_start_steps,
+                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
                     let solved = solve_type(&parsed, solver_host, SolveLimits::default());
@@ -1247,7 +1295,7 @@ pub fn expand_macro_types(
                         expanded.exactness,
                         expanded.execution_status,
                         &expanded.diagnostics,
-                        env,
+                        debug_env.as_deref(),
                     );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
@@ -1270,28 +1318,34 @@ pub fn expand_macro_types(
                 if let Some(lowered) = type_params.get(define_slots_index) {
                     if m.slot_fields.is_empty() {
                         let item_started = Instant::now();
-                        let item_start_steps = env.steps();
                         let stage_log = ExpandStageLog {
                             macro_index,
                             macro_kind: m.kind,
                             stage: "define_slots",
                             target: "type_param",
                             started: item_started,
-                            start_steps: item_start_steps,
+                            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                         };
                         log_expand_stage_start(&stage_log);
-                        let previous_slot_return_mode =
-                            env.preserve_canonical_vue_vnode_slot_returns;
-                        env.preserve_canonical_vue_vnode_slot_returns = true;
+                        let previous_slot_return_mode = debug_env
+                            .as_deref()
+                            .map(|env| env.preserve_canonical_vue_vnode_slot_returns);
+                        if let Some(env) = debug_env.as_deref_mut() {
+                            env.preserve_canonical_vue_vnode_slot_returns = true;
+                        }
                         let solved = solve_type(lowered, solver_host, SolveLimits::default());
-                        env.preserve_canonical_vue_vnode_slot_returns = previous_slot_return_mode;
+                        if let (Some(previous), Some(env)) =
+                            (previous_slot_return_mode, debug_env.as_deref_mut())
+                        {
+                            env.preserve_canonical_vue_vnode_slot_returns = previous;
+                        }
                         let shape_result = solver_to_object_shape_result(solved);
                         log_expand_stage(
                             stage_log,
                             shape_result.exactness,
                             shape_result.execution_status,
                             &shape_result.diagnostics,
-                            env,
+                            debug_env.as_deref(),
                         );
                         if !shape_result.value.properties.is_empty() {
                             result.define_slots.push(ExpandedMacroObjectShape {
@@ -1318,7 +1372,6 @@ pub fn expand_macro_types(
                     let parsed = parse_type_annotation(type_ann);
                     if !parsed.is_unknown() {
                         let item_started = Instant::now();
-                        let item_start_steps = env.steps();
                         let slot_binding_target = format!("{}.{}", slot.name, binding.name);
                         let stage_log = ExpandStageLog {
                             macro_index,
@@ -1326,7 +1379,7 @@ pub fn expand_macro_types(
                             stage: "slot_binding",
                             target: slot_binding_target.as_str(),
                             started: item_started,
-                            start_steps: item_start_steps,
+                            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                         };
                         log_expand_stage_start(&stage_log);
                         let solved = solve_type(&parsed, solver_host, SolveLimits::default());
@@ -1336,7 +1389,7 @@ pub fn expand_macro_types(
                             expanded.exactness,
                             expanded.execution_status,
                             &expanded.diagnostics,
-                            env,
+                            debug_env.as_deref(),
                         );
                         result.slot_bindings.push(ExpandedField {
                             name: slot_binding_target,
@@ -1354,43 +1407,28 @@ pub fn expand_macro_types(
     }
 
     // Expand binding type annotations (for expose/value lookups)
-    let binding_entries: Vec<(String, TypeExpr)> = env
-        .value_symbols
-        .iter()
-        .filter(|(name, _)| {
-            local_binding_names
-                .map(|names| names.contains(name.as_str()))
-                .unwrap_or(true)
-        })
-        .filter_map(|(name, decl)| {
-            decl.type_annotation
-                .as_ref()
-                .map(|ta| (name.clone(), ta.clone()))
-        })
-        .collect();
     for (name, type_ann) in binding_entries {
         let item_started = Instant::now();
-        let item_start_steps = env.steps();
         let stage_log = ExpandStageLog {
             macro_index: usize::MAX,
             macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
             stage: "binding",
             target: name.as_str(),
             started: item_started,
-            start_steps: item_start_steps,
+            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
         };
         log_expand_stage_start(&stage_log);
-        let solved = solve_type(&type_ann, solver_host, SolveLimits::default());
+        let solved = solve_type(type_ann, solver_host, SolveLimits::default());
         let expanded = solver_to_expr_result(solved);
         log_expand_stage(
             stage_log,
             expanded.exactness,
             expanded.execution_status,
             &expanded.diagnostics,
-            env,
+            debug_env.as_deref(),
         );
         result.bindings.push(ExpandedField {
-            name,
+            name: name.clone(),
             r#type: expanded.value.expr,
             raw_type: None,
             optional: false,
@@ -1410,8 +1448,14 @@ pub fn expand_macro_types(
             result.define_slots.len(),
             result.slot_bindings.len(),
             result.bindings.len(),
-            env.steps().saturating_sub(start_steps),
-            env.budget_exhausted(),
+            debug_env
+                .as_deref()
+                .map(|env| env.steps().saturating_sub(start_steps))
+                .unwrap_or(0),
+            debug_env
+                .as_deref()
+                .map(EvalEnv::budget_exhausted)
+                .unwrap_or(false),
             started.elapsed(),
         )
     });

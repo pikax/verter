@@ -5,17 +5,33 @@
  * through the ComponentMetaChecker compat path.
  * Requires @verter/native to be built.
  */
-import { describe, it, expect } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { afterEach, describe, it, expect } from "vitest";
 import { resolve } from "node:path";
 import { createCheckerByJson } from "./compat/checker.js";
+import { normalizePath as runtimeNormalizePath, shutdownMetaRuntime } from "./runtime/index.js";
 
 let nextProjectRootId = 1;
+const activeCheckers = new Set<{ close(): void }>();
+
+function trackChecker<T extends { close(): void }>(checker: T): T {
+  activeCheckers.add(checker);
+  return checker;
+}
+
+async function settleNativeProject(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 async function createRuntimeChecker(name = "native-eval") {
-  return createCheckerByJson(
-    resolve(process.env.TEMP ?? "/tmp", `${name}-${nextProjectRootId++}`),
-    {},
-    { typeExpansionBackend: "verter" },
+  const projectRoot = mkdtempSync(resolve(process.env.TEMP ?? tmpdir(), `${name}-`));
+  return trackChecker(
+    await createCheckerByJson(
+      projectRoot,
+      {},
+      { runtimeMode: "dedicated", typeExpansionBackend: "verter" },
+    ),
   );
 }
 
@@ -24,6 +40,14 @@ async function createRuntimeChecker(name = "native-eval") {
 // =============================================================================
 
 describe("native evaluator integration", () => {
+  afterEach(() => {
+    for (const checker of activeCheckers) {
+      checker.close();
+    }
+    activeCheckers.clear();
+    shutdownMetaRuntime();
+  });
+
   it("evaluates simple typed props", async () => {
     const checker = await createRuntimeChecker("native-eval-basic");
 
@@ -38,6 +62,11 @@ defineProps<{
 </script>
 <template><div /></template>`,
     );
+
+    // Verter's native project/session path is async and stages imported helper
+    // hydration after overlay upserts. Yield once before asserting the resulting
+    // metadata shape instead of treating same-tick visibility as a contract.
+    await settleNativeProject();
 
     const meta = await checker.getComponentMeta("Button.vue");
 
@@ -373,11 +402,22 @@ defineProps<{
   // from the native Rust evaluator. Re-enable when the resolver populates
   // rawType (source text) and declaration (canonical source, span) on registry entries.
   it("preserves type-registry declaration metadata in live native payloads", async () => {
-    const projectRoot = resolve(
-      process.env.TEMP ?? "/tmp",
-      `native-eval-type-registry-metadata-${nextProjectRootId++}`,
+    const projectRoot = mkdtempSync(
+      resolve(
+        process.env.TEMP ?? tmpdir(),
+        `native-eval-type-registry-metadata-${nextProjectRootId++}-`,
+      ),
     );
-    const checker = await createCheckerByJson(projectRoot, {}, { typeExpansionBackend: "verter" });
+    const checker = trackChecker(
+      await createCheckerByJson(
+        projectRoot,
+        {},
+        {
+          runtimeMode: "dedicated",
+          typeExpansionBackend: "verter",
+        },
+      ),
+    );
 
     checker.updateFile(
       "types.ts",
@@ -401,7 +441,7 @@ defineProps<Props>()
 
     expect(nativeMeta?.typeRegistry?.[0]?.rawType).toContain("export interface Props");
     expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe(
-      resolve(projectRoot, "types.ts"),
+      runtimeNormalizePath(resolve(projectRoot, "types.ts")),
     );
   });
 
@@ -684,6 +724,8 @@ defineSlots<ButtonSlots>()
 </script>
 <template><div /></template>`,
     );
+
+    await settleNativeProject();
 
     const meta = await checker.getComponentMeta("Button.vue");
     const color = meta.props.find((prop) => prop.name === "color");

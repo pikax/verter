@@ -748,9 +748,8 @@ defineProps<Props>()
         .expect("resolved class macro should be present");
 
     let prop_names = prop_names_from_resolved(&state);
-    // The shared resolver resolves members declared directly in the class body.
-    // External base class inheritance (extends BaseProps) is not yet resolved
-    // for cross-file classes, so from_base and hidden are absent.
+    // The shared resolver should include public inherited base-class members
+    // while still hiding protected/private fields.
     assert!(
         prop_names.contains(&"from_interface".to_string()),
         "imported class instance members should flow through shared resolver: {:?}",
@@ -762,8 +761,8 @@ defineProps<Props>()
         prop_names
     );
     assert!(
-        !prop_names.contains(&"from_base".to_string()),
-        "external base class members are not yet resolved for cross-file classes: {:?}",
+        prop_names.contains(&"from_base".to_string()),
+        "shared resolver should include inherited base-class members: {:?}",
         prop_names
     );
     assert!(
@@ -782,17 +781,25 @@ defineProps<Props>()
         .iter()
         .map(|prop| prop.name.as_str())
         .collect();
-    // native_props retains all directly-declared members including private,
-    // but not external base class members (hidden is on BaseProps, not Props).
+    // native_props preserves visibility metadata for inherited protected class
+    // members as well as directly-declared private members.
     assert!(
-        !native_names.contains(&"hidden"),
-        "external base class protected members are not resolved for cross-file classes: {:?}",
+        native_names.contains(&"hidden"),
+        "native state should retain inherited protected class members: {:?}",
         native_names
     );
     assert!(
         native_names.contains(&"secret"),
         "native state should retain private members declared directly in the class: {:?}",
         native_names
+    );
+    assert!(
+        class_macro.native_props.iter().any(|prop| {
+            prop.name == "hidden"
+                && prop.visibility
+                    == verter_compiler::utils::oxc::vue::resolve_type::ResolvedMemberVisibility::Protected
+        }),
+        "native state should preserve visibility metadata for inherited protected members"
     );
     assert!(
         class_macro.native_props.iter().any(|prop| {
@@ -1658,11 +1665,10 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         .materialize_imported_dependency_state_in_view("/src/types.ts", None)
         .expect("types dependency should seed imported state");
     let decl = seeded
-        .env
-        .as_ref()
-        .and_then(|env| env.type_symbols.get("Props"))
+        .prepared_type_decls
+        .get("Props")
         .cloned()
-        .expect("seeded dependency should expose Props");
+        .expect("seeded dependency should expose Props through the prepared declaration cache");
 
     {
         let mut cache = host.imported_dependency_cache.lock();
@@ -1672,23 +1678,19 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         Arc::make_mut(entry).snapshot = None;
     }
 
-    let materialized = materialize_imported_component_meta_registry_decl_body_in_view(
-        &host,
-        "/src/types.ts",
-        &decl,
-        &[],
-        None,
-    );
+    let materialized =
+        solve_component_meta_registry_decl_in_view(&host, "/src/types.ts", "Props", None)
+            .expect("solver-backed registry decl materialization should use cached prepared state");
 
     assert_eq!(
         materialized, decl.body,
-        "registry decl materialization should stay shallow when the imported cache does not own a snapshot yet",
+        "registry decl solving should stay shallow when the imported cache does not own a snapshot yet",
     );
     assert!(
         host.clone_current_imported_dependency_entry("/src/types.ts", None)
             .and_then(|entry| entry.snapshot.clone())
             .is_none(),
-        "registry decl materialization must not bounce into raw snapshot building for imported files",
+        "registry decl solving must not bounce into raw snapshot building for imported files",
     );
 }
 
@@ -2114,7 +2116,6 @@ defineProps<Props>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn imported_inherited_props_reach_resolved_evaluated_types() {
     let project = make_project();
     project
@@ -2270,7 +2271,7 @@ defineProps<Props>()
         .host()
         .get_component_meta("/App.vue")
         .expect("should return component meta");
-    let resolved = project
+    let _resolved = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
         .expect("should resolve expanded component meta");
@@ -2972,7 +2973,7 @@ defineProps<DashboardSidebarCollapseProps>()
         .host()
         .get_component_meta("/workspace/App.vue")
         .expect("should return component meta");
-    let resolved = project
+    let _resolved = project
         .host()
         .resolve_component_meta("/workspace/App.vue", ResolverMode::Expanded)
         .expect("should resolve expanded component meta");
@@ -3009,7 +3010,6 @@ defineProps<DashboardSidebarCollapseProps>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn imported_mapped_slots_reach_final_component_meta() {
     let project = make_project();
     project
@@ -3082,7 +3082,6 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn imported_mapped_slots_reach_resolved_evaluated_types() {
     let project = make_project();
     project
@@ -3246,7 +3245,6 @@ const sectionSlot = 'section-title'
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn namespace_qualified_imported_props_reach_final_component_meta() {
     let project = make_project();
     project

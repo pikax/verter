@@ -155,6 +155,14 @@ pub fn find_sccs(nodes: &[usize], adjacency: &FxHashMap<usize, Vec<usize>>) -> V
 pub struct RecursionTracker {
     /// Currently active resolutions: (canonical_id, symbol_name, args_hash) -> NodeId placeholder.
     active: FxHashMap<RecursionKey, NodeId>,
+    /// Active reentry depth per declaration symbol, independent of the applied args.
+    ///
+    /// This catches structural recursion where each reentry manufactures fresh
+    /// infer/application nodes and therefore never repeats the exact args hash.
+    symbol_depth: FxHashMap<(String, String), usize>,
+    /// Placeholder stack for each active symbol. When structural recursion is
+    /// detected, the innermost active placeholder is reused.
+    symbol_placeholders: FxHashMap<(String, String), Vec<NodeId>>,
 
     /// Maximum depth observed (for diagnostics).
     max_depth: usize,
@@ -170,6 +178,8 @@ pub struct RecursionKey {
 }
 
 impl RecursionTracker {
+    const MAX_SYMBOL_REENTRY: usize = 5;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -180,19 +190,51 @@ impl RecursionTracker {
         if let Some(&placeholder) = self.active.get(&key) {
             return Some(placeholder);
         }
+        let symbol_key = key.symbol_key();
+        if self
+            .symbol_depth
+            .get(&symbol_key)
+            .copied()
+            .unwrap_or_default()
+            >= Self::MAX_SYMBOL_REENTRY
+        {
+            return self
+                .symbol_placeholders
+                .get(&symbol_key)
+                .and_then(|placeholders| placeholders.last().copied());
+        }
         None
     }
 
     /// Record that resolution of `key` is in progress, associated with
     /// the given placeholder node.
     pub fn push(&mut self, key: RecursionKey, placeholder: NodeId) {
+        let symbol_key = key.symbol_key();
         self.active.insert(key, placeholder);
+        *self.symbol_depth.entry(symbol_key.clone()).or_default() += 1;
+        self.symbol_placeholders
+            .entry(symbol_key)
+            .or_default()
+            .push(placeholder);
         self.max_depth = self.max_depth.max(self.active.len());
     }
 
     /// Mark resolution of `key` as complete.
     pub fn pop(&mut self, key: &RecursionKey) {
         self.active.remove(key);
+        let symbol_key = key.symbol_key();
+        if let Some(depth) = self.symbol_depth.get_mut(&symbol_key) {
+            *depth = depth.saturating_sub(1);
+            if *depth == 0 {
+                self.symbol_depth.remove(&symbol_key);
+            }
+        }
+        if let Some(placeholders) = self.symbol_placeholders.get_mut(&symbol_key) {
+            placeholders.pop();
+            if placeholders.is_empty() {
+                self.symbol_placeholders.remove(&symbol_key);
+            }
+        }
     }
 
     /// Current active depth.
@@ -208,6 +250,12 @@ impl RecursionTracker {
     /// Whether we're currently resolving this key.
     pub fn is_active(&self, key: &RecursionKey) -> bool {
         self.active.contains_key(key)
+    }
+}
+
+impl RecursionKey {
+    fn symbol_key(&self) -> (String, String) {
+        (self.canonical_id.clone(), self.symbol_name.clone())
     }
 }
 
@@ -345,5 +393,27 @@ mod tests {
 
         tracker.pop(&k1);
         assert_eq!(tracker.depth(), 0);
+    }
+
+    #[test]
+    fn recursion_tracker_limits_structural_symbol_reentry() {
+        let mut tracker = RecursionTracker::new();
+
+        for args_hash in 0..5 {
+            let key = RecursionKey {
+                canonical_id: "/types.ts".into(),
+                symbol_name: "NestedItem".into(),
+                args_hash,
+            };
+            assert!(tracker.enter(key.clone()).is_none());
+            tracker.push(key, NodeId(args_hash as u32));
+        }
+
+        let structural_reentry = RecursionKey {
+            canonical_id: "/types.ts".into(),
+            symbol_name: "NestedItem".into(),
+            args_hash: 99,
+        };
+        assert_eq!(tracker.enter(structural_reentry), Some(NodeId(4)));
     }
 }

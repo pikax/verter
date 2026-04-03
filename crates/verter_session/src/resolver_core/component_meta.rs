@@ -74,6 +74,7 @@ pub struct ResolvedComponentMetaParts {
     pub resolved_type_registry: Vec<ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub tracked_dependencies: BTreeSet<String>,
     pub fact_versions: Vec<FactVersionRef>,
 }
 
@@ -325,7 +326,7 @@ where
     if expanded {
         for (macro_index, mac) in host.snapshot_macros(snapshot).iter().enumerate() {
             let owner_source = host.read_source(owner_canonical);
-            for resolved in &mac.resolved_local_types {
+            for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !resolved_macros
                     .iter()
                     .any(|meta| meta.macro_index == macro_index && meta.type_name == resolved.name)
@@ -379,7 +380,12 @@ where
                     }
                 }
 
-                if seen_registry_names.insert(resolved.name.clone()) {
+                // Seed only the direct macro-local root into the registry up
+                // front. Additional owner-local helpers are discovered later
+                // from the queried root surface during registry append, which
+                // keeps publication demand-driven instead of prepublishing the
+                // entire same-file helper chain.
+                if resolved_index == 0 && seen_registry_names.insert(resolved.name.clone()) {
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
                         type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
@@ -410,6 +416,7 @@ where
         resolved_type_registry,
         resolved_type_registry_meta,
         evaluated_types: eval_outputs.evaluated_types,
+        tracked_dependencies: tracked_deps,
         fact_versions,
     }
 }

@@ -26,6 +26,19 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
     resolved_state: Option<&host::meta_resolve::ResolvedComponentMetaState>,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
+    let mut merged_type_registry = analysis.type_registry;
+    if let Some(state) = resolved_state {
+        for resolved_entry in &state.resolved_type_registry {
+            if let Some(existing) = merged_type_registry
+                .iter_mut()
+                .find(|entry| entry.name == resolved_entry.name)
+            {
+                *existing = resolved_entry.clone();
+            } else {
+                merged_type_registry.push(resolved_entry.clone());
+            }
+        }
+    }
     FfiComponentMeta {
         props: analysis
             .props
@@ -118,8 +131,7 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
             styles: blocks.styles.into_iter().map(style_block_to_ffi).collect(),
             custom: blocks.custom.into_iter().map(custom_block_to_ffi).collect(),
         }),
-        type_registry: analysis
-            .type_registry
+        type_registry: merged_type_registry
             .into_iter()
             .map(|entry| {
                 let declaration = resolved_state
@@ -2004,7 +2016,6 @@ mod tests {
                 },
             }],
             evaluated_types: None,
-            cached_eval_inputs: None,
             fact_versions: Vec::new(),
         };
 
@@ -2027,6 +2038,114 @@ mod tests {
                 .map(|declaration| declaration.canonical_source.as_str()),
             Some("/src/types.ts"),
             "native payload should also retain declaration provenance",
+        );
+    }
+
+    #[test]
+    fn component_meta_type_registry_prefers_resolved_registry_type_expr_when_available() {
+        let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
+            type_registry: vec![
+                verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+                    name: "Button".to_string(),
+                    type_expr: verter_semantic::analysis::type_expr::TypeExpr::named("Button"),
+                    type_expansion: None,
+                },
+            ],
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+            root_reachability:
+                verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
+                    reason:
+                        verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness:
+                verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface:
+                verter_semantic::analysis::component_meta::FallthroughSurface::None {
+                    reason:
+                        verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                },
+            options_api: false,
+            file_path: "/src/App.vue".to_string(),
+        };
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ResolverMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: vec![host::meta_resolve::ResolvedTypeAnalysis {
+                name: "Button".to_string(),
+                type_expr: verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+                    verter_semantic::analysis::type_expr::ObjectExpr {
+                        properties: vec![
+                            verter_semantic::analysis::type_expr::ObjectMember::Property(
+                                verter_semantic::analysis::type_expr::ObjectProperty {
+                                    name: "variants".to_string(),
+                                    ty: verter_semantic::analysis::type_expr::TypeExpr::Object(
+                                        Arc::new(
+                                            verter_semantic::analysis::type_expr::ObjectExpr {
+                                                properties: vec![],
+                                            },
+                                        ),
+                                    ),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            ),
+                        ],
+                    },
+                )),
+                type_expansion: None,
+            }],
+            resolved_type_registry_meta: vec![host::meta_resolve::ResolvedTypeRegistryMeta {
+                name: "Button".to_string(),
+                declaration: host::meta_resolve::ResolvedTypeDeclaration {
+                    requested_name: "Button".to_string(),
+                    declaration_id: None,
+                    resolved_name: "Button".to_string(),
+                    canonical_source: "/src/App.vue".to_string(),
+                    span: verter_span::Span::new(10, 52),
+                    kind: host::meta_resolve::ResolvedDeclarationKind::TypeAlias,
+                    text: Some(
+                        "type Button = ComponentConfig<typeof theme, MissingAppConfig>".to_string(),
+                    ),
+                },
+            }],
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+        };
+
+        let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
+        let entry = ffi
+            .type_registry
+            .first()
+            .expect("type registry entry should be present");
+
+        assert!(
+            matches!(
+                entry.r#type,
+                verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+            ),
+            "resolved registry entry should override the shallow analysis alias"
+        );
+        assert_eq!(
+            entry.raw_type.as_deref(),
+            Some("type Button = ComponentConfig<typeof theme, MissingAppConfig>"),
+            "resolved registry should still keep the pre-expansion source text",
         );
     }
 

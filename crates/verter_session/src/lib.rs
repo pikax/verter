@@ -216,7 +216,6 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub shallow_file_state: Option<Arc<crate::resolver_core::ShallowFileState>>,
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
-    pub env: Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
     pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
     pub exported_required_import_names:
         rustc_hash::FxHashMap<String, Arc<rustc_hash::FxHashSet<String>>>,
@@ -231,8 +230,6 @@ pub(crate) struct ImportedDependencyCacheEntry {
         String,
         Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
     >,
-    pub prepared_type_aliases:
-        rustc_hash::FxHashMap<String, crate::resolver_core::CachedPreparedImportedTypeAlias>,
     pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 

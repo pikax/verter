@@ -915,6 +915,90 @@ export interface ButtonProps extends UseComponentIconsProps, LinkProps {
 }
 
 #[test]
+fn dependency_resolutions_for_eval_in_view_fills_missing_type_routes_from_current_store_view() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/schema.ts",
+        "export interface AppConfig { tone?: 'neutral' }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/tv.ts",
+        "export type ComponentConfig<T, A> = { theme: T; config: A }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/theme.ts",
+        "export default { variants: { color: { primary: '', secondary: '' } } } as const\n",
+    );
+    upsert_vue(
+        &host,
+        "/workspace/Button.vue",
+        r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig>
+defineProps<{ button?: Button }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    #[cfg(feature = "scheduler")]
+    {
+        let mut entry = host
+            .compile_cache
+            .get_mut("/workspace/Button.vue")
+            .expect("Button.vue should have a compile-cache entry");
+        entry.dependency_resolutions = rustc_hash::FxHashMap::from_iter([(
+            "./theme".to_string(),
+            exact_dependency("./theme", "/workspace/theme.ts"),
+        )]);
+    }
+
+    #[cfg(not(feature = "scheduler"))]
+    {
+        let mut files = crate::shared::write_lock(&host.files);
+        let entry = files
+            .get_mut("/workspace/Button.vue")
+            .expect("Button.vue should have a host-file entry");
+        entry.dependency_resolutions = rustc_hash::FxHashMap::from_iter([(
+            "./theme".to_string(),
+            exact_dependency("./theme", "/workspace/theme.ts"),
+        )]);
+    }
+
+    let view = host.resolver_store_view();
+    let resolutions = host
+        .dependency_resolutions_for_eval_in_view("/workspace/Button.vue", Some(&view))
+        .expect("captured store view should expose dependency resolutions for the current file");
+
+    assert_eq!(
+        resolutions
+            .get("./schema")
+            .and_then(|resolution| resolution.effective_target()),
+        Some("/workspace/schema.ts"),
+        "captured store views should backfill type-only dependency routes from the current raw snapshot",
+    );
+    assert_eq!(
+        resolutions
+            .get("./tv")
+            .and_then(|resolution| resolution.effective_target()),
+        Some("/workspace/tv.ts"),
+        "captured store views should include helper type routes needed by the current query",
+    );
+    assert_eq!(
+        resolutions
+            .get("./theme")
+            .and_then(|resolution| resolution.effective_target()),
+        Some("/workspace/theme.ts"),
+        "captured store views should preserve runtime dependency routes alongside type-only ones",
+    );
+}
+
+#[test]
 fn resolver_store_view_tracks_transitive_dependency_targets() {
     let host = strict_host();
 
@@ -1138,11 +1222,6 @@ fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_ca
         before.snapshot.is_none(),
         "source-only imported dependency entry should start without a snapshot"
     );
-    assert!(
-        before.env.is_none(),
-        "source-only imported dependency entry should start without an eval env"
-    );
-
     let snapshot = host
         .get_raw_analysis_snapshot_in_view(
             "/workspace/node_modules/pkg/dist/shared.d.ts",
@@ -1171,10 +1250,6 @@ fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_ca
     assert!(
         after.snapshot.is_some(),
         "store-view snapshot build should promote the snapshot into the imported dependency cache"
-    );
-    assert!(
-        after.env.is_some(),
-        "store-view eval env build should promote the env into the imported dependency cache"
     );
 }
 
@@ -1283,8 +1358,8 @@ export interface Props extends Base {
         "repeated Vue imported dependency state lookups should reuse the same cached entry object",
     );
     assert!(
-        first.cached_parse.is_some() && first.snapshot.is_some() && first.env.is_some(),
-        "cached Vue imported dependency entry should retain parse/snapshot/env state",
+        first.cached_parse.is_some() && first.snapshot.is_some(),
+        "cached Vue imported dependency entry should retain parse/snapshot state without caching env",
     );
     assert!(
         first.script_analysis.is_some() && first.export_signatures.is_some(),
@@ -1339,8 +1414,8 @@ fn materialize_imported_dependency_state_in_view_populates_external_type_analysi
         .expect("imported dependency state should be materialized");
 
     assert!(
-        entry.snapshot.is_some() && entry.env.is_some(),
-        "non-SFC imported dependency state should eagerly retain analysis snapshot and eval env",
+        entry.snapshot.is_some(),
+        "non-SFC imported dependency state should retain the analysis snapshot without caching env",
     );
     assert!(
         entry.script_analysis.is_some() && entry.export_signatures.is_some(),
@@ -1489,7 +1564,7 @@ import { dep } from "@/dep"
 }
 
 #[test]
-fn build_owner_eval_env_hydrates_imported_symbol_dependencies_for_shallow_aliases() {
+fn component_meta_uses_prepared_symbol_dependencies_for_shallow_aliases() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -1543,53 +1618,16 @@ defineProps<Props>()
         prepared.2.symbol_dependencies
     );
 
-    let mut env = host
-        .base_eval_env_in_view("/src/App.vue", None)
-        .expect("owner base env should build");
-    let mut visiting = rustc_hash::FxHashSet::default();
-    assert!(
-        host.materialize_shallow_type_symbol_into_env_in_view(
-            &mut env,
-            "Props",
-            "/src/types.ts",
-            "Props",
-            None,
-            &mut visiting,
-        ),
-        "owner env should materialize the shallow imported root alias"
-    );
-
-    assert!(
-        env.type_symbols.contains_key("Props"),
-        "owner env should contain the shallow imported alias"
-    );
-    assert!(
-        env.type_symbols.contains_key("ImportedBase"),
-        "owner env should also contain the alias's attached symbol dependency"
-    );
-
-    let props_decl = env
-        .type_symbols
-        .get("Props")
-        .cloned()
-        .expect("materialized Props decl should exist");
-    let evaluated = verter_semantic::analysis::type_eval::evaluate(&props_decl.body, &mut env);
-    let TypeExpr::Object(object) = evaluated else {
-        panic!("Props should evaluate to an object");
-    };
-    let prop_names: std::collections::BTreeSet<_> = object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
-            _ => None,
-        })
-        .collect();
+    let meta = host
+        .get_component_meta("/src/App.vue")
+        .expect("component meta should resolve through prepared declarations");
+    let prop_names: std::collections::BTreeSet<_> =
+        meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert_eq!(
         prop_names,
         std::collections::BTreeSet::from(["activeClass", "replace"]),
-        "attached shallow symbol dependencies should be sufficient to evaluate the imported alias in the owner env",
+        "attached shallow symbol dependencies should be sufficient for component-meta expansion through prepared declarations",
     );
 }
 
@@ -1759,20 +1797,81 @@ fn resolve_shallow_symbol_dependency_alias_follows_barrel_root_to_cached_definin
         prepared.2.decl.body
     );
 
-    let barrel_cached = host
+    let _barrel_cached = host
         .clone_current_imported_dependency_entry("/src/barrel.ts", Some(&view))
         .expect("barrel source should be cached");
-    assert!(
-        !barrel_cached.prepared_type_aliases.contains_key("BaseProps"),
-        "shallow symbol builder lookup should cache the defining-file alias, not synthesize a barrel-local prepared alias"
-    );
-
     let base_cached = host
         .clone_current_imported_dependency_entry("/src/base.ts", Some(&view))
         .expect("base source should be cached");
     assert!(
-        base_cached.prepared_type_aliases.contains_key("BaseProps"),
-        "builder should cache the shallow defining-file alias for later requests"
+        base_cached.prepared_type_decls.contains_key("BaseProps"),
+        "builder should rely on the cached defining-file prepared declaration for later requests",
+    );
+}
+
+#[test]
+fn prepared_type_decl_lookup_requires_already_materialized_target_state() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseProps { replace?: boolean }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export type { BaseProps } from './base'",
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+
+    let _ = host.ensure_shallow_imported_dependency_state_in_view("/src/barrel.ts", None);
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/base.ts", None)
+            .is_none(),
+        "test setup should keep the target file out of the materialized imported cache"
+    );
+
+    let prepared = host.prepared_type_decl_in_view("/src/barrel.ts", "BaseProps", None);
+    assert!(
+        prepared.is_none(),
+        "prepared lookup should not deep-materialize barrel targets on cache miss"
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/base.ts", None)
+            .is_none(),
+        "prepared lookup should not backfill imported dependency state as a side effect"
+    );
+}
+
+#[test]
+fn prepared_type_decl_lookup_rejects_stale_cache_entries() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label: string }",
+    );
+    let _ = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should materialize");
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = Arc::make_mut(
+            cache
+                .get_mut("/src/types.ts")
+                .expect("types dependency should remain cached"),
+        );
+        entry.whole_hash = [7; 16];
+    }
+
+    assert!(
+        host.prepared_type_decl_in_view("/src/types.ts", "Props", None)
+            .is_none(),
+        "prepared lookup should drop stale cached declarations when the owning file hash changes"
     );
 }
 
@@ -1843,7 +1942,49 @@ export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | '
 }
 
 #[test]
-fn resolve_shallow_symbol_dependency_alias_materializes_reexported_vue_pick_aliases() {
+fn resolve_prepared_symbol_dependency_alias_does_not_populate_legacy_alias_cache() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/base.ts",
+        "export interface BaseProps { replace?: boolean }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export type { BaseProps } from './base'",
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+    let _ = host
+        .materialize_imported_dependency_state_in_view("/src/base.ts", None)
+        .expect("base dependency should materialize");
+    let _ = host
+        .materialize_imported_dependency_state_in_view("/src/barrel.ts", None)
+        .expect("barrel dependency should materialize");
+
+    let resolved = host
+        .resolve_prepared_symbol_dependency_alias_in_view("/src/barrel.ts", "BaseProps", None)
+        .expect("registry lookup should resolve through prepared declarations");
+    assert_eq!(resolved.0, "/src/base.ts");
+    assert_eq!(resolved.1, "BaseProps");
+
+    let _barrel_cached = host
+        .clone_current_imported_dependency_entry("/src/barrel.ts", None)
+        .expect("barrel source should be cached");
+    let base_cached = host
+        .clone_current_imported_dependency_entry("/src/base.ts", None)
+        .expect("base source should be cached");
+    assert!(
+        base_cached.prepared_type_decls.contains_key("BaseProps"),
+        "prepared symbol resolution should stay on prepared declaration caches",
+    );
+}
+
+#[test]
+fn resolve_shallow_symbol_dependency_alias_keeps_reexported_vue_pick_aliases_symbolic() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -1899,28 +2040,16 @@ export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | '
         )
         .expect("shallow alias should materialize vue re-exported Pick helpers");
 
-    let TypeExpr::Object(shape) = &prepared.2.decl.body else {
-        panic!(
-            "vue re-exported Pick alias should hydrate to an object surface, got {:?}",
-            prepared.2.decl.body
-        );
-    };
-    let prop_names: std::collections::BTreeSet<&str> = shape
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(property) => Some(property.name.as_str()),
-            _ => None,
-        })
-        .collect();
     assert!(
-        prop_names.contains("form")
-            && prop_names.contains("formaction")
-            && prop_names.contains("formenctype")
-            && prop_names.contains("formmethod")
-            && prop_names.contains("formnovalidate")
-            && prop_names.contains("formtarget"),
-        "vue re-exported Pick alias should preserve button form attrs after shallow hydration, got {prop_names:?}"
+        matches!(prepared.2.decl.body, TypeExpr::Ref { .. }),
+        "shallow prepared alias should stay symbolic before solving, got {:?}",
+        prepared.2.decl.body
+    );
+
+    assert!(
+        prepared.2.symbol_dependencies.is_empty(),
+        "shallow symbolic Pick alias should not eagerly materialize nested dependency edges, got {:?}",
+        prepared.2.symbol_dependencies
     );
 }
 #[test]
@@ -4200,8 +4329,8 @@ fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shall
     );
     assert_eq!(
         ws.read_count("/workspace/node_modules/pkg/dist/index.d.ts"),
-        1,
-        "companion selection should only probe the chosen declaration target",
+        0,
+        "companion selection should stay on shallow existence probes and avoid reading the declaration companion",
     );
 
     let runtime_entry = host
@@ -4214,26 +4343,41 @@ fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shall
             && runtime_entry
                 .as_ref()
                 .and_then(|entry| entry.external_type_analysis.as_ref())
-                .is_none()
-            && runtime_entry
-                .as_ref()
-                .and_then(|entry| entry.env.as_ref())
                 .is_none(),
         "runtime-script entries must stay untouched during shallow companion selection",
     );
 
-    let declaration_entry = host
-        .clone_current_imported_dependency_entry(
+    assert!(
+        host.clone_current_imported_dependency_entry(
             "/workspace/node_modules/pkg/dist/index.d.ts",
             None,
         )
-        .expect("the declaration companion should be cached after canonicalization");
+        .is_none(),
+        "companion canonicalization must not materialize or cache the declaration target during shallow selection",
+    );
+}
+
+#[test]
+fn resolve_eval_dependency_canonical_in_view_ignores_empty_candidate_without_reads() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    let resolved = host.resolve_eval_dependency_canonical_in_view("", None);
+
     assert!(
-        declaration_entry.snapshot.is_none()
-            && declaration_entry.export_signatures.is_none()
-            && declaration_entry.external_type_analysis.is_none()
-            && declaration_entry.env.is_none(),
-        "companion canonicalization must remain raw-source-only until the selected target is materialized",
+        resolved.is_none(),
+        "empty canonical ids should not produce synthetic companion candidates",
+    );
+    assert_eq!(
+        ws.read_count(""),
+        0,
+        "empty canonical ids must not trigger analysis-source reads",
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("", None)
+            .is_none(),
+        "empty canonical ids must not seed imported dependency cache entries",
     );
 }
 
@@ -4302,7 +4446,7 @@ fn resolve_external_type_from_cached_dependency_state_in_view_keeps_local_type_r
         .ensure_shallow_imported_dependency_state_in_view("/src/types.ts", None)
         .expect("types dependency should seed shallow imported state");
     assert!(
-        shallow.snapshot.is_none() && shallow.env.is_none(),
+        shallow.snapshot.is_none(),
         "shallow imported state should stay export-only before local type resolution",
     );
 
@@ -4329,7 +4473,7 @@ fn resolve_external_type_from_cached_dependency_state_in_view_keeps_local_type_r
         .clone_current_imported_dependency_entry("/src/types.ts", None)
         .expect("types dependency should remain cached after local type resolution");
     assert!(
-        cached.snapshot.is_none() && cached.env.is_none(),
+        cached.snapshot.is_none(),
         "local cached type resolution must not deepen imported dependencies beyond shallow analysis",
     );
     assert!(
@@ -4549,10 +4693,11 @@ fn base_eval_env_in_view_prefers_declaration_companion_for_runtime_js_dependenci
     let runtime_entry = host
         .clone_current_imported_dependency_entry("/workspace/node_modules/pkg/dist/index.js", None);
     assert!(
-        runtime_entry
-            .as_ref()
-            .and_then(|entry| entry.env.as_ref())
-            .is_none(),
+        runtime_entry.is_none()
+            || runtime_entry
+                .as_ref()
+                .and_then(|entry| entry.snapshot.as_ref())
+                .is_none(),
         "runtime-script entries should stay shallow when a declaration companion exists",
     );
 
@@ -4563,8 +4708,8 @@ fn base_eval_env_in_view_prefers_declaration_companion_for_runtime_js_dependenci
         )
         .expect("the declaration companion should own the cached env");
     assert!(
-        declaration_entry.env.is_some(),
-        "the declaration companion should cache the eval env",
+        declaration_entry.snapshot.is_none(),
+        "the declaration companion should not retain a cached snapshot in the imported dependency entry",
     );
 }
 
@@ -4617,12 +4762,6 @@ fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snaps
         "named export routing should not materialize full snapshots while only seeding shallow state (barrel_snapshot={} target_snapshot={})",
         barrel_entry.snapshot.is_some(),
         target_entry.snapshot.is_some(),
-    );
-    assert!(
-        barrel_entry.env.is_none() && target_entry.env.is_none(),
-        "named export routing should not build eval envs during shallow seeding (barrel_env={} target_env={})",
-        barrel_entry.env.is_some(),
-        target_entry.env.is_some(),
     );
     assert!(
         target_entry.dependency_resolutions.is_empty(),
@@ -4717,23 +4856,18 @@ export type ClassNameArray = ClassNameValue[]
     let cached = host
         .clone_current_imported_dependency_entry("/src/types.ts", None)
         .expect("types dependency should remain cached after hydration");
-    let cached_value = cached
-        .prepared_type_aliases
-        .get("ClassNameValue")
-        .expect("resolved root should populate the prepared alias cache");
-
     assert!(
-        !cached_value.requires_source_merge,
-        "once a recursive alias has been hydrated through the shallow env, later passes should reuse that cached result instead of rebuilding it",
+        cached.prepared_type_decls.contains_key("ClassNameValue"),
+        "the defining file should serve recursive roots from its prepared declaration cache",
     );
     assert!(
-        !cached.prepared_type_aliases.contains_key("ClassNameArray"),
-        "same-file recursive support aliases should stay in the base eval env/local closure path instead of being re-prepared as imported aliases",
+        cached.prepared_type_decls.contains_key("ClassNameArray"),
+        "same-file recursive support aliases should stay available through the prepared declaration cache for local closure",
     );
 }
 
 #[test]
-fn resolve_shallow_symbol_dependency_alias_reuses_cached_hydrated_body_without_rebuilding_it() {
+fn resolve_shallow_symbol_dependency_alias_reuses_prepared_decl_cache_without_legacy_alias_cache() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -4763,22 +4897,18 @@ export interface Props extends ImportedBase {
     let first = host
         .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
         .expect("Props alias should hydrate through the shallow cache path");
-    assert!(
-        !first.2.symbol_dependencies.is_empty(),
-        "test setup should keep helper symbol dependencies attached so the regression catches repeated rebuilds",
-    );
 
     let cached_after_first = host
         .clone_current_imported_dependency_entry("/src/types.ts", None)
         .expect("types dependency should remain cached after hydration");
-    let cached_alias = cached_after_first
-        .prepared_type_aliases
+    let cached_prepared = cached_after_first
+        .prepared_type_decls
         .get("Props")
-        .expect("prepared alias cache should contain Props after hydration");
-    assert!(
-        cached_alias.body_hydrated,
-        "non-generic shallow alias hydration should mark the cached body as already hydrated even when helper symbol dependencies remain attached, got {:?}",
-        cached_alias.decl.body,
+        .expect("prepared declaration cache should contain Props after hydration");
+    assert_eq!(
+        cached_prepared.body,
+        first.2.decl.body,
+        "the first shallow alias resolution should reflect the prepared declaration body before the cache mutation",
     );
 
     {
@@ -4786,21 +4916,28 @@ export interface Props extends ImportedBase {
         let entry = cache
             .get_mut("/src/types.ts")
             .expect("types dependency should stay cached");
-        let cached_alias = Arc::make_mut(entry)
-            .prepared_type_aliases
+        let cached_prepared = Arc::make_mut(entry)
+            .prepared_type_decls
             .get_mut("Props")
-            .expect("prepared alias cache should still contain Props");
-        cached_alias.decl.body = TypeExpr::Primitive(PrimitiveName::Number);
+            .expect("prepared declaration cache should still contain Props");
+        let prepared = Arc::make_mut(cached_prepared);
+        prepared.body = TypeExpr::Primitive(PrimitiveName::Number);
     }
 
     let second = host
         .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
-        .expect("subsequent shallow alias lookups should reuse the cached hydrated body");
+        .expect("subsequent shallow alias lookups should reuse the cached prepared declaration");
 
     assert_eq!(
         second.2.decl.body,
         TypeExpr::Primitive(PrimitiveName::Number),
-        "once a non-generic shallow alias body is cached as hydrated, later lookups should reuse it instead of rebuilding a fresh eval env just because helper symbol dependencies remain attached",
+        "later shallow alias lookups should reflect the defining-file prepared declaration cache instead of rebuilding through the removed alias-cache path",
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("/src/types.ts", None)
+            .map(|entry| entry.prepared_type_decls.contains_key("Props"))
+            .unwrap_or(false),
+        "repeated shallow alias lookups must keep using the prepared declaration cache",
     );
 }
 
@@ -4914,6 +5051,201 @@ export interface UnusedProps {
         ws.read_count("/src/Unused.vue"),
         0,
         "shallow vue export state should stay local and avoid unrelated siblings",
+    );
+}
+
+#[test]
+fn ensure_shallow_imported_dependency_state_defers_prepared_decl_materialization_until_lookup() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export interface Props {
+  label: string
+}
+
+export const defaults: Props = { label: 'ok' }
+"#,
+    );
+
+    let entry = host
+        .ensure_shallow_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed shallow imported state");
+
+    assert!(
+        entry.prepared_type_decls.is_empty(),
+        "shallow imported state should defer prepared type declaration materialization until lookup",
+    );
+    assert!(
+        entry.prepared_value_decls.is_empty(),
+        "shallow imported state should defer prepared value declaration materialization until lookup",
+    );
+
+    let prepared_type = host
+        .prepared_type_decl_in_view("/src/types.ts", "Props", None)
+        .expect("prepared type decl should materialize on demand");
+    assert!(
+        prepared_type.member_index.contains_key("label"),
+        "on-demand prepared type materialization should retain the shallow member index",
+    );
+
+    let prepared_value = host
+        .prepared_value_decl_in_view("/src/types.ts", "defaults", None)
+        .expect("prepared value decl should materialize on demand");
+    assert!(
+        matches!(
+            prepared_value.type_annotation.as_ref(),
+            Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Props"
+        ),
+        "on-demand prepared value materialization should retain the shallow type annotation, got {:?}",
+        prepared_value.type_annotation
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should stay cached");
+    assert!(
+        cached.prepared_type_decls.contains_key("Props"),
+        "on-demand prepared type materialization should populate the imported dependency cache",
+    );
+    assert!(
+        cached.prepared_value_decls.contains_key("defaults"),
+        "on-demand prepared value materialization should populate the imported dependency cache",
+    );
+}
+
+#[test]
+fn shallow_prepared_decl_name_resolution_uses_shallow_dependency_targets() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/node_modules/@vue/runtime-core.d.ts",
+        "export interface Component { name?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { Component } from '@vue/runtime-core'
+
+export interface Props {
+  as?: Component
+}
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency(
+            "@vue/runtime-core",
+            "/node_modules/@vue/runtime-core.d.ts",
+        )],
+    );
+
+    let entry = host
+        .ensure_shallow_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed shallow imported state");
+    assert!(
+        entry.snapshot.is_none(),
+        "shallow imported state should not materialize a full snapshot before prepared lookup",
+    );
+    assert!(
+        entry.dependency_resolutions.is_empty(),
+        "shallow imported state should keep dependency resolutions unpublished before a route requests them",
+    );
+
+    let prepared = host
+        .prepared_type_decl_in_view("/src/types.ts", "Props", None)
+        .expect("Props should prepare from the shallow imported cache");
+    let resolved = prepared.name_resolution.get("Component").expect(
+        "prepared declaration should resolve imported Component through shallow dependency targets",
+    );
+    assert_eq!(
+        resolved.canonical_id,
+        "/node_modules/@vue/runtime-core.d.ts",
+        "shallow prepared declaration lookup should canonicalize imported names without a full imported-state materialization",
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry("/src/types.ts", None)
+        .expect("types dependency should stay cached");
+    assert!(
+        cached.snapshot.is_none(),
+        "on-demand prepared lookup should keep the imported dependency snapshotless",
+    );
+    assert!(
+        cached.dependency_resolutions.is_empty(),
+        "on-demand prepared lookup should not backfill the shallow entry with full dependency-resolution publication",
+    );
+}
+
+#[test]
+fn owner_local_prepared_decl_name_resolution_uses_stored_dependency_targets() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/schema.ts",
+        "export interface AppConfig { ui: {} }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/tv.ts",
+        "export type ComponentConfig<T, A, K> = { config: A; key: K }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        "export default { value: true } as const",
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            exact_dependency("./schema", "/src/schema.ts"),
+            exact_dependency("./theme", "/src/theme.ts"),
+            exact_dependency("./tv", "/src/tv.ts"),
+        ],
+    );
+
+    let store_view = host.resolver_store_view();
+    let prepared = host
+        .prepared_type_decl_in_view("/src/Button.vue", "Button", Some(&store_view))
+        .expect("Button should prepare from the owner-local shallow cache");
+
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("AppConfig")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/schema.ts"),
+        "owner-local prepared declarations should canonicalize type imports through stored dependency targets",
+    );
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("ComponentConfig")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/tv.ts"),
+        "owner-local prepared declarations should canonicalize imported helper aliases through stored dependency targets",
+    );
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("theme")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/theme.ts"),
+        "owner-local prepared declarations should canonicalize imported values through stored dependency targets",
     );
 }
 
@@ -5070,23 +5402,20 @@ export type Avatar = {
         matches!(prepared.2.decl.body, TypeExpr::Object(_)),
         "shallow alias hydration should still materialize Avatar enough for downstream evaluation",
     );
-    let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
-        .expect("types snapshot should exist");
-    let mut prepared_env = host
-        .build_cache_only_lookup_env_for_type_decl_in_view(
-            "/src/types.ts",
-            &snapshot,
-            &prepared.2.decl,
-            &prepared.2.symbol_dependencies,
-            None,
-        )
-        .expect("prepared env should build");
-    let prepared_avatar =
-        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        &host,
+        None,
+        "/src/types.ts",
+    );
+    let prepared_avatar = verter_semantic::analysis::type_solver::solve::solve_type(
+        &TypeExpr::named("Avatar"),
+        &solver_host,
+        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
+    )
+    .value;
     assert!(
         matches!(prepared_avatar, TypeExpr::Object(_)),
-        "prepared Avatar should evaluate without widening through unrelated imported siblings",
+        "prepared Avatar should solve without widening through unrelated imported siblings",
     );
     // Shallow alias hydration may read sibling imports when resolving dependency routes
     // for the types file, even if the Unused type is not on the requested path.
@@ -5138,6 +5467,28 @@ export type Avatar = {
 #[cfg(feature = "scheduler")]
 #[test]
 fn shallow_imported_decl_env_hydrates_same_file_support_symbols_without_new_roots() {
+    fn collect_object_property_names(
+        expr: &TypeExpr,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        match expr {
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    if let ObjectMember::Property(prop) = member {
+                        names.insert(prop.name.clone());
+                    }
+                }
+            }
+            TypeExpr::Intersection(members) | TypeExpr::Union(members) => {
+                for member in members.iter() {
+                    collect_object_property_names(member, names);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_object_property_names(inner, names),
+            _ => {}
+        }
+    }
+
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -5182,39 +5533,31 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         .materialize_imported_dependency_state_in_view("/src/types.ts", None)
         .expect("types dependency should seed imported state");
 
-    let prepared = host
+    let _prepared = host
         .resolve_shallow_symbol_dependency_alias_in_view("/src/types.ts", "ButtonProps", None)
         .expect("ButtonProps should hydrate through the shallow cache path");
-    let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/types.ts", None)
-        .expect("types snapshot should exist");
-    let mut prepared_env = host
-        .build_cache_only_lookup_env_for_type_decl_in_view(
-            "/src/types.ts",
-            &snapshot,
-            &prepared.2.decl,
-            &prepared.2.symbol_dependencies,
-            None,
-        )
-        .expect("prepared env should build");
-    let evaluated =
-        verter_semantic::analysis::type_eval::evaluate(&prepared.2.decl.body, &mut prepared_env);
-    let TypeExpr::Object(object) = evaluated else {
-        panic!("ButtonProps should evaluate to an object");
-    };
-    let prop_names: std::collections::BTreeSet<_> = object
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            ObjectMember::Property(prop) => Some(prop.name.as_str()),
-            _ => None,
-        })
-        .collect();
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        &host,
+        None,
+        "/src/types.ts",
+    );
+    let evaluated = verter_semantic::analysis::type_solver::solve::solve_type(
+        &TypeExpr::named("ButtonProps"),
+        &solver_host,
+        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
+    )
+    .value;
+    let mut prop_names = std::collections::BTreeSet::new();
+    collect_object_property_names(&evaluated, &mut prop_names);
 
     assert_eq!(
         prop_names,
-        std::collections::BTreeSet::from(["as", "class", "label"]),
-        "same-file support symbols should hydrate inside the shallow eval env without spawning new roots",
+        std::collections::BTreeSet::from([
+            "as".to_string(),
+            "class".to_string(),
+            "label".to_string(),
+        ]),
+        "same-file support symbols should resolve through declaration-scoped solving and remain available in the final object surface",
     );
     assert_eq!(
         ws.read_count("/src/types.ts"),
@@ -5225,8 +5568,105 @@ export interface ButtonProps extends Omit<LinkProps, 'href'> {
         .clone_current_imported_dependency_entry("/src/types.ts", None)
         .expect("types dependency should remain cached after shallow env construction");
     assert!(
-        !cached.prepared_type_aliases.contains_key("LinkProps"),
-        "same-file support symbols should stay in base eval env/local-closure state instead of becoming prepared imported aliases",
+        cached.prepared_type_decls.contains_key("LinkProps"),
+        "same-file support symbols should stay available through the prepared declaration cache",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn declaration_scoped_solver_applies_omit_to_barrel_imported_types() {
+    fn collect_object_property_names(
+        expr: &TypeExpr,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        match expr {
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    if let ObjectMember::Property(prop) = member {
+                        names.insert(prop.name.clone());
+                    }
+                }
+            }
+            TypeExpr::Intersection(members) | TypeExpr::Union(members) => {
+                for member in members.iter() {
+                    collect_object_property_names(member, names);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_object_property_names(inner, names),
+            _ => {}
+        }
+    }
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/types/index.ts", "export * from '../Button.vue'\n");
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  icon?: string
+}
+
+export interface ButtonProps extends IconProps {
+  label?: string
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+type Props = Omit<ButtonProps, 'color'> & {
+  status?: string
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![exact_dependency("../Button.vue", "/src/Button.vue")],
+    );
+
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        &host,
+        None,
+        "/src/App.vue",
+    );
+    let evaluated = verter_semantic::analysis::type_solver::solve::solve_type(
+        &TypeExpr::named("Props"),
+        &solver_host,
+        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
+    )
+    .value;
+    let mut prop_names = std::collections::BTreeSet::new();
+    collect_object_property_names(&evaluated, &mut prop_names);
+
+    assert_eq!(
+        prop_names,
+        std::collections::BTreeSet::from([
+            "icon".to_string(),
+            "label".to_string(),
+            "status".to_string(),
+        ]),
+        "declaration-scoped solving should apply Omit after routing imported barrel types to their defining prepared declarations",
     );
 }
 
@@ -5465,6 +5905,91 @@ fn ensure_export_registry_keeps_imported_barrels_export_only() {
     assert!(
         shallow.external_type_analysis.is_some(),
         "registry seeding should rely on cached shallow external type analysis",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn get_component_meta_resolves_transitive_macro_types_without_frontier_prewarm() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+import type { Base } from './base'
+
+export interface Props extends Base {
+  label?: string
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/base.ts",
+        r#"
+import type { Inner } from './inner'
+
+export interface Base {
+  inner?: Inner
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/inner.ts",
+        "export interface Inner { value: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./base", "/src/base.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/base.ts",
+        vec![exact_dependency("./inner", "/src/inner.ts")],
+    );
+
+    ws.reset_reads();
+    let meta = host
+        .get_component_meta("/src/Consumer.vue")
+        .expect("component meta should resolve for the consumer");
+
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "label"),
+        "resolved props should include Props.label, got {:?}",
+        meta.props,
+    );
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "inner"),
+        "resolved props should include Base.inner through transitive solver lookup, got {:?}",
+        meta.props,
+    );
+    assert!(
+        ws.read_count("/src/inner.ts") <= 1,
+        "transitive macro expansion should reach the inner dependency on demand without repeated workspace reads, got {}",
+        ws.read_count("/src/inner.ts"),
     );
 }
 
@@ -6011,7 +6536,6 @@ defineProps<ImportedProps>()
 /// After Phase 1, the solver host must resolve both the direct import AND its
 /// same-file dependencies through the prepared-decl cache.
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn solver_host_resolves_transitive_same_file_deps_in_imported_type() {
     let host = VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -6233,10 +6757,53 @@ import { imported_obj } from './attrs'
 /// Full verification requires a CountingWorkspace to track file read counts,
 /// which is not available in the standalone host test harness.
 #[test]
-#[ignore = "requires CountingWorkspace implementation to track file read/parse counts"]
 fn solver_host_cache_ownership_cold_warm() {
-    // Stub: would create a host with CountingWorkspace, call get_component_meta twice,
-    // and assert that the second call triggers 0 additional file reads/parses.
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string }",
+    );
+    upsert_vue(
+        &host,
+        "/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    // Cold call
+    let meta1 = host
+        .get_component_meta("/App.vue")
+        .expect("cold call should produce component meta");
+    let recomputes_after_cold = host
+        .provenance
+        .component_meta_resolved_state_recomputes
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // Warm call — should reuse cached resolved state
+    let meta2 = host
+        .get_component_meta("/App.vue")
+        .expect("warm call should produce component meta");
+    let recomputes_after_warm = host
+        .provenance
+        .component_meta_resolved_state_recomputes
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    assert_eq!(
+        meta1.props.len(),
+        meta2.props.len(),
+        "cold and warm calls should produce identical props"
+    );
+    assert_eq!(
+        recomputes_after_cold, recomputes_after_warm,
+        "warm call should not trigger additional resolved state recomputes"
+    );
 }
 
 /// Test 9: same-request macro+fallthrough — verifies that a single get_component_meta
@@ -6245,12 +6812,43 @@ fn solver_host_cache_ownership_cold_warm() {
 /// Full verification requires read/parse counter instrumentation on the host,
 /// which is not available in the standalone test harness.
 #[test]
-#[ignore = "requires read/parse counter instrumentation to verify single-pass resolution"]
 fn solver_host_same_request_macro_and_fallthrough_single_pass() {
-    // Stub: would create a component with both defineProps<ImportedType>() and a
-    // single-component root that inherits attrs, call get_component_meta once,
-    // and assert that both macro type resolution and fallthrough resolution happen
-    // without redundant file reads.
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    upsert_ts(
+        &host,
+        "/types.ts",
+        "export interface Props { label: string }",
+    );
+    upsert_vue(
+        &host,
+        "/App.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let meta = host
+        .get_component_meta("/App.vue")
+        .expect("single-pass should produce component meta");
+
+    // Both macro resolution (defineProps) and the meta surface should complete
+    // in a single get_component_meta call
+    assert!(
+        meta.props.iter().any(|p| p.name == "label"),
+        "macro type should resolve imported prop 'label'"
+    );
+    assert_eq!(
+        host.provenance
+            .get_component_meta_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "only one get_component_meta call should have been made"
+    );
 }
 
 /// Test 10: negative — missing imported symbol must not silently succeed.

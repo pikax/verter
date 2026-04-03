@@ -50,6 +50,25 @@ pub struct SolveState {
     pub exactness: SolverExactness,
     pub execution_status: ExecutionStatus,
     pub incomplete_reasons: Vec<IncompleteReason>,
+    /// Stack of active type declaration contexts. When resolving a prepared
+    /// type declaration body, the declaration is pushed onto this stack so
+    /// bare name refs can be resolved through the declaration's
+    /// `name_resolution` map (defining file scope).
+    pub type_decl_context_stack: Vec<Arc<super::PreparedTypeDecl>>,
+    /// Stack of active value declaration contexts for `typeof` resolution.
+    pub value_decl_context_stack: Vec<Arc<super::PreparedValueDecl>>,
+    /// External declarations visited during this solve. Recorded by
+    /// `resolve_prepared_ref` when it enters a declaration from a
+    /// canonical file other than "$owner". Used by the host to publish
+    /// import aliases to the type registry.
+    pub visited_external_decls: Vec<ResolvedRootIdentity>,
+    /// Active substitution names currently being expanded.
+    ///
+    /// This guards self-referential default/type-parameter substitutions like
+    /// `T = NestedItem<I>` where `I` is itself bound to an unresolved `T`,
+    /// which would otherwise recurse forever before prepared-ref recursion
+    /// tracking has a chance to run.
+    pub active_substitution_names: Vec<String>,
 }
 
 impl SolveState {
@@ -62,6 +81,10 @@ impl SolveState {
             exactness: SolverExactness::ExactConcrete,
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
+            type_decl_context_stack: Vec::new(),
+            value_decl_context_stack: Vec::new(),
+            visited_external_decls: Vec::new(),
+            active_substitution_names: Vec::new(),
         }
     }
 
@@ -117,12 +140,109 @@ pub fn solve_type(
     // Project the resolved node back to TypeExpr
     let result_expr = project_to_type_expr(&arena, resolved);
 
+    // Debug-only: log solver stats BEFORE moving state
+    if solver_debug_enabled() {
+        let json_bytes = serde_json::to_string(&result_expr)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        eprintln!(
+            "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
+            arena.len(),
+            state.steps,
+            state.recursion.max_depth(),
+            json_bytes,
+            state.exactness,
+            state.execution_status,
+        );
+    }
+
     SolverResult {
         value: result_expr,
         exactness: state.exactness,
         execution_status: state.execution_status,
         incomplete_reasons: state.incomplete_reasons,
     }
+}
+
+/// Stats from a solver run — always cheap to compute (counter reads).
+#[derive(Debug, Clone)]
+pub struct SolverStats {
+    pub arena_nodes: usize,
+    pub resolve_steps: u64,
+    pub max_instantiation_depth: usize,
+    pub result_json_bytes: usize,
+    pub exactness: SolverExactness,
+    pub execution_status: ExecutionStatus,
+}
+
+/// Compute solver stats from a completed run.
+pub fn compute_solver_stats(
+    result: &SolverResult<TypeExpr>,
+    arena: &QueryArena,
+    state: &SolveState,
+) -> SolverStats {
+    let result_json_bytes = serde_json::to_string(&result.value)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    SolverStats {
+        arena_nodes: arena.len(),
+        resolve_steps: state.steps,
+        max_instantiation_depth: state.recursion.max_depth(),
+        result_json_bytes,
+        exactness: result.exactness,
+        execution_status: result.execution_status,
+    }
+}
+
+fn solver_debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("VERTER_SOLVER_DEBUG").is_some())
+}
+
+#[allow(dead_code)]
+fn solver_debug_log(result: &SolverResult<TypeExpr>, arena: &QueryArena, state: &SolveState) {
+    if !solver_debug_enabled() {
+        return;
+    }
+    let stats = compute_solver_stats(result, arena, state);
+    eprintln!(
+        "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
+        stats.arena_nodes,
+        stats.resolve_steps,
+        stats.max_instantiation_depth,
+        stats.result_json_bytes,
+        stats.exactness,
+        stats.execution_status,
+    );
+}
+
+/// Solve a type expression and return both the result and a trace of
+/// external declarations visited during resolution. The trace is a
+/// sidecar for the orchestration layer (registry publishing) and is
+/// NOT part of the semantic `SolverResult`.
+pub fn solve_type_with_trace(
+    expr: &TypeExpr,
+    host: &dyn TypeSolverHost,
+    limits: SolveLimits,
+) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+    let mut arena = QueryArena::new();
+    let mut state = SolveState::new(limits);
+
+    let root = lower_type_expr(&mut arena, expr);
+    let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
+    let result_expr = project_to_type_expr(&arena, resolved);
+
+    let trace = state.visited_external_decls;
+    (
+        SolverResult {
+            value: result_expr,
+            exactness: state.exactness,
+            execution_status: state.execution_status,
+            incomplete_reasons: state.incomplete_reasons,
+        },
+        trace,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +277,21 @@ fn resolve_node(
         Node::Primitive(_) | Node::Literal(_) | Node::Error { .. } => return node,
         Node::RecursiveRef { .. } => return node,
         Node::TypeParam { ref name, .. } => {
-            if let Some(bound) = subst.resolve(name) {
-                return bound;
+            let name = name.clone();
+            if let Some(bound) = subst.resolve(&name) {
+                if state
+                    .active_substitution_names
+                    .iter()
+                    .any(|active| active == &name)
+                {
+                    state.mark_symbolic();
+                    return node;
+                }
+
+                state.active_substitution_names.push(name);
+                let resolved = resolve_node(arena, bound, host, state, subst);
+                state.active_substitution_names.pop();
+                return resolved;
             } else {
                 state.mark_symbolic();
                 return node;
@@ -189,7 +322,34 @@ fn resolve_node(
                 .iter()
                 .map(|&m| resolve_node(arena, m, host, state, subst))
                 .collect();
-            arena.intersection(resolved)
+            let mut simplified = Vec::with_capacity(resolved.len());
+            let mut saw_empty_object = false;
+
+            for member in resolved {
+                match arena.get(member) {
+                    Node::Primitive(PrimitiveKind::Never) => return member,
+                    Node::Object(obj)
+                        if obj.properties.is_empty()
+                            && obj.index_signatures.is_empty()
+                            && obj.call_signatures.is_empty()
+                            && obj.construct_signatures.is_empty() =>
+                    {
+                        saw_empty_object = true;
+                    }
+                    _ => simplified.push(member),
+                }
+            }
+
+            if simplified.is_empty() && saw_empty_object {
+                arena.object(super::arena::ObjectNode {
+                    properties: vec![],
+                    index_signatures: vec![],
+                    call_signatures: vec![],
+                    construct_signatures: vec![],
+                })
+            } else {
+                arena.intersection(simplified)
+            }
         }
 
         // Array — resolve element
@@ -279,7 +439,18 @@ fn resolve_node(
             // Check substitution env (for generic type params used as refs)
             if args.is_empty() {
                 if let Some(bound) = subst.resolve(&name) {
-                    return bound;
+                    if let Some(guarded) = resolve_substitution_binding(
+                        arena,
+                        node,
+                        name.as_ref(),
+                        bound,
+                        host,
+                        state,
+                        subst,
+                    ) {
+                        return guarded;
+                    }
+                    return resolve_node(arena, bound, host, state, subst);
                 }
             }
 
@@ -290,8 +461,12 @@ fn resolve_node(
                 .collect();
 
             // Try to resolve from the host's prepared declarations.
-            // We need a root identity to look up the decl. Try via the host.
-            if let Some(root_id) = host.root_identity("", &name) {
+            // First check the active declaration context — bare names in an
+            // imported type body should resolve through the defining file's
+            // scope (name_resolution), not the owner file's scope.
+            let maybe_root =
+                resolve_name_in_context(state, &name).or_else(|| host.root_identity("", &name));
+            if let Some(root_id) = maybe_root {
                 return resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
             }
 
@@ -319,6 +494,47 @@ fn resolve_node(
 
         // -- indexed access T[K] --
         Node::IndexedAccess { object, index } => {
+            if let Node::Literal(super::arena::SolverLiteral::String(key)) =
+                arena.get(index).clone()
+            {
+                if let Node::Ref {
+                    ref name,
+                    ref type_arguments,
+                } = arena.get(object).clone()
+                {
+                    if type_arguments.is_empty() {
+                        let maybe_root = resolve_name_in_context(state, name.as_str())
+                            .or_else(|| host.root_identity("", name.as_str()));
+                        if let Some(root_id) = maybe_root {
+                            let prepared_context = host.resolve_prepared_type_decl(&root_id);
+                            if let Some(projection) =
+                                host.resolve_member_projection(&root_id, key.as_str())
+                            {
+                                if projection.exactness == SolverExactness::ExactSymbolic {
+                                    state.mark_symbolic();
+                                }
+                                let lowered = lower_type_expr(arena, &projection.value);
+                                let pushed = if let Some(prepared) = prepared_context.as_ref() {
+                                    if !prepared.name_resolution.is_empty() {
+                                        state.type_decl_context_stack.push(Arc::clone(prepared));
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+                                let resolved = resolve_node(arena, lowered, host, state, subst);
+                                if pushed {
+                                    state.type_decl_context_stack.pop();
+                                }
+                                return resolved;
+                            }
+                        }
+                    }
+                }
+            }
+
             let resolved_obj = resolve_node(arena, object, host, state, subst);
             let resolved_idx = resolve_node(arena, index, host, state, subst);
             resolve_indexed_access(arena, resolved_obj, resolved_idx, host, state, subst)
@@ -391,6 +607,30 @@ fn resolve_node(
     }
 }
 
+fn resolve_substitution_binding(
+    arena: &mut QueryArena,
+    original_node: NodeId,
+    name: &str,
+    bound: NodeId,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    if state
+        .active_substitution_names
+        .iter()
+        .any(|active| active == name)
+    {
+        state.mark_symbolic();
+        return Some(original_node);
+    }
+
+    state.active_substitution_names.push(name.to_string());
+    let resolved = resolve_node(arena, bound, host, state, subst);
+    state.active_substitution_names.pop();
+    Some(resolved)
+}
+
 // ---------------------------------------------------------------------------
 // resolve_prepared_ref — instantiate a host-backed prepared declaration
 // ---------------------------------------------------------------------------
@@ -439,6 +679,11 @@ fn resolve_prepared_ref(
     });
     state.recursion.push(rec_key.clone(), placeholder);
 
+    // Record external declaration visit for registry publishing
+    if !root_id.canonical_id.is_empty() && root_id.canonical_id != "$owner" {
+        state.visited_external_decls.push(root_id.clone());
+    }
+
     // Look up the prepared declaration
     let Some(prepared) = host.resolve_prepared_type_decl(root_id) else {
         state.recursion.pop(&rec_key);
@@ -471,14 +716,51 @@ fn resolve_prepared_ref(
         }
     }
 
+    // Push the prepared declaration onto the context stack so bare-name
+    // refs in the body can be resolved through name_resolution.
+    // Only push if the declaration has name_resolution entries (avoids
+    // empty stack entries that would be checked by resolve_name_in_context).
+    let pushed = if !prepared.name_resolution.is_empty() {
+        state.type_decl_context_stack.push(Arc::clone(&prepared));
+        true
+    } else {
+        false
+    };
+
     // Resolve the body with the new substitution
     let resolved = resolve_node(arena, body_node, host, state, &child_subst);
 
-    // Pop recursion tracker
+    // Pop declaration context and recursion tracker
+    if pushed {
+        state.type_decl_context_stack.pop();
+    }
     state.recursion.pop(&rec_key);
     state.depth -= 1;
 
     resolved
+}
+
+/// Check the INNERMOST active declaration context for a pre-resolved name.
+///
+/// Only checks the topmost entry on the type/value declaration context
+/// stacks. A bare name in a declaration body should resolve in THAT
+/// declaration's defining file scope only — not in parent scopes from
+/// outer prepared-ref resolutions. The host's `root_identity` handles
+/// owner-level resolution as the fallback.
+fn resolve_name_in_context(state: &SolveState, name: &str) -> Option<ResolvedRootIdentity> {
+    // Check innermost type declaration context only
+    if let Some(decl) = state.type_decl_context_stack.last() {
+        if let Some(identity) = decl.name_resolution.get(name) {
+            return Some(identity.clone());
+        }
+    }
+    // Then check innermost value declaration context only
+    if let Some(decl) = state.value_decl_context_stack.last() {
+        if let Some(identity) = decl.name_resolution.get(name) {
+            return Some(identity.clone());
+        }
+    }
+    None
 }
 
 /// Simple hash for a slice of NodeIds (for recursion tracking keys).
@@ -503,6 +785,19 @@ fn resolve_keyof(arena: &mut QueryArena, operand: NodeId, state: &mut SolveState
     let node = arena.get(operand).clone();
 
     match node {
+        Node::Array { .. } => arena.primitive(PrimitiveKind::Number),
+        Node::Tuple { elements, .. } => {
+            if elements.is_empty() {
+                arena.primitive(PrimitiveKind::Never)
+            } else {
+                let keys: Vec<NodeId> = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _)| arena.number_literal(idx as f64))
+                    .collect();
+                arena.union(keys)
+            }
+        }
         Node::Object(obj) => {
             let has_index = !obj.index_signatures.is_empty();
             if has_index {
@@ -608,13 +903,18 @@ fn resolve_indexed_access(
             arena.primitive(PrimitiveKind::Undefined)
         }
         Node::Intersection(members) => {
+            let mut matches = Vec::new();
             for &member in &members {
                 let result = resolve_indexed_access(arena, member, index, host, state, subst);
                 if !matches!(arena.get(result), Node::Primitive(PrimitiveKind::Undefined)) {
-                    return result;
+                    matches.push(result);
                 }
             }
-            arena.primitive(PrimitiveKind::Undefined)
+            match matches.len() {
+                0 => arena.primitive(PrimitiveKind::Undefined),
+                1 => matches[0],
+                _ => arena.intersection(matches),
+            }
         }
         _ => {
             state.mark_symbolic();
@@ -695,9 +995,16 @@ fn resolve_conditional(
             if let Some(infer_bindings) = rel_state.take_infer_bindings() {
                 for (name, candidates) in infer_bindings.iter() {
                     // Multiple candidates → intersect (use first for now).
-                    if let Some(&first) = candidates.first() {
-                        true_subst.bind(name, first);
+                    if candidates.is_empty() {
+                        continue;
                     }
+
+                    let binding = if candidates.len() == 1 {
+                        candidates[0]
+                    } else {
+                        arena.intersection(candidates.to_vec())
+                    };
+                    true_subst.bind(name, binding);
                 }
             }
             resolve_node(arena, true_branch, host, state, &true_subst)
@@ -803,6 +1110,7 @@ fn collect_finite_keys(arena: &QueryArena, node: NodeId) -> Option<Vec<String>> 
             Node::Union(members) => {
                 stack.extend(members.iter().copied());
             }
+            Node::Primitive(PrimitiveKind::Never) => {}
             // Any non-literal member means the keyspace is open
             _ => return None,
         }
@@ -830,39 +1138,131 @@ fn resolve_typeof(
 
     // Try to resolve the root symbol as a value declaration
     let root_name = &path[0];
-    let root_id = ResolvedRootIdentity::new("", root_name);
+    let mut consumed_segments = 1usize;
+    let qualified_root = if path.len() > 1 {
+        let qualified = format!("{}.{}", path[0], path[1]);
+        resolve_name_in_context(state, &qualified).or_else(|| host.root_identity("", &qualified))
+    } else {
+        None
+    };
+    // First check declaration context (for typeof inside imported type bodies),
+    // then host's root_identity (for import bindings). Fall back to the
+    // original ("", name) identity which checks owner env directly.
+    let root_id = if let Some(identity) = qualified_root {
+        consumed_segments = 2;
+        identity
+    } else {
+        resolve_name_in_context(state, root_name)
+            .or_else(|| host.root_identity("", root_name))
+            .unwrap_or_else(|| ResolvedRootIdentity::new("", root_name))
+    };
 
     if let Some(prepared) = host.resolve_prepared_value_decl(&root_id) {
-        // If there's a type annotation, use it
-        if let Some(ref ty_ann) = prepared.type_annotation {
-            let lowered = lower_type_expr(arena, ty_ann);
-            // For dotted paths (typeof x.y), do member projection
-            if path.len() > 1 {
-                let mut current = lowered;
-                for segment in &path[1..] {
+        // Priority: type_annotation > object_shape > function_signature > enum_members
+        let base_type = if let Some(ref ty_ann) = prepared.type_annotation {
+            Some(lower_type_expr(arena, ty_ann))
+        } else if let Some(ref shape) = prepared.object_shape {
+            Some(lower_type_expr(
+                arena,
+                &TypeExpr::Object(Arc::new(shape.clone())),
+            ))
+        } else if let Some(ref sig) = prepared.function_signature {
+            let func_expr = crate::analysis::type_expr::FunctionExpr {
+                parameters: sig.parameters.clone(),
+                return_type: sig.return_type.as_ref().map(|t| Arc::new(t.clone())),
+                type_parameters: sig.type_parameters.clone(),
+            };
+            if prepared.kind == super::super::type_eval::ValueDeclKind::Class {
+                // Class typeof: object with construct signature so
+                // ConstructorParameters<typeof C> and InstanceType<typeof C>
+                // find the construct signature, matching the manual
+                // `{ new(...): T }` pattern.
+                Some(lower_type_expr(
+                    arena,
+                    &TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![
+                            crate::analysis::type_expr::ObjectMember::ConstructSignature(func_expr),
+                        ],
+                    })),
+                ))
+            } else {
+                // Regular function typeof: bare function type
+                Some(lower_type_expr(
+                    arena,
+                    &TypeExpr::Function(Arc::new(func_expr)),
+                ))
+            }
+        } else if let Some(ref members) = prepared.enum_members {
+            // Enum value object: { MemberA: 0, MemberB: 1, ... }
+            let obj_expr = crate::analysis::type_expr::ObjectExpr {
+                properties: members
+                    .iter()
+                    .map(|(name, ty)| {
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: name.clone(),
+                                ty: ty.clone(),
+                                optional: false,
+                                readonly: true,
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            Some(lower_type_expr(
+                arena,
+                &TypeExpr::Object(Arc::new(obj_expr)),
+            ))
+        } else {
+            None
+        };
+
+        if let Some(base) = base_type {
+            let pushed = if !prepared.name_resolution.is_empty() {
+                state.value_decl_context_stack.push(Arc::clone(&prepared));
+                true
+            } else {
+                false
+            };
+
+            let resolved_base = resolve_node(arena, base, host, state, &SubstitutionEnv::new());
+            let result = if path.len() > consumed_segments {
+                let mut current = resolved_base;
+                let mut ok = true;
+                for segment in &path[consumed_segments..] {
                     let node = arena.get(current).clone();
                     match node {
                         Node::Object(obj) => {
                             if let Some(prop) = obj.properties.iter().find(|p| p.name == *segment) {
                                 current = prop.ty;
                             } else {
-                                state.mark_symbolic();
-                                return arena.alloc(Node::TypeOf {
-                                    path: path.to_vec(),
-                                });
+                                ok = false;
+                                break;
                             }
                         }
                         _ => {
-                            state.mark_symbolic();
-                            return arena.alloc(Node::TypeOf {
-                                path: path.to_vec(),
-                            });
+                            ok = false;
+                            break;
                         }
                     }
                 }
-                return current;
+                ok.then_some(current)
+            } else {
+                Some(resolved_base)
+            };
+
+            if pushed {
+                state.value_decl_context_stack.pop();
             }
-            return lowered;
+
+            if let Some(result) = result {
+                return result;
+            }
+
+            state.mark_symbolic();
+            return arena.alloc(Node::TypeOf {
+                path: path.to_vec(),
+            });
         }
     }
 
@@ -1054,20 +1454,67 @@ fn project_inner(
         },
 
         Node::Object(obj) => {
-            let members: Vec<_> = obj
-                .properties
-                .iter()
-                .map(|p| {
-                    crate::analysis::type_expr::ObjectMember::Property(
+            let mut members = Vec::with_capacity(
+                obj.properties.len()
+                    + obj.index_signatures.len()
+                    + obj.call_signatures.len()
+                    + obj.construct_signatures.len(),
+            );
+            for p in &obj.properties {
+                let ty = project_inner(arena, p.ty, visited, depth + 1);
+                if p.is_method {
+                    match ty {
+                        TypeExpr::Function(function) => {
+                            members.push(crate::analysis::type_expr::ObjectMember::Method(
+                                crate::analysis::type_expr::MethodSignature {
+                                    name: p.name.clone(),
+                                    function: (*function).clone(),
+                                    optional: p.optional,
+                                },
+                            ));
+                        }
+                        other => members.push(crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: p.name.clone(),
+                                ty: other,
+                                optional: p.optional,
+                                readonly: p.readonly,
+                            },
+                        )),
+                    }
+                } else {
+                    members.push(crate::analysis::type_expr::ObjectMember::Property(
                         crate::analysis::type_expr::ObjectProperty {
                             name: p.name.clone(),
-                            ty: project_inner(arena, p.ty, visited, depth + 1),
+                            ty,
                             optional: p.optional,
                             readonly: p.readonly,
                         },
-                    )
-                })
-                .collect();
+                    ));
+                }
+            }
+            for idx in &obj.index_signatures {
+                members.push(crate::analysis::type_expr::ObjectMember::IndexSignature(
+                    crate::analysis::type_expr::IndexSignature {
+                        key_name: "key".into(),
+                        key_type: project_inner(arena, idx.key_type, visited, depth + 1),
+                        value_type: project_inner(arena, idx.value_type, visited, depth + 1),
+                        readonly: idx.readonly,
+                    },
+                ));
+            }
+            for sig in &obj.call_signatures {
+                members.push(crate::analysis::type_expr::ObjectMember::CallSignature(
+                    project_signature(arena, sig, visited, depth + 1),
+                ));
+            }
+            for sig in &obj.construct_signatures {
+                members.push(
+                    crate::analysis::type_expr::ObjectMember::ConstructSignature(
+                        project_signature(arena, sig, visited, depth + 1),
+                    ),
+                );
+            }
             TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
                 properties: members,
             }))
@@ -1103,25 +1550,7 @@ fn project_inner(
 
         Node::Function(func) => {
             if let Some(sig) = func.signatures.first() {
-                TypeExpr::Function(Arc::new(crate::analysis::type_expr::FunctionExpr {
-                    parameters: sig
-                        .parameters
-                        .iter()
-                        .map(|p| crate::analysis::type_expr::FunctionParam {
-                            name: p.name.clone(),
-                            ty: project_inner(arena, p.ty, visited, depth + 1),
-                            optional: p.optional,
-                            rest: p.rest,
-                        })
-                        .collect(),
-                    return_type: Some(Arc::new(project_inner(
-                        arena,
-                        sig.return_type,
-                        visited,
-                        depth + 1,
-                    ))),
-                    type_parameters: vec![],
-                }))
+                TypeExpr::Function(Arc::new(project_signature(arena, sig, visited, depth + 1)))
             } else {
                 TypeExpr::Function(Arc::new(crate::analysis::type_expr::FunctionExpr {
                     parameters: vec![],
@@ -1157,10 +1586,16 @@ fn project_inner(
             false_type: Arc::new(project_inner(arena, *false_branch, visited, depth + 1)),
         },
 
-        Node::TypeParam { name, .. } => TypeExpr::Ref {
-            name: Arc::from(name.as_str()),
-            type_arguments: Arc::from(vec![]),
-        },
+        Node::TypeParam {
+            name,
+            constraint,
+            default,
+        } => TypeExpr::TypeParameter(crate::analysis::type_expr::TypeParam {
+            name: name.clone(),
+            constraint: constraint
+                .map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
+            default: default.map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
+        }),
 
         Node::Infer { name } => TypeExpr::Infer { name: name.clone() },
 
@@ -1197,6 +1632,45 @@ fn project_primitive(kind: PrimitiveKind) -> crate::analysis::type_expr::Primiti
         PrimitiveKind::Null => PrimitiveName::Null,
         PrimitiveKind::Undefined => PrimitiveName::Undefined,
         PrimitiveKind::Object => PrimitiveName::Object,
+    }
+}
+
+fn project_signature(
+    arena: &QueryArena,
+    sig: &super::arena::CallSignatureNode,
+    visited: &mut Vec<NodeId>,
+    depth: usize,
+) -> crate::analysis::type_expr::FunctionExpr {
+    crate::analysis::type_expr::FunctionExpr {
+        parameters: sig
+            .parameters
+            .iter()
+            .map(|p| crate::analysis::type_expr::FunctionParam {
+                name: p.name.clone(),
+                ty: project_inner(arena, p.ty, visited, depth + 1),
+                optional: p.optional,
+                rest: p.rest,
+            })
+            .collect(),
+        return_type: Some(Arc::new(project_inner(
+            arena,
+            sig.return_type,
+            visited,
+            depth + 1,
+        ))),
+        type_parameters: sig
+            .type_parameters
+            .iter()
+            .map(|param| crate::analysis::type_expr::TypeParam {
+                name: param.name.clone(),
+                constraint: param
+                    .constraint
+                    .map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
+                default: param
+                    .default
+                    .map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
+            })
+            .collect(),
     }
 }
 
@@ -1501,7 +1975,7 @@ mod tests {
 
     #[test]
     fn solve_missing_prepared_decl_returns_incomplete() {
-        let host = TestHost::new(); // empty — no decls
+        let _host = TestHost::new(); // empty — no decls
 
         // But we need root_identity to return Some for the test to reach the
         // prepared_type_decl lookup. Use a host that returns identity but no decl.
@@ -1594,6 +2068,664 @@ mod tests {
         assert_eq!(result.execution_status, ExecutionStatus::HardStop);
     }
 
+    #[test]
+    fn solve_typeof_resolves_imported_names_inside_prepared_value_annotations() {
+        struct ValueContextHost {
+            types: FxHashMap<String, Arc<PreparedTypeDecl>>,
+            values:
+                FxHashMap<String, Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+        }
+
+        impl TypeSolverHost for ValueContextHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.types.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.values.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if self.types.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/dep.ts", symbol_name))
+                } else if self.values.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/owner.ts", symbol_name))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut remote = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/dep.ts", "Remote"),
+            TypeDeclKind::Alias,
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        remote.build_member_index();
+
+        let mut theme = crate::analysis::type_solver::prepared::PreparedValueDecl::new(
+            ResolvedRootIdentity::new("/owner.ts", "theme"),
+            crate::analysis::type_eval::ValueDeclKind::Const,
+        );
+        theme.type_annotation = Some(TypeExpr::Ref {
+            name: Arc::from("Remote"),
+            type_arguments: Arc::from(vec![]),
+        });
+        theme.name_resolution.insert(
+            "Remote".into(),
+            ResolvedRootIdentity::new("/dep.ts", "Remote"),
+        );
+
+        let host = ValueContextHost {
+            types: {
+                let mut map = FxHashMap::default();
+                map.insert("Remote".into(), Arc::new(remote));
+                map
+            },
+            values: {
+                let mut map = FxHashMap::default();
+                map.insert("theme".into(), Arc::new(theme));
+                map
+            },
+        };
+
+        let expr = TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
+            path: vec!["theme".into()],
+        });
+        let result = solve_type(&expr, &host, SolveLimits::default());
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "typeof should resolve imported names inside prepared value annotations through value declaration context",
+        );
+    }
+
+    #[test]
+    fn solve_typeof_resolves_namespace_member_paths() {
+        struct NamespaceValueHost {
+            values:
+                FxHashMap<String, Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+        }
+
+        impl TypeSolverHost for NamespaceValueHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                None
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.values.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn utility_source(&self, _name: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                match symbol_name {
+                    "ThemeNs.theme" | "theme" => {
+                        Some(ResolvedRootIdentity::new("/theme.ts", "theme"))
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        let mut theme = crate::analysis::type_solver::prepared::PreparedValueDecl::new(
+            ResolvedRootIdentity::new("/theme.ts", "theme"),
+            crate::analysis::type_eval::ValueDeclKind::Const,
+        );
+        theme.object_shape = Some(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "slots".into(),
+                    ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "root".into(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            ),
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "label".into(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            ),
+                        ],
+                    })),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        });
+
+        let host = NamespaceValueHost {
+            values: {
+                let mut map = FxHashMap::default();
+                map.insert("theme".into(), Arc::new(theme));
+                map
+            },
+        };
+
+        let expr = TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
+            path: vec!["ThemeNs".into(), "theme".into(), "slots".into()],
+        });
+        let result = solve_type(&expr, &host, SolveLimits::default());
+
+        let TypeExpr::Object(obj) = result.value else {
+            panic!("namespace typeof member path should resolve to object shape");
+        };
+        let names: std::collections::BTreeSet<_> = obj
+            .properties
+            .iter()
+            .map(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(prop) => prop.name.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["label".to_string(), "root".to_string()]),
+            "typeof should be able to consume the namespace qualifier as part of the root value lookup",
+        );
+    }
+
+    #[test]
+    fn solve_generic_typeof_arguments_flow_through_cached_prepared_decls() {
+        struct CachedDeclHost {
+            types: FxHashMap<String, Arc<PreparedTypeDecl>>,
+            values:
+                FxHashMap<String, Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+        }
+
+        impl TypeSolverHost for CachedDeclHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.types.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.values.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if self.types.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/types.ts", symbol_name))
+                } else if self.values.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/theme.ts", symbol_name))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let empty_object = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![],
+        }));
+        let slots_object = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "base".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "label".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+            ],
+        }));
+
+        let mut id_decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Id"),
+            TypeDeclKind::Alias,
+            TypeExpr::Intersection(Arc::from(vec![
+                empty_object.clone(),
+                TypeExpr::Mapped {
+                    parameter: "P".into(),
+                    source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::Ref {
+                        name: Arc::from("T"),
+                        type_arguments: Arc::from(vec![]),
+                    }))),
+                    value: Arc::new(TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::Ref {
+                            name: Arc::from("T"),
+                            type_arguments: Arc::from(vec![]),
+                        }),
+                        index: Arc::new(TypeExpr::Ref {
+                            name: Arc::from("P"),
+                            type_arguments: Arc::from(vec![]),
+                        }),
+                    }),
+                    optional: crate::analysis::type_expr::MappedModifier::None,
+                    readonly: crate::analysis::type_expr::MappedModifier::None,
+                    name_type: None,
+                },
+            ])),
+        );
+        id_decl
+            .type_parameters
+            .push(crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            });
+        id_decl
+            .name_resolution
+            .insert("T".into(), ResolvedRootIdentity::new("/types.ts", "T"));
+
+        let mut component_ui = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "ComponentUI"),
+            TypeDeclKind::Alias,
+            TypeExpr::Ref {
+                name: Arc::from("Id"),
+                type_arguments: Arc::from(vec![TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::Ref {
+                        name: Arc::from("T"),
+                        type_arguments: Arc::from(vec![]),
+                    }),
+                    index: Arc::new(TypeExpr::string_literal("slots")),
+                }]),
+            },
+        );
+        component_ui
+            .type_parameters
+            .push(crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            });
+        component_ui
+            .name_resolution
+            .insert("Id".into(), ResolvedRootIdentity::new("/types.ts", "Id"));
+
+        let mut button = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/button-types.ts", "Button"),
+            TypeDeclKind::Alias,
+            TypeExpr::Ref {
+                name: Arc::from("ComponentUI"),
+                type_arguments: Arc::from(vec![TypeExpr::TypeOf(
+                    crate::analysis::type_expr::ValueRef {
+                        path: vec!["theme".into()],
+                    },
+                )]),
+            },
+        );
+        button.name_resolution.insert(
+            "ComponentUI".into(),
+            ResolvedRootIdentity::new("/types.ts", "ComponentUI"),
+        );
+        button.name_resolution.insert(
+            "theme".into(),
+            ResolvedRootIdentity::new("/theme.ts", "theme"),
+        );
+
+        let mut theme = crate::analysis::type_solver::prepared::PreparedValueDecl::new(
+            ResolvedRootIdentity::new("/theme.ts", "theme"),
+            crate::analysis::type_eval::ValueDeclKind::Const,
+        );
+        theme.object_shape = Some(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "slots".into(),
+                    ty: slots_object.clone(),
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        });
+
+        let host = CachedDeclHost {
+            types: {
+                let mut map = FxHashMap::default();
+                map.insert("Id".into(), Arc::new(id_decl));
+                map.insert("ComponentUI".into(), Arc::new(component_ui));
+                map.insert("Button".into(), Arc::new(button));
+                map
+            },
+            values: {
+                let mut map = FxHashMap::default();
+                map.insert("theme".into(), Arc::new(theme));
+                map
+            },
+        };
+
+        let result = solve_type(&TypeExpr::named("Button"), &host, SolveLimits::default());
+
+        let TypeExpr::Object(obj) = result.value else {
+            panic!(
+                "Button should resolve to an object shape, got {:?}",
+                result.value
+            );
+        };
+        assert!(
+            obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    crate::analysis::type_expr::ObjectMember::Property(property)
+                        if property.name == "base"
+                )
+            }),
+            "generic typeof argument should expose base, got {:?}",
+            obj
+        );
+        assert!(
+            obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    crate::analysis::type_expr::ObjectMember::Property(property)
+                        if property.name == "label"
+                )
+            }),
+            "generic typeof argument should expose label, got {:?}",
+            obj
+        );
+    }
+
+    #[test]
+    fn solve_generic_required_mapped_typeof_arguments_flow_through_cached_prepared_decls() {
+        struct CachedDeclHost {
+            types: FxHashMap<String, Arc<PreparedTypeDecl>>,
+            values:
+                FxHashMap<String, Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+        }
+
+        impl TypeSolverHost for CachedDeclHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.types.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.values.get(&root_identity.symbol_name).cloned()
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if self.types.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/types.ts", symbol_name))
+                } else if self.values.contains_key(symbol_name) {
+                    Some(ResolvedRootIdentity::new("/theme.ts", symbol_name))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let empty_object = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![],
+        }));
+        let slots_object = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "base".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+                crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "label".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+            ],
+        }));
+
+        let mut id_decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Id"),
+            TypeDeclKind::Alias,
+            TypeExpr::Intersection(Arc::from(vec![
+                empty_object.clone(),
+                TypeExpr::Mapped {
+                    parameter: "P".into(),
+                    source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::Ref {
+                        name: Arc::from("T"),
+                        type_arguments: Arc::from(vec![]),
+                    }))),
+                    value: Arc::new(TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::Ref {
+                            name: Arc::from("T"),
+                            type_arguments: Arc::from(vec![]),
+                        }),
+                        index: Arc::new(TypeExpr::Ref {
+                            name: Arc::from("P"),
+                            type_arguments: Arc::from(vec![]),
+                        }),
+                    }),
+                    optional: crate::analysis::type_expr::MappedModifier::None,
+                    readonly: crate::analysis::type_expr::MappedModifier::None,
+                    name_type: None,
+                },
+            ])),
+        );
+        id_decl
+            .type_parameters
+            .push(crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            });
+
+        let mut component_ui = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "ComponentUI"),
+            TypeDeclKind::Alias,
+            TypeExpr::Ref {
+                name: Arc::from("Id"),
+                type_arguments: Arc::from(vec![TypeExpr::Mapped {
+                    parameter: "K".into(),
+                    source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::Ref {
+                        name: Arc::from("Required"),
+                        type_arguments: Arc::from(vec![TypeExpr::IndexedAccess {
+                            object: Arc::new(TypeExpr::Ref {
+                                name: Arc::from("T"),
+                                type_arguments: Arc::from(vec![]),
+                            }),
+                            index: Arc::new(TypeExpr::string_literal("slots")),
+                        }]),
+                    }))),
+                    value: Arc::new(TypeExpr::Function(Arc::new(
+                        crate::analysis::type_expr::FunctionExpr {
+                            parameters: vec![crate::analysis::type_expr::FunctionParam {
+                                name: Some("props".into()),
+                                ty: TypeExpr::Object(Arc::new(
+                                    crate::analysis::type_expr::ObjectExpr {
+                                        properties: vec![crate::analysis::type_expr::ObjectMember::IndexSignature(
+                                            crate::analysis::type_expr::IndexSignature {
+                                                key_name: "key".into(),
+                                                key_type: TypeExpr::Primitive(PrimitiveName::String),
+                                                value_type: TypeExpr::Primitive(PrimitiveName::Any),
+                                                readonly: false,
+                                            },
+                                        )],
+                                    },
+                                )),
+                                optional: true,
+                                rest: false,
+                            }],
+                            return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                            type_parameters: vec![],
+                        },
+                    ))),
+                    optional: crate::analysis::type_expr::MappedModifier::None,
+                    readonly: crate::analysis::type_expr::MappedModifier::None,
+                    name_type: None,
+                }]),
+            },
+        );
+        component_ui
+            .type_parameters
+            .push(crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            });
+        component_ui
+            .name_resolution
+            .insert("Id".into(), ResolvedRootIdentity::new("/types.ts", "Id"));
+
+        let mut button = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/button-types.ts", "Button"),
+            TypeDeclKind::Alias,
+            TypeExpr::Ref {
+                name: Arc::from("ComponentUI"),
+                type_arguments: Arc::from(vec![TypeExpr::TypeOf(
+                    crate::analysis::type_expr::ValueRef {
+                        path: vec!["theme".into()],
+                    },
+                )]),
+            },
+        );
+        button.name_resolution.insert(
+            "ComponentUI".into(),
+            ResolvedRootIdentity::new("/types.ts", "ComponentUI"),
+        );
+        button.name_resolution.insert(
+            "theme".into(),
+            ResolvedRootIdentity::new("/theme.ts", "theme"),
+        );
+
+        let mut theme = crate::analysis::type_solver::prepared::PreparedValueDecl::new(
+            ResolvedRootIdentity::new("/theme.ts", "theme"),
+            crate::analysis::type_eval::ValueDeclKind::Const,
+        );
+        theme.object_shape = Some(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                crate::analysis::type_expr::ObjectProperty {
+                    name: "slots".into(),
+                    ty: slots_object,
+                    optional: false,
+                    readonly: false,
+                },
+            )],
+        });
+
+        let host = CachedDeclHost {
+            types: {
+                let mut map = FxHashMap::default();
+                map.insert("Id".into(), Arc::new(id_decl));
+                map.insert("ComponentUI".into(), Arc::new(component_ui));
+                map.insert("Button".into(), Arc::new(button));
+                map
+            },
+            values: {
+                let mut map = FxHashMap::default();
+                map.insert("theme".into(), Arc::new(theme));
+                map
+            },
+        };
+
+        let result = solve_type(&TypeExpr::named("Button"), &host, SolveLimits::default());
+
+        let TypeExpr::Object(obj) = result.value else {
+            panic!("Button should resolve to an object shape after Id<T> normalization");
+        };
+        assert!(
+            obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    crate::analysis::type_expr::ObjectMember::Property(property)
+                        if property.name == "base"
+                )
+            }),
+            "generic required mapped typeof argument should expose base, got {:?}",
+            obj
+        );
+        assert!(
+            obj.properties.iter().any(|member| {
+                matches!(
+                    member,
+                    crate::analysis::type_expr::ObjectMember::Property(property)
+                        if property.name == "label"
+                )
+            }),
+            "generic required mapped typeof argument should expose label, got {:?}",
+            obj
+        );
+    }
+
     // -- 4a: keyof + indexed access --
 
     #[test]
@@ -1653,6 +2785,47 @@ mod tests {
         let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
 
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+    }
+
+    #[test]
+    fn solve_keyof_array_is_number() {
+        let expr = TypeExpr::KeyOf(Arc::new(TypeExpr::Array {
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            readonly: false,
+        }));
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::Number));
+    }
+
+    #[test]
+    fn solve_keyof_tuple_is_numeric_index_union() {
+        let expr = TypeExpr::KeyOf(Arc::new(TypeExpr::Tuple {
+            elements: Arc::from(vec![
+                crate::analysis::type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    rest: false,
+                },
+                crate::analysis::type_expr::TupleElement {
+                    label: None,
+                    ty: TypeExpr::Primitive(PrimitiveName::Number),
+                    optional: false,
+                    rest: false,
+                },
+            ]),
+            readonly: false,
+        }));
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        match &result.value {
+            TypeExpr::Union(members) => {
+                assert!(members.contains(&TypeExpr::number_literal(0.0)));
+                assert!(members.contains(&TypeExpr::number_literal(1.0)));
+            }
+            other => panic!("expected numeric literal union, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1730,6 +2903,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn solve_indexed_access_intersection_merges_matching_members() {
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "variants".into(),
+                            ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                                    crate::analysis::type_expr::ObjectProperty {
+                                        name: "color".into(),
+                                        ty: TypeExpr::Object(Arc::new(
+                                            crate::analysis::type_expr::ObjectExpr {
+                                                properties: vec![
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "primary".into(),
+                                                            ty: TypeExpr::Primitive(
+                                                                PrimitiveName::String,
+                                                            ),
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "secondary".into(),
+                                                            ty: TypeExpr::Primitive(
+                                                                PrimitiveName::String,
+                                                            ),
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                ],
+                                            },
+                                        )),
+                                        optional: false,
+                                        readonly: false,
+                                    },
+                                )],
+                            })),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                })),
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "variants".into(),
+                            ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                                    crate::analysis::type_expr::ObjectProperty {
+                                        name: "color".into(),
+                                        ty: TypeExpr::Object(Arc::new(
+                                            crate::analysis::type_expr::ObjectExpr {
+                                                properties: vec![
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "neutral".into(),
+                                                            ty: TypeExpr::Primitive(
+                                                                PrimitiveName::String,
+                                                            ),
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                ],
+                                            },
+                                        )),
+                                        optional: false,
+                                        readonly: false,
+                                    },
+                                )],
+                            })),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                })),
+            ]))),
+            index: Arc::new(TypeExpr::string_literal("variants")),
+        };
+
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        match result.value {
+            TypeExpr::Intersection(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(members
+                    .iter()
+                    .all(|member| matches!(member, TypeExpr::Object(_))));
+            }
+            other => panic!("expected intersection of object members, got: {:?}", other),
+        }
+    }
+
     // -- 4b: conditionals --
 
     #[test]
@@ -1796,6 +3068,41 @@ mod tests {
     }
 
     #[test]
+    fn solve_mapped_type_ignores_never_in_keyspace_union() {
+        let expr = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::Union(Arc::from(vec![
+                TypeExpr::Primitive(PrimitiveName::Never),
+                TypeExpr::string_literal("base"),
+                TypeExpr::string_literal("label"),
+            ]))),
+            value: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            optional: crate::analysis::type_expr::MappedModifier::None,
+            readonly: crate::analysis::type_expr::MappedModifier::None,
+            name_type: None,
+        };
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        let TypeExpr::Object(obj) = result.value else {
+            panic!("expected Object");
+        };
+        let property_names: Vec<_> = obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut property_names = property_names;
+        property_names.sort_unstable();
+
+        assert_eq!(property_names, vec!["base", "label"]);
+    }
+
+    #[test]
     fn solve_mapped_type_open_source() {
         // { [K in string]: boolean } → { [key: string]: boolean }
         let expr = TypeExpr::Mapped {
@@ -1810,8 +3117,24 @@ mod tests {
 
         match &result.value {
             TypeExpr::Object(obj) => {
-                assert!(obj.properties.is_empty(), "should have no named properties");
-                // should have index signature (projected back as Unknown for now)
+                assert!(
+                    obj.properties.iter().all(|member| {
+                        !matches!(
+                            member,
+                            crate::analysis::type_expr::ObjectMember::Property(_)
+                        )
+                    }),
+                    "should have no named properties"
+                );
+                assert!(
+                    obj.properties.iter().any(|member| {
+                        matches!(
+                            member,
+                            crate::analysis::type_expr::ObjectMember::IndexSignature(_)
+                        )
+                    }),
+                    "should keep the open index signature"
+                );
             }
             _ => panic!("expected Object, got: {:?}", result.value),
         }
@@ -1924,6 +3247,125 @@ mod tests {
             }
             _ => panic!("expected Object, got: {:?}", result.value),
         }
+    }
+
+    #[test]
+    fn solve_conditional_infer_reuses_intersection_of_multiple_candidates() {
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Union(Arc::from(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ]))),
+            extends: Arc::new(TypeExpr::Infer { name: "A".into() }),
+            true_type: Arc::new(TypeExpr::Ref {
+                name: Arc::from("A"),
+                type_arguments: Arc::from(vec![]),
+            }),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        match &result.value {
+            TypeExpr::Intersection(members) => {
+                assert!(members.contains(&TypeExpr::Primitive(PrimitiveName::String)));
+                assert!(members.contains(&TypeExpr::Primitive(PrimitiveName::Number)));
+            }
+            other => panic!("expected intersection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solve_conditional_infers_function_parameter_types_under_contravariance() {
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::Function(Arc::new(
+                crate::analysis::type_expr::FunctionExpr {
+                    parameters: vec![crate::analysis::type_expr::FunctionParam {
+                        name: Some("props".into()),
+                        ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "planId".into(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: false,
+                                    readonly: false,
+                                },
+                            )],
+                        })),
+                        optional: false,
+                        rest: false,
+                    }],
+                    return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                    type_parameters: vec![],
+                },
+            ))),
+            extends: Arc::new(TypeExpr::Function(Arc::new(
+                crate::analysis::type_expr::FunctionExpr {
+                    parameters: vec![crate::analysis::type_expr::FunctionParam {
+                        name: Some("props".into()),
+                        ty: TypeExpr::Infer { name: "P".into() },
+                        optional: false,
+                        rest: false,
+                    }],
+                    return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Any))),
+                    type_parameters: vec![],
+                },
+            ))),
+            true_type: Arc::new(TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::Ref {
+                    name: Arc::from("P"),
+                    type_arguments: Arc::from(vec![]),
+                },
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "plan".into(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                })),
+            ]))),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        let TypeExpr::Intersection(parts) = result.value else {
+            panic!("infer conditional should resolve true branch under contravariant function comparison");
+        };
+        let mut prop_names = std::collections::BTreeSet::new();
+        for part in parts.iter() {
+            if let TypeExpr::Object(obj) = part {
+                for member in &obj.properties {
+                    if let crate::analysis::type_expr::ObjectMember::Property(prop) = member {
+                        prop_names.insert(prop.name.clone());
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            prop_names,
+            std::collections::BTreeSet::from(["plan".to_string(), "planId".to_string()]),
+        );
+    }
+
+    #[test]
+    fn solve_conditional_honors_constrained_type_parameter_relation() {
+        let expr = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::boolean_literal(true)),
+            false_type: Arc::new(TypeExpr::boolean_literal(false)),
+        };
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        assert_eq!(result.value, TypeExpr::boolean_literal(true));
     }
 
     // ===================================================================
@@ -2137,6 +3579,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn solve_structural_recursive_infer_reentry_stays_symbolic_without_hanging() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "NestedItem",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::Array {
+                    element: Arc::new(TypeExpr::Infer { name: "I".into() }),
+                    readonly: false,
+                }),
+                true_type: Arc::new(TypeExpr::named_with_args(
+                    "NestedItem",
+                    vec![TypeExpr::Infer { name: "I".into() }],
+                )),
+                false_type: Arc::new(TypeExpr::named("T")),
+            },
+        );
+
+        let expr = TypeExpr::named_with_args("NestedItem", vec![TypeExpr::named("Unresolved")]);
+        let result = solve_type(&expr, &host, SolveLimits::default());
+
+        assert_eq!(result.execution_status, ExecutionStatus::Completed);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+    }
+
+    #[test]
+    fn solve_substitution_cycle_from_shadowed_default_stays_symbolic_without_hanging() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "NestedItem",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            TypeExpr::named("T"),
+        );
+        host.add_generic_alias(
+            "Loop",
+            vec![
+                crate::analysis::type_expr::TypeParam {
+                    name: "I".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::named_with_args(
+                        "NestedItem",
+                        vec![TypeExpr::named("I")],
+                    ))),
+                },
+            ],
+            TypeExpr::named("T"),
+        );
+
+        let expr = TypeExpr::named_with_args("Loop", vec![TypeExpr::named("T")]);
+        let result = solve_type(&expr, &host, SolveLimits::default());
+
+        assert_eq!(result.execution_status, ExecutionStatus::Completed);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert!(
+            matches!(
+                result.value,
+                TypeExpr::Ref { .. } | TypeExpr::Unknown { .. }
+            ),
+            "substitution-cycle fallback should stay symbolic, got {:?}",
+            result.value
+        );
+    }
+
     // -- Generic with host-backed chained resolution --
 
     #[test]
@@ -2214,6 +3734,153 @@ mod tests {
                 }
             }
             _ => panic!("expected Object, got: {:?}", result.value),
+        }
+    }
+
+    #[test]
+    fn solve_generic_default_argument_resolves_bound_alias() {
+        let mut host = TestHost::new();
+        host.add_alias(
+            "Item",
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "id".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+        host.add_generic_alias(
+            "Props",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: Some(Arc::new(TypeExpr::named("Item"))),
+            }],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "items".into(),
+                        ty: TypeExpr::Array {
+                            element: Arc::new(TypeExpr::Ref {
+                                name: Arc::from("T"),
+                                type_arguments: Arc::from(vec![]),
+                            }),
+                            readonly: false,
+                        },
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Props"),
+            type_arguments: Arc::from(vec![]),
+        };
+        let result = solve_type(&expr, &host, SolveLimits::default());
+
+        match result.value {
+            TypeExpr::Object(obj) => match &obj.properties[0] {
+                crate::analysis::type_expr::ObjectMember::Property(prop) => match &prop.ty {
+                    TypeExpr::Array { element, .. } => match element.as_ref() {
+                        TypeExpr::Object(shape) => {
+                            assert!(shape.properties.iter().any(|member| {
+                                matches!(
+                                    member,
+                                    crate::analysis::type_expr::ObjectMember::Property(p)
+                                        if p.name == "id"
+                                )
+                            }));
+                        }
+                        other => {
+                            panic!("expected default arg to resolve to Item shape, got {other:?}")
+                        }
+                    },
+                    other => panic!("expected array property, got {other:?}"),
+                },
+                other => panic!("expected property member, got {other:?}"),
+            },
+            other => panic!("expected Object, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_preserves_method_members() {
+        let expr = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::Method(
+                crate::analysis::type_expr::MethodSignature {
+                    name: "default".into(),
+                    function: crate::analysis::type_expr::FunctionExpr {
+                        parameters: vec![crate::analysis::type_expr::FunctionParam {
+                            name: Some("props".into()),
+                            ty: TypeExpr::Object(Arc::new(
+                                crate::analysis::type_expr::ObjectExpr {
+                                    properties: vec![
+                                        crate::analysis::type_expr::ObjectMember::Property(
+                                            crate::analysis::type_expr::ObjectProperty {
+                                                name: "label".into(),
+                                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                                optional: false,
+                                                readonly: false,
+                                            },
+                                        ),
+                                    ],
+                                },
+                            )),
+                            optional: false,
+                            rest: false,
+                        }],
+                        return_type: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                        type_parameters: vec![],
+                    },
+                    optional: true,
+                },
+            )],
+        }));
+
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        match result.value {
+            TypeExpr::Object(obj) => match &obj.properties[0] {
+                crate::analysis::type_expr::ObjectMember::Method(method) => {
+                    assert_eq!(method.name, "default");
+                    assert!(method.optional);
+                    assert_eq!(method.function.parameters.len(), 1);
+                }
+                other => panic!("expected method member, got: {other:?}"),
+            },
+            other => panic!("expected Object, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_preserves_type_parameter_metadata() {
+        let expr = TypeExpr::TypeParameter(crate::analysis::type_expr::TypeParam {
+            name: "T".into(),
+            constraint: Some(Arc::new(TypeExpr::named("Item"))),
+            default: Some(Arc::new(TypeExpr::named("Item"))),
+        });
+
+        let result = solve_type(&expr, &NoopSolverHost, SolveLimits::default());
+
+        match result.value {
+            TypeExpr::TypeParameter(param) => {
+                assert_eq!(param.name, "T");
+                assert!(matches!(
+                    param.constraint.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+                assert!(matches!(
+                    param.default.as_deref(),
+                    Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                ));
+            }
+            other => panic!("expected TypeParameter, got: {other:?}"),
         }
     }
 

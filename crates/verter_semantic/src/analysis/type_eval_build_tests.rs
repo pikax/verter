@@ -1,8 +1,9 @@
 use super::type_eval::*;
-use super::type_eval_build::{evaluate_macro_types, expand_macro_types, parse_and_build_env};
+use super::type_eval_build::{
+    evaluate_macro_types, expand_macro_types, expand_macro_types_with_bindings, parse_and_build_env,
+};
 use super::type_expr::*;
-use super::type_solver::host::EvalEnvSolverHost;
-use rustc_hash::FxHashMap;
+use super::type_solver::host::{EvalEnvSolverHost, NoopSolverHost};
 use std::sync::Arc;
 
 // =============================================================================
@@ -1124,6 +1125,23 @@ const localLabel: string = 'hello'
     assert!(
         !names.contains(&"importedLabel"),
         "should skip imported bindings, got: {names:?}"
+    );
+}
+
+#[test]
+fn expand_macro_types_with_bindings_emits_binding_shapes_without_eval_env() {
+    let binding_entries = vec![(
+        "localLabel".to_string(),
+        TypeExpr::Primitive(PrimitiveName::String),
+    )];
+
+    let result = expand_macro_types_with_bindings(&[], None, &binding_entries, &NoopSolverHost);
+
+    assert_eq!(result.bindings.len(), 1);
+    assert_eq!(result.bindings[0].name, "localLabel");
+    assert_eq!(
+        result.bindings[0].r#type,
+        TypeExpr::Primitive(PrimitiveName::String)
     );
 }
 

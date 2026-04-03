@@ -341,10 +341,30 @@ impl QueryArena {
     }
 
     pub fn union(&mut self, members: Vec<NodeId>) -> NodeId {
-        match members.len() {
+        let mut flattened = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+        for member in members {
+            match self.get(member) {
+                Node::Union(inner) => {
+                    for nested in inner {
+                        if seen.insert(*nested) {
+                            flattened.push(*nested);
+                        }
+                    }
+                }
+                Node::Primitive(PrimitiveKind::Never) => {}
+                _ => {
+                    if seen.insert(member) {
+                        flattened.push(member);
+                    }
+                }
+            }
+        }
+
+        match flattened.len() {
             0 => self.primitive(PrimitiveKind::Never),
-            1 => members[0],
-            _ => self.alloc(Node::Union(members)),
+            1 => flattened[0],
+            _ => self.alloc(Node::Union(flattened)),
         }
     }
 

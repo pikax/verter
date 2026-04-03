@@ -291,6 +291,15 @@ fn relate_inner(
             }
         }
 
+        // -- Type parameters --
+        (Node::TypeParam { constraint, .. }, _) => {
+            relate_source_type_param(arena, caches, *constraint, target, mode, state)
+        }
+
+        (_, Node::TypeParam { constraint, .. }) => {
+            relate_target_type_param(arena, caches, source, *constraint, mode, state)
+        }
+
         // Error nodes
         (Node::Error { .. }, _) | (_, Node::Error { .. }) => RelationResult::Unknown,
 
@@ -365,16 +374,39 @@ fn relate_objects(
 
     let mut result = RelationResult::Assignable;
     for t_prop in &target.properties {
-        if let Some(s_prop) = source.properties.iter().find(|p| p.name == t_prop.name) {
-            let prop_result = relate(arena, caches, s_prop.ty, t_prop.ty, mode, state);
-            result = result.and(prop_result);
-        } else if !t_prop.optional {
-            result = result.and(RelationResult::NotAssignable);
-        }
+        let prop_result =
+            if let Some(s_prop) = source.properties.iter().find(|p| p.name == t_prop.name) {
+                relate(arena, caches, s_prop.ty, t_prop.ty, mode, state)
+            } else if let Some(index_result) =
+                relate_property_via_source_index(arena, caches, source, t_prop, mode, state)
+            {
+                index_result
+            } else if t_prop.optional {
+                RelationResult::Assignable
+            } else {
+                RelationResult::NotAssignable
+            };
+        result = result.and(prop_result);
+    }
+
+    for t_index in &target.index_signatures {
+        result = result.and(relate_target_index_signature(
+            arena, caches, source, t_index, mode, state,
+        ));
     }
 
     for t_sig in &target.call_signatures {
         let sig_ok = source.call_signatures.iter().any(|s_sig| {
+            relate_call_signatures(arena, caches, s_sig, t_sig, mode, state)
+                == RelationResult::Assignable
+        });
+        if !sig_ok {
+            result = result.and(RelationResult::NotAssignable);
+        }
+    }
+
+    for t_sig in &target.construct_signatures {
+        let sig_ok = source.construct_signatures.iter().any(|s_sig| {
             relate_call_signatures(arena, caches, s_sig, t_sig, mode, state)
                 == RelationResult::Assignable
         });
@@ -436,13 +468,13 @@ fn relate_call_signatures(
 
     let mut result = RelationResult::Assignable;
 
-    // Parameters: intentionally bivariant for the initial implementation to match
-    // common declaration-file behavior and reduce false negatives in library types.
-    // TODO(Milestone 4): implement proper contravariance for strictFunctionTypes.
     for (s_param, t_param) in source.parameters.iter().zip(target.parameters.iter()) {
-        let fwd = relate(arena, caches, s_param.ty, t_param.ty, mode, state);
-        let bwd = relate(arena, caches, t_param.ty, s_param.ty, mode, state);
-        result = result.and(fwd.or(bwd));
+        let param_result = if contains_infer(arena, t_param.ty) {
+            relate(arena, caches, s_param.ty, t_param.ty, mode, state)
+        } else {
+            relate(arena, caches, t_param.ty, s_param.ty, mode, state)
+        };
+        result = result.and(param_result);
     }
 
     // Return type: covariant
@@ -456,6 +488,252 @@ fn relate_call_signatures(
     ));
 
     result
+}
+
+fn contains_infer(arena: &QueryArena, node: NodeId) -> bool {
+    match arena.get(node) {
+        Node::Infer { .. } => true,
+        Node::Array { element, .. } | Node::KeyOf(element) | Node::Rest(element) => {
+            contains_infer(arena, *element)
+        }
+        Node::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| contains_infer(arena, element.ty)),
+        Node::Union(members) | Node::Intersection(members) => members
+            .iter()
+            .copied()
+            .any(|member| contains_infer(arena, member)),
+        Node::Object(obj) => {
+            obj.properties
+                .iter()
+                .any(|prop| contains_infer(arena, prop.ty))
+                || obj.index_signatures.iter().any(|sig| {
+                    contains_infer(arena, sig.key_type) || contains_infer(arena, sig.value_type)
+                })
+                || obj.call_signatures.iter().any(|sig| {
+                    sig.parameters
+                        .iter()
+                        .any(|param| contains_infer(arena, param.ty))
+                        || contains_infer(arena, sig.return_type)
+                })
+                || obj.construct_signatures.iter().any(|sig| {
+                    sig.parameters
+                        .iter()
+                        .any(|param| contains_infer(arena, param.ty))
+                        || contains_infer(arena, sig.return_type)
+                })
+        }
+        Node::Function(func) => func.signatures.iter().any(|sig| {
+            sig.parameters
+                .iter()
+                .any(|param| contains_infer(arena, param.ty))
+                || contains_infer(arena, sig.return_type)
+        }),
+        Node::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .copied()
+            .any(|arg| contains_infer(arena, arg)),
+        Node::Applied { args, .. } => args.iter().copied().any(|arg| contains_infer(arena, arg)),
+        Node::IndexedAccess { object, index } => {
+            contains_infer(arena, *object) || contains_infer(arena, *index)
+        }
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            contains_infer(arena, *check)
+                || contains_infer(arena, *extends)
+                || contains_infer(arena, *true_branch)
+                || contains_infer(arena, *false_branch)
+        }
+        Node::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            contains_infer(arena, *source)
+                || contains_infer(arena, *value)
+                || name_type
+                    .map(|node| contains_infer(arena, node))
+                    .unwrap_or(false)
+        }
+        Node::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .copied()
+            .any(|expr| contains_infer(arena, expr)),
+        Node::Primitive(_)
+        | Node::Literal(_)
+        | Node::TypeParam { .. }
+        | Node::RecursiveRef { .. }
+        | Node::Error { .. }
+        | Node::TypeOf { .. } => false,
+    }
+}
+
+fn relate_source_type_param(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    constraint: Option<NodeId>,
+    target: NodeId,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    let Some(constraint) = constraint else {
+        return RelationResult::Unknown;
+    };
+
+    match relate(arena, caches, constraint, target, mode, state) {
+        RelationResult::Assignable => RelationResult::Assignable,
+        RelationResult::NotAssignable | RelationResult::Unknown => RelationResult::Unknown,
+    }
+}
+
+fn relate_target_type_param(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: NodeId,
+    constraint: Option<NodeId>,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    let Some(constraint) = constraint else {
+        return RelationResult::Unknown;
+    };
+
+    match relate(arena, caches, source, constraint, mode, state) {
+        RelationResult::NotAssignable => RelationResult::NotAssignable,
+        RelationResult::Assignable | RelationResult::Unknown => RelationResult::Unknown,
+    }
+}
+
+fn relate_property_via_source_index(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: &ObjectNode,
+    target_prop: &super::arena::PropertyNode,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> Option<RelationResult> {
+    let mut matched = false;
+    let mut result = RelationResult::Assignable;
+
+    for s_index in &source.index_signatures {
+        if !index_signature_applies_to_property(arena, s_index.key_type, &target_prop.name) {
+            continue;
+        }
+        matched = true;
+        result = result.and(relate(
+            arena,
+            caches,
+            s_index.value_type,
+            target_prop.ty,
+            mode,
+            state,
+        ));
+    }
+
+    matched.then_some(result)
+}
+
+fn relate_target_index_signature(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: &ObjectNode,
+    target_index: &super::arena::IndexSignatureNode,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    let mut result = RelationResult::Assignable;
+
+    for s_index in &source.index_signatures {
+        if !index_domains_overlap(arena, s_index.key_type, target_index.key_type) {
+            continue;
+        }
+        result = result.and(relate(
+            arena,
+            caches,
+            s_index.value_type,
+            target_index.value_type,
+            mode,
+            state,
+        ));
+    }
+
+    for prop in &source.properties {
+        if !index_signature_applies_to_property(arena, target_index.key_type, &prop.name) {
+            continue;
+        }
+        result = result.and(relate(
+            arena,
+            caches,
+            prop.ty,
+            target_index.value_type,
+            mode,
+            state,
+        ));
+    }
+
+    result
+}
+
+fn index_domains_overlap(arena: &QueryArena, source_key: NodeId, target_key: NodeId) -> bool {
+    match arena.get(target_key) {
+        Node::Primitive(PrimitiveKind::String | PrimitiveKind::Any) => matches!(
+            arena.get(source_key),
+            Node::Primitive(
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Any
+                    | PrimitiveKind::Unknown
+            ) | Node::Literal(_)
+                | Node::Union(_)
+        ),
+        Node::Primitive(PrimitiveKind::Number) => matches!(
+            arena.get(source_key),
+            Node::Primitive(PrimitiveKind::Number | PrimitiveKind::Any | PrimitiveKind::Unknown)
+                | Node::Literal(super::arena::SolverLiteral::Number(_))
+                | Node::Union(_)
+        ),
+        Node::Literal(super::arena::SolverLiteral::String(name)) => {
+            index_signature_applies_to_property(arena, source_key, name)
+        }
+        Node::Literal(super::arena::SolverLiteral::Number(n)) => {
+            index_signature_applies_to_property(arena, source_key, &format_numeric_property(*n))
+        }
+        Node::Union(members) => members
+            .iter()
+            .any(|&member| index_domains_overlap(arena, source_key, member)),
+        _ => false,
+    }
+}
+
+fn index_signature_applies_to_property(
+    arena: &QueryArena,
+    key_type: NodeId,
+    property_name: &str,
+) -> bool {
+    match arena.get(key_type) {
+        Node::Primitive(PrimitiveKind::String | PrimitiveKind::Any) => true,
+        Node::Primitive(PrimitiveKind::Number) => property_name.parse::<u64>().is_ok(),
+        Node::Literal(SolverLiteral::String(name)) => name == property_name,
+        Node::Literal(SolverLiteral::Number(n)) => format_numeric_property(*n) == property_name,
+        Node::Union(members) => members
+            .iter()
+            .any(|&member| index_signature_applies_to_property(arena, member, property_name)),
+        _ => false,
+    }
+}
+
+fn format_numeric_property(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -859,5 +1137,270 @@ mod tests {
 
         let r2 = relate(&a, &mut c, s, n, RelationMode::Assignable, &mut st);
         assert_eq!(r2, RelationResult::NotAssignable);
+    }
+
+    #[test]
+    fn object_properties_must_satisfy_target_string_index_signature() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+
+        let source = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "title".into(),
+                ty: string_ty,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        let target = a.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![IndexSignatureNode {
+                key_type: string_ty,
+                value_type: string_ty,
+                readonly: false,
+            }],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                source,
+                target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable
+        );
+    }
+
+    #[test]
+    fn object_properties_fail_target_string_index_signature_on_value_mismatch() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let number_ty = a.primitive(PrimitiveKind::Number);
+
+        let source = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "title".into(),
+                ty: number_ty,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        let target = a.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![IndexSignatureNode {
+                key_type: string_ty,
+                value_type: string_ty,
+                readonly: false,
+            }],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                source,
+                target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::NotAssignable
+        );
+    }
+
+    #[test]
+    fn source_index_signature_satisfies_named_target_property() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+
+        let source = a.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![IndexSignatureNode {
+                key_type: string_ty,
+                value_type: string_ty,
+                readonly: false,
+            }],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        let target = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "title".into(),
+                ty: string_ty,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                source,
+                target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable
+        );
+    }
+
+    #[test]
+    fn construct_signatures_participate_in_object_assignability() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+
+        let ctor = CallSignatureNode {
+            type_parameters: vec![],
+            parameters: vec![],
+            return_type: string_ty,
+        };
+
+        let source = a.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![ctor.clone()],
+        });
+
+        let target = a.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![ctor],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                source,
+                target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable
+        );
+    }
+
+    #[test]
+    fn function_parameters_are_contravariant() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let number_ty = a.primitive(PrimitiveKind::Number);
+        let string_or_number = a.union(vec![string_ty, number_ty]);
+        let void_ty = a.primitive(PrimitiveKind::Void);
+
+        let source = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("value".into()),
+                    ty: string_ty,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+
+        let target = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("value".into()),
+                    ty: string_or_number,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                source,
+                target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::NotAssignable
+        );
+    }
+
+    #[test]
+    fn constrained_type_parameter_uses_constraint_as_source_upper_bound() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let type_param = a.alloc(Node::TypeParam {
+            name: "T".into(),
+            constraint: Some(string_ty),
+            default: None,
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                type_param,
+                string_ty,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable
+        );
+    }
+
+    #[test]
+    fn infer_target_binds_source_type_param_before_constraint_projection() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let type_param = a.alloc(Node::TypeParam {
+            name: "T".into(),
+            constraint: Some(string_ty),
+            default: None,
+        });
+        let infer = a.alloc(Node::Infer { name: "U".into() });
+
+        st.begin_infer();
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                type_param,
+                infer,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable
+        );
+
+        let bindings = st
+            .take_infer_bindings()
+            .expect("infer bindings should be recorded");
+        assert_eq!(bindings.candidates("U"), Some(&[type_param][..]));
     }
 }

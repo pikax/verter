@@ -94,6 +94,7 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 
 - Load a dependency source at most once per canonical ID per workspace content generation. Parse it immediately and cache the raw source, parsed/OXC snapshot, and any reusable eval/build state right away.
 - When the host materializes an imported dependency on a cold miss, derive the AST-backed bundle from that single parse and cache it together: file snapshot, eval env, external-type analysis, symbol/export lookup tables, and any other reusable per-file analysis. Do not let later resolver stages trigger a second parse of the same canonical file just to build another artifact.
+- Host-owned imported-file caches are long-lived for the lifetime of the `VerterHost`. Distinct queries on the same host must keep reusing the same cached canonical file state until that file's content hash or workspace generation changes.
 - Cache named declarations from that parsed file by name, not just exported entrypoints. Internal named types/interfaces/aliases still matter because exported declarations in the same file may depend on them later.
 - Treat named-node discovery as local symbol lookup. Once a file is parsed for a given canonical ID/version, future lookups should hit cached symbol/export maps instead of walking the full AST again to rediscover names.
 - Treat AST ownership as single-pass work. For a given canonical ID/version, the resolver should do at most one full top-level AST walk to discover named symbols/exports, then cache those lookup entries and leave deeper expansion lazy per symbol. Do not rewalk the full file to rediscover the same symbol on later requests.
@@ -104,9 +105,34 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - Builder-owned shallow imported aliases should treat their stored canonical ID as the defining-file root. They may consult cached barrel/export state only when a canonical root is still unknown. Cache the prepared alias on the defining canonical file and hydrate from that file's host cache or base eval env. Do not synthesize barrel-local prepared aliases for symbols that resolve to another file.
 - Whole-file hashes are for long-lived update handling and cache validation, not for repeated warm reads. Compute/store the hash once for the current source version, then reuse it until the VFS reports a newer content generation / file version.
 - VFS is the authority for file-change invalidation. When a canonical file’s version/hash changes, host caches derived from that canonical ID must be discarded together across source snapshots, parsed state, eval envs, and resolved-type/import caches.
+- Invalidation must stay selective. If `/src/type.ts` changes, invalidate caches owned by `/src/type.ts` and downstream final expansion/query results that depend on it, but do not force reparsing or reshallowing unchanged owner files that merely import it. Those owner files should stay warm on their own-file caches and only re-resolve against the refreshed imported dependency state.
+- A changed imported dependency may be reparsed once for its new hash, even if several owners or several later queries need it. That single refreshed canonical file state must then be shared across all of those requests.
+- Concurrent cold requests that reach the same canonical imported file must collapse onto one host-owned materialization path. `Promise.all([MetaA, MetaB, MetaC])` is not allowed to produce three separate read/parse/shallow passes for the same `type.ts`.
+- Prepared declarations are also host-owned warm artifacts. Once `(canonical_id, symbol_name, whole_hash)` has been prepared, later lookups from other owners and from later distinct queries on the same host must reuse that prepared declaration until invalidation.
+- Reuse the current host-owned route/barrel cache path. Today that means `ImportTypeRouteEntry` on the importer side plus `BarrelResolutionState` on the imported-file side; do not add a second route-cache subsystem for the same work without explicit proof it is needed.
+- Route discovery must stay lazy and demand-driven. First-hit discovery may follow barrel/reexport hops only until the requested symbol is found (or proven absent under the current negative-cache policy). Do not require a full scan of all barrel exports on every first hit.
+- Warm same-owner lookups should reuse the existing valid importer-local route entry rather than replaying the full barrel chain.
+- Cross-owner reuse in the current architecture should come primarily from shared imported-file state, shared barrel/export surfaces, and prepared declarations. Do not assume canonical cross-owner route-fact backfill exists unless a later change explicitly adds it.
+- Stable negative route answers in the current architecture are gated by `BarrelResolutionState.fully_resolved` plus tracked dependency/store-view freshness. If richer persisted completeness states are ever needed, add them as an explicit follow-up rather than treating them as an existing invariant.
+- If in-flight dedup is needed for concurrent cold route work, model that separately from the persisted barrel state. Do not overload `fully_resolved` to mean "currently being built".
+- Do not use `Arc` next-hop chains as the primary barrel cache shape if a future route-cache redesign is introduced.
+- Route caches and prepared-declaration caches must invalidate independently. If a leaf file body changes but its export surface stays the same, the route fact may remain valid while prepared declarations and downstream final results refresh.
+- On file update, eagerly recompute the changed file's own parse/shallow/export surface once. That write-path cost is acceptable and keeps later reads fast.
+- Do not eagerly rewrite every upstream barrel/route fact on every changed-file update. After the changed file's fresh shallow/export snapshot is available, let upstream route facts validate lazily against tracked route participants/generations on demand.
+- Prefer comparing old vs new shallow/export surface for the changed file. If the export surface is unchanged, keep route generations stable and refresh only body/prepared-declaration/final-result layers. If the export surface changed, bump the route/export-surface generation so affected warm route facts become stale and lazily rebuild on next access.
+- Route invalidation is not file-hash-only. tsconfig path changes, vite alias changes, workspace graph changes, package target changes, and barrel export-surface changes must invalidate affected route facts even if the owner file text did not change.
+- Negative route/cache misses may be cached only against a concrete snapshot (hash/generation/store-view context). Cancelled or interrupted results must never be promoted to warm reusable cache entries.
+- One query must resolve against one coherent host/store snapshot. Resolver stages must not mix captured stale owner routes with newer live dependency routes within a single query flow.
 - Legacy fallback paths that reparse or rewalk imported dependency files on warm requests should be removed, not preserved behind alternative code paths. Default behavior must go through the cache-aware host/VFS path.
+- Architectural cache/resolver changes must land as one clean cutover. Do not leave temporary shims, compatibility wrappers, feature flags, or duplicated old/new paths behind. Delete the superseded path in the same change, or upgrade the surviving path to first-class shared ownership with the same invariants and tests.
 - Imported dependency loading, type-resolution source materialization, and dependency canonical resolution should be host-owned single entry points. Do not add request-local cache layers or alternative parser/import paths on top of the host cache for the same work.
 - Imported type root/declaration resolution and prepared imported-type alias caching should also be host-owned single entry points keyed by canonical ID plus current file version/hash. Do not rebuild the same imported symbol route or prepared alias body per request when the host cache already has it.
+
+Concrete performance contract:
+
+- If `MetaA`, `MetaB`, and `MetaC` all depend on `type.ts`, the first query batch may process each owner file once and `type.ts` once.
+- If a later batch requests `MetaB` and `MetaC` again with no file changes, that later batch must reuse the warm cached state for both the owner files and `type.ts`.
+- If `type.ts` changes between batches, `MetaB` and `MetaC` may keep their own-file caches, while `type.ts` is processed exactly once for the new hash and then shared by both later requests.
 
 ### Shallow Type State and Frontier Engine
 
@@ -333,6 +359,12 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 **Pipeline:** `TypeExpr → lower → QueryArena → resolve_node → project_to_type_expr → TypeExpr`
 
 **Host boundary:** `TypeSolverHost` trait (in `type_solver::host`) is the seam between `verter_session` (file readiness, frontier, caches) and the solver (arena, relations, projections). The solver never reopens route discovery — it only accepts resolved root identities. Two implementations exist: `SessionSolverHost` in `resolver_core/solver_host.rs` (production, bridges host caches) and `EvalEnvSolverHost` in `type_solver/host.rs` (standalone, wraps an `EvalEnv`'s type_symbols for local-only resolution without a session).
+
+**Declaration context propagation:** `PreparedTypeDecl` and `PreparedValueDecl` carry a `name_resolution: FxHashMap<String, ResolvedRootIdentity>` field that maps bare names appearing in their bodies to resolved root identities. Built at preparation time from the defining file's local and import scope (local deps → same-file identity, external deps → resolved canonical_id via dep_edges). The solver's `SolveState` maintains `type_decl_context_stack` and `value_decl_context_stack`. When `resolve_prepared_ref` enters a declaration body, it pushes the prepared decl onto the stack. The `resolve_name_in_context` helper checks only the INNERMOST context (topmost stack entry) — bare names in an imported type body resolve in that declaration's defining file scope, not in parent scopes.
+
+**Barrel re-export following:** `prepared_type_decl_in_view` and `prepared_value_decl_in_view` follow barrel re-exports when a symbol is not found in the target file's local prepared decl cache. For named re-exports (`export { Foo } from './bar'`), the source specifier is resolved and the lookup continues in the target file. For wildcard re-exports (`export * from './bar'`), all wildcard sources are tried in declaration order with depth-limited recursion (max 20 hops).
+
+**Namespace import resolution:** `SessionSolverHost::root_identity` handles dotted names (`Ns.Member`) by splitting on the first dot, resolving the prefix through import bindings, and looking up the member in the resolved file's prepared decl cache.
 
 **Exactness model:** `ExactConcrete | ExactSymbolic | Incomplete` — replaces old `Exact | LowerBound | OpaqueFallback`. Execution status (`Completed | Cancelled | HardStop`) is tracked separately from semantic exactness.
 

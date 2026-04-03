@@ -327,35 +327,32 @@ fn expand_pick_omit(
 ) -> NodeId {
     // Collect the key set from the keys argument
     let key_set = collect_string_literal_keys(arena, keys_arg);
-    let node = arena.get(obj_arg).clone();
+    let Some(obj) = flatten_object_like(arena, obj_arg) else {
+        return obj_arg;
+    };
 
-    match node {
-        super::arena::Node::Object(obj) => {
-            let filtered: Vec<super::arena::PropertyNode> = obj
-                .properties
-                .into_iter()
-                .filter(|p| {
-                    let in_set = key_set.contains(&p.name);
-                    if is_pick {
-                        in_set
-                    } else {
-                        !in_set
-                    }
-                })
-                .collect();
-            arena.object(super::arena::ObjectNode {
-                properties: filtered,
-                index_signatures: if is_pick {
-                    vec![] // Pick drops index signatures
-                } else {
-                    obj.index_signatures
-                },
-                call_signatures: obj.call_signatures,
-                construct_signatures: obj.construct_signatures,
-            })
-        }
-        _ => obj_arg,
-    }
+    let filtered: Vec<super::arena::PropertyNode> = obj
+        .properties
+        .into_iter()
+        .filter(|p| {
+            let in_set = key_set.contains(&p.name);
+            if is_pick {
+                in_set
+            } else {
+                !in_set
+            }
+        })
+        .collect();
+    arena.object(super::arena::ObjectNode {
+        properties: filtered,
+        index_signatures: if is_pick {
+            vec![] // Pick drops index signatures
+        } else {
+            obj.index_signatures
+        },
+        call_signatures: obj.call_signatures,
+        construct_signatures: obj.construct_signatures,
+    })
 }
 
 /// Collect string literal values from a type (handles unions).
@@ -374,6 +371,47 @@ fn collect_string_literal_keys(arena: &QueryArena, node: NodeId) -> Vec<String> 
         }
     }
     keys
+}
+
+fn flatten_object_like(arena: &mut QueryArena, node: NodeId) -> Option<super::arena::ObjectNode> {
+    let node_data = arena.get(node).clone();
+    match node_data {
+        super::arena::Node::Object(obj) => Some(obj),
+        super::arena::Node::Intersection(members) => {
+            let mut merged_props: rustc_hash::FxHashMap<String, super::arena::PropertyNode> =
+                rustc_hash::FxHashMap::default();
+            let mut index_signatures = Vec::new();
+            let mut call_signatures = Vec::new();
+            let mut construct_signatures = Vec::new();
+
+            for member in members {
+                let obj = flatten_object_like(arena, member)?;
+                for prop in obj.properties {
+                    if let Some(existing) = merged_props.get_mut(&prop.name) {
+                        existing.ty = arena.intersection(vec![existing.ty, prop.ty]);
+                        existing.optional = existing.optional && prop.optional;
+                        existing.readonly = existing.readonly || prop.readonly;
+                        existing.is_method = existing.is_method && prop.is_method;
+                    } else {
+                        merged_props.insert(prop.name.clone(), prop);
+                    }
+                }
+                index_signatures.extend(obj.index_signatures);
+                call_signatures.extend(obj.call_signatures);
+                construct_signatures.extend(obj.construct_signatures);
+            }
+
+            let mut properties: Vec<_> = merged_props.into_values().collect();
+            properties.sort_by(|a, b| a.name.cmp(&b.name));
+            Some(super::arena::ObjectNode {
+                properties,
+                index_signatures,
+                call_signatures,
+                construct_signatures,
+            })
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -922,6 +960,25 @@ mod tests {
     }
 
     #[test]
+    fn omit_removes_named_keys_from_intersection_objects() {
+        let mut arena = QueryArena::new();
+        let s = arena.primitive(PrimitiveKind::String);
+        let left = make_obj(&mut arena, &[("icon", s, false), ("color", s, false)]);
+        let right = make_obj(&mut arena, &[("label", s, false)]);
+        let obj = arena.intersection(vec![left, right]);
+        let keys = arena.string_literal("color");
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::Omit, &[obj, keys]).unwrap();
+        match arena.get(result) {
+            Node::Object(o) => {
+                let names: Vec<_> = o.properties.iter().map(|p| p.name.as_str()).collect();
+                assert_eq!(names, vec!["icon", "label"]);
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn record_with_literal_keys() {
         let mut arena = QueryArena::new();
         let a = arena.string_literal("x");
@@ -1046,6 +1103,62 @@ mod tests {
                 assert!(elements[1].optional);
             }
             _ => panic!("expected tuple"),
+        }
+    }
+
+    #[test]
+    fn constructor_parameters_extracts_from_construct_signature() {
+        // Manual pattern: { new(name: string): Instance }
+        let mut arena = QueryArena::new();
+        let str_ty = arena.primitive(PrimitiveKind::String);
+        let instance_ty = arena.primitive(PrimitiveKind::Any);
+        let obj = arena.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("name".into()),
+                    ty: str_ty,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: instance_ty,
+            }],
+        });
+
+        let result =
+            expand_builtin(&mut arena, BuiltinUtility::ConstructorParameters, &[obj]).unwrap();
+        match arena.get(result) {
+            Node::Tuple { elements, .. } => {
+                assert_eq!(elements.len(), 1, "should extract 1 constructor param");
+                assert_eq!(elements[0].ty, str_ty);
+            }
+            _ => panic!("expected tuple from ConstructorParameters"),
+        }
+    }
+
+    #[test]
+    fn instance_type_extracts_from_construct_signature() {
+        // Manual pattern: { new(): SomeType }
+        let mut arena = QueryArena::new();
+        let bool_ty = arena.primitive(PrimitiveKind::Boolean);
+        let obj = arena.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![],
+                return_type: bool_ty,
+            }],
+        });
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::InstanceType, &[obj]).unwrap();
+        match arena.get(result) {
+            Node::Primitive(PrimitiveKind::Boolean) => {} // correct
+            other => panic!("InstanceType should extract the construct return type, got {other:?}"),
         }
     }
 }

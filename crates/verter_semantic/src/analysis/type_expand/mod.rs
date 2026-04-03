@@ -114,12 +114,16 @@ pub fn type_expr_to_expanded_shape(expr: &TypeExpr) -> ExpandedObjectShape {
             let mut properties = Vec::new();
             let mut index_signatures = Vec::new();
             let mut call_signatures = Vec::new();
-            let mut seen_names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+            let mut property_positions: rustc_hash::FxHashMap<String, usize> =
+                rustc_hash::FxHashMap::default();
 
             for part in parts.iter() {
                 let shape = type_expr_to_expanded_shape(part);
                 for prop in shape.properties {
-                    if seen_names.insert(prop.name.clone()) {
+                    if let Some(index) = property_positions.get(&prop.name).copied() {
+                        properties[index] = prop;
+                    } else {
+                        property_positions.insert(prop.name.clone(), properties.len());
                         properties.push(prop);
                     }
                 }

@@ -66,6 +66,9 @@ pub enum ValueDeclKind {
     Function,
     AsyncFunction,
     Class,
+    /// TypeScript enum declaration — dual-space: type (union of members)
+    /// and value (object with member lookup).
+    Enum,
 }
 
 /// A function signature extracted from a declaration.

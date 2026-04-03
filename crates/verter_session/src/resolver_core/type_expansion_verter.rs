@@ -181,15 +181,30 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 /// Takes the same `ResolvedMacroMeta` as `resolved_macro_to_expansion` but
 /// runs each prop/emit type_annotation through `solve_type` for deeper
 /// resolution of generics, utilities, and cross-file types.
+///
+/// Returns the expansion result and a list of external declarations visited
+/// during solving (for registry publishing).
 pub fn resolved_macro_to_expansion_via_solver(
     macro_meta: &ResolvedMacroMeta,
     host: &crate::VerterHost,
     store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> TypeExpansionResult {
-    use verter_semantic::analysis::type_solver::solve::{solve_type, SolveLimits};
+) -> (
+    TypeExpansionResult,
+    Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
+) {
+    use verter_semantic::analysis::type_solver::solve::{solve_type_with_trace, SolveLimits};
 
-    let solver_host = crate::resolver_core::SessionSolverHost::new(host, store_view);
+    let solver_host = if macro_meta.declaration.canonical_source.is_empty() {
+        crate::resolver_core::SessionSolverHost::new(host, store_view)
+    } else {
+        crate::resolver_core::SessionSolverHost::with_declaration_scope(
+            host,
+            store_view,
+            macro_meta.declaration.canonical_source.as_str(),
+        )
+    };
     let limits = SolveLimits::default();
+    let mut all_visited = Vec::new();
 
     let mut members = Vec::new();
 
@@ -199,7 +214,8 @@ pub fn resolved_macro_to_expansion_via_solver(
             .as_deref()
             .map(|text| {
                 let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let result = solve_type(&parsed, &solver_host, limits.clone());
+                let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits.clone());
+                all_visited.extend(trace);
                 result.value
             })
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
@@ -219,7 +235,8 @@ pub fn resolved_macro_to_expansion_via_solver(
             .as_deref()
             .map(|text| {
                 let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let result = solve_type(&parsed, &solver_host, limits.clone());
+                let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits.clone());
+                all_visited.extend(trace);
                 result.value
             })
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
@@ -250,19 +267,22 @@ pub fn resolved_macro_to_expansion_via_solver(
     };
 
     let type_expr = if !macro_meta.type_name.is_empty() {
-        // Also solve the top-level type name through the solver
         let parsed = TypeExpr::named(&macro_meta.type_name);
-        let result = solve_type(&parsed, &solver_host, limits);
+        let (result, trace) = solve_type_with_trace(&parsed, &solver_host, limits);
+        all_visited.extend(trace);
         result.value
     } else {
         TypeExpr::primitive(PrimitiveName::Unknown)
     };
 
-    TypeExpansionResult {
-        type_expr,
-        members,
-        completeness,
-    }
+    (
+        TypeExpansionResult {
+            type_expr,
+            members,
+            completeness,
+        },
+        all_visited,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +401,7 @@ mod tests {
         // Solver path (standalone host — no files loaded, so solver can't
         // resolve cross-file refs, but primitive type_text should match)
         let host = crate::VerterHost::new_standalone(Default::default());
-        let solver = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (solver, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
 
         // Same number of members
         assert_eq!(old.members.len(), solver.members.len());
@@ -407,7 +427,7 @@ mod tests {
     fn solver_expansion_preserves_completeness() {
         let macro_meta = make_resolved_macro();
         let host = crate::VerterHost::new_standalone(Default::default());
-        let result = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
         assert_eq!(result.completeness, ExpansionCompleteness::Exact);
     }
 
@@ -416,7 +436,89 @@ mod tests {
         let mut macro_meta = make_resolved_macro();
         macro_meta.props.clear();
         let host = crate::VerterHost::new_standalone(Default::default());
-        let result = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
         assert_eq!(result.completeness, ExpansionCompleteness::LowerBound);
+    }
+
+    #[test]
+    fn solver_expansion_uses_declaration_scope_for_projected_macro_text() {
+        use rustc_hash::FxHashMap;
+        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
+        use verter_semantic::analysis::Hash16;
+
+        let source = r#"
+export interface Button {
+  variants: {
+    size: 'sm' | 'lg'
+  }
+}
+"#;
+        let allocator = oxc_allocator::Allocator::new();
+        let analysis = Arc::new(analyze_external_type_source(source, &allocator));
+        let env = parse_and_build_env(source);
+        let state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            Hash16::default(),
+            Arc::clone(&analysis),
+            Some(&env),
+        ));
+        let host = crate::VerterHost::new_standalone(Default::default());
+        host.imported_dependency_cache.lock().insert(
+            "/src/types.ts".into(),
+            Arc::new(crate::ImportedDependencyCacheEntry {
+                workspace_generation: host.ws().content_generation(),
+                whole_hash: Hash16::default(),
+                resolved_canonical_id: "/src/types.ts".into(),
+                raw_source: Arc::<str>::from(source),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                external_type_analysis: Some(analysis),
+                shallow_file_state: Some(Arc::clone(&state)),
+                snapshot: None,
+                eval_source: Some(Arc::<str>::from(source)),
+                required_owner_import_names: None,
+                exported_required_import_names: FxHashMap::default(),
+                resolved_type_roots: FxHashMap::default(),
+                resolved_type_declarations: FxHashMap::default(),
+                prepared_type_decls: crate::resolver_core::build_prepared_type_decl_cache(
+                    "/src/types.ts",
+                    &state,
+                    None,
+                ),
+                prepared_value_decls: crate::resolver_core::build_prepared_value_decl_cache(
+                    "/src/types.ts",
+                    &state,
+                    None,
+                ),
+                dependency_resolutions: FxHashMap::default(),
+            }),
+        );
+
+        let mut macro_meta = make_resolved_macro();
+        macro_meta.declaration.canonical_source = "/src/types.ts".to_string();
+        macro_meta.type_name.clear();
+        macro_meta.props = vec![verter_semantic::analysis::AnalyzedPropField {
+            name: "size".to_string(),
+            is_optional: false,
+            type_annotation: Some("Button".to_string()),
+            span: Span::new(20, 30),
+            description: None,
+            tags: vec![],
+            resolution_source: Default::default(),
+            resolution_error: None,
+        }];
+
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+
+        assert_eq!(result.members.len(), 1);
+        match &result.members[0].type_expr {
+            TypeExpr::Object(shape) => assert!(shape.properties.iter().any(|member| matches!(
+                member,
+                verter_semantic::analysis::type_expr::ObjectMember::Property(prop)
+                    if prop.name == "variants"
+            ))),
+            other => panic!("expected declaration-scoped object resolution, got {other:?}"),
+        }
     }
 }

@@ -30,7 +30,7 @@ use crate::resolver_core::{
 use crate::resolver_store::HostStoreView;
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,7 +56,6 @@ pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
     snapshot: FileAnalysisSnapshot,
     owner_eval_source: Option<String>,
-    owner_env: Option<verter_semantic::analysis::type_eval::EvalEnv>,
     dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 
@@ -120,16 +119,14 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         let owner_eval_source =
             VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
-        let owner_env = self.base_eval_env_in_view(canonical, Some(view));
         let dep_resolutions =
             self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?;
         component_meta_trace_event!(
             "capture_component_meta_inputs_result",
             format!(
-                "owner={} owner_eval_source_len={} has_owner_env={} dep_resolutions={}",
+                "owner={} owner_eval_source_len={} dep_resolutions={}",
                 canonical,
                 owner_eval_source.len(),
-                owner_env.is_some(),
                 dep_resolutions.len(),
             ),
         );
@@ -137,7 +134,6 @@ impl ComponentMetaRequestHost for VerterHost {
             whole_hash,
             snapshot,
             owner_eval_source: Some(owner_eval_source),
-            owner_env,
             dep_resolutions,
         })
     }
@@ -604,9 +600,17 @@ impl VerterHost {
         self.append_component_meta_registry_entries(
             canonical,
             &snapshot,
+            parts.evaluated_types.as_ref(),
             &mut parts.resolved_type_registry,
             &mut parts.resolved_type_registry_meta,
+            &mut parts.tracked_dependencies,
             store_view,
+        );
+        let final_store_view = self.resolver_store_view();
+        parts.fact_versions = self.current_dependency_fact_versions_in_view(
+            canonical,
+            &parts.tracked_dependencies,
+            Some(&final_store_view),
         );
         let append_elapsed = append_start.elapsed();
         let registry_after = parts.resolved_type_registry.len();
@@ -651,13 +655,25 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         snapshot: &FileAnalysisSnapshot,
+        evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
         resolved_type_registry: &mut Vec<
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
         >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
+        tracked_dependencies: &mut BTreeSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) {
-        let owner_registry_collection_env = self.base_eval_env_in_view(owner_canonical, store_view);
+        fn track_component_meta_dependency(
+            tracked_dependencies: &mut BTreeSet<String>,
+            owner_canonical: &str,
+            canonical_id: &str,
+        ) {
+            if !canonical_id.is_empty() && canonical_id != owner_canonical {
+                tracked_dependencies.insert(canonical_id.to_string());
+            }
+        }
+
+        let mut append_cache = ComponentMetaRegistryAppendCache::default();
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
@@ -666,13 +682,20 @@ impl VerterHost {
             if declaration_source.is_empty() || declaration_source == owner_canonical {
                 continue;
             }
+            track_component_meta_dependency(
+                tracked_dependencies,
+                owner_canonical,
+                declaration_source,
+            );
             let requested_exported_name = if meta.declaration.resolved_name.is_empty() {
                 entry.name.as_str()
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let Some((resolved_canonical_id, _resolved_exported_name, prepared)) = self
-                .resolve_prepared_symbol_dependency_alias_in_view(
+            let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
+                cached_resolve_prepared_symbol_dependency_alias_in_view(
+                    &mut append_cache,
+                    self,
                     declaration_source,
                     requested_exported_name,
                     store_view,
@@ -680,20 +703,32 @@ impl VerterHost {
             else {
                 continue;
             };
-            meta.declaration.canonical_source = resolved_canonical_id.clone();
-            let materialized = if is_component_meta_registry_package_source(Some(
+            track_component_meta_dependency(
+                tracked_dependencies,
+                owner_canonical,
                 resolved_canonical_id.as_str(),
-            )) {
-                prepared.decl.body.clone()
-            } else {
-                materialize_imported_component_meta_registry_decl_body_in_view(
-                    self,
-                    resolved_canonical_id.as_str(),
-                    &prepared.decl,
-                    &prepared.symbol_dependencies,
-                    store_view,
-                )
-            };
+            );
+            track_component_meta_dependency(
+                tracked_dependencies,
+                owner_canonical,
+                resolved_canonical_id.as_str(),
+            );
+            for dependency in &prepared.canonical_dependencies {
+                track_component_meta_dependency(
+                    tracked_dependencies,
+                    owner_canonical,
+                    dependency.as_str(),
+                );
+            }
+            meta.declaration.canonical_source = resolved_canonical_id.clone();
+            let materialized = cached_solve_component_meta_registry_decl_in_view(
+                &mut append_cache,
+                self,
+                resolved_canonical_id.as_str(),
+                resolved_exported_name.as_str(),
+                store_view,
+            )
+            .unwrap_or_else(|| prepared.decl.body.clone());
             entry.type_expr = choose_preferred_component_meta_registry_candidate(
                 Some(entry.type_expr.clone()),
                 Some(materialized),
@@ -707,14 +742,55 @@ impl VerterHost {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
+        if let Some(evaluated_types) = evaluated_types {
+            for field in &evaluated_types.props {
+                collect_component_meta_registry_public_field_refs(
+                    self,
+                    owner_canonical,
+                    store_view,
+                    field,
+                    &published_names,
+                    &mut queued_names,
+                    &mut referenced_names,
+                    Some(owner_canonical),
+                );
+            }
+            for field in &evaluated_types.emits {
+                collect_component_meta_registry_public_field_refs(
+                    self,
+                    owner_canonical,
+                    store_view,
+                    field,
+                    &published_names,
+                    &mut queued_names,
+                    &mut referenced_names,
+                    Some(owner_canonical),
+                );
+            }
+            for field in &evaluated_types.slot_bindings {
+                collect_component_meta_registry_public_field_refs(
+                    self,
+                    owner_canonical,
+                    store_view,
+                    field,
+                    &published_names,
+                    &mut queued_names,
+                    &mut referenced_names,
+                    Some(owner_canonical),
+                );
+            }
+        }
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let source_hint = resolved_type_registry_meta
                 .get(index)
                 .map(|meta| meta.declaration.canonical_source.as_str());
             if should_collect_component_meta_registry_nested_refs(owner_canonical, source_hint) {
-                let source_expr = owner_component_meta_registry_collection_expr(
-                    owner_registry_collection_env.as_ref(),
+                let source_expr = cached_owner_component_meta_registry_collection_expr(
+                    &mut append_cache,
+                    self,
+                    owner_canonical,
                     entry.name.as_str(),
+                    store_view,
                 );
                 collect_component_meta_registry_refs(
                     source_expr.as_ref().unwrap_or(&entry.type_expr),
@@ -722,11 +798,10 @@ impl VerterHost {
                     &mut queued_names,
                     &mut referenced_names,
                     source_hint,
+                    false,
                 );
             }
         }
-
-        let mut registry_lookup_env = self.base_eval_env_in_view(owner_canonical, store_view);
 
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
@@ -734,32 +809,75 @@ impl VerterHost {
         while let Some(pending) = referenced_names.pop_front() {
             _loop_iterations += 1;
             let type_name = pending.name;
+            let imported_owner_route =
+                owner_component_meta_registry_import_binding(snapshot, type_name.as_str()).filter(
+                    |_| {
+                        pending
+                            .source_hint
+                            .as_deref()
+                            .is_none_or(|source| source.is_empty() || source == owner_canonical)
+                    },
+                );
+            let pending_source_hint = imported_owner_route
+                .as_ref()
+                .map(|(canonical_id, _)| canonical_id.as_str())
+                .or_else(|| pending.source_hint.as_deref());
+            let pending_exported_name = imported_owner_route
+                .as_ref()
+                .map(|(_, exported_name)| exported_name.as_str())
+                .or_else(|| pending.exported_name.as_deref());
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?}",
-                    owner_canonical, type_name, pending.source_hint, pending.exported_name,
+                    owner_canonical, type_name, pending_source_hint, pending_exported_name,
                 ));
             }
             if published_names.contains(&type_name) {
                 continue;
             }
-            let requested_exported_name = pending
-                .exported_name
-                .as_deref()
-                .unwrap_or(type_name.as_str());
-            if let Some(source_hint) = pending
-                .source_hint
-                .as_deref()
+            if !cached_component_meta_registry_ref_can_resolve(
+                &mut append_cache,
+                self,
+                owner_canonical,
+                pending_exported_name.unwrap_or(type_name.as_str()),
+                pending_source_hint,
+                store_view,
+            ) {
+                continue;
+            }
+            let requested_exported_name = pending_exported_name.unwrap_or(type_name.as_str());
+            if let Some(source_hint) = pending_source_hint
                 .filter(|source| !source.is_empty() && *source != owner_canonical)
             {
-                if let Some((resolved_canonical_id, resolved_exported_name, prepared)) = self
-                    .resolve_prepared_symbol_dependency_alias_in_view(
+                track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
+                if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
+                    cached_resolve_prepared_symbol_dependency_alias_in_view(
+                        &mut append_cache,
+                        self,
                         source_hint,
                         requested_exported_name,
                         store_view,
                     )
                 {
-                    let mut declaration = resolve_type_declaration_in_view(
+                    track_component_meta_dependency(
+                        tracked_dependencies,
+                        owner_canonical,
+                        resolved_canonical_id.as_str(),
+                    );
+                    track_component_meta_dependency(
+                        tracked_dependencies,
+                        owner_canonical,
+                        resolved_canonical_id.as_str(),
+                    );
+                    for dependency in &prepared.canonical_dependencies {
+                        track_component_meta_dependency(
+                            tracked_dependencies,
+                            owner_canonical,
+                            dependency.as_str(),
+                        );
+                    }
+                    let mut declaration = cached_resolve_type_declaration_in_view(
+                        &mut append_cache,
                         self,
                         resolved_canonical_id.as_str(),
                         resolved_exported_name.as_str(),
@@ -768,19 +886,19 @@ impl VerterHost {
                     if declaration.canonical_source.is_empty() {
                         declaration.canonical_source = resolved_canonical_id.clone();
                     }
-                    let type_expr = if is_component_meta_registry_package_source(Some(
+                    track_component_meta_dependency(
+                        tracked_dependencies,
+                        owner_canonical,
+                        declaration.canonical_source.as_str(),
+                    );
+                    let type_expr = cached_solve_component_meta_registry_decl_in_view(
+                        &mut append_cache,
+                        self,
                         resolved_canonical_id.as_str(),
-                    )) {
-                        prepared.decl.body.clone()
-                    } else {
-                        materialize_imported_component_meta_registry_decl_body_in_view(
-                            self,
-                            resolved_canonical_id.as_str(),
-                            &prepared.decl,
-                            &prepared.symbol_dependencies,
-                            store_view,
-                        )
-                    };
+                        resolved_exported_name.as_str(),
+                        store_view,
+                    )
+                    .unwrap_or_else(|| prepared.decl.body.clone());
                     upsert_component_meta_registry_entry(
                         owner_canonical,
                         resolved_type_registry,
@@ -796,67 +914,82 @@ impl VerterHost {
                     continue;
                 }
             }
-            let declaration_owner = pending
-                .source_hint
-                .as_deref()
+
+            let declaration_owner = pending_source_hint
                 .filter(|source| !source.is_empty())
                 .unwrap_or(owner_canonical);
-            let mut declaration = resolve_type_declaration_in_view(
+            track_component_meta_dependency(
+                tracked_dependencies,
+                owner_canonical,
+                declaration_owner,
+            );
+            let mut declaration = cached_resolve_type_declaration_in_view(
+                &mut append_cache,
                 self,
                 declaration_owner,
                 type_name.as_str(),
                 store_view,
             );
             if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
-                declaration = resolve_type_declaration_in_view(
+                declaration = cached_resolve_type_declaration_in_view(
+                    &mut append_cache,
                     self,
                     owner_canonical,
                     type_name.as_str(),
                     store_view,
                 );
             }
-            if declaration_owner != owner_canonical {
-                let imported_materialized = self
-                    .base_eval_env_in_view(declaration_owner, store_view)
-                    .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned())
-                    .map(|decl| {
-                        materialize_imported_component_meta_registry_decl_body_in_view(
-                            self,
-                            declaration_owner,
-                            &decl,
-                            &[],
-                            store_view,
-                        )
-                    });
-                if let Some(materialized) = imported_materialized {
-                    _loop_materializations += 1;
-                    upsert_component_meta_registry_entry(
-                        owner_canonical,
-                        resolved_type_registry,
-                        resolved_type_registry_meta,
-                        &mut published_names,
-                        &mut queued_names,
-                        &mut referenced_names,
-                        type_name.clone(),
-                        materialized,
-                        declaration,
-                        None,
-                    );
-                    continue;
-                }
-            }
-            let owner_decl = registry_lookup_env
-                .as_mut()
-                .and_then(|env| env.type_symbols.get(type_name.as_str()).cloned());
-            let materialized = owner_decl.as_ref().map(|decl| {
-                materialize_owner_component_meta_registry_decl_body_in_view(
+            let mut materialized = if declaration_owner != owner_canonical {
+                cached_solve_component_meta_registry_decl_in_view(
+                    &mut append_cache,
+                    self,
+                    declaration_owner,
+                    type_name.as_str(),
+                    store_view,
+                )
+            } else {
+                None
+            };
+            let owner_collection_expr = cached_owner_component_meta_registry_collection_expr(
+                &mut append_cache,
+                self,
+                owner_canonical,
+                type_name.as_str(),
+                store_view,
+            );
+            materialized = materialized.or_else(|| {
+                cached_solve_component_meta_registry_decl_in_view(
+                    &mut append_cache,
                     self,
                     owner_canonical,
-                    snapshot,
-                    decl,
+                    type_name.as_str(),
                     store_view,
                 )
             });
+            if materialized.is_some() && declaration.canonical_source.is_empty() {
+                if let Some(import) = snapshot
+                    .imports
+                    .iter()
+                    .find(|imp| imp.bindings.iter().any(|b| b.name == type_name))
+                {
+                    if let Some(canonical_id) = import.resolved_canonical_id.as_deref() {
+                        if let Some(binding) = import.bindings.iter().find(|b| b.name == type_name)
+                        {
+                            declaration.canonical_source = canonical_id.to_string();
+                            declaration.resolved_name = binding
+                                .imported_name
+                                .as_deref()
+                                .unwrap_or("default")
+                                .to_string();
+                        }
+                    }
+                }
+            }
+            track_component_meta_dependency(
+                tracked_dependencies,
+                owner_canonical,
+                declaration.canonical_source.as_str(),
+            );
             let Some(materialized) = materialized else {
                 continue;
             };
@@ -871,7 +1004,7 @@ impl VerterHost {
                 type_name.clone(),
                 materialized,
                 declaration,
-                owner_decl.as_ref().map(|decl| &decl.body),
+                owner_collection_expr.as_ref(),
             );
         }
         if crate::host_manage::component_meta_debug_enabled()
@@ -1042,7 +1175,6 @@ impl VerterHost {
                     source,
                     None,
                     Some(Arc::new(snapshot.clone())),
-                    None,
                     None,
                     None,
                     dependency_resolutions,
@@ -1429,19 +1561,31 @@ impl VerterHost {
     }
 }
 
-const COMPONENT_META_REGISTRY_MATERIALIZATION_DEPTH: usize = 8;
-const COMPONENT_META_REGISTRY_MAX_EVAL_DEPTH: usize = 64;
-const COMPONENT_META_REGISTRY_MAX_UNION_EXPANSION: usize = 128;
-const COMPONENT_META_REGISTRY_MAX_MAPPED_KEYS: usize = 512;
-const COMPONENT_META_REGISTRY_MAX_MAPPED_DEPTH: usize = 16;
-const COMPONENT_META_REGISTRY_MAX_EVAL_STEPS: usize = 200_000;
-const COMPONENT_META_REGISTRY_MAX_REF_DEPTH: usize = 32;
-
 #[derive(Debug, Clone)]
 struct PendingComponentMetaRegistryRef {
     name: String,
     source_hint: Option<String>,
     exported_name: Option<String>,
+}
+
+#[derive(Default)]
+struct ComponentMetaRegistryAppendCache {
+    owner_collection_exprs:
+        rustc_hash::FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
+    materialized_exprs: rustc_hash::FxHashMap<
+        (String, String),
+        Option<verter_semantic::analysis::type_expr::TypeExpr>,
+    >,
+    declarations: rustc_hash::FxHashMap<(String, String), ResolvedTypeDeclaration>,
+    prepared_aliases: rustc_hash::FxHashMap<
+        (String, String),
+        Option<(
+            String,
+            String,
+            crate::resolver_core::CachedPreparedImportedTypeAlias,
+        )>,
+    >,
+    resolvable_refs: rustc_hash::FxHashMap<(String, String), bool>,
 }
 
 fn upsert_component_meta_registry_entry(
@@ -1489,6 +1633,7 @@ fn upsert_component_meta_registry_entry(
                     queued_names,
                     referenced_names,
                     declaration_source_hint.as_deref(),
+                    false,
                 );
             }
         }
@@ -1502,6 +1647,7 @@ fn upsert_component_meta_registry_entry(
             queued_names,
             referenced_names,
             declaration_source_hint.as_deref(),
+            false,
         );
     }
     resolved_type_registry.push(
@@ -1516,6 +1662,133 @@ fn upsert_component_meta_registry_entry(
         declaration,
     });
     published_names.insert(name);
+}
+
+fn cached_owner_component_meta_registry_collection_expr(
+    cache: &mut ComponentMetaRegistryAppendCache,
+    host: &VerterHost,
+    owner_canonical: &str,
+    name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    if let Some(cached) = cache.owner_collection_exprs.get(name) {
+        return cached.clone();
+    }
+    let expr =
+        owner_component_meta_registry_collection_expr(host, owner_canonical, name, store_view);
+    cache
+        .owner_collection_exprs
+        .insert(name.to_string(), expr.clone());
+    expr
+}
+
+fn cached_solve_component_meta_registry_decl_in_view(
+    cache: &mut ComponentMetaRegistryAppendCache,
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    requested_name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    let key = (scope_canonical_id.to_string(), requested_name.to_string());
+    if let Some(cached) = cache.materialized_exprs.get(&key) {
+        return cached.clone();
+    }
+    let solved = solve_component_meta_registry_decl_in_view(
+        host,
+        scope_canonical_id,
+        requested_name,
+        store_view,
+    );
+    cache.materialized_exprs.insert(key, solved.clone());
+    solved
+}
+
+fn cached_resolve_type_declaration_in_view(
+    cache: &mut ComponentMetaRegistryAppendCache,
+    host: &VerterHost,
+    canonical_source: &str,
+    requested_name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> ResolvedTypeDeclaration {
+    let key = (canonical_source.to_string(), requested_name.to_string());
+    if let Some(cached) = cache.declarations.get(&key) {
+        return cached.clone();
+    }
+    let declaration =
+        resolve_type_declaration_in_view(host, canonical_source, requested_name, store_view);
+    cache.declarations.insert(key, declaration.clone());
+    declaration
+}
+
+fn cached_resolve_prepared_symbol_dependency_alias_in_view(
+    cache: &mut ComponentMetaRegistryAppendCache,
+    host: &VerterHost,
+    canonical_id: &str,
+    exported_name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> Option<(
+    String,
+    String,
+    crate::resolver_core::CachedPreparedImportedTypeAlias,
+)> {
+    let key = (canonical_id.to_string(), exported_name.to_string());
+    if let Some(cached) = cache.prepared_aliases.get(&key) {
+        return cached.clone();
+    }
+    let resolved = host.resolve_prepared_symbol_dependency_alias_in_view(
+        canonical_id,
+        exported_name,
+        store_view,
+    );
+    cache.prepared_aliases.insert(key, resolved.clone());
+    resolved
+}
+
+fn cached_component_meta_registry_ref_can_resolve(
+    cache: &mut ComponentMetaRegistryAppendCache,
+    host: &VerterHost,
+    owner_canonical: &str,
+    name: &str,
+    source_hint: Option<&str>,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> bool {
+    if is_component_meta_registry_builtin_name(name) {
+        return false;
+    }
+
+    let scope_canonical_id = source_hint
+        .filter(|source| !source.is_empty())
+        .unwrap_or(owner_canonical);
+    let key = (scope_canonical_id.to_string(), name.to_string());
+    if let Some(cached) = cache.resolvable_refs.get(&key) {
+        return *cached;
+    }
+
+    let resolvable = if host
+        .prepared_type_decl_in_view(scope_canonical_id, name, store_view)
+        .is_some()
+    {
+        true
+    } else {
+        let (resolved_canonical_id, resolved_name) =
+            host.resolve_imported_type_root_in_view(scope_canonical_id, name, store_view);
+        (resolved_canonical_id != scope_canonical_id || resolved_name != name)
+            && host
+                .prepared_type_decl_in_view(
+                    resolved_canonical_id.as_str(),
+                    resolved_name.as_str(),
+                    store_view,
+                )
+                .is_some()
+    };
+
+    cache.resolvable_refs.insert(key, resolvable);
+    resolvable
+}
+
+fn is_component_meta_registry_builtin_name(name: &str) -> bool {
+    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
+        || matches!(name, "Array" | "ReadonlyArray" | "Promise")
 }
 
 fn is_component_meta_registry_package_source(source_hint: Option<&str>) -> bool {
@@ -1533,10 +1806,90 @@ fn should_collect_component_meta_registry_nested_refs(
 }
 
 fn owner_component_meta_registry_collection_expr(
-    env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+    host: &VerterHost,
+    owner_canonical: &str,
     name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    env.and_then(|env| env.type_symbols.get(name).map(|decl| decl.body.clone()))
+    host.prepared_type_decl_in_view(owner_canonical, name, store_view)
+        .map(|prepared| prepared.body.clone())
+}
+
+fn owner_component_meta_registry_import_binding(
+    snapshot: &FileAnalysisSnapshot,
+    local_name: &str,
+) -> Option<(String, String)> {
+    snapshot.imports.iter().find_map(|import| {
+        let canonical_id = import.resolved_canonical_id.as_ref()?;
+        let binding = import
+            .bindings
+            .iter()
+            .find(|binding| binding.name == local_name)?;
+        let exported_name = binding
+            .imported_name
+            .clone()
+            .unwrap_or_else(|| local_name.to_string());
+        Some((canonical_id.clone(), exported_name))
+    })
+}
+
+fn solve_component_meta_registry_decl_in_view(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    requested_name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    if is_component_meta_registry_package_source(Some(scope_canonical_id)) {
+        return host
+            .prepared_type_decl_in_view(scope_canonical_id, requested_name, store_view)
+            .map(|prepared| prepared.body.clone());
+    }
+
+    if let Some(prepared) =
+        host.prepared_type_decl_in_view(scope_canonical_id, requested_name, store_view)
+    {
+        let direct_surface = matches!(
+            &prepared.body,
+            verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Intersection(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Array { .. }
+                | verter_semantic::analysis::type_expr::TypeExpr::Tuple { .. }
+                | verter_semantic::analysis::type_expr::TypeExpr::Function(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Mapped { .. }
+        );
+        let preserve_prepared_surface = direct_surface
+            && prepared.local_deps.is_empty()
+            && (prepared.external_deps.is_empty()
+                || prepared
+                    .external_deps
+                    .iter()
+                    .all(|dep| dep.canonical_id.contains("/node_modules/")));
+        if preserve_prepared_surface {
+            return Some(prepared.body.clone());
+        }
+    }
+
+    host.shallow_file_state_in_view(scope_canonical_id, store_view)?;
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        host,
+        store_view,
+        scope_canonical_id,
+    );
+    let type_ref = verter_semantic::analysis::type_expr::TypeExpr::named(requested_name);
+    let result = verter_semantic::analysis::type_solver::solve::solve_type(
+        &type_ref,
+        &solver_host,
+        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
+    );
+
+    match &result.value {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if name.as_ref() == requested_name && type_arguments.is_empty() => None,
+        _ => Some(result.value),
+    }
 }
 
 fn enqueue_component_meta_registry_ref(
@@ -1575,57 +1928,6 @@ fn enqueue_component_meta_registry_ref(
         source_hint,
         exported_name,
     });
-}
-
-fn materialize_component_meta_registry_decl_body(
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    registry_eval_env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let saved = decl
-        .type_parameters
-        .iter()
-        .map(|param| {
-            (
-                param.name.clone(),
-                registry_eval_env.type_bindings.get(&param.name).cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    for param in &decl.type_parameters {
-        registry_eval_env.type_bindings.insert(
-            param.name.clone(),
-            Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone())),
-        );
-    }
-
-    let evaluated = verter_semantic::analysis::type_eval::evaluate(&decl.body, registry_eval_env);
-    let materialized = materialize_component_meta_registry_type(
-        &evaluated,
-        registry_eval_env,
-        COMPONENT_META_REGISTRY_MATERIALIZATION_DEPTH,
-    );
-    if crate::host_manage::component_meta_debug_enabled() {
-        crate::host_manage::component_meta_debug(format!(
-            "REGISTRY_MATERIALIZE decl={} evaluated={:?} materialized={:?}",
-            decl.name, evaluated, materialized
-        ));
-    }
-    for (name, previous) in saved {
-        if let Some(previous) = previous {
-            registry_eval_env.type_bindings.insert(name, previous);
-        } else {
-            registry_eval_env.type_bindings.remove(&name);
-        }
-    }
-
-    choose_preferred_component_meta_registry_candidate(
-        crate::resolver_core::choose_preferred_imported_type_body(
-            Some(evaluated),
-            Some(materialized),
-        ),
-        Some(decl.body.clone()),
-    )
-    .unwrap_or_else(|| decl.body.clone())
 }
 
 fn choose_preferred_component_meta_registry_candidate(
@@ -1795,621 +2097,20 @@ fn component_meta_registry_indexed_ref_penalty(
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn materialize_imported_component_meta_registry_decl_body_in_view(
-    host: &VerterHost,
-    canonical_id: &str,
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    symbol_dependencies: &[crate::resolver_core::ImportedSymbolDependency],
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let _start = std::time::Instant::now();
-    let Some(snapshot) = host
-        .clone_current_imported_dependency_entry(canonical_id, store_view)
-        .and_then(|dependency| dependency.snapshot.clone())
-    else {
-        return decl.body.clone();
-    };
-    let same_file_support_symbols = symbol_dependencies
-        .iter()
-        .filter(|dependency| {
-            dependency.canonical_id == canonical_id
-                && dependency.exported_name == dependency.local_name
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let result = materialize_component_meta_registry_decl_body_with_snapshot_in_view(
-        host,
-        canonical_id,
-        snapshot.as_ref(),
-        decl,
-        &same_file_support_symbols,
-        store_view,
-    )
-    .unwrap_or_else(|| decl.body.clone());
-    if crate::host_manage::component_meta_debug_enabled() {
-        let elapsed = _start.elapsed();
-        if elapsed.as_millis() > 5 {
-            crate::host_manage::component_meta_debug(format!(
-                "MATERIALIZE_IMPORTED dep={} decl={} result_kind={:?} ms={:.1}",
-                canonical_id,
-                decl.name,
-                result,
-                elapsed.as_secs_f64() * 1000.0,
-            ));
-        }
-    }
-    result
-}
-
-fn materialize_owner_component_meta_registry_decl_body_in_view(
-    host: &VerterHost,
-    canonical_id: &str,
-    snapshot: &FileAnalysisSnapshot,
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    materialize_component_meta_registry_decl_body_with_snapshot_in_view(
-        host,
-        canonical_id,
-        snapshot,
-        decl,
-        &[],
-        store_view,
-    )
-    .unwrap_or_else(|| decl.body.clone())
-}
-
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn materialize_component_meta_registry_decl_body_with_snapshot_in_view(
-    host: &VerterHost,
-    canonical_id: &str,
-    snapshot: &FileAnalysisSnapshot,
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    seed_symbol_dependencies: &[crate::resolver_core::ImportedSymbolDependency],
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    let mut env = host.build_cache_only_lookup_env_for_type_decl_in_view(
-        canonical_id,
-        snapshot,
-        decl,
-        seed_symbol_dependencies,
-        store_view,
-    )?;
-    env.limits.max_depth = env
-        .limits
-        .max_depth
-        .max(COMPONENT_META_REGISTRY_MAX_EVAL_DEPTH);
-    env.limits.max_union_expansion = env
-        .limits
-        .max_union_expansion
-        .max(COMPONENT_META_REGISTRY_MAX_UNION_EXPANSION);
-    env.limits.max_mapped_keys = env
-        .limits
-        .max_mapped_keys
-        .max(COMPONENT_META_REGISTRY_MAX_MAPPED_KEYS);
-    env.limits.max_mapped_depth = env
-        .limits
-        .max_mapped_depth
-        .max(COMPONENT_META_REGISTRY_MAX_MAPPED_DEPTH);
-    env.limits.max_steps = env
-        .limits
-        .max_steps
-        .max(COMPONENT_META_REGISTRY_MAX_EVAL_STEPS);
-    env.limits.max_ref_depth = env
-        .limits
-        .max_ref_depth
-        .max(COMPONENT_META_REGISTRY_MAX_REF_DEPTH);
-    Some(materialize_component_meta_registry_decl_body(
-        decl, &mut env,
-    ))
-}
-
-fn materialize_component_meta_registry_type(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    remaining_depth: usize,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::{
-        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-    };
-
-    if remaining_depth == 0 {
-        return expr.clone();
-    }
-
-    let next_depth = remaining_depth.saturating_sub(1);
-
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. } => expr.clone(),
-        TypeExpr::TypeParameter(param) => env
-            .type_bindings
-            .get(param.name.as_str())
-            .cloned()
-            .filter(|_| remaining_depth > 0)
-            .map(|bound| materialize_component_meta_registry_type(bound.as_ref(), env, next_depth))
-            .unwrap_or_else(|| expr.clone()),
-        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
-            materialize_component_meta_registry_type(inner, env, next_depth),
-        )),
-        TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: Arc::new(materialize_component_meta_registry_type(
-                element, env, next_depth,
-            )),
-            readonly: *readonly,
-        },
-        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
-            elements: elements
-                .iter()
-                .map(
-                    |element| verter_semantic::analysis::type_expr::TupleElement {
-                        label: element.label.clone(),
-                        ty: materialize_component_meta_registry_type(&element.ty, env, next_depth),
-                        optional: element.optional,
-                        rest: element.rest,
-                    },
-                )
-                .collect(),
-            readonly: *readonly,
-        },
-        TypeExpr::Union(types) => TypeExpr::Union(
-            types
-                .iter()
-                .map(|ty| materialize_component_meta_registry_type(ty, env, next_depth))
-                .collect(),
-        ),
-        TypeExpr::Intersection(types) => {
-            let materialized =
-                materialize_component_meta_registry_non_structural_type(expr, env, remaining_depth);
-            if materialized != *expr {
-                materialized
-            } else {
-                TypeExpr::Intersection(
-                    types
-                        .iter()
-                        .map(|ty| materialize_component_meta_registry_type(ty, env, next_depth))
-                        .collect(),
-                )
-            }
-        }
-        TypeExpr::Object(object) => {
-            let properties = object
-                .properties
-                .iter()
-                .map(|member| match member {
-                    ObjectMember::Property(property) => ObjectMember::Property(ObjectProperty {
-                        name: property.name.clone(),
-                        ty: materialize_component_meta_registry_type(&property.ty, env, next_depth),
-                        optional: property.optional,
-                        readonly: property.readonly,
-                    }),
-                    ObjectMember::IndexSignature(signature) => ObjectMember::IndexSignature(
-                        verter_semantic::analysis::type_expr::IndexSignature {
-                            key_name: signature.key_name.clone(),
-                            key_type: materialize_component_meta_registry_type(
-                                &signature.key_type,
-                                env,
-                                next_depth,
-                            ),
-                            value_type: materialize_component_meta_registry_type(
-                                &signature.value_type,
-                                env,
-                                next_depth,
-                            ),
-                            readonly: signature.readonly,
-                        },
-                    ),
-                    ObjectMember::CallSignature(function) => ObjectMember::CallSignature(
-                        materialize_component_meta_registry_function(function, env, next_depth),
-                    ),
-                    ObjectMember::ConstructSignature(function) => ObjectMember::ConstructSignature(
-                        materialize_component_meta_registry_function(function, env, next_depth),
-                    ),
-                    ObjectMember::Method(method) => ObjectMember::Method(
-                        verter_semantic::analysis::type_expr::MethodSignature {
-                            name: method.name.clone(),
-                            function: materialize_component_meta_registry_function(
-                                &method.function,
-                                env,
-                                next_depth,
-                            ),
-                            optional: method.optional,
-                        },
-                    ),
-                })
-                .collect();
-            TypeExpr::Object(Arc::new(ObjectExpr { properties }))
-        }
-        TypeExpr::Function(function) => TypeExpr::Function(Arc::new(FunctionExpr {
-            parameters: function
-                .parameters
-                .iter()
-                .map(|parameter| FunctionParam {
-                    name: parameter.name.clone(),
-                    ty: materialize_component_meta_registry_type(&parameter.ty, env, next_depth),
-                    optional: parameter.optional,
-                    rest: parameter.rest,
-                })
-                .collect(),
-            return_type: function.return_type.as_ref().map(|ret| {
-                Arc::new(materialize_component_meta_registry_type(
-                    ret, env, next_depth,
-                ))
-            }),
-            type_parameters: function.type_parameters.clone(),
-        })),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if type_arguments.is_empty() {
-                if let Some(bound) = env.type_bindings.get(name.as_ref()).cloned() {
-                    return materialize_component_meta_registry_type(
-                        bound.as_ref(),
-                        env,
-                        next_depth,
-                    );
-                }
-            }
-
-            let local_decl = env.type_symbols.get(name.as_ref()).cloned();
-            if let Some(identity_materialized) = local_decl.as_ref().and_then(|decl| {
-                try_materialize_component_meta_registry_identity_alias(
-                    decl,
-                    type_arguments,
-                    env,
-                    next_depth,
-                )
-            }) {
-                return identity_materialized;
-            }
-
-            if !type_arguments.is_empty() {
-                let materialized = materialize_component_meta_registry_non_structural_type(
-                    expr,
-                    env,
-                    remaining_depth,
-                );
-                if materialized != *expr {
-                    return materialized;
-                }
-            }
-
-            if let Some(decl) = local_decl {
-                let saved =
-                    bind_component_meta_registry_type_parameters(&decl, type_arguments, env);
-                let materialized =
-                    materialize_component_meta_registry_type(&decl.body, env, next_depth);
-                restore_component_meta_registry_type_parameters(saved, env);
-                return materialized;
-            }
-
-            TypeExpr::Ref {
-                name: name.clone(),
-                type_arguments: type_arguments
-                    .iter()
-                    .map(|arg| materialize_component_meta_registry_type(arg, env, next_depth))
-                    .collect(),
-            }
-        }
-        _ => materialize_component_meta_registry_non_structural_type(expr, env, next_depth),
-    }
-}
-
-fn try_materialize_component_meta_registry_identity_alias(
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    type_arguments: &[verter_semantic::analysis::type_expr::TypeExpr],
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    remaining_depth: usize,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    if decl.type_parameters.len() != 1 || type_arguments.len() != 1 {
-        return None;
-    }
-    let param_name = decl.type_parameters[0].name.as_str();
-    if !component_meta_registry_is_identity_alias_body(&decl.body, param_name) {
-        return None;
-    }
-
-    let evaluated_arg = verter_semantic::analysis::type_eval::evaluate(&type_arguments[0], env);
-    Some(materialize_component_meta_registry_type(
-        &evaluated_arg,
-        env,
-        remaining_depth,
-    ))
-}
-
-fn component_meta_registry_is_identity_alias_body(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    param_name: &str,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Parenthesized(inner) => {
-            component_meta_registry_is_identity_alias_body(inner, param_name)
-        }
-        TypeExpr::Intersection(types) if types.len() == 2 => {
-            let mut saw_empty_object = false;
-            let mut saw_identity_mapped = false;
-            for ty in types.iter() {
-                if matches!(ty, TypeExpr::Object(object) if object.properties.is_empty()) {
-                    saw_empty_object = true;
-                } else if component_meta_registry_is_identity_mapped(ty, param_name) {
-                    saw_identity_mapped = true;
-                }
-            }
-            saw_empty_object && saw_identity_mapped
-        }
-        _ => component_meta_registry_is_identity_mapped(expr, param_name),
-    }
-}
-
-fn component_meta_registry_is_identity_mapped(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    param_name: &str,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    let TypeExpr::Mapped {
-        parameter,
-        source,
-        value,
-        name_type,
-        ..
-    } = expr
-    else {
-        return false;
-    };
-
-    if name_type.is_some() {
-        return false;
-    }
-
-    matches!(
-        source.as_ref(),
-        TypeExpr::KeyOf(inner) if component_meta_registry_is_identity_target(inner, param_name)
-    ) && matches!(
-        value.as_ref(),
-        TypeExpr::IndexedAccess { object, index }
-            if component_meta_registry_is_identity_target(object, param_name)
-                && matches!(index.as_ref(), TypeExpr::Ref { name, type_arguments } if type_arguments.is_empty() && name.as_ref() == parameter)
-    )
-}
-
-fn component_meta_registry_is_identity_target(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    param_name: &str,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::TypeParameter(param) => param.name == param_name,
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => type_arguments.is_empty() && name.as_ref() == param_name,
-        TypeExpr::Parenthesized(inner) => {
-            component_meta_registry_is_identity_target(inner, param_name)
-        }
-        _ => false,
-    }
-}
-
-fn bind_component_meta_registry_type_parameters(
-    decl: &verter_semantic::analysis::type_eval::TypeDeclInfo,
-    args: &[verter_semantic::analysis::type_expr::TypeExpr],
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-) -> Vec<(
-    String,
-    Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
-)> {
-    let saved = decl
-        .type_parameters
-        .iter()
-        .map(|param| {
-            (
-                param.name.clone(),
-                env.type_bindings.get(&param.name).cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    for (index, param) in decl.type_parameters.iter().enumerate() {
-        let binding = if index < args.len() {
-            Arc::new(verter_semantic::analysis::type_eval::evaluate(
-                &args[index],
-                env,
-            ))
-        } else if let Some(default) = &param.default {
-            Arc::new(verter_semantic::analysis::type_eval::evaluate(default, env))
-        } else if let Some(constraint) = &param.constraint {
-            Arc::new(verter_semantic::analysis::type_eval::evaluate(
-                constraint, env,
-            ))
-        } else {
-            Arc::new(verter_semantic::analysis::type_expr::TypeExpr::type_parameter(param.clone()))
-        };
-        env.type_bindings.insert(param.name.clone(), binding);
-    }
-
-    saved
-}
-
-fn restore_component_meta_registry_type_parameters(
-    saved: Vec<(
-        String,
-        Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
-    )>,
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-) {
-    for (name, previous) in saved {
-        if let Some(previous) = previous {
-            env.type_bindings.insert(name, previous);
-        } else {
-            env.type_bindings.remove(&name);
-        }
-    }
-}
-
-fn materialize_component_meta_registry_non_structural_type(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    remaining_depth: usize,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    if remaining_depth > 0 {
-        let solver_host = verter_semantic::analysis::type_solver::host::EvalEnvSolverHost::new(env);
-        let shape = verter_semantic::analysis::type_expand::expand_object_shape(expr, &solver_host);
-        if component_meta_registry_shape_has_members(&shape.value) {
-            return component_meta_registry_shape_to_type_expr(
-                shape.value,
-                env,
-                remaining_depth.saturating_sub(1),
-            );
-        }
-    }
-
-    let evaluated = verter_semantic::analysis::type_eval::evaluate(expr, env);
-    if evaluated == *expr {
-        expr.clone()
-    } else {
-        materialize_component_meta_registry_type(&evaluated, env, remaining_depth)
-    }
-}
-
-fn materialize_component_meta_registry_function(
-    function: &verter_semantic::analysis::type_expr::FunctionExpr,
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    remaining_depth: usize,
-) -> verter_semantic::analysis::type_expr::FunctionExpr {
-    verter_semantic::analysis::type_expr::FunctionExpr {
-        parameters: function
-            .parameters
-            .iter()
-            .map(
-                |parameter| verter_semantic::analysis::type_expr::FunctionParam {
-                    name: parameter.name.clone(),
-                    ty: materialize_component_meta_registry_type(
-                        &parameter.ty,
-                        env,
-                        remaining_depth,
-                    ),
-                    optional: parameter.optional,
-                    rest: parameter.rest,
-                },
-            )
-            .collect(),
-        return_type: function.return_type.as_ref().map(|ret| {
-            Arc::new(materialize_component_meta_registry_type(
-                ret,
-                env,
-                remaining_depth,
-            ))
-        }),
-        type_parameters: function.type_parameters.clone(),
-    }
-}
-
-fn component_meta_registry_shape_has_members(
-    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
-) -> bool {
-    !shape.properties.is_empty()
-        || !shape.index_signatures.is_empty()
-        || !shape.call_signatures.is_empty()
-}
-
-fn component_meta_registry_shape_to_type_expr(
-    shape: verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    remaining_depth: usize,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let mut properties = Vec::new();
-    let next_depth = remaining_depth.saturating_sub(1);
-
-    for property in shape.properties {
-        properties.push(
-            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                verter_semantic::analysis::type_expr::ObjectProperty {
-                    name: property.name,
-                    ty: materialize_component_meta_registry_type(&property.ty, env, next_depth),
-                    optional: property.optional,
-                    readonly: property.readonly,
-                },
-            ),
-        );
-    }
-
-    for signature in shape.index_signatures {
-        properties.push(
-            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
-                verter_semantic::analysis::type_expr::IndexSignature {
-                    key_name: "key".to_string(),
-                    key_type: materialize_component_meta_registry_type(
-                        &signature.key_type,
-                        env,
-                        next_depth,
-                    ),
-                    value_type: materialize_component_meta_registry_type(
-                        &signature.value_type,
-                        env,
-                        next_depth,
-                    ),
-                    readonly: signature.readonly,
-                },
-            ),
-        );
-    }
-
-    for signature in shape.call_signatures {
-        let function = verter_semantic::analysis::type_expr::FunctionExpr {
-            parameters: signature
-                .parameters
-                .into_iter()
-                .map(
-                    |parameter| verter_semantic::analysis::type_expr::FunctionParam {
-                        name: (!parameter.name.is_empty()).then_some(parameter.name),
-                        ty: materialize_component_meta_registry_type(
-                            &parameter.ty,
-                            env,
-                            next_depth,
-                        ),
-                        optional: parameter.optional,
-                        rest: parameter.rest,
-                    },
-                )
-                .collect(),
-            return_type: Some(Arc::new(materialize_component_meta_registry_type(
-                &signature.return_type,
-                env,
-                next_depth,
-            ))),
-            type_parameters: signature.type_parameters,
-        };
-        properties
-            .push(verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function));
-    }
-
-    verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr { properties },
-    ))
-}
-
 fn collect_component_meta_registry_refs(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
+    allow_plain_member_refs: bool,
 ) {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
     match expr {
         TypeExpr::Ref {
             name,
-            type_arguments,
+            type_arguments: _,
         } => {
             enqueue_component_meta_registry_ref(
                 published_names,
@@ -2419,15 +2120,6 @@ fn collect_component_meta_registry_refs(
                 source_hint,
                 None,
             );
-            for arg in type_arguments.iter() {
-                collect_component_meta_registry_refs(
-                    arg,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                );
-            }
         }
         TypeExpr::Array { element, .. }
         | TypeExpr::Parenthesized(element)
@@ -2439,6 +2131,7 @@ fn collect_component_meta_registry_refs(
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_member_refs,
             );
         }
         TypeExpr::Tuple { elements, .. } => {
@@ -2449,6 +2142,429 @@ fn collect_component_meta_registry_refs(
                     queued_names,
                     output,
                     source_hint,
+                    allow_plain_member_refs,
+                );
+            }
+        }
+        TypeExpr::Union(types)
+        | TypeExpr::Intersection(types)
+        | TypeExpr::TemplateLiteral {
+            expressions: types, ..
+        } => {
+            if !allow_plain_member_refs {
+                return;
+            }
+            for ty in types.iter() {
+                collect_component_meta_registry_refs(
+                    ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_member_refs,
+                );
+            }
+        }
+        // Registry publication stays shallow: object/function member types remain
+        // inline on the owning helper instead of spawning separate registry
+        // entries for every nested support type. We still need to notice
+        // direct member-surface helper refs such as `Button['variants']['color']`
+        // or `LocalConfig<string>['slot']`, because compat display/schema output
+        // depends on those helpers being present in the registry.
+        TypeExpr::Object(obj) => {
+            use verter_semantic::analysis::type_expr::ObjectMember;
+
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => {
+                        collect_component_meta_registry_member_surface_refs(
+                            &prop.ty,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_member_refs,
+                        );
+                    }
+                    ObjectMember::IndexSignature(sig) => {
+                        collect_component_meta_registry_member_surface_refs(
+                            &sig.key_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_member_refs,
+                        );
+                        collect_component_meta_registry_member_surface_refs(
+                            &sig.value_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_member_refs,
+                        );
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        collect_component_meta_registry_function_surface_refs(
+                            func,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                    ObjectMember::Method(method) => {
+                        collect_component_meta_registry_function_surface_refs(
+                            &method.function,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                }
+            }
+        }
+        TypeExpr::Function(func) => {
+            collect_component_meta_registry_function_surface_refs(
+                func,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_component_meta_registry_refs(
+                object,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            collect_component_meta_registry_refs(
+                index,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            if !allow_plain_member_refs {
+                return;
+            }
+            collect_component_meta_registry_refs(
+                check,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            collect_component_meta_registry_refs(
+                extends,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            collect_component_meta_registry_refs(
+                true_type,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            collect_component_meta_registry_refs(
+                false_type,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            if !allow_plain_member_refs {
+                return;
+            }
+            collect_component_meta_registry_refs(
+                source,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            collect_component_meta_registry_refs(
+                value,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_member_refs,
+            );
+            if let Some(name_type) = name_type.as_deref() {
+                collect_component_meta_registry_refs(
+                    name_type,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_member_refs,
+                );
+            }
+        }
+        TypeExpr::TypeParameter(_) => {}
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Infer { .. } => {}
+    }
+}
+
+fn collect_component_meta_registry_function_surface_refs(
+    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    for param in &func.parameters {
+        collect_component_meta_registry_member_surface_refs(
+            &param.ty,
+            published_names,
+            queued_names,
+            output,
+            source_hint,
+            false,
+        );
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        collect_component_meta_registry_member_surface_refs(
+            return_type,
+            published_names,
+            queued_names,
+            output,
+            source_hint,
+            false,
+        );
+    }
+}
+
+fn collect_component_meta_registry_public_field_refs(
+    host: &VerterHost,
+    owner_canonical: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    let parsed_raw = field
+        .raw_type
+        .as_deref()
+        .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
+    let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
+
+    collect_component_meta_registry_public_surface_refs(
+        expr,
+        published_names,
+        queued_names,
+        output,
+        source_hint,
+    );
+
+    collect_component_meta_registry_public_indexed_access_roots(
+        host,
+        owner_canonical,
+        store_view,
+        expr,
+        published_names,
+        queued_names,
+        output,
+        source_hint,
+    );
+}
+
+fn collect_component_meta_registry_public_surface_refs(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments: _,
+        } => {
+            enqueue_component_meta_registry_ref(
+                published_names,
+                queued_names,
+                output,
+                name.as_ref(),
+                source_hint,
+                None,
+            );
+        }
+        TypeExpr::Parenthesized(element) => {
+            collect_component_meta_registry_public_surface_refs(
+                element,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Array { .. }
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_)
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Union(_)
+        | TypeExpr::Intersection(_)
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TemplateLiteral { .. } => {}
+        TypeExpr::Object(_)
+        | TypeExpr::Function(_)
+        | TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => {}
+    }
+}
+
+fn collect_component_meta_registry_public_indexed_access_roots(
+    host: &VerterHost,
+    owner_canonical: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+) {
+    use verter_semantic::analysis::type_eval::TypeDeclKind;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    let TypeExpr::IndexedAccess { object, .. } = expr else {
+        return;
+    };
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = object.as_ref()
+    else {
+        return;
+    };
+    if !type_arguments.is_empty() {
+        return;
+    }
+    let Some(prepared) =
+        host.prepared_type_decl_in_view(owner_canonical, name.as_ref(), store_view)
+    else {
+        return;
+    };
+    if !matches!(prepared.kind, TypeDeclKind::Interface | TypeDeclKind::Class) {
+        return;
+    }
+    enqueue_component_meta_registry_ref(
+        published_names,
+        queued_names,
+        output,
+        name.as_ref(),
+        source_hint,
+        None,
+    );
+}
+
+fn collect_component_meta_registry_member_surface_refs(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    published_names: &rustc_hash::FxHashSet<String>,
+    queued_names: &mut rustc_hash::FxHashSet<String>,
+    output: &mut VecDeque<PendingComponentMetaRegistryRef>,
+    source_hint: Option<&str>,
+    allow_plain_refs: bool,
+) {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments: _,
+        } if allow_plain_refs => {
+            enqueue_component_meta_registry_ref(
+                published_names,
+                queued_names,
+                output,
+                name.as_ref(),
+                source_hint,
+                None,
+            );
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_component_meta_registry_member_surface_refs(
+                object,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                true,
+            );
+            collect_component_meta_registry_member_surface_refs(
+                index,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                true,
+            );
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element) => {
+            collect_component_meta_registry_member_surface_refs(
+                element,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+                allow_plain_refs,
+            );
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements.iter() {
+                collect_component_meta_registry_member_surface_refs(
+                    &element.ty,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                    allow_plain_refs,
                 );
             }
         }
@@ -2458,126 +2574,15 @@ fn collect_component_meta_registry_refs(
             expressions: types, ..
         } => {
             for ty in types.iter() {
-                collect_component_meta_registry_refs(
+                collect_component_meta_registry_member_surface_refs(
                     ty,
                     published_names,
                     queued_names,
                     output,
                     source_hint,
+                    allow_plain_refs,
                 );
             }
-        }
-        TypeExpr::Object(object) => {
-            for member in object.properties.iter() {
-                match member {
-                    verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                        collect_component_meta_registry_refs(
-                            &property.ty,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
-                        signature,
-                    ) => {
-                        collect_component_meta_registry_refs(
-                            &signature.key_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                        collect_component_meta_registry_refs(
-                            &signature.value_type,
-                            published_names,
-                            queued_names,
-                            output,
-                            source_hint,
-                        );
-                    }
-                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
-                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                        function,
-                    ) => {
-                        for parameter in function.parameters.iter() {
-                            collect_component_meta_registry_refs(
-                                &parameter.ty,
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                            );
-                        }
-                        if let Some(return_type) = function.return_type.as_deref() {
-                            collect_component_meta_registry_refs(
-                                return_type,
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                            );
-                        }
-                    }
-                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                        for parameter in method.function.parameters.iter() {
-                            collect_component_meta_registry_refs(
-                                &parameter.ty,
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                            );
-                        }
-                        if let Some(return_type) = method.function.return_type.as_deref() {
-                            collect_component_meta_registry_refs(
-                                return_type,
-                                published_names,
-                                queued_names,
-                                output,
-                                source_hint,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        TypeExpr::Function(function) => {
-            for parameter in function.parameters.iter() {
-                collect_component_meta_registry_refs(
-                    &parameter.ty,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                );
-            }
-            if let Some(return_type) = function.return_type.as_deref() {
-                collect_component_meta_registry_refs(
-                    return_type,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                );
-            }
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            collect_component_meta_registry_refs(
-                object,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-            );
-            collect_component_meta_registry_refs(
-                index,
-                published_names,
-                queued_names,
-                output,
-                source_hint,
-            );
         }
         TypeExpr::Conditional {
             check,
@@ -2585,33 +2590,37 @@ fn collect_component_meta_registry_refs(
             true_type,
             false_type,
         } => {
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 check,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 extends,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 true_type,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 false_type,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
         }
         TypeExpr::Mapped {
@@ -2620,55 +2629,101 @@ fn collect_component_meta_registry_refs(
             name_type,
             ..
         } => {
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 source,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
-            collect_component_meta_registry_refs(
+            collect_component_meta_registry_member_surface_refs(
                 value,
                 published_names,
                 queued_names,
                 output,
                 source_hint,
+                allow_plain_refs,
             );
             if let Some(name_type) = name_type.as_deref() {
-                collect_component_meta_registry_refs(
+                collect_component_meta_registry_member_surface_refs(
                     name_type,
                     published_names,
                     queued_names,
                     output,
                     source_hint,
+                    allow_plain_refs,
                 );
             }
         }
-        TypeExpr::TypeParameter(param) => {
-            if let Some(constraint) = param.constraint.as_deref() {
-                collect_component_meta_registry_refs(
-                    constraint,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                );
-            }
-            if let Some(default) = param.default.as_deref() {
-                collect_component_meta_registry_refs(
-                    default,
-                    published_names,
-                    queued_names,
-                    output,
-                    source_hint,
-                );
+        TypeExpr::Function(func) => {
+            collect_component_meta_registry_function_surface_refs(
+                func,
+                published_names,
+                queued_names,
+                output,
+                source_hint,
+            );
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => {
+                        collect_component_meta_registry_member_surface_refs(
+                            &prop.ty,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_refs,
+                        );
+                    }
+                    ObjectMember::IndexSignature(sig) => {
+                        collect_component_meta_registry_member_surface_refs(
+                            &sig.key_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_refs,
+                        );
+                        collect_component_meta_registry_member_surface_refs(
+                            &sig.value_type,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                            allow_plain_refs,
+                        );
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        collect_component_meta_registry_function_surface_refs(
+                            func,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                    ObjectMember::Method(method) => {
+                        collect_component_meta_registry_function_surface_refs(
+                            &method.function,
+                            published_names,
+                            queued_names,
+                            output,
+                            source_hint,
+                        );
+                    }
+                }
             }
         }
-        TypeExpr::Primitive(_)
+        TypeExpr::TypeParameter(_)
+        | TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
         | TypeExpr::TypeOf(_)
-        | TypeExpr::Infer { .. } => {}
+        | TypeExpr::Infer { .. }
+        | TypeExpr::Ref { .. } => {}
     }
 }
 
@@ -2892,7 +2947,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 owner_canonical,
                 snapshot,
                 eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-                eval_context.and_then(|captured| captured.owner_env.clone()),
+                &dep_resolutions,
                 self.store_view,
             );
         if let Some(compute_eval_start) = compute_eval_start {
@@ -3216,12 +3271,17 @@ fn resolve_jsdoc_tag_type(
             .into_iter()
             .map(|dependency| dependency.canonical_id),
     );
-    let mut owner_env = host
-        .build_cache_only_lookup_env_for_expr_in_view(canonical_source, &parsed, store_view)
-        .or_else(|| host.base_eval_env_in_view(canonical_source, store_view))
-        .unwrap_or_default();
-    let resolved = verter_semantic::analysis::type_eval::evaluate(&parsed, &mut owner_env);
-    Some(resolved)
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        host,
+        store_view,
+        canonical_source,
+    );
+    let resolved = verter_semantic::analysis::type_solver::solve::solve_type(
+        &parsed,
+        &solver_host,
+        verter_semantic::analysis::type_solver::solve::SolveLimits::default(),
+    );
+    Some(resolved.value)
 }
 
 #[cfg(test)]

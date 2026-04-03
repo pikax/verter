@@ -3310,6 +3310,36 @@ fn workspace_resolution_does_not_override_exact_resolution() {
     );
 }
 
+#[test]
+fn shallow_type_dependency_resolution_finds_loaded_overlay_relative_targets() {
+    let host = strict_host();
+
+    // Upsert the importer first so its cached dependency resolutions stay empty.
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        "<script setup lang=\"ts\">\nimport type { ComponentConfig } from './tv'\ndefineProps<ComponentConfig>()\n</script>\n<template><div /></template>",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/tv.ts",
+        "export interface ComponentConfig { label: string }",
+    );
+
+    let store_view = host.resolver_store_view();
+    let result = host.resolve_type_dependency_canonical_shallow_in_view(
+        "/src/Button.vue",
+        "./tv",
+        Some(&store_view),
+    );
+
+    assert_eq!(
+        result,
+        Some("/src/tv.ts".to_string()),
+        "shallow type dependency resolution should find loaded overlay-only relative targets even when workspace resolution is unavailable"
+    );
+}
+
 /// Macro type deps (defineProps<ExternalType>) should resolve packages with
 /// types-only exports (e.g., `"exports": { ".": { "types": "..." } }`).
 /// This requires using TypeImport (not EsmImport) so the "types" condition
@@ -3581,6 +3611,10 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
     assert!(
         declaration_entry.external_type_analysis.is_some(),
         "the declaration companion should own the cached external-type analysis",
+    );
+    assert!(
+        declaration_entry.snapshot.is_none(),
+        "declaration-companion resolution should stay on the shallow cached path instead of materializing a full imported snapshot",
     );
 }
 

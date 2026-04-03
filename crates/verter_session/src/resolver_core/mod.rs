@@ -70,10 +70,7 @@ pub use fallthrough::{
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    prepare_imported_type_alias, prepare_local_imported_type_alias,
     CachedPreparedImportedTypeAlias, ComputedEvaluatedTypes, ImportedSymbolDependency,
-    ImportedTypeAliasPrepareError, ImportedTypeAliasResolveRequest, ImportedTypeAliasResolver,
-    PreparedImportedTypeAlias, PreparedLocalImportedTypeAlias,
 };
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,

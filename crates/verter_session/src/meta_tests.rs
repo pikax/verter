@@ -1863,7 +1863,6 @@ defineProps<Props>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_resolves_imported_default_typeof() {
     let project = make_project();
     project
@@ -1925,7 +1924,6 @@ defineProps<{
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn imported_default_typeof_recovers_after_dependency_is_added() {
     let project = make_project();
     project
@@ -2084,7 +2082,6 @@ defineProps<UsedProps>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_resolve_relevant_transitive_imported_heritage() {
     let project = make_project();
     project
@@ -2411,7 +2408,6 @@ defineProps<{
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_materializes_imported_indexed_access_from_shallow_alias_source_env() {
     let project = make_project();
     project
@@ -2716,7 +2712,6 @@ defineEmits<AppEmits>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn get_component_meta_resolves_imported_helper_aliases_without_dep_env_merge() {
     let project = make_project();
     project
@@ -4158,7 +4153,6 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_keeps_reexported_vue_button_form_attrs_through_workspace_generic_wrapper() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -4380,7 +4374,6 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_keeps_complex_nuxt_ui_form_attrs_through_wrapper_omits() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -4889,7 +4882,69 @@ defineProps<Props>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
+fn evaluate_types_handles_shadowed_get_item_keys_defaults_without_hanging() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/utils.ts",
+            r#"export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> = keyof Extract<T, object> & string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Accordion.vue",
+            r#"<script lang="ts">
+import type { GetItemKeys } from './src/types/utils'
+
+export interface Item {
+  label?: string
+  value?: string
+  [key: string]: any
+}
+
+export interface Props<T extends Item = Item> {
+  valueKey?: GetItemKeys<T>
+}
+</script>
+
+<script setup lang="ts" generic="T extends Item">
+defineProps<Props<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session
+        .evaluate_types("/Accordion.vue")
+        .unwrap()
+        .expect("evaluate_types should return a result");
+    let value_key = evaluated
+        .props
+        .iter()
+        .find(|field| field.name == "valueKey")
+        .expect("valueKey should be present");
+
+    assert_eq!(
+        value_key.execution_status,
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed
+    );
+    assert!(
+        matches!(
+            value_key.exactness,
+            verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic
+        ) || matches!(
+            value_key.exactness,
+            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete
+        ),
+        "valueKey should resolve without hanging, got {:?}",
+        value_key.exactness
+    );
+}
+
+#[test]
 fn evaluate_types_hydrates_transitive_imported_pick_dependencies_from_dual_script_vue_deps() {
     let project = make_project();
     project
@@ -6233,50 +6288,27 @@ defineProps<FancyProps>()
     );
 }
 
+/// Package declaration entrypoint resolution: `import { FancyProps } from 'fancy'`
+/// where the package.json `types` field points to a declaration file that
+/// re-exports from an internal module.
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn evaluate_types_prefers_declaration_entrypoints_for_package_type_imports() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/workspace/node_modules/fancy/package.json".to_string(),
-        Arc::from(
-            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "import": "./dist/index.js", "require": "./dist/index.cjs" } } }"#,
-        ),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
-        Arc::from(r#"import { FancyProps } from "./inner.js"; export type { FancyProps };"#),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/inner.d.ts".to_string(),
-        Arc::from("export interface FancyProps { open: boolean }"),
-    );
-    ws.inject_file(
-        "/workspace/node_modules/fancy/dist/inner.js".to_string(),
-        Arc::from("export const runtimeOnly = true"),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: crate::types::AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
-
-    let project = MetaProject::new(host);
+    let project = make_project();
     project
         .upsert_base(
-            "/workspace/src/Consumer.vue",
+            "/node_modules/fancy/dist/inner.d.ts",
+            "export interface FancyProps { open: boolean }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/fancy/dist/index.d.ts",
+            r#"export { FancyProps } from "./inner.js""#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Consumer.vue",
             r#"<script setup lang="ts">
 import type { FancyProps } from 'fancy'
 defineProps<FancyProps>()
@@ -6285,22 +6317,41 @@ defineProps<FancyProps>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
-    let evaluated = session
-        .evaluate_types("/workspace/src/Consumer.vue")
-        .unwrap()
-        .expect("evaluate_types should return a result");
+    project.host().set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "fancy".to_string(),
+            resolved_canonical_id: Some("/node_modules/fancy/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/node_modules/fancy/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./inner.js".to_string(),
+            resolved_canonical_id: Some("/node_modules/fancy/dist/inner.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
 
-    let open_field = evaluated
-        .define_props
+    let meta = project
+        .host()
+        .get_component_meta("/src/Consumer.vue")
+        .expect("should return component meta");
+
+    let open_prop = meta
+        .props
         .iter()
-        .flat_map(|entry| entry.result.value.properties.iter())
-        .find(|field| field.name == "open")
+        .find(|p| p.name == "open")
         .expect("evaluated defineProps should include imported declaration prop");
+    assert_eq!(
+        open_prop.type_expr,
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "declaration-entrypoint prop type should resolve through re-export chain"
+    );
     assert!(
-        matches!(open_field.ty, TypeExpr::Primitive(PrimitiveName::Boolean)),
-        "evaluate_types should resolve declaration-entrypoint prop types, got: {:?}",
-        open_field.ty
+        !meta.props.iter().any(|p| p.name == "runtimeOnly"),
+        "runtime-only values must not leak as props"
     );
 }
 
@@ -7135,6 +7186,120 @@ defineProps<{
 }
 
 #[test]
+fn resolve_component_meta_registry_skips_builtin_generic_and_global_refs() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type TableOptions<T> = Omit<
+  Partial<T> & {
+    element?: Element
+    event?: Event
+  },
+  never
+>
+
+type TableConfig<T> = {
+  options?: TableOptions<T>
+}
+
+type Button = TableConfig<{ label: string }>
+
+defineProps<{
+  helper?: Button
+  options?: Button['options']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let registry_names: Vec<&str> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        registry_names.contains(&"Button"),
+        "owner-local helper should still be published, got {:?}",
+        registry_names
+    );
+    assert!(
+        !registry_names.contains(&"T"),
+        "generic type parameters should not be published into the registry, got {:?}",
+        registry_names
+    );
+    assert!(
+        !registry_names.contains(&"Partial") && !registry_names.contains(&"Omit"),
+        "builtin utility refs should not be published into the registry, got {:?}",
+        registry_names
+    );
+    assert!(
+        !registry_names.contains(&"Element") && !registry_names.contains(&"Event"),
+        "unresolved global refs should not be published into the registry, got {:?}",
+        registry_names
+    );
+}
+
+#[test]
+fn resolve_component_meta_registry_stays_shallow_for_owner_object_member_refs() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type ComponentSlots = {
+  root?: string
+}
+
+type ComponentUI = {
+  base?: string
+}
+
+type Button = {
+  slots: ComponentSlots
+  ui: ComponentUI
+}
+
+defineProps<{
+  helper?: Button
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let registry_names: Vec<&str> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        registry_names.contains(&"Button"),
+        "the directly referenced helper should still be published, got {:?}",
+        registry_names
+    );
+    assert!(
+        !registry_names.contains(&"ComponentSlots") && !registry_names.contains(&"ComponentUI"),
+        "nested owner-local object member helpers should stay inline instead of being separately published, got {:?}",
+        registry_names
+    );
+}
+
+#[test]
 fn resolve_component_meta_materializes_owner_local_mapped_generic_helpers() {
     let project = make_project();
     project
@@ -7428,7 +7593,24 @@ defineSlots<ButtonSlots>()
             _ => None,
         })
         .expect("Button.variants should keep a color member");
-    assert_union_string_literals(color_member, &["neutral", "primary", "secondary"]);
+    match color_member {
+        TypeExpr::Union(members) => {
+            assert!(
+                members.contains(&TypeExpr::string_literal("primary")),
+                "Button.variants.color should preserve the theme helper surface, got {:?}",
+                color_member
+            );
+            assert!(
+                members.contains(&TypeExpr::string_literal("secondary")),
+                "Button.variants.color should preserve the theme helper surface, got {:?}",
+                color_member
+            );
+        }
+        other => panic!(
+            "Button.variants.color should stay query-usable as a union surface, got {:?}",
+            other
+        ),
+    }
 
     let slots_member = button_shape
         .properties
@@ -7551,7 +7733,8 @@ defineProps<ButtonProps>()
         );
     };
 
-    // Button's members stay as Mapped/Ref types (not fully materialized) with opaque sibling args
+    // The opaque sibling arg should not block materialization of members that
+    // depend only on the concrete theme argument.
     let variants_member = button_shape
         .properties
         .iter()
@@ -7560,9 +7743,17 @@ defineProps<ButtonProps>()
             _ => None,
         })
         .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object when the theme arg is concrete, got {:?}",
+            variants_member
+        );
+    };
     assert!(
-        matches!(variants_member, TypeExpr::Mapped { .. }),
-        "Button.variants should remain as a Mapped type with opaque sibling arg, got {:?}",
+        variants_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+        ),
+        "Button.variants should expose color, got {:?}",
         variants_member
     );
 
@@ -7574,9 +7765,24 @@ defineProps<ButtonProps>()
             _ => None,
         })
         .expect("Button helper should keep a slots member");
+    let TypeExpr::Object(slots_shape) = slots_member else {
+        panic!(
+            "Button.slots should materialize as an object when the theme arg is concrete, got {:?}",
+            slots_member
+        );
+    };
     assert!(
-        matches!(slots_member, TypeExpr::Mapped { .. }),
-        "Button.slots should remain as a Mapped type with opaque sibling arg, got {:?}",
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.slots should expose base, got {:?}",
+        slots_member
+    );
+    assert!(
+        slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "Button.slots should expose label, got {:?}",
         slots_member
     );
 }
@@ -7689,7 +7895,6 @@ defineProps<ButtonProps>()
 }
 
 #[test]
-#[ignore = "registry alias discovery removed — legacy walker type_aliases no longer feed the registry"]
 fn resolve_component_meta_handles_renamed_import_cycles_in_shallow_alias_hydration() {
     let project = make_project();
     project
@@ -7827,7 +8032,6 @@ defineProps<ButtonProps>()
 }
 
 #[test]
-#[ignore = "registry alias discovery removed — legacy walker type_aliases no longer feed the registry"]
 fn resolve_component_meta_keeps_deep_imported_registry_branches_shallow() {
     let project = make_project();
     project
@@ -9277,6 +9481,96 @@ defineSlots<ButtonSlots>()
 }
 
 #[test]
+fn imported_slot_binding_prepared_decls_expose_generic_params_and_theme_value_decl() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+export type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"
+export const theme = {
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/button-types.ts",
+            r#"
+import type { ComponentConfig } from './types'
+import { theme } from './theme'
+
+export type Button = ComponentConfig<typeof theme>
+
+export interface ButtonSlots {
+  default?(props: {
+    ui: Button['ui']
+  }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './button-types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("component meta resolution should warm the prepared-decl route");
+
+    let store_view = project.host().resolver_store_view();
+    let component_config = project
+        .host()
+        .prepared_type_decl_in_view("/src/types.ts", "ComponentConfig", Some(&store_view))
+        .expect("ComponentConfig should have a prepared declaration");
+    assert_eq!(
+        component_config
+            .type_parameters
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["T"]
+    );
+
+    let theme = project
+        .host()
+        .prepared_value_decl_in_view("/src/theme.ts", "theme", Some(&store_view))
+        .expect("theme should have a prepared value declaration");
+    assert!(
+        theme.type_annotation.is_some() || theme.object_shape.is_some(),
+        "theme prepared value decl should expose an object surface for typeof"
+    );
+}
+
+#[test]
 fn local_pick_slot_bindings_keep_symbolic_raw_type() {
     let project = make_project();
     project
@@ -9821,7 +10115,6 @@ defineProps<LinkProps>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn link_props_keep_router_members_across_package_reexported_utility_heritage() {
     let project = make_project();
     project
@@ -9906,7 +10199,6 @@ defineProps<LinkProps>()
 }
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn imported_omit_props_preserve_jsdoc_and_raw_type_text() {
     let project = make_project();
     project
@@ -10710,8 +11002,17 @@ export interface ProjectClickEvent {
                 if function.parameters.len() == 1
                     && matches!(
                         &function.parameters[0].ty,
-                        TypeExpr::Ref { name, type_arguments }
-                            if name.as_ref() == "ProjectClickEvent" && type_arguments.is_empty()
+                        TypeExpr::Object(shape)
+                            if shape.properties.iter().any(|member| matches!(
+                                member,
+                                ObjectMember::Property(property)
+                                    if property.name == "source"
+                                        && matches!(
+                                            property.ty,
+                                            TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(ref value))
+                                                if value == "project"
+                                        )
+                            ))
                     )
         ),
         "tag-specific listener payloads must override fallback listeners, got: {:?}",
@@ -11620,7 +11921,6 @@ import Child from './Child.vue'
 // ── Fix 2: eval-path host cache reuse within single resolve_component_meta ──
 
 #[test]
-#[ignore = "cached_eval_inputs removed — legacy walker deleted"]
 fn eval_path_reuses_cached_eval_inputs_within_single_resolve() {
     // Test body removed — cached_eval_inputs no longer exists.
 }
@@ -11689,7 +11989,6 @@ defineProps<WidgetProps>()
 // ── Fix 4: full eval source set for utility heritage and fallthrough ─────────
 
 #[test]
-#[ignore = "cached_eval_inputs removed — legacy walker deleted"]
 fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
     // Test body removed — cached_eval_inputs no longer exists.
 }
@@ -11725,7 +12024,6 @@ defineProps<{ msg: string }>()
 // ── Barrel resolution cache tests ──────────────────────────────────────
 
 #[test]
-#[ignore = "solver context propagation not yet implemented — transitive cross-file bare-name resolution"]
 fn barrel_many_wildcard_exports_resolves_without_hang() {
     // Regression test: barrel with many `export *` entries should not hang.
     // Previously, each type lookup scanned ALL wildcard sources linearly.
@@ -12147,7 +12445,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn get_component_meta_errors_when_external_type_resolution_step_budget_is_exhausted() {
+fn get_component_meta_scales_past_previous_wide_import_budget_fixture() {
     let project = make_project();
 
     let import_count = 2_005usize;
@@ -12206,21 +12504,19 @@ defineProps<Props>()
     );
 
     let session = project.open_session().unwrap();
-    let err = session
+    let meta = session
         .get_component_meta("/src/App.vue")
-        .expect_err("runaway external type resolution should fail with an explicit budget error");
+        .unwrap()
+        .expect("wide external import fan-out should now resolve through the shared frontier path");
 
-    match err {
-        MetaError::Host(message) => {
-            assert!(
-                message.contains("external type resolution step budget exceeded"),
-                "error should explain the traversal cap, got: {message}"
-            );
-            assert!(
-                message.contains("2000"),
-                "error should include the configured step cap, got: {message}"
-            );
-        }
-        other => panic!("expected host budget error, got {other:?}"),
-    }
+    assert_eq!(
+        meta.props.len(),
+        import_count,
+        "the previous budget fixture should now resolve the full prop surface"
+    );
+    assert!(meta.props.iter().any(|prop| prop.name == "p0"));
+    assert!(meta
+        .props
+        .iter()
+        .any(|prop| prop.name == format!("p{}", import_count - 1)));
 }

@@ -109,6 +109,8 @@ pub struct ShallowValueSymbol {
     pub function_signature: Option<FunctionSignature>,
     /// Object literal shape, if the declaration is a literal object.
     pub object_shape: Option<ObjectExpr>,
+    /// Enum member values — populated for `ValueDeclKind::Enum`.
+    pub enum_members: Option<rustc_hash::FxHashMap<String, TypeExpr>>,
 }
 
 /// A reference to an imported symbol that needs cross-file resolution.
@@ -248,12 +250,26 @@ impl ShallowFileState {
         analysis: Arc<AnalyzedExternalTypeSource>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
     ) -> Self {
+        Self::from_analysis_with_source(whole_hash, analysis, None, eval_env)
+    }
+
+    /// Build from analysis with an optional source fallback that can populate
+    /// symbol inventories when the caller does not already have an `EvalEnv`.
+    pub fn from_analysis_with_source(
+        whole_hash: Hash16,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+        eval_source: Option<&str>,
+        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+    ) -> Self {
+        let fallback_env =
+            eval_source.map(verter_semantic::analysis::type_eval_build::parse_and_build_env);
+        let eval_env = eval_env.or(fallback_env.as_ref());
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
         let mut import_locals = FxHashSet::default();
         let mut import_targets = FxHashMap::default();
-        let mut symbols = FxHashMap::default();
-        let mut value_symbols = FxHashMap::default();
+        let mut symbols: FxHashMap<String, ShallowTypeSymbol> = FxHashMap::default();
+        let mut value_symbols: FxHashMap<String, ShallowValueSymbol> = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
@@ -309,7 +325,7 @@ impl ShallowFileState {
         if let Some(env) = eval_env {
             for (name, decl) in &env.type_symbols {
                 let local_type_sym = analysis.local_type_symbol(name);
-                let (local_deps, external_deps) = if let Some(sym) = local_type_sym {
+                let (local_deps, mut external_deps) = if let Some(sym) = local_type_sym {
                     classify_deps(
                         name,
                         analysis.as_ref(),
@@ -320,7 +336,45 @@ impl ShallowFileState {
                 } else {
                     (Vec::new(), Vec::new())
                 };
+                augment_with_typeof_import_deps(&decl.body, &import_targets, &mut external_deps);
 
+                // Phase 1b: Declaration merging — multiple interfaces with the
+                // same name merge their members (TS declaration merging).
+                if let Some(existing) = symbols.get_mut(name) {
+                    if existing.kind == TypeDeclKind::Interface
+                        && decl.kind == TypeDeclKind::Interface
+                    {
+                        // Merge bodies: combine members via Intersection
+                        existing.raw_body = TypeExpr::intersection(vec![
+                            existing.raw_body.clone(),
+                            decl.body.clone(),
+                        ]);
+                        // Merge type parameters (keep first decl's params,
+                        // add any new params from subsequent declarations)
+                        for param in &decl.type_parameters {
+                            if !existing
+                                .type_parameters
+                                .iter()
+                                .any(|p| p.name == param.name)
+                            {
+                                existing.type_parameters.push(param.clone());
+                            }
+                        }
+                        // Merge local deps
+                        for dep in &local_deps {
+                            if !existing.local_deps.contains(dep) {
+                                existing.local_deps.push(dep.clone());
+                            }
+                        }
+                        // Merge external deps
+                        for dep in &external_deps {
+                            if !existing.external_deps.contains(dep) {
+                                existing.external_deps.push(dep.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
                 symbols.insert(
                     name.clone(),
                     ShallowTypeSymbol {
@@ -334,6 +388,16 @@ impl ShallowFileState {
             }
 
             for (name, decl) in &env.value_symbols {
+                // For enum values, extract member names from the corresponding
+                // type symbol's union body (TypeScript enums are dual-space:
+                // type = union, value = object with member lookup).
+                let enum_members = if decl.kind == ValueDeclKind::Enum {
+                    env.type_symbols
+                        .get(name)
+                        .and_then(|type_decl| extract_enum_members_from_type_body(&type_decl.body))
+                } else {
+                    None
+                };
                 value_symbols.insert(
                     name.clone(),
                     ShallowValueSymbol {
@@ -341,11 +405,13 @@ impl ShallowFileState {
                         type_annotation: decl.type_annotation.clone(),
                         function_signature: decl.function_signature.clone(),
                         object_shape: decl.object_shape.clone(),
+                        enum_members,
                     },
                 );
             }
         }
-        // Note: when no eval_env is provided, symbols stay empty.
+        // Without an eval env or source fallback, the shallow state can still
+        // expose export/import routing but cannot populate declaration bodies.
         // The analysis-level symbol data (AnalyzedExternalTypeSymbol) does not
         // carry TypeExpr bodies â€” only dependency metadata. Callers that need
         // symbol bodies must build the shallow state through the eval-env path.
@@ -525,6 +591,50 @@ impl<'a> ShallowTypeView<'a> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Extract enum member names and values from a union type body.
+///
+/// TypeScript enums produce a union of literal types as their type-space body.
+/// This function extracts the member name → literal value mapping for the
+/// value-space `enum_members` field.
+fn extract_enum_members_from_type_body(body: &TypeExpr) -> Option<FxHashMap<String, TypeExpr>> {
+    match body {
+        TypeExpr::Union(members) => {
+            let mut result = FxHashMap::default();
+            for (i, member) in members.iter().enumerate() {
+                match member {
+                    TypeExpr::Literal(lit) => {
+                        let name = match lit {
+                            verter_semantic::analysis::type_expr::LiteralValue::String(s) => {
+                                s.clone()
+                            }
+                            verter_semantic::analysis::type_expr::LiteralValue::Number(n) => {
+                                format!("{n}")
+                            }
+                            verter_semantic::analysis::type_expr::LiteralValue::Boolean(b) => {
+                                format!("{b}")
+                            }
+                            verter_semantic::analysis::type_expr::LiteralValue::BigInt(s) => {
+                                s.clone()
+                            }
+                        };
+                        result.insert(name, member.clone());
+                    }
+                    _ => {
+                        // Non-literal member — use index as name
+                        result.insert(format!("_{i}"), member.clone());
+                    }
+                }
+            }
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Classify a symbol's structural dependencies into local vs external.
 fn classify_deps(
     symbol_name: &str,
@@ -577,6 +687,139 @@ fn classify_deps(
     });
 
     (local, external)
+}
+
+fn augment_with_typeof_import_deps(
+    expr: &TypeExpr,
+    import_targets: &FxHashMap<String, (String, String)>,
+    external: &mut Vec<ExternalSymbolRef>,
+) {
+    let mut roots = FxHashSet::default();
+    collect_typeof_roots(expr, &mut roots);
+    for root in roots {
+        let Some((source_specifier, imported_name)) = import_targets.get(root.as_str()) else {
+            continue;
+        };
+        let dep = ExternalSymbolRef {
+            local_name: root.clone(),
+            source_specifier: source_specifier.clone(),
+            imported_name: imported_name.clone(),
+        };
+        if !external.contains(&dep) {
+            external.push(dep);
+        }
+    }
+    external.sort_by(|left, right| {
+        left.local_name
+            .cmp(&right.local_name)
+            .then_with(|| left.source_specifier.cmp(&right.source_specifier))
+            .then_with(|| left.imported_name.cmp(&right.imported_name))
+    });
+}
+
+fn collect_typeof_roots(expr: &TypeExpr, out: &mut FxHashSet<String>) {
+    match expr {
+        TypeExpr::TypeOf(value_ref) => {
+            if let Some(root) = value_ref.path.first() {
+                out.insert(root.clone());
+            }
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            for inner in types.iter() {
+                collect_typeof_roots(inner, out);
+            }
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element) => collect_typeof_roots(element, out),
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements.iter() {
+                collect_typeof_roots(&element.ty, out);
+            }
+        }
+        TypeExpr::Object(object) => {
+            for member in &object.properties {
+                match member {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
+                        collect_typeof_roots(&prop.ty, out);
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(sig) => {
+                        collect_typeof_roots(&sig.key_type, out);
+                        collect_typeof_roots(&sig.value_type, out);
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(func)
+                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                        func,
+                    ) => {
+                        collect_typeof_roots_in_function(func, out);
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                        collect_typeof_roots_in_function(&method.function, out);
+                    }
+                }
+            }
+        }
+        TypeExpr::Function(func) => collect_typeof_roots_in_function(func, out),
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_typeof_roots(object, out);
+            collect_typeof_roots(index, out);
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            collect_typeof_roots(check, out);
+            collect_typeof_roots(extends, out);
+            collect_typeof_roots(true_type, out);
+            collect_typeof_roots(false_type, out);
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            collect_typeof_roots(source, out);
+            collect_typeof_roots(value, out);
+            if let Some(name_type) = name_type.as_deref() {
+                collect_typeof_roots(name_type, out);
+            }
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            for expr in expressions.iter() {
+                collect_typeof_roots(expr, out);
+            }
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Ref { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. }
+        | TypeExpr::Unknown { .. } => {}
+    }
+}
+
+fn collect_typeof_roots_in_function(
+    func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    out: &mut FxHashSet<String>,
+) {
+    for param in &func.parameters {
+        collect_typeof_roots(&param.ty, out);
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        collect_typeof_roots(return_type, out);
+    }
+    for param in &func.type_parameters {
+        if let Some(constraint) = param.constraint.as_deref() {
+            collect_typeof_roots(constraint, out);
+        }
+        if let Some(default) = param.default.as_deref() {
+            collect_typeof_roots(default, out);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +909,56 @@ mod tests {
         );
         // But exports should still be populated
         assert!(state.export_target("Props").is_some());
+    }
+
+    #[test]
+    fn source_backed_construction_populates_symbols_without_caller_env() {
+        let source = r#"
+export interface Props { label: string }
+export const defaults: Props = { label: 'ok' }
+"#;
+        let analysis = make_analysis(source);
+        let state = ShallowFileState::from_analysis_with_source(
+            Hash16::default(),
+            analysis,
+            Some(source),
+            None,
+        );
+
+        assert!(
+            state.symbol("Props").is_some(),
+            "source-backed construction should populate type symbols without a caller-provided env"
+        );
+        let defaults = state
+            .value_symbol("defaults")
+            .expect("source-backed construction should populate value symbols");
+        assert_eq!(defaults.kind, ValueDeclKind::Const);
+        assert!(defaults.type_annotation.is_some());
+    }
+
+    #[test]
+    fn typeof_imports_are_recorded_as_external_deps() {
+        let source = r#"
+import { theme } from './theme'
+
+export type Button = {
+  slots: keyof typeof theme
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+        let button = state.symbol("Button").expect("Button should exist");
+
+        assert!(
+            button.external_deps.iter().any(|dep| {
+                dep.local_name == "theme"
+                    && dep.source_specifier == "./theme"
+                    && dep.imported_name == "theme"
+            }),
+            "typeof import roots should be tracked as external deps: {:?}",
+            button.external_deps
+        );
     }
 
     #[test]
@@ -839,5 +1132,78 @@ export const defaults: Props = { label: 'ok' }
             Some(ExportTarget::Local { symbol_name }) => assert_eq!(symbol_name, "defaults"),
             other => panic!("expected Local export for defaults, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn duplicate_interface_names_handled_without_panic() {
+        // The eval env deduplicates interface declarations (HashMap last-wins).
+        // The merging code in from_analysis is a safety net for future env
+        // changes that might preserve duplicates. This test verifies that
+        // duplicate names don't cause panics or data loss.
+        let source = r#"
+export interface Props { x: string }
+export interface Props { y: number }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let symbol = state.symbol("Props").expect("Props symbol should exist");
+        assert_eq!(
+            symbol.kind,
+            TypeDeclKind::Interface,
+            "symbol should keep Interface kind"
+        );
+        // EvalEnv does last-wins for same-name symbols, so only the second
+        // interface's body is present. The merging code in from_analysis
+        // would merge if the env produced duplicates.
+        assert!(
+            !matches!(symbol.raw_body, TypeExpr::Unknown { .. }),
+            "body should not be Unknown"
+        );
+    }
+
+    #[test]
+    fn name_resolution_populated_for_type_decls_with_deps() {
+        let source = r#"
+import type { Inner } from "./inner"
+type Local = { x: number }
+export interface Props { child: Inner; data: Local }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let dep_edges = {
+            let mut edges = FxHashMap::default();
+            edges.insert("./inner".to_string(), "/resolved/inner.ts".to_string());
+            edges
+        };
+        let prepared = super::super::prepared_decl::prepare_exported_type_decl(
+            "/src/types.ts",
+            &state,
+            "Props",
+            Some(&dep_edges),
+        )
+        .expect("Props should prepare");
+
+        // Local dep should resolve to same file
+        assert_eq!(
+            prepared
+                .name_resolution
+                .get("Local")
+                .map(|r| &r.canonical_id),
+            Some(&"/src/types.ts".to_string()),
+            "local dep should resolve to same file"
+        );
+        // External dep should resolve through dep_edges
+        assert_eq!(
+            prepared
+                .name_resolution
+                .get("Inner")
+                .map(|r| &r.canonical_id),
+            Some(&"/resolved/inner.ts".to_string()),
+            "external dep should resolve through dep_edges"
+        );
     }
 }
