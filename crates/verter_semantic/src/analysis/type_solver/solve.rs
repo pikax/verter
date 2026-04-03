@@ -133,10 +133,7 @@ impl SolveState {
             .len()
             .saturating_sub(Self::MAX_CONDITIONAL_CONTEXT_FRAMES)
             .max(base);
-        self.conditional_context_stack[start..]
-            .iter()
-            .cloned()
-            .collect()
+        self.conditional_context_stack[start..].to_vec()
     }
 
     /// Record incomplete status.
@@ -933,6 +930,21 @@ fn resolve_name_in_context(state: &SolveState, name: &str) -> Option<ResolvedRoo
     None
 }
 
+/// Build effective args: explicit call-site args plus lowered defaults
+/// for any unsupplied trailing type parameters. This ensures that
+/// `Foo<number>` and `Foo<number, string>` (where string is the default)
+/// produce the same recursion key and placeholder args.
+///
+/// Infer bindings from conditional types do not need explicit inclusion
+/// here. When `resolve_conditional` discovers infer bindings (e.g.,
+/// `T extends Promise<infer U> ? AwaitedLike<U> : T`), it injects them
+/// into the true-branch substitution env. The recursive call's type
+/// arguments then pass through `resolve_node`, which applies that
+/// substitution — so by the time we reach `resolve_prepared_ref`, the
+/// args are already fully substituted with inferred types. This is
+/// correct because infer resolution and arg resolution happen in the
+/// same `resolve_node` walk, before the recursive call enters this
+/// function.
 fn build_effective_args(
     arena: &mut QueryArena,
     prepared: &PreparedTypeDecl,
@@ -963,11 +975,24 @@ fn materialize_effective_arg(
     node: NodeId,
     subst: &SubstitutionEnv,
 ) -> NodeId {
+    let mut in_progress = std::collections::HashSet::new();
+    materialize_effective_arg_inner(arena, node, subst, &mut in_progress)
+}
+
+fn materialize_effective_arg_inner(
+    arena: &mut QueryArena,
+    node: NodeId,
+    subst: &SubstitutionEnv,
+    in_progress: &mut std::collections::HashSet<NodeId>,
+) -> NodeId {
     if node.is_unresolved() {
         return node;
     }
+    if !in_progress.insert(node) {
+        return node;
+    }
 
-    match arena.get(node).clone() {
+    let result = match arena.get(node).clone() {
         Node::Primitive(_)
         | Node::Literal(_)
         | Node::Applied { .. }
@@ -982,31 +1007,38 @@ fn materialize_effective_arg(
         } => {
             if type_arguments.is_empty() {
                 if let Some(bound) = subst.resolve(&name) {
-                    return materialize_effective_arg(arena, bound, subst);
+                    materialize_effective_arg_inner(arena, bound, subst, in_progress)
+                } else {
+                    let resolved_args: Vec<NodeId> = type_arguments
+                        .iter()
+                        .map(|&arg| materialize_effective_arg_inner(arena, arg, subst, in_progress))
+                        .collect();
+                    arena.type_ref(name, resolved_args)
                 }
+            } else {
+                let resolved_args: Vec<NodeId> = type_arguments
+                    .iter()
+                    .map(|&arg| materialize_effective_arg_inner(arena, arg, subst, in_progress))
+                    .collect();
+                arena.type_ref(name, resolved_args)
             }
-            let resolved_args: Vec<NodeId> = type_arguments
-                .iter()
-                .map(|&arg| materialize_effective_arg(arena, arg, subst))
-                .collect();
-            arena.type_ref(name, resolved_args)
         }
         Node::Union(members) => {
             let resolved: Vec<NodeId> = members
                 .into_iter()
-                .map(|member| materialize_effective_arg(arena, member, subst))
+                .map(|member| materialize_effective_arg_inner(arena, member, subst, in_progress))
                 .collect();
             arena.union(resolved)
         }
         Node::Intersection(members) => {
             let resolved: Vec<NodeId> = members
                 .into_iter()
-                .map(|member| materialize_effective_arg(arena, member, subst))
+                .map(|member| materialize_effective_arg_inner(arena, member, subst, in_progress))
                 .collect();
             arena.intersection(resolved)
         }
         Node::Array { element, readonly } => {
-            let element = materialize_effective_arg(arena, element, subst);
+            let element = materialize_effective_arg_inner(arena, element, subst, in_progress);
             arena.array(element, readonly)
         }
         Node::Tuple { elements, readonly } => {
@@ -1014,7 +1046,7 @@ fn materialize_effective_arg(
             for element in elements {
                 resolved_elements.push(super::arena::TupleNodeElement {
                     label: element.label,
-                    ty: materialize_effective_arg(arena, element.ty, subst),
+                    ty: materialize_effective_arg_inner(arena, element.ty, subst, in_progress),
                     optional: element.optional,
                     rest: element.rest,
                 });
@@ -1029,7 +1061,7 @@ fn materialize_effective_arg(
             for property in obj.properties {
                 properties.push(super::arena::PropertyNode {
                     name: property.name,
-                    ty: materialize_effective_arg(arena, property.ty, subst),
+                    ty: materialize_effective_arg_inner(arena, property.ty, subst, in_progress),
                     optional: property.optional,
                     readonly: property.readonly,
                     is_method: property.is_method,
@@ -1038,8 +1070,14 @@ fn materialize_effective_arg(
 
             let mut index_signatures = Vec::with_capacity(obj.index_signatures.len());
             for signature in obj.index_signatures {
-                let key_type = materialize_effective_arg(arena, signature.key_type, subst);
-                let value_type = materialize_effective_arg(arena, signature.value_type, subst);
+                let key_type =
+                    materialize_effective_arg_inner(arena, signature.key_type, subst, in_progress);
+                let value_type = materialize_effective_arg_inner(
+                    arena,
+                    signature.value_type,
+                    subst,
+                    in_progress,
+                );
                 index_signatures.push(super::arena::IndexSignatureNode {
                     key_type,
                     value_type,
@@ -1049,12 +1087,17 @@ fn materialize_effective_arg(
 
             let mut call_signatures = Vec::with_capacity(obj.call_signatures.len());
             for signature in obj.call_signatures {
-                call_signatures.push(materialize_signature(arena, signature, subst));
+                call_signatures.push(materialize_signature(arena, signature, subst, in_progress));
             }
 
             let mut construct_signatures = Vec::with_capacity(obj.construct_signatures.len());
             for signature in obj.construct_signatures {
-                construct_signatures.push(materialize_signature(arena, signature, subst));
+                construct_signatures.push(materialize_signature(
+                    arena,
+                    signature,
+                    subst,
+                    in_progress,
+                ));
             }
 
             arena.alloc(Node::Object(super::arena::ObjectNode {
@@ -1067,17 +1110,17 @@ fn materialize_effective_arg(
         Node::Function(func) => {
             let mut signatures = Vec::with_capacity(func.signatures.len());
             for signature in func.signatures {
-                signatures.push(materialize_signature(arena, signature, subst));
+                signatures.push(materialize_signature(arena, signature, subst, in_progress));
             }
             arena.alloc(Node::Function(super::arena::FunctionNode { signatures }))
         }
         Node::KeyOf(operand) => {
-            let operand = materialize_effective_arg(arena, operand, subst);
+            let operand = materialize_effective_arg_inner(arena, operand, subst, in_progress);
             arena.key_of(operand)
         }
         Node::IndexedAccess { object, index } => {
-            let object = materialize_effective_arg(arena, object, subst);
-            let index = materialize_effective_arg(arena, index, subst);
+            let object = materialize_effective_arg_inner(arena, object, subst, in_progress);
+            let index = materialize_effective_arg_inner(arena, index, subst, in_progress);
             arena.indexed_access(object, index)
         }
         Node::Conditional {
@@ -1087,10 +1130,12 @@ fn materialize_effective_arg(
             false_branch,
             distributive,
         } => {
-            let check = materialize_effective_arg(arena, check, subst);
-            let extends = materialize_effective_arg(arena, extends, subst);
-            let true_branch = materialize_effective_arg(arena, true_branch, subst);
-            let false_branch = materialize_effective_arg(arena, false_branch, subst);
+            let check = materialize_effective_arg_inner(arena, check, subst, in_progress);
+            let extends = materialize_effective_arg_inner(arena, extends, subst, in_progress);
+            let true_branch =
+                materialize_effective_arg_inner(arena, true_branch, subst, in_progress);
+            let false_branch =
+                materialize_effective_arg_inner(arena, false_branch, subst, in_progress);
             arena.conditional(check, extends, true_branch, false_branch, distributive)
         }
         Node::Mapped {
@@ -1101,9 +1146,10 @@ fn materialize_effective_arg(
             readonly,
             name_type,
         } => {
-            let source = materialize_effective_arg(arena, source, subst);
-            let value = materialize_effective_arg(arena, value, subst);
-            let name_type = name_type.map(|node| materialize_effective_arg(arena, node, subst));
+            let source = materialize_effective_arg_inner(arena, source, subst, in_progress);
+            let value = materialize_effective_arg_inner(arena, value, subst, in_progress);
+            let name_type = name_type
+                .map(|node| materialize_effective_arg_inner(arena, node, subst, in_progress));
             arena.mapped(parameter, source, value, optional, readonly, name_type)
         }
         Node::TemplateLiteral {
@@ -1112,7 +1158,12 @@ fn materialize_effective_arg(
         } => {
             let mut resolved_expressions = Vec::with_capacity(expressions.len());
             for expr in expressions {
-                resolved_expressions.push(materialize_effective_arg(arena, expr, subst));
+                resolved_expressions.push(materialize_effective_arg_inner(
+                    arena,
+                    expr,
+                    subst,
+                    in_progress,
+                ));
             }
             arena.alloc(Node::TemplateLiteral {
                 quasis,
@@ -1120,16 +1171,20 @@ fn materialize_effective_arg(
             })
         }
         Node::Rest(inner) => {
-            let inner = materialize_effective_arg(arena, inner, subst);
+            let inner = materialize_effective_arg_inner(arena, inner, subst, in_progress);
             arena.alloc(Node::Rest(inner))
         }
-    }
+    };
+
+    in_progress.remove(&node);
+    result
 }
 
 fn materialize_signature(
     arena: &mut QueryArena,
     signature: super::arena::CallSignatureNode,
     subst: &SubstitutionEnv,
+    in_progress: &mut std::collections::HashSet<NodeId>,
 ) -> super::arena::CallSignatureNode {
     super::arena::CallSignatureNode {
         type_parameters: signature
@@ -1139,10 +1194,10 @@ fn materialize_signature(
                 name: param.name,
                 constraint: param
                     .constraint
-                    .map(|node| materialize_effective_arg(arena, node, subst)),
+                    .map(|node| materialize_effective_arg_inner(arena, node, subst, in_progress)),
                 default: param
                     .default
-                    .map(|node| materialize_effective_arg(arena, node, subst)),
+                    .map(|node| materialize_effective_arg_inner(arena, node, subst, in_progress)),
             })
             .collect(),
         parameters: signature
@@ -1150,25 +1205,34 @@ fn materialize_signature(
             .into_iter()
             .map(|param| super::arena::ParamNode {
                 name: param.name,
-                ty: materialize_effective_arg(arena, param.ty, subst),
+                ty: materialize_effective_arg_inner(arena, param.ty, subst, in_progress),
                 optional: param.optional,
                 rest: param.rest,
             })
             .collect(),
-        return_type: materialize_effective_arg(arena, signature.return_type, subst),
+        return_type: materialize_effective_arg_inner(
+            arena,
+            signature.return_type,
+            subst,
+            in_progress,
+        ),
     }
 }
 
 /// Semantic hash for a slice of effective argument nodes (for exact recursion keys).
+const EFFECTIVE_ARG_HASH_DEPTH_CAP: usize = 3;
+const EFFECTIVE_ARG_HASH_NODE_CAP: usize = 64;
+
 fn hash_effective_args(arena: &QueryArena, ids: &[NodeId]) -> u64 {
     use std::collections::HashSet;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut in_progress = HashSet::new();
+    let mut visited = 0usize;
     ids.len().hash(&mut hasher);
     for &id in ids {
-        hash_effective_arg_node(arena, id, &mut hasher, &mut in_progress);
+        hash_effective_arg_node(arena, id, &mut hasher, &mut in_progress, 0, &mut visited);
     }
     hasher.finish()
 }
@@ -1178,6 +1242,8 @@ fn hash_effective_arg_node(
     node: NodeId,
     hasher: &mut impl std::hash::Hasher,
     in_progress: &mut std::collections::HashSet<NodeId>,
+    depth: usize,
+    visited: &mut usize,
 ) {
     use std::hash::Hash;
 
@@ -1185,10 +1251,15 @@ fn hash_effective_arg_node(
         255u8.hash(hasher);
         return;
     }
+    if depth > EFFECTIVE_ARG_HASH_DEPTH_CAP || *visited > EFFECTIVE_ARG_HASH_NODE_CAP {
+        253u8.hash(hasher);
+        return;
+    }
     if !in_progress.insert(node) {
         254u8.hash(hasher);
         return;
     }
+    *visited += 1;
 
     match arena.get(node) {
         Node::Primitive(kind) => {
@@ -1203,20 +1274,20 @@ fn hash_effective_arg_node(
             2u8.hash(hasher);
             members.len().hash(hasher);
             for &member in members {
-                hash_effective_arg_node(arena, member, hasher, in_progress);
+                hash_effective_arg_node(arena, member, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::Intersection(members) => {
             3u8.hash(hasher);
             members.len().hash(hasher);
             for &member in members {
-                hash_effective_arg_node(arena, member, hasher, in_progress);
+                hash_effective_arg_node(arena, member, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::Array { element, readonly } => {
             4u8.hash(hasher);
             readonly.hash(hasher);
-            hash_effective_arg_node(arena, *element, hasher, in_progress);
+            hash_effective_arg_node(arena, *element, hasher, in_progress, depth + 1, visited);
         }
         Node::Tuple { elements, readonly } => {
             5u8.hash(hasher);
@@ -1226,7 +1297,7 @@ fn hash_effective_arg_node(
                 element.label.hash(hasher);
                 element.optional.hash(hasher);
                 element.rest.hash(hasher);
-                hash_effective_arg_node(arena, element.ty, hasher, in_progress);
+                hash_effective_arg_node(arena, element.ty, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::Object(object) => {
@@ -1237,13 +1308,34 @@ fn hash_effective_arg_node(
                 property.optional.hash(hasher);
                 property.readonly.hash(hasher);
                 property.is_method.hash(hasher);
-                hash_effective_arg_node(arena, property.ty, hasher, in_progress);
+                hash_effective_arg_node(
+                    arena,
+                    property.ty,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
             }
             object.index_signatures.len().hash(hasher);
             for signature in &object.index_signatures {
                 signature.readonly.hash(hasher);
-                hash_effective_arg_node(arena, signature.key_type, hasher, in_progress);
-                hash_effective_arg_node(arena, signature.value_type, hasher, in_progress);
+                hash_effective_arg_node(
+                    arena,
+                    signature.key_type,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
+                hash_effective_arg_node(
+                    arena,
+                    signature.value_type,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
             }
         }
         Node::Function(function) => {
@@ -1255,9 +1347,23 @@ fn hash_effective_arg_node(
                     param.name.hash(hasher);
                     param.optional.hash(hasher);
                     param.rest.hash(hasher);
-                    hash_effective_arg_node(arena, param.ty, hasher, in_progress);
+                    hash_effective_arg_node(
+                        arena,
+                        param.ty,
+                        hasher,
+                        in_progress,
+                        depth + 1,
+                        visited,
+                    );
                 }
-                hash_effective_arg_node(arena, signature.return_type, hasher, in_progress);
+                hash_effective_arg_node(
+                    arena,
+                    signature.return_type,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
             }
         }
         Node::Ref {
@@ -1268,7 +1374,7 @@ fn hash_effective_arg_node(
             name.hash(hasher);
             type_arguments.len().hash(hasher);
             for &arg in type_arguments {
-                hash_effective_arg_node(arena, arg, hasher, in_progress);
+                hash_effective_arg_node(arena, arg, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::Applied { identity, args } => {
@@ -1276,7 +1382,7 @@ fn hash_effective_arg_node(
             identity.hash(hasher);
             args.len().hash(hasher);
             for &arg in args {
-                hash_effective_arg_node(arena, arg, hasher, in_progress);
+                hash_effective_arg_node(arena, arg, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::TypeParam {
@@ -1287,12 +1393,16 @@ fn hash_effective_arg_node(
             10u8.hash(hasher);
             node.hash(hasher);
             name.hash(hasher);
-            constraint.map(|node| hash_effective_arg_node(arena, node, hasher, in_progress));
-            default.map(|node| hash_effective_arg_node(arena, node, hasher, in_progress));
+            constraint.map(|node| {
+                hash_effective_arg_node(arena, node, hasher, in_progress, depth + 1, visited)
+            });
+            default.map(|node| {
+                hash_effective_arg_node(arena, node, hasher, in_progress, depth + 1, visited)
+            });
         }
         Node::KeyOf(operand) => {
             11u8.hash(hasher);
-            hash_effective_arg_node(arena, *operand, hasher, in_progress);
+            hash_effective_arg_node(arena, *operand, hasher, in_progress, depth + 1, visited);
         }
         Node::TypeOf { path } => {
             12u8.hash(hasher);
@@ -1300,8 +1410,8 @@ fn hash_effective_arg_node(
         }
         Node::IndexedAccess { object, index } => {
             13u8.hash(hasher);
-            hash_effective_arg_node(arena, *object, hasher, in_progress);
-            hash_effective_arg_node(arena, *index, hasher, in_progress);
+            hash_effective_arg_node(arena, *object, hasher, in_progress, depth + 1, visited);
+            hash_effective_arg_node(arena, *index, hasher, in_progress, depth + 1, visited);
         }
         Node::Conditional {
             check,
@@ -1312,10 +1422,17 @@ fn hash_effective_arg_node(
         } => {
             14u8.hash(hasher);
             distributive.hash(hasher);
-            hash_effective_arg_node(arena, *check, hasher, in_progress);
-            hash_effective_arg_node(arena, *extends, hasher, in_progress);
-            hash_effective_arg_node(arena, *true_branch, hasher, in_progress);
-            hash_effective_arg_node(arena, *false_branch, hasher, in_progress);
+            hash_effective_arg_node(arena, *check, hasher, in_progress, depth + 1, visited);
+            hash_effective_arg_node(arena, *extends, hasher, in_progress, depth + 1, visited);
+            hash_effective_arg_node(arena, *true_branch, hasher, in_progress, depth + 1, visited);
+            hash_effective_arg_node(
+                arena,
+                *false_branch,
+                hasher,
+                in_progress,
+                depth + 1,
+                visited,
+            );
         }
         Node::Mapped {
             parameter,
@@ -1329,10 +1446,10 @@ fn hash_effective_arg_node(
             parameter.hash(hasher);
             optional.hash(hasher);
             readonly.hash(hasher);
-            hash_effective_arg_node(arena, *source, hasher, in_progress);
-            hash_effective_arg_node(arena, *value, hasher, in_progress);
+            hash_effective_arg_node(arena, *source, hasher, in_progress, depth + 1, visited);
+            hash_effective_arg_node(arena, *value, hasher, in_progress, depth + 1, visited);
             if let Some(name_type) = name_type {
-                hash_effective_arg_node(arena, *name_type, hasher, in_progress);
+                hash_effective_arg_node(arena, *name_type, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::TemplateLiteral {
@@ -1343,7 +1460,7 @@ fn hash_effective_arg_node(
             quasis.hash(hasher);
             expressions.len().hash(hasher);
             for &expr in expressions {
-                hash_effective_arg_node(arena, expr, hasher, in_progress);
+                hash_effective_arg_node(arena, expr, hasher, in_progress, depth + 1, visited);
             }
         }
         Node::Infer { name } => {
@@ -1353,7 +1470,7 @@ fn hash_effective_arg_node(
         }
         Node::Rest(inner) => {
             18u8.hash(hasher);
-            hash_effective_arg_node(arena, *inner, hasher, in_progress);
+            hash_effective_arg_node(arena, *inner, hasher, in_progress, depth + 1, visited);
         }
         Node::RecursiveRef {
             symbol_name,
@@ -1364,14 +1481,28 @@ fn hash_effective_arg_node(
             symbol_name.hash(hasher);
             type_arguments.len().hash(hasher);
             for &arg in type_arguments {
-                hash_effective_arg_node(arena, arg, hasher, in_progress);
+                hash_effective_arg_node(arena, arg, hasher, in_progress, depth + 1, visited);
             }
             conditional_context.len().hash(hasher);
             for frame in conditional_context {
                 frame.branch.hash(hasher);
                 frame.decided.hash(hasher);
-                hash_effective_arg_node(arena, frame.check, hasher, in_progress);
-                hash_effective_arg_node(arena, frame.extends, hasher, in_progress);
+                hash_effective_arg_node(
+                    arena,
+                    frame.check,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
+                hash_effective_arg_node(
+                    arena,
+                    frame.extends,
+                    hasher,
+                    in_progress,
+                    depth + 1,
+                    visited,
+                );
             }
         }
         Node::Error { description } => {
@@ -1486,14 +1617,21 @@ fn resolve_indexed_access(
         return arena.union(results);
     }
 
+    if matches!(arena.get(object), Node::Primitive(PrimitiveKind::Any)) {
+        return arena.primitive(PrimitiveKind::Any);
+    }
+
     let key = match arena.get(index) {
         Node::Literal(super::arena::SolverLiteral::String(s)) => Some(s.clone()),
         _ => None,
     };
 
-    let Some(key) = key else {
-        state.mark_symbolic();
-        return arena.indexed_access(object, index);
+    let open_key_kind = match arena.get(index) {
+        Node::Primitive(PrimitiveKind::String) => Some(PrimitiveKind::String),
+        Node::Primitive(PrimitiveKind::Number) => Some(PrimitiveKind::Number),
+        Node::Primitive(PrimitiveKind::Symbol) => Some(PrimitiveKind::Symbol),
+        Node::Primitive(PrimitiveKind::Any) => Some(PrimitiveKind::Any),
+        _ => None,
     };
 
     // Clone object node to release borrow before recursion/allocation.
@@ -1501,18 +1639,46 @@ fn resolve_indexed_access(
 
     match obj_node {
         Node::Object(obj) => {
-            if let Some(prop) = obj.properties.iter().find(|p| p.name == key) {
-                return prop.ty;
-            }
-            for idx_sig in &obj.index_signatures {
-                if matches!(
-                    arena.get(idx_sig.key_type),
-                    Node::Primitive(PrimitiveKind::String)
-                ) {
-                    return idx_sig.value_type;
+            if let Some(key) = key.as_ref() {
+                if let Some(prop) = obj.properties.iter().find(|p| p.name == *key) {
+                    return prop.ty;
                 }
             }
-            arena.primitive(PrimitiveKind::Undefined)
+
+            let matching_index_values: Vec<NodeId> = obj
+                .index_signatures
+                .iter()
+                .filter_map(|idx_sig| {
+                    index_signature_matches_request(
+                        arena,
+                        idx_sig.key_type,
+                        key.as_ref(),
+                        open_key_kind,
+                    )
+                    .then_some(idx_sig.value_type)
+                })
+                .collect();
+
+            if matching_index_values.is_empty() {
+                if key.is_none() && open_key_kind.is_none() {
+                    state.mark_symbolic();
+                    return arena.indexed_access(object, index);
+                }
+                return arena.primitive(PrimitiveKind::Undefined);
+            }
+
+            if matching_index_values.len() == 1 {
+                matching_index_values[0]
+            } else {
+                arena.union(matching_index_values)
+            }
+        }
+        Node::Union(members) => {
+            let results: Vec<NodeId> = members
+                .iter()
+                .map(|&member| resolve_indexed_access(arena, member, index, host, state, subst))
+                .collect();
+            arena.union(results)
         }
         Node::Intersection(members) => {
             let mut matches = Vec::new();
@@ -1532,6 +1698,42 @@ fn resolve_indexed_access(
             state.mark_symbolic();
             arena.indexed_access(object, index)
         }
+    }
+}
+
+fn index_signature_matches_request(
+    arena: &QueryArena,
+    key_type: NodeId,
+    literal_key: Option<&String>,
+    open_key_kind: Option<PrimitiveKind>,
+) -> bool {
+    match arena.get(key_type) {
+        Node::Primitive(PrimitiveKind::Any) => literal_key.is_some() || open_key_kind.is_some(),
+        Node::Primitive(PrimitiveKind::String) => {
+            literal_key.is_some()
+                || matches!(
+                    open_key_kind,
+                    Some(PrimitiveKind::String | PrimitiveKind::Any)
+                )
+        }
+        Node::Primitive(PrimitiveKind::Number) => matches!(
+            open_key_kind,
+            Some(PrimitiveKind::Number | PrimitiveKind::Any)
+        ),
+        Node::Primitive(PrimitiveKind::Symbol) => matches!(
+            open_key_kind,
+            Some(PrimitiveKind::Symbol | PrimitiveKind::Any)
+        ),
+        Node::Literal(super::arena::SolverLiteral::String(name)) => {
+            literal_key.is_some_and(|requested| requested == name)
+        }
+        Node::Union(members) => members.iter().any(|member| {
+            index_signature_matches_request(arena, *member, literal_key, open_key_kind)
+        }),
+        Node::Intersection(members) => members.iter().all(|member| {
+            index_signature_matches_request(arena, *member, literal_key, open_key_kind)
+        }),
+        _ => false,
     }
 }
 
@@ -1736,7 +1938,14 @@ fn resolve_mapped(
             construct_signatures: vec![],
         })
     } else {
-        let resolved_value = resolve_node(arena, value, host, state, subst);
+        let resolved_value = if should_eagerly_resolve_open_mapped_value(arena, source) {
+            let mut child_subst = subst.clone();
+            child_subst.bind(parameter, source);
+            resolve_node(arena, value, host, state, &child_subst)
+        } else {
+            state.mark_symbolic();
+            value
+        };
         arena.object(ObjectNode {
             properties: vec![],
             index_signatures: vec![IndexSignatureNode {
@@ -1771,6 +1980,21 @@ fn collect_finite_keys(arena: &QueryArena, node: NodeId) -> Option<Vec<String>> 
     }
 
     Some(keys)
+}
+
+fn should_eagerly_resolve_open_mapped_value(arena: &QueryArena, source: NodeId) -> bool {
+    match arena.get(source) {
+        Node::Primitive(
+            PrimitiveKind::String
+            | PrimitiveKind::Number
+            | PrimitiveKind::Symbol
+            | PrimitiveKind::Any,
+        ) => true,
+        Node::Union(members) => members
+            .iter()
+            .all(|member| should_eagerly_resolve_open_mapped_value(arena, *member)),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,6 +2411,15 @@ fn project_inner(
             ),
         },
 
+        Node::Applied { identity, args } => TypeExpr::Ref {
+            name: Arc::from(identity.symbol_name.as_str()),
+            type_arguments: Arc::from(
+                args.iter()
+                    .map(|&arg| project_inner(arena, arg, visited, depth + 1))
+                    .collect::<Vec<_>>(),
+            ),
+        },
+
         Node::Tuple { elements, readonly } => TypeExpr::Tuple {
             elements: Arc::from(
                 elements
@@ -2238,6 +2471,36 @@ fn project_inner(
             extends: Arc::new(project_inner(arena, *extends, visited, depth + 1)),
             true_type: Arc::new(project_inner(arena, *true_branch, visited, depth + 1)),
             false_type: Arc::new(project_inner(arena, *false_branch, visited, depth + 1)),
+        },
+
+        Node::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => TypeExpr::Mapped {
+            parameter: parameter.clone(),
+            source: Arc::new(project_inner(arena, *source, visited, depth + 1)),
+            value: Arc::new(project_inner(arena, *value, visited, depth + 1)),
+            optional: project_mapped_modifier(*optional),
+            readonly: project_mapped_modifier(*readonly),
+            name_type: name_type
+                .map(|node| Arc::new(project_inner(arena, node, visited, depth + 1))),
+        },
+
+        Node::TemplateLiteral {
+            quasis,
+            expressions,
+        } => TypeExpr::TemplateLiteral {
+            quasis: quasis.clone(),
+            expressions: Arc::from(
+                expressions
+                    .iter()
+                    .map(|&expr| project_inner(arena, expr, visited, depth + 1))
+                    .collect::<Vec<_>>(),
+            ),
         },
 
         Node::TypeParam {
@@ -2300,25 +2563,20 @@ fn project_inner(
                             check: Arc::new(project_recursive_arg_summary(
                                 arena,
                                 frame.check,
-                                1,
-                                8,
+                                2,
+                                16,
                             )),
                             extends: Arc::new(project_recursive_arg_summary(
                                 arena,
                                 frame.extends,
-                                1,
-                                8,
+                                2,
+                                16,
                             )),
                         })
                         .collect::<Vec<_>>(),
                 ),
             }
         }
-
-        // Mapped, TemplateLiteral, Applied — use display as fallback
-        _ => TypeExpr::Unknown {
-            raw: display_node(arena, node),
-        },
     };
 
     visited.pop();
@@ -2340,6 +2598,20 @@ fn project_primitive(kind: PrimitiveKind) -> crate::analysis::type_expr::Primiti
         PrimitiveKind::Null => PrimitiveName::Null,
         PrimitiveKind::Undefined => PrimitiveName::Undefined,
         PrimitiveKind::Object => PrimitiveName::Object,
+    }
+}
+
+fn project_mapped_modifier(
+    modifier: super::arena::MappedModifierKind,
+) -> crate::analysis::type_expr::MappedModifier {
+    match modifier {
+        super::arena::MappedModifierKind::Add => crate::analysis::type_expr::MappedModifier::Add,
+        super::arena::MappedModifierKind::Remove => {
+            crate::analysis::type_expr::MappedModifier::Remove
+        }
+        super::arena::MappedModifierKind::Unchanged => {
+            crate::analysis::type_expr::MappedModifier::None
+        }
     }
 }
 
@@ -2487,6 +2759,23 @@ fn project_recursive_summary_inner(
                     .collect::<Vec<_>>(),
             ),
         },
+        Node::Applied { identity, args } => TypeExpr::Ref {
+            name: Arc::from(identity.symbol_name.as_str()),
+            type_arguments: Arc::from(
+                args.iter()
+                    .map(|&arg| {
+                        project_recursive_summary_inner(
+                            arena,
+                            arg,
+                            depth + 1,
+                            max_depth,
+                            count,
+                            max_nodes,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        },
         Node::Tuple { elements, readonly } => TypeExpr::Tuple {
             elements: Arc::from(
                 elements
@@ -2536,6 +2825,134 @@ fn project_recursive_summary_inner(
                 properties: members,
             }))
         }
+        Node::KeyOf(operand) => TypeExpr::KeyOf(Arc::new(project_recursive_summary_inner(
+            arena,
+            *operand,
+            depth + 1,
+            max_depth,
+            count,
+            max_nodes,
+        ))),
+        Node::TypeOf { path } => {
+            TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef { path: path.clone() })
+        }
+        Node::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
+            object: Arc::new(project_recursive_summary_inner(
+                arena,
+                *object,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            index: Arc::new(project_recursive_summary_inner(
+                arena,
+                *index,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+        },
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            ..
+        } => TypeExpr::Conditional {
+            check: Arc::new(project_recursive_summary_inner(
+                arena,
+                *check,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            extends: Arc::new(project_recursive_summary_inner(
+                arena,
+                *extends,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            true_type: Arc::new(project_recursive_summary_inner(
+                arena,
+                *true_branch,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            false_type: Arc::new(project_recursive_summary_inner(
+                arena,
+                *false_branch,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+        },
+        Node::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => TypeExpr::Mapped {
+            parameter: parameter.clone(),
+            source: Arc::new(project_recursive_summary_inner(
+                arena,
+                *source,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            value: Arc::new(project_recursive_summary_inner(
+                arena,
+                *value,
+                depth + 1,
+                max_depth,
+                count,
+                max_nodes,
+            )),
+            optional: project_mapped_modifier(*optional),
+            readonly: project_mapped_modifier(*readonly),
+            name_type: name_type.map(|node| {
+                Arc::new(project_recursive_summary_inner(
+                    arena,
+                    node,
+                    depth + 1,
+                    max_depth,
+                    count,
+                    max_nodes,
+                ))
+            }),
+        },
+        Node::TemplateLiteral {
+            quasis,
+            expressions,
+        } => TypeExpr::TemplateLiteral {
+            quasis: quasis.clone(),
+            expressions: Arc::from(
+                expressions
+                    .iter()
+                    .map(|&expr| {
+                        project_recursive_summary_inner(
+                            arena,
+                            expr,
+                            depth + 1,
+                            max_depth,
+                            count,
+                            max_nodes,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        },
         Node::TypeParam {
             name,
             constraint,
@@ -4093,6 +4510,147 @@ mod tests {
             }
             _ => panic!("expected Object, got: {:?}", result.value),
         }
+    }
+
+    #[test]
+    fn solve_open_mapped_recursive_index_any_stays_symbolic_without_hard_stop() {
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let recursive_index = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::named("K")),
+        };
+        let body = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Mapped {
+                parameter: "K".into(),
+                source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+                value: Arc::new(TypeExpr::named_with_args(
+                    "OpenPath",
+                    vec![TypeExpr::named_with_args(
+                        "NonNullable",
+                        vec![recursive_index],
+                    )],
+                )),
+                optional: crate::analysis::type_expr::MappedModifier::None,
+                readonly: crate::analysis::type_expr::MappedModifier::None,
+                name_type: None,
+            }),
+            index: Arc::new(TypeExpr::string_literal("path")),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "OpenPath".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let indexed_any = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::IndexSignature(
+                crate::analysis::type_expr::IndexSignature {
+                    key_name: "key".into(),
+                    key_type: TypeExpr::Primitive(PrimitiveName::String),
+                    value_type: TypeExpr::Primitive(PrimitiveName::Any),
+                    readonly: false,
+                },
+            )],
+        }));
+        let result = solve_type_with_limits(
+            &TypeExpr::named_with_args("OpenPath", vec![indexed_any]),
+            &host,
+            SolveLimits {
+                max_instantiation_depth: 16,
+                max_resolve_steps: 2_000,
+                max_arena_nodes: 100_000,
+            },
+        );
+        let json = serde_json::to_string(&result.value).unwrap();
+
+        assert_ne!(
+            result.execution_status,
+            ExecutionStatus::HardStop,
+            "open mapped recursion over an any index signature should terminate symbolically, got reasons {:?}",
+            result.incomplete_reasons
+        );
+        assert!(
+            json.contains("recursiveRef"),
+            "open mapped recursion should collapse to RecursiveRef instead of growing without bound, got: {}",
+            &json[..json.len().min(400)]
+        );
+        assert!(
+            !json.contains("\"kind\":\"unknown\""),
+            "open mapped recursion should not degrade to Unknown, got: {json}"
+        );
+    }
+
+    #[test]
+    fn solve_open_mapped_lookup_reads_string_index_signature() {
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+
+        let body = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Mapped {
+                parameter: "K".into(),
+                source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+                value: Arc::new(TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("K")),
+                }),
+                optional: crate::analysis::type_expr::MappedModifier::None,
+                readonly: crate::analysis::type_expr::MappedModifier::None,
+                name_type: None,
+            }),
+            index: Arc::new(TypeExpr::string_literal("path")),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "OpenLookup".into(),
+            declaration_id: 0,
+            body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let indexed_any = TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: vec![crate::analysis::type_expr::ObjectMember::IndexSignature(
+                crate::analysis::type_expr::IndexSignature {
+                    key_name: "key".into(),
+                    key_type: TypeExpr::Primitive(PrimitiveName::String),
+                    value_type: TypeExpr::Primitive(PrimitiveName::Any),
+                    readonly: false,
+                },
+            )],
+        }));
+
+        let result = solve_type(
+            &TypeExpr::named_with_args("OpenLookup", vec![indexed_any]),
+            &host,
+        );
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::Any),
+            "open mapped lookup should read the underlying string index signature"
+        );
+        assert_ne!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::Undefined),
+            "open mapped lookup must not collapse to undefined for string index signatures"
+        );
     }
 
     // -- template literals --
@@ -6047,6 +6605,70 @@ mod tests {
     }
 
     #[test]
+    fn materialize_effective_arg_resolves_long_substitution_chains_without_cutoff() {
+        let mut arena = QueryArena::new();
+        let terminal = arena.primitive(PrimitiveKind::String);
+        let refs: Vec<NodeId> = (0..25)
+            .map(|index| arena.type_ref(format!("T{index}"), Vec::new()))
+            .collect();
+
+        let mut subst = SubstitutionEnv::new();
+        for index in 0..24 {
+            subst.bind(format!("T{index}"), refs[index + 1]);
+        }
+        subst.bind("T24", terminal);
+
+        let resolved = materialize_effective_arg(&mut arena, refs[0], &subst);
+        assert!(
+            matches!(arena.get(resolved), Node::Primitive(PrimitiveKind::String)),
+            "long substitution chains should resolve semantically, got {:?}",
+            arena.get(resolved)
+        );
+    }
+
+    #[test]
+    fn materialize_effective_arg_does_not_leak_in_progress_for_repeated_bound_refs() {
+        let mut arena = QueryArena::new();
+        let repeated_ref = arena.type_ref("T", Vec::new());
+        let tuple = arena.alloc(Node::Tuple {
+            elements: vec![
+                crate::analysis::type_solver::arena::TupleNodeElement {
+                    label: None,
+                    ty: repeated_ref,
+                    optional: false,
+                    rest: false,
+                },
+                crate::analysis::type_solver::arena::TupleNodeElement {
+                    label: None,
+                    ty: repeated_ref,
+                    optional: false,
+                    rest: false,
+                },
+            ],
+            readonly: false,
+        });
+        let string = arena.primitive(PrimitiveKind::String);
+
+        let mut subst = SubstitutionEnv::new();
+        subst.bind("T", string);
+
+        let resolved = materialize_effective_arg(&mut arena, tuple, &subst);
+        match arena.get(resolved) {
+            Node::Tuple { elements, .. } => {
+                assert_eq!(elements.len(), 2);
+                for element in elements {
+                    assert!(
+                        matches!(arena.get(element.ty), Node::Primitive(PrimitiveKind::String)),
+                        "repeated bound refs should fully materialize instead of leaving a leaked in-progress ref, got {:?}",
+                        arena.get(element.ty)
+                    );
+                }
+            }
+            other => panic!("expected tuple, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn exact_recursive_key_substitutes_dependent_defaults_before_transport() {
         // type Box<T, U = T> = { next: Box<T> }
         // The recursive transport must preserve effective args after substitution,
@@ -6566,6 +7188,153 @@ mod tests {
         assert!(
             result.execution_status != ExecutionStatus::HardStop,
             "Flatten<SomeType> should terminate cleanly"
+        );
+    }
+
+    #[test]
+    fn solve_dot_path_keys_over_symbolic_nested_item_stays_bounded() {
+        use crate::analysis::type_eval::{EvalEnv, TypeDeclInfo, TypeDeclKind};
+        use crate::analysis::type_solver::host::EvalEnvSolverHost;
+        use serde_json::Value;
+
+        fn has_unknown_outside_recursive_context(value: &Value) -> bool {
+            match value {
+                Value::Object(map) => {
+                    if map.get("kind").and_then(Value::as_str) == Some("unknown") {
+                        return true;
+                    }
+                    map.iter().any(|(key, child)| {
+                        key != "conditionalContext" && has_unknown_outside_recursive_context(child)
+                    })
+                }
+                Value::Array(items) => items.iter().any(has_unknown_outside_recursive_context),
+                _ => false,
+            }
+        }
+
+        let nested_item_body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            )),
+            extends: Arc::new(TypeExpr::Array {
+                element: Arc::new(TypeExpr::Infer { name: "I".into() }),
+                readonly: true,
+            }),
+            true_type: Arc::new(TypeExpr::named_with_args(
+                "NestedItem",
+                vec![TypeExpr::named("I")],
+            )),
+            false_type: Arc::new(TypeExpr::named("T")),
+        };
+
+        let mapped_source = TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::KeyOf(Arc::new(TypeExpr::named("T"))),
+            TypeExpr::Primitive(PrimitiveName::String),
+        ]));
+        let indexed_tk = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("T")),
+            index: Arc::new(TypeExpr::named("K")),
+        };
+        let dot_path_body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::named("T")),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Object)),
+            true_type: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::Mapped {
+                    parameter: "K".into(),
+                    source: Arc::new(mapped_source.clone()),
+                    value: Arc::new(TypeExpr::Union(Arc::from(vec![
+                        TypeExpr::named("K"),
+                        TypeExpr::TemplateLiteral {
+                            quasis: vec!["".into(), ".".into(), "".into()],
+                            expressions: Arc::from(vec![
+                                TypeExpr::named("K"),
+                                TypeExpr::named_with_args(
+                                    "DotPathKeys",
+                                    vec![TypeExpr::named_with_args(
+                                        "NonNullable",
+                                        vec![indexed_tk],
+                                    )],
+                                ),
+                            ]),
+                        },
+                    ]))),
+                    optional: crate::analysis::type_expr::MappedModifier::None,
+                    readonly: crate::analysis::type_expr::MappedModifier::None,
+                    name_type: None,
+                }),
+                index: Arc::new(mapped_source),
+            }),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+
+        let mut env = EvalEnv::new();
+        env.add_type(TypeDeclInfo {
+            name: "NestedItem".into(),
+            declaration_id: 0,
+            body: nested_item_body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+        env.add_type(TypeDeclInfo {
+            name: "DotPathKeys".into(),
+            declaration_id: 0,
+            body: dot_path_body,
+            type_parameters: vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            kind: TypeDeclKind::Alias,
+        });
+
+        let host = EvalEnvSolverHost::new(&env);
+        let input = TypeExpr::named_with_args(
+            "DotPathKeys",
+            vec![TypeExpr::named_with_args(
+                "NestedItem",
+                vec![TypeExpr::named_with_args(
+                    "NestedItem",
+                    vec![TypeExpr::named("T")],
+                )],
+            )],
+        );
+        let result = solve_type_with_limits(
+            &input,
+            &host,
+            SolveLimits {
+                max_instantiation_depth: 24,
+                max_resolve_steps: 4_000,
+                max_arena_nodes: 200_000,
+            },
+        );
+        let json = serde_json::to_string(&result.value).unwrap();
+        let json_value = serde_json::to_value(&result.value).unwrap();
+
+        assert_ne!(
+            result.execution_status,
+            ExecutionStatus::HardStop,
+            "symbolic NestedItem -> DotPathKeys should not hard stop, got reasons {:?}",
+            result.incomplete_reasons
+        );
+        assert!(
+            json.contains("templateLiteral")
+                || json.contains("conditional")
+                || json.contains("recursiveRef")
+                || json.contains("indexedAccess"),
+            "symbolic DotPathKeys should stay representable instead of collapsing, got: {}",
+            &json[..json.len().min(400)]
+        );
+        assert!(
+            !has_unknown_outside_recursive_context(&json_value),
+            "symbolic DotPathKeys should not degrade to Unknown outside bounded recursive context summaries, got: {json}"
         );
     }
 

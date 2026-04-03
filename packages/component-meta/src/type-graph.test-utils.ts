@@ -24,6 +24,17 @@ export type TestTypeExpr =
   | {
       kind: "object";
       properties: Array<{ name: string; type: TestTypeExpr; optional?: boolean }>;
+    }
+  | {
+      kind: "recursiveRef";
+      name: string;
+      typeArguments: TestTypeExpr[];
+      conditionalContext: Array<{
+        branch: "true" | "false";
+        decided: boolean;
+        check: TestTypeExpr;
+        extends: TestTypeExpr;
+      }>;
     };
 
 export interface TestTypeRegistryEntry {
@@ -108,7 +119,9 @@ const EXPANSION_REASON_INDETERMINATE_CONDITIONAL = 4;
 const EXPANSION_REASON_INFINITE_KEY_SPACE = 5;
 const EXPANSION_REASON_UNSUPPORTED_OPERATOR = 6;
 
-type TypeNodeInit = NonNullable<NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]>[number];
+type TypeNodeInit = NonNullable<
+  NonNullable<ComponentMetaPayloadInit["typeGraph"]>["nodes"]
+>[number];
 
 const primitiveTags: Record<TestPrimitiveName, number> = {
   string: 1,
@@ -197,6 +210,23 @@ class TestGraphBuilder {
           })),
         });
         break;
+      case "recursiveRef":
+        proto = {
+          kind: {
+            case: "recursiveRef",
+            value: {
+              nameId: this.stringId(expr.name),
+              typeArgumentNodeIds: expr.typeArguments.map((a) => this.nodeId(a)),
+              conditionalContext: expr.conditionalContext.map((frame) => ({
+                branch: frame.branch === "true" ? 1 : 2,
+                decided: frame.decided,
+                checkNodeId: this.nodeId(frame.check),
+                extendsNodeId: this.nodeId(frame.extends),
+              })),
+            },
+          },
+        } as Record<string, unknown>;
+        break;
     }
 
     const id = this.nodes.length + 1;
@@ -215,7 +245,7 @@ class TestGraphBuilder {
 }
 
 function typeNode(
-  caseName: "primitive" | "literal" | "ref" | "union" | "indexedAccess" | "object",
+  caseName: "primitive" | "literal" | "ref" | "union" | "indexedAccess" | "object" | "recursiveRef",
   value: Record<string, unknown>,
 ): TypeNodeInit {
   return {

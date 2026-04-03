@@ -2024,6 +2024,84 @@ defineProps<{
 }
 
 #[test]
+fn evaluate_types_cross_file_recursive_alias_through_reexport_preserves_recursive_transport() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export type TreeNode = { label: string; children: TreeNode[] }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/index.ts", r#"export type { TreeNode } from './types'"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import type { TreeNode } from './index'
+defineProps<{ root: TreeNode }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+    let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
+
+    match evaluated_prop_type(&evaluated, "root") {
+        TypeExpr::Object(obj) => {
+            let children = obj
+                .properties
+                .iter()
+                .find_map(|member| match member {
+                    ObjectMember::Property(prop) if prop.name == "children" => Some(prop),
+                    _ => None,
+                })
+                .expect("resolved TreeNode should have a 'children' property");
+
+            match &children.ty {
+                TypeExpr::Array { element, .. } => match element.as_ref() {
+                    TypeExpr::Object(child_obj) => {
+                        let nested_children = child_obj
+                            .properties
+                            .iter()
+                            .find_map(|member| match member {
+                                ObjectMember::Property(prop) if prop.name == "children" => {
+                                    Some(prop)
+                                }
+                                _ => None,
+                            })
+                            .expect("expanded child TreeNode should have a nested 'children' property");
+
+                        match &nested_children.ty {
+                            TypeExpr::Array { element, .. } => match element.as_ref() {
+                                TypeExpr::RecursiveRef { name, .. } => {
+                                    assert_eq!(&**name, "TreeNode");
+                                }
+                                other => panic!(
+                                    "nested children element should be RecursiveRef after re-export resolution, got {other:?}"
+                                ),
+                            },
+                            other => panic!(
+                                "nested children should resolve to TreeNode[] and preserve RecursiveRef, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!(
+                        "children element should expand one TreeNode level before the recursive backedge, got {other:?}"
+                    ),
+                },
+                other => panic!("children should resolve to TreeNode[] and preserve RecursiveRef, got {other:?}"),
+            }
+        }
+        other => {
+            panic!("expected root prop to resolve through re-export to an object, got {other:?}")
+        }
+    }
+}
+
+#[test]
 fn evaluate_types_prunes_imported_eval_inputs_to_macro_reachable_deps() {
     let project = make_project();
     project

@@ -362,18 +362,32 @@ impl QueryArena {
     pub fn union(&mut self, members: Vec<NodeId>) -> NodeId {
         let mut flattened = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
+        let mut seen_primitives = rustc_hash::FxHashSet::default();
+        let mut seen_literals = rustc_hash::FxHashSet::default();
         for member in members {
             match self.get(member) {
                 Node::Union(inner) => {
                     for nested in inner {
-                        if seen.insert(*nested) {
+                        if union_member_is_new(
+                            self,
+                            *nested,
+                            &mut seen,
+                            &mut seen_primitives,
+                            &mut seen_literals,
+                        ) {
                             flattened.push(*nested);
                         }
                     }
                 }
                 Node::Primitive(PrimitiveKind::Never) => {}
                 _ => {
-                    if seen.insert(member) {
+                    if union_member_is_new(
+                        self,
+                        member,
+                        &mut seen,
+                        &mut seen_primitives,
+                        &mut seen_literals,
+                    ) {
                         flattened.push(member);
                     }
                 }
@@ -476,6 +490,20 @@ impl fmt::Debug for QueryArena {
         f.debug_struct("QueryArena")
             .field("nodes", &self.nodes.len())
             .finish()
+    }
+}
+
+fn union_member_is_new(
+    arena: &QueryArena,
+    member: NodeId,
+    seen: &mut rustc_hash::FxHashSet<NodeId>,
+    seen_primitives: &mut rustc_hash::FxHashSet<PrimitiveKind>,
+    seen_literals: &mut rustc_hash::FxHashSet<SolverLiteral>,
+) -> bool {
+    match arena.get(member) {
+        Node::Primitive(kind) => seen_primitives.insert(*kind),
+        Node::Literal(literal) => seen_literals.insert(literal.clone()),
+        _ => seen.insert(member),
     }
 }
 

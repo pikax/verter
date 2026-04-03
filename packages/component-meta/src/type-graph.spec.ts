@@ -116,6 +116,74 @@ describe("decodeComponentMetaPayload", () => {
     });
   });
 
+  it("preserves recursiveRef through proto decode and bridge", () => {
+    const childrenType: import("./type-graph.test-utils.js").TestTypeExpr = {
+      kind: "recursiveRef",
+      name: "TreeNode",
+      typeArguments: [{ kind: "primitive", name: "string" }],
+      conditionalContext: [
+        {
+          branch: "true" as const,
+          decided: true,
+          check: { kind: "primitive" as const, name: "string" as const },
+          extends: { kind: "primitive" as const, name: "number" as const },
+        },
+      ],
+    };
+    const payload = encodeTestComponentMetaPayload({
+      filePath: "/project/src/Recursive.vue",
+      typeRegistry: [
+        {
+          name: "TreeNode",
+          type: {
+            kind: "object",
+            properties: [
+              { name: "label", type: { kind: "primitive", name: "string" } },
+              { name: "children", type: childrenType },
+            ],
+          },
+        },
+      ],
+      props: [{ name: "root", type: { kind: "ref", name: "TreeNode" } }],
+    });
+
+    const native = decodeComponentMetaPayload(payload);
+    const registry = nativeTypeRegistryToMap(native);
+    const treeNode = registry?.get("TreeNode");
+
+    expect(treeNode).toBeDefined();
+    expect(treeNode!.kind).toBe("object");
+
+    if (treeNode!.kind === "object") {
+      const children = treeNode!.properties.find((p) => p.name === "children");
+      expect(children).toBeDefined();
+
+      // Must be recursiveRef, NOT unknown
+      expect(children!.type.kind).toBe("recursiveRef");
+      expect(children!.type.kind).not.toBe("unknown");
+
+      if (children!.type.kind === "recursiveRef") {
+        expect(children!.type.name).toBe("TreeNode");
+        expect(children!.type.typeArguments).toHaveLength(1);
+        expect(children!.type.typeArguments[0]).toEqual({
+          kind: "primitive",
+          name: "string",
+        });
+        expect(children!.type.conditionalContext).toHaveLength(1);
+        expect(children!.type.conditionalContext[0]!.branch).toBe("true");
+        expect(children!.type.conditionalContext[0]!.decided).toBe(true);
+        expect(children!.type.conditionalContext[0]!.check).toEqual({
+          kind: "primitive",
+          name: "string",
+        });
+        expect(children!.type.conditionalContext[0]!.extends).toEqual({
+          kind: "primitive",
+          name: "number",
+        });
+      }
+    }
+  });
+
   it("decodes expansion exactness and execution status from graph metadata", () => {
     const payload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Button.vue",
