@@ -36,6 +36,7 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 - Use conventional commits: `<type>(<scope>): <description>`.
 - Load only the specific reference material needed for the task instead of bulk-reading every file.
 - Follow the shared build philosophy below for type work and any host-backed architecture changes.
+- For `component-meta` native/compat boundaries, treat `CLAUDE.md`'s `Component-Meta Native Vs Compat (CRITICAL)` section as the canonical rule set. In particular: Rust is the semantic authority, `component-meta` makes one async native request per query, JS adapts the returned payload but does not become a second resolver/expander, and native should send the smallest semantically complete payload it can.
 - For `component-meta` type work, use cached lookup/eval state only. Do not add AST/source-walk fallback to recover or expand types after the cache-owning pass.
 - For `component-meta` registry publication, stay shallow and demand-driven: load only the symbols required by the current query, and expand only when a cached lookup result is actually needed.
 - For `component-meta` cross-file resolution, deepen in one place only: follow the active declaration route for the requested symbol/query and do not branch into unrelated sibling symbols/files.
