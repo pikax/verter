@@ -217,8 +217,13 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
     pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
-    pub exported_required_import_names:
-        rustc_hash::FxHashMap<String, Arc<rustc_hash::FxHashSet<String>>>,
+    pub exported_required_import_names: rustc_hash::FxHashMap<
+        (
+            String,
+            crate::resolver_core::shallow_file_state::ExportedRoute,
+        ),
+        Arc<rustc_hash::FxHashSet<String>>,
+    >,
     pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
     pub resolved_type_declarations:
         rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,

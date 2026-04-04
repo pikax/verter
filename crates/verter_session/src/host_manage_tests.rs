@@ -1632,6 +1632,85 @@ defineProps<Props>()
 }
 
 #[test]
+fn prepared_symbol_dependencies_follow_narrow_member_routes() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/alpha.ts",
+        "export interface AlphaProps { alpha?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/beta.ts",
+        "export interface BetaProps { beta?: string }",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { AlphaProps } from './alpha'
+import type { BetaProps } from './beta'
+
+export interface Props {
+  primary?: AlphaProps
+  secondary?: BetaProps
+}
+"#,
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./alpha", "/src/alpha.ts"),
+            exact_dependency("./beta", "/src/beta.ts"),
+        ],
+    );
+
+    let _seeded = host
+        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
+        .expect("types dependency should seed imported state");
+
+    let narrow = host
+        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+            "/src/types.ts",
+            "Props",
+            &crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
+            None,
+        )
+        .expect("narrow member route should resolve from cached imported state");
+    let whole = host
+        .resolve_prepared_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .expect("whole route should resolve from cached imported state");
+
+    assert!(
+        narrow.2.symbol_dependencies.iter().any(|dependency| {
+            dependency.local_name == "AlphaProps"
+                && dependency.canonical_id == "/src/alpha.ts"
+                && dependency.exported_name == "AlphaProps"
+        }),
+        "narrow member route should keep the active imported dependency, got {:?}",
+        narrow.2.symbol_dependencies
+    );
+    assert!(
+        !narrow
+            .2
+            .symbol_dependencies
+            .iter()
+            .any(|dependency| dependency.canonical_id == "/src/beta.ts"),
+        "narrow member route should not widen to sibling imported dependencies, got {:?}",
+        narrow.2.symbol_dependencies
+    );
+    assert!(
+        whole
+            .2
+            .symbol_dependencies
+            .iter()
+            .any(|dependency| dependency.canonical_id == "/src/beta.ts"),
+        "whole route should still include the sibling imported dependency, got {:?}",
+        whole.2.symbol_dependencies
+    );
+}
+
+#[test]
 fn build_fallthrough_eval_env_skips_unused_runtime_import_dependency_lookups() {
     let host = make_host();
     upsert_non_sfc(&host, "/src/used.ts", "export const used = 'used'");

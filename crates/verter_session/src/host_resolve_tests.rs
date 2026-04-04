@@ -1892,6 +1892,122 @@ defineProps<Props>()
     );
 }
 
+#[test]
+fn frontier_companion_seeds_preserve_narrow_routes_through_alias_targets() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/src/alpha.ts",
+        "export interface AlphaProps { alpha?: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/beta.ts",
+        "export interface BetaProps { beta?: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { AlphaProps } from './alpha'
+import type { BetaProps } from './beta'
+
+export interface Props {
+  primary?: AlphaProps
+  secondary?: BetaProps
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export { Props as PublicProps } from './types'\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            crate::DependencyResolution {
+                specifier: "./alpha".to_string(),
+                resolved_canonical_id: Some("/src/alpha.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "./beta".to_string(),
+                resolved_canonical_id: Some("/src/beta.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let mut requested_routes = super::FrontierRequestedRoutes::default();
+    super::merge_frontier_requested_route(
+        &mut requested_routes,
+        "/src/barrel.ts".to_string(),
+        "PublicProps".to_string(),
+        crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
+    );
+
+    let (frontier, target, _had_route_cycle) = host
+        .run_external_type_frontier_closure_in_view(
+            "/src/barrel.ts",
+            "PublicProps",
+            &mut requested_routes,
+            Some(&view),
+        )
+        .expect("frontier closure should complete");
+    assert_eq!(
+        target,
+        Some(("/src/types.ts".to_string(), "Props".to_string())),
+        "barrel alias should resolve to the defining symbol",
+    );
+    assert_eq!(
+        requested_routes.get(&("/src/types.ts".to_string(), "Props".to_string())),
+        Some(&crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into())),
+        "the active member route should be transferred onto the defining target",
+    );
+
+    let adapter = super::HostFrontierAdapter {
+        host: &host,
+        store_view: Some(&view),
+        materialize_symbols: false,
+        route_exports_only: true,
+    };
+    let mut inspected_symbols = rustc_hash::FxHashSet::default();
+    let seeds = host.collect_frontier_companion_seeds_in_view(
+        &frontier,
+        &adapter,
+        Some(&view),
+        &mut inspected_symbols,
+        &mut requested_routes,
+    );
+    let seeded: std::collections::BTreeSet<_> = seeds
+        .into_iter()
+        .map(|seed| (seed.canonical_id, seed.exported_name))
+        .collect();
+
+    assert!(
+        seeded.contains(&("/src/alpha.ts".to_string(), "AlphaProps".to_string())),
+        "narrow member route should seed the active imported dependency, got {:?}",
+        seeded
+    );
+    assert!(
+        !seeded.contains(&("/src/beta.ts".to_string(), "BetaProps".to_string())),
+        "narrow member route should not widen to sibling imported dependencies, got {:?}",
+        seeded
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn barrel_cache_hits_increment_barrel_fact_reuse_counter() {

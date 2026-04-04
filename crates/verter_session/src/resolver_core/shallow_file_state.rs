@@ -81,6 +81,21 @@ pub enum ExportTarget {
     },
 }
 
+/// Narrow access route for an exported type. Used to compute a narrower
+/// import closure that only includes dependencies reachable from the
+/// requested route, not the full export.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExportedRoute {
+    /// Full export — all dependencies.
+    Whole,
+    /// Single member access: `Type['member']`.
+    Member(String),
+    /// Pick subset: `Pick<Type, 'a' | 'b'>`.
+    Pick(Vec<String>),
+    /// Omit subset: `Omit<Type, 'a' | 'b'>`.
+    Omit(Vec<String>),
+}
+
 /// Shallow metadata for one locally-declared type symbol.
 #[derive(Debug, Clone)]
 pub struct ShallowTypeSymbol {
@@ -96,6 +111,11 @@ pub struct ShallowTypeSymbol {
     /// Names of import-local symbols this type directly depends on.
     /// These become `ExternalSymbolRef` during frontier traversal.
     pub external_deps: Vec<ExternalSymbolRef>,
+    /// Per-member dependency tracking for route-aware closure narrowing.
+    /// Maps member name → names referenced in that member's type.
+    /// Populated only for Object-bodied symbols (interfaces, object types).
+    /// Empty for non-object bodies or if member-level tracking is unavailable.
+    pub member_deps: rustc_hash::FxHashMap<String, Vec<String>>,
 }
 
 /// Shallow metadata for one locally-declared value symbol.
@@ -344,6 +364,7 @@ impl ShallowFileState {
                     if existing.kind == TypeDeclKind::Interface
                         && decl.kind == TypeDeclKind::Interface
                     {
+                        let merged_member_deps = extract_member_deps(&decl.body);
                         // Merge bodies: combine members via Intersection
                         existing.raw_body = TypeExpr::intersection(vec![
                             existing.raw_body.clone(),
@@ -372,9 +393,18 @@ impl ShallowFileState {
                                 existing.external_deps.push(dep.clone());
                             }
                         }
+                        for (member, deps) in merged_member_deps {
+                            let entry = existing.member_deps.entry(member).or_default();
+                            for dep in deps {
+                                if !entry.contains(&dep) {
+                                    entry.push(dep);
+                                }
+                            }
+                        }
                         continue;
                     }
                 }
+                let member_deps = extract_member_deps(&decl.body);
                 symbols.insert(
                     name.clone(),
                     ShallowTypeSymbol {
@@ -383,6 +413,7 @@ impl ShallowFileState {
                         type_parameters: decl.type_parameters.clone(),
                         local_deps,
                         external_deps,
+                        member_deps,
                     },
                 );
             }
@@ -562,6 +593,181 @@ impl ShallowFileState {
             steps: steps as u64,
         }
     }
+
+    /// Compute a narrower closure for a specific route on an exported symbol.
+    ///
+    /// For `Route::Whole`, delegates to `local_closure`.
+    /// For `Route::Member(m)`, starts only from the member's type deps
+    /// (if per-member tracking is available for the symbol).
+    /// For `Route::Pick(members)`, unions the member deps for all listed members.
+    ///
+    /// Falls back to whole closure when member-level data is unavailable.
+    pub fn route_closure(
+        &self,
+        symbol_name: &str,
+        route: &ExportedRoute,
+        budget: usize,
+    ) -> LocalClosureResult {
+        match route {
+            ExportedRoute::Whole => self.local_closure(symbol_name, budget),
+            ExportedRoute::Member(member) => {
+                self.member_route_closure(symbol_name, &[member.as_str()], budget)
+            }
+            ExportedRoute::Pick(members) => {
+                let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+                self.member_route_closure(symbol_name, &refs, budget)
+            }
+            ExportedRoute::Omit(omitted) => {
+                let Some(sym) = self.symbols.get(symbol_name) else {
+                    return self.local_closure(symbol_name, budget);
+                };
+                let Some(members) = direct_object_member_names(&sym.raw_body) else {
+                    return self.local_closure(symbol_name, budget);
+                };
+                let omitted: FxHashSet<&str> = omitted.iter().map(|name| name.as_str()).collect();
+                let remaining = members
+                    .into_iter()
+                    .filter(|name| !omitted.contains(name.as_str()))
+                    .collect::<Vec<_>>();
+                if remaining.is_empty() {
+                    return LocalClosureResult {
+                        status: LocalClosureStatus::Resolved,
+                        local_symbols_used: vec![symbol_name.to_string()],
+                        unresolved_external: Vec::new(),
+                        steps: 1,
+                    };
+                }
+                let refs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
+                self.member_route_closure(symbol_name, &refs, budget)
+            }
+        }
+    }
+
+    /// Internal: compute closure starting from specific member deps only.
+    fn member_route_closure(
+        &self,
+        symbol_name: &str,
+        members: &[&str],
+        budget: usize,
+    ) -> LocalClosureResult {
+        let sym = match self.symbols.get(symbol_name) {
+            Some(s) => s,
+            None => return self.local_closure(symbol_name, budget),
+        };
+
+        // If no member_deps tracking, fall back to whole closure
+        if sym.member_deps.is_empty() {
+            return self.local_closure(symbol_name, budget);
+        }
+
+        // Collect the initial seed names from the requested members' deps
+        let mut seed_names: Vec<String> = Vec::new();
+        let mut saw_known_member = false;
+        for member in members {
+            if let Some(deps) = sym.member_deps.get(*member) {
+                saw_known_member = true;
+                for dep in deps {
+                    if !seed_names.contains(dep) {
+                        seed_names.push(dep.clone());
+                    }
+                }
+                continue;
+            }
+            if let Some(prop) = direct_object_property(&sym.raw_body, member) {
+                saw_known_member = true;
+                let mut refs = Vec::new();
+                collect_type_refs(&prop.ty, &mut refs);
+                for dep in refs {
+                    if !seed_names.contains(&dep) {
+                        seed_names.push(dep);
+                    }
+                }
+                continue;
+            }
+        }
+
+        if !saw_known_member {
+            return self.local_closure(symbol_name, budget);
+        }
+
+        if seed_names.is_empty() {
+            // No deps for the requested members — minimal closure
+            return LocalClosureResult {
+                status: LocalClosureStatus::Resolved,
+                local_symbols_used: vec![symbol_name.to_string()],
+                unresolved_external: Vec::new(),
+                steps: 1,
+            };
+        }
+
+        // Now run the local closure starting from only the seed names
+        let mut visited = FxHashSet::default();
+        visited.insert(symbol_name.to_string()); // mark the root as visited
+        let mut pending = seed_names;
+        let mut external_refs = Vec::new();
+        let mut local_used = vec![symbol_name.to_string()];
+        let mut steps = 1u64;
+
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            steps += 1;
+            if steps as usize >= budget {
+                return LocalClosureResult {
+                    status: LocalClosureStatus::BudgetExceeded,
+                    local_symbols_used: local_used,
+                    unresolved_external: external_refs,
+                    steps,
+                };
+            }
+
+            if let Some(dep_sym) = self.symbols.get(&current) {
+                local_used.push(current.clone());
+                for dep in &dep_sym.local_deps {
+                    if !visited.contains(dep.as_str()) {
+                        pending.push(dep.clone());
+                    }
+                }
+                for ext in &dep_sym.external_deps {
+                    if !external_refs.iter().any(|e: &ExternalSymbolRef| {
+                        e.source_specifier == ext.source_specifier
+                            && e.imported_name == ext.imported_name
+                    }) {
+                        external_refs.push(ext.clone());
+                    }
+                }
+            } else if self.import_locals.contains(&current) {
+                if let Some((source, imported)) = self.import_targets.get(&current) {
+                    let ext_ref = ExternalSymbolRef {
+                        local_name: current.clone(),
+                        source_specifier: source.clone(),
+                        imported_name: imported.clone(),
+                    };
+                    if !external_refs.iter().any(|e| {
+                        e.source_specifier == ext_ref.source_specifier
+                            && e.imported_name == ext_ref.imported_name
+                    }) {
+                        external_refs.push(ext_ref);
+                    }
+                }
+            }
+            // Skip unknown names silently — they may be type parameters
+        }
+
+        let status = if external_refs.is_empty() {
+            LocalClosureStatus::Resolved
+        } else {
+            LocalClosureStatus::ResolvedWithExternalDeps
+        };
+
+        LocalClosureResult {
+            status,
+            local_symbols_used: local_used,
+            unresolved_external: external_refs,
+            steps,
+        }
+    }
 }
 
 impl<'a> ShallowTypeView<'a> {
@@ -632,6 +838,148 @@ fn extract_enum_members_from_type_body(body: &TypeExpr) -> Option<FxHashMap<Stri
             }
         }
         _ => None,
+    }
+}
+
+/// Extract per-member dependency names from direct object slices in the body.
+/// For each direct property, collects all type names referenced in that
+/// property's type annotation. Transparent intersections are flattened
+/// right-to-left so declaration-merged interfaces keep earlier members while
+/// later object slices win on duplicate names.
+fn extract_member_deps(body: &TypeExpr) -> FxHashMap<String, Vec<String>> {
+    let mut result = FxHashMap::default();
+    for prop in direct_object_properties(body) {
+        let mut refs = Vec::new();
+        collect_type_refs(&prop.ty, &mut refs);
+        if !refs.is_empty() {
+            result.insert(prop.name.clone(), refs);
+        }
+    }
+    result
+}
+
+fn direct_object_member_names(body: &TypeExpr) -> Option<Vec<String>> {
+    let names = direct_object_properties(body)
+        .into_iter()
+        .map(|prop| prop.name.clone())
+        .collect::<Vec<_>>();
+    (!names.is_empty()).then_some(names)
+}
+
+fn direct_object_property<'a>(
+    body: &'a TypeExpr,
+    name: &str,
+) -> Option<&'a verter_semantic::analysis::type_expr::ObjectProperty> {
+    direct_object_properties(body)
+        .into_iter()
+        .find(|prop| prop.name == name)
+}
+
+fn direct_object_properties(
+    body: &TypeExpr,
+) -> Vec<&verter_semantic::analysis::type_expr::ObjectProperty> {
+    let mut result = Vec::new();
+    let mut seen = FxHashSet::default();
+    collect_direct_object_properties(body, &mut result, &mut seen);
+    result
+}
+
+fn collect_direct_object_properties<'a>(
+    body: &'a TypeExpr,
+    out: &mut Vec<&'a verter_semantic::analysis::type_expr::ObjectProperty>,
+    seen: &mut FxHashSet<String>,
+) {
+    match body {
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                if let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member {
+                    if seen.insert(prop.name.clone()) {
+                        out.push(prop);
+                    }
+                }
+            }
+        }
+        TypeExpr::Intersection(parts) => {
+            for part in parts.iter().rev() {
+                collect_direct_object_properties(part, out, seen);
+            }
+        }
+        TypeExpr::Parenthesized(inner) => {
+            collect_direct_object_properties(inner, out, seen);
+        }
+        _ => {}
+    }
+}
+
+/// Collect all named type references from a TypeExpr, non-recursively
+/// (only direct references, not transitive).
+fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            out.push(name.to_string());
+            for arg in type_arguments.iter() {
+                collect_type_refs(arg, out);
+            }
+        }
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            for m in members.iter() {
+                collect_type_refs(m, out);
+            }
+        }
+        TypeExpr::Array { element, .. } => collect_type_refs(element, out),
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                if let verter_semantic::analysis::type_expr::ObjectMember::Property(prop) = member {
+                    collect_type_refs(&prop.ty, out);
+                }
+            }
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for el in elements.iter() {
+                collect_type_refs(&el.ty, out);
+            }
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_type_refs(object, out);
+            collect_type_refs(index, out);
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            collect_type_refs(check, out);
+            collect_type_refs(extends, out);
+            collect_type_refs(true_type, out);
+            collect_type_refs(false_type, out);
+        }
+        TypeExpr::Function(func) => {
+            for param in &func.parameters {
+                collect_type_refs(&param.ty, out);
+            }
+            if let Some(ref ret) = func.return_type {
+                collect_type_refs(ret, out);
+            }
+        }
+        TypeExpr::Mapped { source, value, .. } => {
+            collect_type_refs(source, out);
+            collect_type_refs(value, out);
+        }
+        TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+            collect_type_refs(inner, out);
+        }
+        TypeExpr::TypeOf { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::TemplateLiteral { .. }
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::Infer { .. } => {}
     }
 }
 
@@ -1205,6 +1553,213 @@ export interface Props { child: Inner; data: Local }
                 .map(|r| &r.canonical_id),
             Some(&"/resolved/inner.ts".to_string()),
             "external dep should resolve through dep_edges"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream C: route-aware closure tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn member_deps_populated_for_interface_with_typed_members() {
+        let source = r#"
+import type { AvatarProps } from './avatar'
+import type { ButtonHTMLAttributes } from 'vue'
+
+export interface CheckboxProps extends ButtonHTMLAttributes {
+  ui?: AppConfig
+  color?: string
+  indicator?: AvatarProps
+}
+
+type AppConfig = { theme: string }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let sym = state.symbols.get("CheckboxProps").expect("CheckboxProps");
+
+        // member_deps should exist for 'ui', 'indicator', but not 'color' (primitive)
+        assert!(
+            sym.member_deps.contains_key("ui"),
+            "ui should have member deps, member_deps: {:?}",
+            sym.member_deps
+        );
+        assert!(
+            sym.member_deps.contains_key("indicator"),
+            "indicator should have member deps"
+        );
+        // 'color' is just 'string' — no refs
+        assert!(
+            !sym.member_deps.contains_key("color"),
+            "color (primitive string) should have no deps"
+        );
+
+        // Verify 'ui' deps reference AppConfig
+        let ui_deps = &sym.member_deps["ui"];
+        assert!(
+            ui_deps.contains(&"AppConfig".to_string()),
+            "ui deps should reference AppConfig, got {:?}",
+            ui_deps
+        );
+    }
+
+    #[test]
+    fn route_closure_member_narrows_to_member_deps_only() {
+        let source = r#"
+import type { Alpha } from './alpha'
+import type { Beta } from './beta'
+
+export interface Props {
+  a: Alpha
+  b: Beta
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        // Route::Member("a") should only include Alpha deps, not Beta
+        let closure_a = state.route_closure("Props", &ExportedRoute::Member("a".into()), 500);
+        let ext_names: Vec<&str> = closure_a
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(
+            ext_names.contains(&"Alpha"),
+            "Member('a') should include Alpha, got {:?}",
+            ext_names
+        );
+        assert!(
+            !ext_names.contains(&"Beta"),
+            "Member('a') should NOT include Beta"
+        );
+
+        // Route::Whole should include both
+        let closure_whole = state.route_closure("Props", &ExportedRoute::Whole, 500);
+        let ext_names_whole: Vec<&str> = closure_whole
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(
+            ext_names_whole.contains(&"Alpha") && ext_names_whole.contains(&"Beta"),
+            "Whole should include both Alpha and Beta, got {:?}",
+            ext_names_whole
+        );
+    }
+
+    #[test]
+    fn route_closure_pick_narrows_to_subset() {
+        let source = r#"
+import type { A } from './a'
+import type { B } from './b'
+import type { C } from './c'
+
+export interface Props {
+  x: A
+  y: B
+  z: C
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        // Pick(['x', 'z']) should include A and C but not B
+        let closure = state.route_closure(
+            "Props",
+            &ExportedRoute::Pick(vec!["x".into(), "z".into()]),
+            500,
+        );
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(ext_names.contains(&"A"), "Pick(['x','z']) should include A");
+        assert!(ext_names.contains(&"C"), "Pick(['x','z']) should include C");
+        assert!(
+            !ext_names.contains(&"B"),
+            "Pick(['x','z']) should NOT include B"
+        );
+    }
+
+    #[test]
+    fn route_closure_omit_narrows_to_remaining_members() {
+        let source = r#"
+import type { A } from './a'
+import type { B } from './b'
+import type { C } from './c'
+
+export interface Props {
+  x: A
+  y: B
+  z: C
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure("Props", &ExportedRoute::Omit(vec!["y".into()]), 500);
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(ext_names.contains(&"A"));
+        assert!(ext_names.contains(&"C"));
+        assert!(!ext_names.contains(&"B"));
+    }
+
+    #[test]
+    fn route_closure_member_with_primitive_property_stays_minimal() {
+        let source = r#"
+import type { Alpha } from './alpha'
+
+export interface Props {
+  a: Alpha
+  color: string
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure("Props", &ExportedRoute::Member("color".into()), 500);
+        assert!(closure.unresolved_external.is_empty());
+        assert_eq!(closure.local_symbols_used, vec!["Props".to_string()]);
+    }
+
+    #[test]
+    fn route_closure_missing_or_inherited_member_falls_back_to_whole() {
+        let source = r#"
+import type { Alpha } from './alpha'
+
+interface Base {
+  inherited: Alpha
+}
+
+export interface Props extends Base {
+  own: string
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure("Props", &ExportedRoute::Member("inherited".into()), 500);
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(
+            ext_names.contains(&"Alpha"),
+            "missing direct metadata should conservatively fall back to whole closure"
         );
     }
 }

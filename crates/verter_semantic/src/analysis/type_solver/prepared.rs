@@ -263,21 +263,56 @@ impl PreparedTypeDecl {
     }
 
     /// Build a member index from an object-like body.
+    ///
+    /// Handles:
+    /// - `TypeExpr::Object` — direct properties
+    /// - `TypeExpr::Intersection` — scan parts right-to-left, indexing direct
+    ///   object members. Right-to-left precedence ensures the interface's own
+    ///   object tail (last part) wins over inherited parts (earlier parts).
+    ///   Only direct Object members are indexed; heritage Ref parts are skipped.
+    ///   Nested transparent intersections are flattened so declaration-merged
+    ///   interfaces still expose members from earlier object slices.
     pub fn build_member_index(&mut self) {
-        if let TypeExpr::Object(ref obj) = self.body {
-            for member in &obj.properties {
-                if let ObjectMember::Property(prop) = member {
-                    self.member_index.insert(
-                        prop.name.clone(),
-                        PreparedMember {
-                            ty: prop.ty.clone(),
-                            optional: prop.optional,
-                            readonly: prop.readonly,
-                            is_method: false,
-                        },
-                    );
+        Self::index_transparent_object_members(&mut self.member_index, &self.body);
+    }
+
+    /// Index direct object members into the member_index map.
+    /// Existing entries are NOT overwritten (preserves right-to-left precedence
+    /// when called from intersection traversal).
+    fn index_object_members(
+        member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
+        obj: &crate::analysis::type_expr::ObjectExpr,
+    ) {
+        for member in &obj.properties {
+            if let ObjectMember::Property(prop) = member {
+                // entry API: only insert if not already present
+                member_index
+                    .entry(prop.name.clone())
+                    .or_insert_with(|| PreparedMember {
+                        ty: prop.ty.clone(),
+                        optional: prop.optional,
+                        readonly: prop.readonly,
+                        is_method: false,
+                    });
+            }
+        }
+    }
+
+    fn index_transparent_object_members(
+        member_index: &mut rustc_hash::FxHashMap<String, PreparedMember>,
+        body: &TypeExpr,
+    ) {
+        match body {
+            TypeExpr::Object(obj) => Self::index_object_members(member_index, obj),
+            TypeExpr::Intersection(parts) => {
+                for part in parts.iter().rev() {
+                    Self::index_transparent_object_members(member_index, part);
                 }
             }
+            TypeExpr::Parenthesized(inner) => {
+                Self::index_transparent_object_members(member_index, inner);
+            }
+            _ => {}
         }
     }
 
@@ -442,5 +477,201 @@ mod tests {
             TypeExpr::Primitive(PrimitiveName::String),
         );
         assert_eq!(decl.prepared_kind(), PreparedDeclKind::Interface);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream D: intersection member indexing tests
+    // -----------------------------------------------------------------------
+
+    fn make_object(props: &[(&str, TypeExpr, bool)]) -> TypeExpr {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: props
+                .iter()
+                .map(|(name, ty, optional)| {
+                    ObjectMember::Property(ObjectProperty {
+                        name: (*name).into(),
+                        ty: ty.clone(),
+                        optional: *optional,
+                        readonly: false,
+                    })
+                })
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn intersection_tail_object_members_indexed() {
+        // Simulates: interface Foo extends Bar { own: string }
+        // Lowered as: Intersection([Ref("Bar"), Object({ own: string })])
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::named("Bar"), // heritage ref
+            make_object(&[("own", TypeExpr::Primitive(PrimitiveName::String), false)]),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Foo"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        // KEY ASSERTION: 'own' from the intersection tail should be indexed
+        assert!(
+            decl.member("own").is_some(),
+            "own member from intersection tail should be indexed"
+        );
+        assert!(
+            matches!(
+                decl.member("own").unwrap().ty,
+                TypeExpr::Primitive(PrimitiveName::String)
+            ),
+            "own should be string"
+        );
+
+        // Negative: 'Bar' heritage ref members should NOT be indexed
+        // (they don't exist as direct members)
+        assert!(
+            decl.member("Bar").is_none(),
+            "heritage ref name should not be indexed as a member"
+        );
+    }
+
+    #[test]
+    fn intersection_own_members_win_over_heritage() {
+        // interface Foo extends Bar { mode: number }
+        // where Bar also has mode: string
+        // Lowered as: Intersection([Object({mode: string}), Object({mode: number})])
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            make_object(&[("mode", TypeExpr::Primitive(PrimitiveName::String), false)]),
+            make_object(&[("mode", TypeExpr::Primitive(PrimitiveName::Number), false)]),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Foo"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        // Right-to-left precedence: the LAST object in the intersection wins
+        let mode = decl.member("mode").expect("mode should be indexed");
+        assert!(
+            matches!(mode.ty, TypeExpr::Primitive(PrimitiveName::Number)),
+            "own member (last in intersection) should win, got {:?}",
+            mode.ty
+        );
+    }
+
+    #[test]
+    fn non_object_body_still_produces_empty_index() {
+        let body = TypeExpr::Primitive(PrimitiveName::String);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "T"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+
+        assert!(
+            decl.member_index.is_empty(),
+            "primitive body should have empty member index"
+        );
+    }
+
+    #[test]
+    fn interface_with_two_heritage_clauses_and_own_tail() {
+        // interface Foo extends A, B { own: boolean }
+        // Lowered as: Intersection([Ref("A"), Ref("B"), Object({own: boolean})])
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::named("A"),
+            TypeExpr::named("B"),
+            make_object(&[("own", TypeExpr::Primitive(PrimitiveName::Boolean), false)]),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Foo"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        assert!(
+            decl.member("own").is_some(),
+            "own member should be indexed from trailing object"
+        );
+        assert!(
+            matches!(
+                decl.member("own").unwrap().ty,
+                TypeExpr::Primitive(PrimitiveName::Boolean)
+            ),
+            "own should be boolean"
+        );
+        // Heritage Ref names should NOT appear as members
+        assert!(decl.member("A").is_none());
+        assert!(decl.member("B").is_none());
+    }
+
+    #[test]
+    fn missing_member_returns_none_without_panic() {
+        let body = make_object(&[(
+            "existing",
+            TypeExpr::Primitive(PrimitiveName::String),
+            false,
+        )]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "T"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        assert!(decl.member("existing").is_some());
+        assert!(
+            decl.member("nonexistent").is_none(),
+            "missing member should return None"
+        );
+        assert!(
+            decl.member("").is_none(),
+            "empty string member should return None"
+        );
+    }
+
+    #[test]
+    fn generic_alias_body_with_type_args_not_indexed() {
+        // type Wrapper<T> = Array<T> — generic ref body, NOT indexable
+        let body = TypeExpr::named_with_args("Array", vec![TypeExpr::named("T")]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Wrapper"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+
+        assert!(
+            decl.member_index.is_empty(),
+            "generic ref body should not be indexed"
+        );
+    }
+
+    #[test]
+    fn merged_interface_nested_intersections_keep_earlier_members() {
+        let body = TypeExpr::Intersection(Arc::from(vec![
+            TypeExpr::Intersection(Arc::from(vec![make_object(&[(
+                "first",
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+            )])])),
+            make_object(&[("second", TypeExpr::Primitive(PrimitiveName::Number), false)]),
+        ]));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Merged"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+
+        assert!(decl.member("first").is_some());
+        assert!(decl.member("second").is_some());
     }
 }

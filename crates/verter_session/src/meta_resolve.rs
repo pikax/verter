@@ -718,8 +718,12 @@ impl VerterHost {
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                resolver_view.resolve_prepared_alias(declaration_source, requested_exported_name)
+            let Some((resolved_canonical_id, resolved_exported_name, prepared)) = resolver_view
+                .resolve_prepared_alias(
+                    declaration_source,
+                    requested_exported_name,
+                    &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+                )
             else {
                 continue;
             };
@@ -816,12 +820,16 @@ impl VerterHost {
         let _loop_start = std::time::Instant::now();
         while let Some(pending) = referenced_names.pop_front() {
             _loop_iterations += 1;
-            let type_name = pending.name;
+            let PendingComponentMetaRegistryRef {
+                name: type_name,
+                source_hint: pending_source_hint_owned,
+                exported_name: pending_exported_name_owned,
+                route: pending_route,
+            } = pending;
             let imported_owner_route =
                 owner_component_meta_registry_import_binding(snapshot, type_name.as_str()).filter(
                     |_| {
-                        pending
-                            .source_hint
+                        pending_source_hint_owned
                             .as_deref()
                             .is_none_or(|source| source.is_empty() || source == owner_canonical)
                     },
@@ -829,15 +837,19 @@ impl VerterHost {
             let pending_source_hint = imported_owner_route
                 .as_ref()
                 .map(|(canonical_id, _)| canonical_id.as_str())
-                .or(pending.source_hint.as_deref());
+                .or(pending_source_hint_owned.as_deref());
             let pending_exported_name = imported_owner_route
                 .as_ref()
                 .map(|(_, exported_name)| exported_name.as_str())
-                .or(pending.exported_name.as_deref());
+                .or(pending_exported_name_owned.as_deref());
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
-                    "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?}",
-                    owner_canonical, type_name, pending_source_hint, pending_exported_name,
+                    "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?} route={:?}",
+                    owner_canonical,
+                    type_name,
+                    pending_source_hint,
+                    pending_exported_name,
+                    pending_route,
                 ));
             }
             if published_names.contains(&type_name) {
@@ -856,7 +868,11 @@ impl VerterHost {
             {
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                    resolver_view.resolve_prepared_alias(source_hint, requested_exported_name)
+                    resolver_view.resolve_prepared_alias(
+                        source_hint,
+                        requested_exported_name,
+                        &pending_route,
+                    )
                 {
                     track_component_meta_dependency(
                         tracked_dependencies,
@@ -1592,6 +1608,7 @@ struct PendingComponentMetaRegistryRef {
     name: String,
     source_hint: Option<String>,
     exported_name: Option<String>,
+    route: crate::resolver_core::shallow_file_state::ExportedRoute,
 }
 
 fn upsert_component_meta_registry_entry(
@@ -1705,6 +1722,7 @@ fn enqueue_component_meta_registry_ref(
     name: &str,
     source_hint: Option<&str>,
     exported_name: Option<&str>,
+    route: crate::resolver_core::shallow_file_state::ExportedRoute,
 ) {
     if published_names.contains(name) {
         return;
@@ -1726,6 +1744,7 @@ fn enqueue_component_meta_registry_ref(
             if existing.exported_name.is_none() {
                 existing.exported_name = exported_name;
             }
+            existing.route = merge_component_meta_registry_route(&existing.route, &route);
         }
         return;
     }
@@ -1733,7 +1752,47 @@ fn enqueue_component_meta_registry_ref(
         name: name.to_string(),
         source_hint,
         exported_name,
+        route,
     });
+}
+
+fn merge_component_meta_registry_route(
+    left: &crate::resolver_core::shallow_file_state::ExportedRoute,
+    right: &crate::resolver_core::shallow_file_state::ExportedRoute,
+) -> crate::resolver_core::shallow_file_state::ExportedRoute {
+    use crate::resolver_core::shallow_file_state::ExportedRoute;
+
+    match (left, right) {
+        (ExportedRoute::Whole, _) | (_, ExportedRoute::Whole) => ExportedRoute::Whole,
+        (ExportedRoute::Member(left), ExportedRoute::Member(right)) if left == right => {
+            ExportedRoute::Member(left.clone())
+        }
+        (ExportedRoute::Member(left), ExportedRoute::Member(right)) => {
+            let mut members = vec![left.clone(), right.clone()];
+            members.sort();
+            members.dedup();
+            ExportedRoute::Pick(members)
+        }
+        (ExportedRoute::Member(member), ExportedRoute::Pick(members))
+        | (ExportedRoute::Pick(members), ExportedRoute::Member(member)) => {
+            let mut merged = members.clone();
+            merged.push(member.clone());
+            merged.sort();
+            merged.dedup();
+            ExportedRoute::Pick(merged)
+        }
+        (ExportedRoute::Pick(left), ExportedRoute::Pick(right)) => {
+            let mut merged = left.clone();
+            merged.extend(right.iter().cloned());
+            merged.sort();
+            merged.dedup();
+            ExportedRoute::Pick(merged)
+        }
+        (ExportedRoute::Omit(left), ExportedRoute::Omit(right)) if left == right => {
+            ExportedRoute::Omit(left.clone())
+        }
+        _ => ExportedRoute::Whole,
+    }
 }
 
 fn choose_preferred_component_meta_registry_candidate(
@@ -1914,6 +1973,19 @@ fn collect_component_meta_registry_refs(
 ) {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
+    if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr) {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            root_name.as_str(),
+            source_hint,
+            None,
+            route,
+        );
+        return;
+    }
+
     match expr {
         TypeExpr::Ref {
             name,
@@ -1926,6 +1998,7 @@ fn collect_component_meta_registry_refs(
                 name.as_ref(),
                 source_hint,
                 None,
+                crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
             );
         }
         TypeExpr::Array { element, .. }
@@ -2212,6 +2285,109 @@ fn collect_component_meta_registry_public_field_refs(
     );
 }
 
+fn component_meta_registry_ref_name(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<&str> {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => Some(name.as_ref()),
+        TypeExpr::Parenthesized(inner) => component_meta_registry_ref_name(inner),
+        _ => None,
+    }
+}
+
+fn component_meta_registry_string_literal_keys(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<Vec<String>> {
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
+        TypeExpr::Union(types) => {
+            let mut keys = Vec::new();
+            for ty in types.iter() {
+                keys.extend(component_meta_registry_string_literal_keys(ty)?);
+            }
+            keys.sort();
+            keys.dedup();
+            Some(keys)
+        }
+        TypeExpr::Parenthesized(inner) => component_meta_registry_string_literal_keys(inner),
+        _ => None,
+    }
+}
+
+fn component_meta_registry_public_utility_route(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<(
+    String,
+    crate::resolver_core::shallow_file_state::ExportedRoute,
+)> {
+    use crate::resolver_core::shallow_file_state::ExportedRoute;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => component_meta_registry_public_utility_route(inner),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.len() == 2 && matches!(name.as_ref(), "Pick" | "Omit") => {
+            let root_name = component_meta_registry_ref_name(&type_arguments[0])?.to_string();
+            let members = component_meta_registry_string_literal_keys(&type_arguments[1])?;
+            if members.is_empty() {
+                return None;
+            }
+            let route = if name.as_ref() == "Pick" {
+                ExportedRoute::Pick(members)
+            } else {
+                ExportedRoute::Omit(members)
+            };
+            Some((root_name, route))
+        }
+        _ => None,
+    }
+}
+
+fn component_meta_registry_public_indexed_access_route(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<(
+    String,
+    crate::resolver_core::shallow_file_state::ExportedRoute,
+)> {
+    use crate::resolver_core::shallow_file_state::ExportedRoute;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    fn collect_path(expr: &TypeExpr, path: &mut Vec<String>) -> Option<String> {
+        use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+        match expr {
+            TypeExpr::IndexedAccess { object, index } => {
+                let root = collect_path(object, path)?;
+                let TypeExpr::Literal(LiteralValue::String(member)) = index.as_ref() else {
+                    return None;
+                };
+                path.push(member.clone());
+                Some(root)
+            }
+            TypeExpr::Parenthesized(inner) => collect_path(inner, path),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => Some(name.to_string()),
+            _ => None,
+        }
+    }
+
+    let mut path = Vec::new();
+    let root = collect_path(expr, &mut path)?;
+    let first_member = path.into_iter().next()?;
+    Some((root, ExportedRoute::Member(first_member)))
+}
+
 fn collect_component_meta_registry_public_surface_refs(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -2233,6 +2409,7 @@ fn collect_component_meta_registry_public_surface_refs(
                 name.as_ref(),
                 source_hint,
                 None,
+                crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
             );
         }
         TypeExpr::Parenthesized(element) => {
@@ -2277,23 +2454,11 @@ fn collect_component_meta_registry_public_indexed_access_roots(
     source_hint: Option<&str>,
 ) {
     use verter_semantic::analysis::type_eval::TypeDeclKind;
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    let TypeExpr::IndexedAccess { object, .. } = expr else {
+    let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) else {
         return;
     };
-    let TypeExpr::Ref {
-        name,
-        type_arguments,
-    } = object.as_ref()
-    else {
-        return;
-    };
-    if !type_arguments.is_empty() {
-        return;
-    }
     let Some(prepared) =
-        host.prepared_type_decl_in_view(owner_canonical, name.as_ref(), store_view)
+        host.prepared_type_decl_in_view(owner_canonical, root_name.as_str(), store_view)
     else {
         return;
     };
@@ -2304,9 +2469,10 @@ fn collect_component_meta_registry_public_indexed_access_roots(
         published_names,
         queued_names,
         output,
-        name.as_ref(),
+        root_name.as_str(),
         source_hint,
         None,
+        route,
     );
 }
 
@@ -2332,6 +2498,7 @@ fn collect_component_meta_registry_member_surface_refs(
                 name.as_ref(),
                 source_hint,
                 None,
+                crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
             );
         }
         TypeExpr::IndexedAccess { object, index } => {

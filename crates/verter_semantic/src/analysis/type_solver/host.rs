@@ -54,6 +54,7 @@ impl std::fmt::Display for ResolvedRootIdentity {
 pub struct SolverProjection<T> {
     pub exactness: SolverExactness,
     pub value: T,
+    pub type_decl_contexts: Vec<Arc<PreparedTypeDecl>>,
 }
 
 impl<T> SolverProjection<T> {
@@ -61,6 +62,7 @@ impl<T> SolverProjection<T> {
         Self {
             exactness: SolverExactness::ExactConcrete,
             value,
+            type_decl_contexts: Vec::new(),
         }
     }
 
@@ -68,6 +70,7 @@ impl<T> SolverProjection<T> {
         Self {
             exactness: SolverExactness::ExactSymbolic,
             value,
+            type_decl_contexts: Vec::new(),
         }
     }
 
@@ -75,13 +78,25 @@ impl<T> SolverProjection<T> {
         Self {
             exactness: SolverExactness::Incomplete,
             value,
+            type_decl_contexts: Vec::new(),
         }
+    }
+
+    pub fn with_type_decl_context(mut self, prepared: Arc<PreparedTypeDecl>) -> Self {
+        self.type_decl_contexts.push(prepared);
+        self
+    }
+
+    pub fn with_type_decl_contexts(mut self, prepared: Vec<Arc<PreparedTypeDecl>>) -> Self {
+        self.type_decl_contexts = prepared;
+        self
     }
 
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SolverProjection<U> {
         SolverProjection {
             exactness: self.exactness,
             value: f(self.value),
+            type_decl_contexts: self.type_decl_contexts,
         }
     }
 }
@@ -368,12 +383,15 @@ mod tests {
         let p = SolverProjection::exact_concrete(42);
         assert_eq!(p.exactness, SolverExactness::ExactConcrete);
         assert_eq!(p.value, 42);
+        assert!(p.type_decl_contexts.is_empty());
 
         let p = SolverProjection::exact_symbolic("open");
         assert_eq!(p.exactness, SolverExactness::ExactSymbolic);
+        assert!(p.type_decl_contexts.is_empty());
 
         let p = SolverProjection::incomplete(false);
         assert_eq!(p.exactness, SolverExactness::Incomplete);
+        assert!(p.type_decl_contexts.is_empty());
     }
 
     #[test]

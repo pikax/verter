@@ -1531,6 +1531,78 @@ defineProps<Props>()
     );
 }
 
+#[test]
+fn narrow_route_required_imports_follow_local_export_alias_and_cache_by_route() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { Alpha } from './alpha'
+import type { Beta } from './beta'
+
+interface InternalProps {
+  a: Alpha
+  b: Beta
+}
+
+export { InternalProps as PublicProps }
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/alpha.ts",
+        "export interface Alpha { value: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/beta.ts",
+        "export interface Beta { value: number }\n",
+    );
+
+    let _ = host.shallow_file_state_in_view("/src/types.ts", None);
+
+    let member_route = crate::resolver_core::shallow_file_state::ExportedRoute::Member("a".into());
+    let member_required = host.required_import_names_for_exported_route_in_view(
+        "/src/types.ts",
+        "PublicProps",
+        &member_route,
+        None,
+    );
+    let whole_required = host.required_import_names_for_exported_route_in_view(
+        "/src/types.ts",
+        "PublicProps",
+        &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+        None,
+    );
+
+    assert!(
+        member_required.contains("Alpha"),
+        "narrow route should follow the aliased local symbol"
+    );
+    assert!(
+        !member_required.contains("Beta"),
+        "narrow route should not widen to sibling imports"
+    );
+    assert!(whole_required.contains("Alpha"));
+    assert!(whole_required.contains("Beta"));
+
+    let cached = host
+        .imported_dependency_cache
+        .lock()
+        .get("/src/types.ts")
+        .cloned()
+        .expect("imported dependency entry should exist");
+    assert!(cached
+        .exported_required_import_names
+        .contains_key(&("PublicProps".to_string(), member_route)));
+    assert!(cached.exported_required_import_names.contains_key(&(
+        "PublicProps".to_string(),
+        crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+    )));
+}
+
 // ===========================================================================
 // Phase 4: HostFrontierAdapter integration test
 // ===========================================================================

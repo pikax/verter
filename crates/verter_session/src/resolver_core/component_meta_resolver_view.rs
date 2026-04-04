@@ -8,6 +8,7 @@
 use rustc_hash::FxHashMap;
 
 use super::declaration_metadata::ResolvedTypeDeclaration;
+use crate::resolver_core::shallow_file_state::ExportedRoute;
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
@@ -23,7 +24,7 @@ pub struct ComponentMetaResolverView<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
     /// Cached import-route resolutions.
-    routes: FxHashMap<(String, String), PreparedAliasEntry>,
+    routes: FxHashMap<(String, String, ExportedRoute), PreparedAliasEntry>,
     /// Cached type declarations.
     declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
     /// Cached resolvability checks.
@@ -61,7 +62,7 @@ impl<'a> ComponentMetaResolverView<'a> {
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let _ = self.resolve_prepared_alias(source, name);
+            let _ = self.resolve_prepared_alias(source, name, &ExportedRoute::Whole);
         }
     }
 
@@ -70,16 +71,23 @@ impl<'a> ComponentMetaResolverView<'a> {
         &mut self,
         canonical_id: &str,
         exported_name: &str,
+        route: &ExportedRoute,
     ) -> PreparedAliasEntry {
-        let key = (canonical_id.to_string(), exported_name.to_string());
+        let key = (
+            canonical_id.to_string(),
+            exported_name.to_string(),
+            route.clone(),
+        );
         self.routes
             .entry(key)
             .or_insert_with_key(|_| {
-                self.host.resolve_prepared_symbol_dependency_alias_in_view(
-                    canonical_id,
-                    exported_name,
-                    self.store_view,
-                )
+                self.host
+                    .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+                        canonical_id,
+                        exported_name,
+                        route,
+                        self.store_view,
+                    )
             })
             .clone()
     }

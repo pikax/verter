@@ -4336,11 +4336,19 @@ defineProps<Props>()
     let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
 
     // First lookup
-    let result1 = view.resolve_prepared_alias("/src/types.ts", "Props");
+    let result1 = view.resolve_prepared_alias(
+        "/src/types.ts",
+        "Props",
+        &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+    );
     assert!(result1.is_some(), "Props should resolve from types.ts");
 
     // Second lookup — should hit cache (routes_count stays at 1)
-    let result2 = view.resolve_prepared_alias("/src/types.ts", "Props");
+    let result2 = view.resolve_prepared_alias(
+        "/src/types.ts",
+        "Props",
+        &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+    );
     assert_eq!(
         format!("{:?}", result1),
         format!("{:?}", result2),
@@ -4350,6 +4358,40 @@ defineProps<Props>()
         view.routes_count(),
         1,
         "should have exactly one cached route"
+    );
+}
+
+#[test]
+fn resolver_view_keys_prepared_alias_cache_by_route() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface Props { primary: string; secondary: number }",
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+
+    let whole = view.resolve_prepared_alias(
+        "/src/types.ts",
+        "Props",
+        &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+    );
+    let narrow = view.resolve_prepared_alias(
+        "/src/types.ts",
+        "Props",
+        &crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
+    );
+
+    assert!(whole.is_some(), "whole route should resolve");
+    assert!(narrow.is_some(), "narrow member route should resolve");
+    assert_eq!(
+        view.routes_count(),
+        2,
+        "whole and narrow routes should occupy separate resolver-view cache entries",
     );
 }
 

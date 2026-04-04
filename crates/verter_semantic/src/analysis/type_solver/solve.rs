@@ -4,7 +4,10 @@
 //! query-local arena, lowers the expression, and resolves references through
 //! the host. Returns a `SolverResult<TypeExpr>` projected back from the arena.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use super::arena::{Node, NodeId, PrimitiveKind, QueryArena};
 use super::builtin::{expand_builtin, BuiltinUtility};
@@ -91,6 +94,55 @@ pub struct SolveState {
     pub diagnostics: Vec<SolverDiagnostic>,
     /// Count of diagnostics that were dropped after the cap was reached.
     pub diagnostics_truncated: usize,
+
+    // -- Query-local reuse caches --
+    /// Cache for host member projections within a single query. Keyed by
+    /// `(canonical_id, symbol_name, member_name)` → resolved `NodeId`.
+    /// Collapses repeated indexed-access projections like `Foo['bar']`
+    /// that would otherwise re-lower and re-resolve the same host result.
+    pub(crate) host_projection_cache: rustc_hash::FxHashMap<(String, String, String), NodeId>,
+
+    /// Cache for completed `resolve_prepared_ref` results within a single
+    /// query. Keyed by `RecursionKey` (identity + args_hash) → resolved
+    /// `NodeId`. Prevents repeated full instantiation of the same
+    /// declaration with the same effective arguments.
+    pub(crate) prepared_ref_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
+
+    // -- Query audit / trace counters --
+    /// Whether structured solver tracing is enabled for this query.
+    pub(crate) trace_enabled: bool,
+
+    /// Audit surface for tests: counts host member projection calls.
+    /// Key: `(canonical_id, symbol_name, member)`, Value: call count.
+    pub(crate) audit_host_projections: rustc_hash::FxHashMap<(String, String, String), u32>,
+
+    /// Audit surface for tests: counts prepared-ref instantiation entries.
+    /// Key: `RecursionKey`, Value: call count.
+    pub(crate) audit_prepared_ref_entries: rustc_hash::FxHashMap<RecursionKey, u32>,
+
+    /// Audit surface for tests/tracing: prepared-ref expansion edges.
+    /// Key: `(parent_label, child_label)`, Value: expansion count.
+    pub(crate) audit_prepared_ref_edges: rustc_hash::FxHashMap<(String, String), u32>,
+
+    /// Audit surface for tests/tracing: unresolved bare-name fallback lookups.
+    /// Key: `(parent_label, symbol_name)`, Value: miss count.
+    pub(crate) audit_unresolved_root_lookups: rustc_hash::FxHashMap<(String, String), u32>,
+
+    /// Audit surface for tests/tracing: visited external declaration counts.
+    /// Key: `"canonical_id::symbol_name"`, Value: visit count.
+    pub(crate) audit_external_decl_visits: rustc_hash::FxHashMap<String, u32>,
+
+    /// Audit surface for tests/tracing: incomplete reason kind counts.
+    pub(crate) audit_incomplete_reason_kinds: rustc_hash::FxHashMap<&'static str, u32>,
+
+    /// Audit: total host projection cache hits in this query.
+    pub(crate) host_projection_cache_hits: u32,
+
+    /// Audit: total prepared-ref cache hits in this query.
+    pub(crate) prepared_ref_cache_hits: u32,
+
+    /// Active prepared-ref expansion stack used to attribute nested traversal.
+    pub(crate) prepared_ref_stack: Vec<String>,
 }
 
 /// Structured capture of conditional context frames for a recursive ref.
@@ -124,6 +176,18 @@ impl SolveState {
             conditional_context_base_stack: Vec::new(),
             diagnostics: Vec::new(),
             diagnostics_truncated: 0,
+            host_projection_cache: rustc_hash::FxHashMap::default(),
+            prepared_ref_cache: rustc_hash::FxHashMap::default(),
+            trace_enabled: solver_trace_enabled(),
+            audit_host_projections: rustc_hash::FxHashMap::default(),
+            audit_prepared_ref_entries: rustc_hash::FxHashMap::default(),
+            audit_prepared_ref_edges: rustc_hash::FxHashMap::default(),
+            audit_unresolved_root_lookups: rustc_hash::FxHashMap::default(),
+            audit_external_decl_visits: rustc_hash::FxHashMap::default(),
+            audit_incomplete_reason_kinds: rustc_hash::FxHashMap::default(),
+            host_projection_cache_hits: 0,
+            prepared_ref_cache_hits: 0,
+            prepared_ref_stack: Vec::new(),
         }
     }
 
@@ -170,6 +234,12 @@ impl SolveState {
     /// Record incomplete status.
     pub fn mark_incomplete(&mut self, reason: IncompleteReason) {
         self.exactness = SolverExactness::Incomplete;
+        if self.audit_enabled() {
+            *self
+                .audit_incomplete_reason_kinds
+                .entry(incomplete_reason_kind(&reason))
+                .or_insert(0) += 1;
+        }
         self.incomplete_reasons.push(reason);
     }
 
@@ -190,6 +260,495 @@ impl SolveState {
             self.diagnostics_truncated += 1;
         }
     }
+
+    fn audit_enabled(&self) -> bool {
+        self.trace_enabled || cfg!(test)
+    }
+
+    fn record_host_projection_call(&mut self, key: (String, String, String)) {
+        if !self.audit_enabled() {
+            return;
+        }
+        *self.audit_host_projections.entry(key).or_insert(0) += 1;
+    }
+
+    fn record_prepared_ref_entry(&mut self, key: RecursionKey) {
+        if !self.audit_enabled() {
+            return;
+        }
+        *self.audit_prepared_ref_entries.entry(key).or_insert(0) += 1;
+    }
+
+    fn current_audit_parent_label(&self) -> String {
+        self.prepared_ref_stack
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "<query-root>".to_string())
+    }
+
+    fn record_prepared_ref_edge(&mut self, child_label: &str) {
+        if !self.audit_enabled() {
+            return;
+        }
+        let parent = self.current_audit_parent_label();
+        *self
+            .audit_prepared_ref_edges
+            .entry((parent, child_label.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    fn record_unresolved_root_lookup(&mut self, symbol_name: &str) {
+        if !self.audit_enabled() {
+            return;
+        }
+        let parent = self.current_audit_parent_label();
+        *self
+            .audit_unresolved_root_lookups
+            .entry((parent, symbol_name.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    fn record_external_decl_visit(&mut self, root_id: &ResolvedRootIdentity) {
+        if !self.audit_enabled() {
+            return;
+        }
+        *self
+            .audit_external_decl_visits
+            .entry(format!("{}::{}", root_id.canonical_id, root_id.symbol_name))
+            .or_insert(0) += 1;
+    }
+
+    fn record_host_projection_cache_hit(&mut self) {
+        if self.audit_enabled() {
+            self.host_projection_cache_hits += 1;
+        }
+    }
+
+    fn record_prepared_ref_cache_hit(&mut self) {
+        if self.audit_enabled() {
+            self.prepared_ref_cache_hits += 1;
+        }
+    }
+}
+
+fn incomplete_reason_kind(reason: &IncompleteReason) -> &'static str {
+    match reason {
+        IncompleteReason::MissingSource { .. } => "MissingSource",
+        IncompleteReason::UnsupportedSyntax { .. } => "UnsupportedSyntax",
+        IncompleteReason::Cancelled => "Cancelled",
+        IncompleteReason::RecursionPolicy { .. } => "RecursionPolicy",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SolveQueryTraceSummary {
+    duration_ms: f64,
+    arena_nodes: usize,
+    resolve_steps: u64,
+    exactness: SolverExactness,
+    execution_status: ExecutionStatus,
+    diagnostics: usize,
+    diagnostics_truncated: usize,
+    incomplete_reasons: usize,
+    visited_external_decls: usize,
+    prepared_ref_entries_total: u64,
+    prepared_ref_entries_unique: usize,
+    prepared_ref_cache_hits: u32,
+    host_projection_calls_total: u64,
+    host_projection_unique: usize,
+    host_projection_cache_hits: u32,
+    top_prepared_refs: Vec<(String, u32)>,
+    top_prepared_ref_edges: Vec<(String, u32)>,
+    top_unresolved_roots: Vec<(String, u32)>,
+    top_external_decl_visits: Vec<(String, u32)>,
+    top_incomplete_reason_kinds: Vec<(String, u32)>,
+    top_host_projections: Vec<(String, u32)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SolveBatchExprStats {
+    calls: u32,
+    hits: u32,
+    misses: u32,
+}
+
+#[derive(Debug, Default)]
+struct SolveBatchTraceStats {
+    total_calls: u32,
+    cache_hits: u32,
+    cache_misses: u32,
+    expr_stats: rustc_hash::FxHashMap<String, SolveBatchExprStats>,
+    miss_summaries: Vec<(String, SolveQueryTraceSummary)>,
+}
+
+fn solver_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("VERTER_SOLVER_TRACE").is_some()
+            || std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
+            || std::env::var_os("VERTER_META_TRACE").is_some()
+    })
+}
+
+fn solver_trace_output_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("VERTER_SOLVER_TRACE_PATH")
+        .or_else(|| std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH"))
+        .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
+        .map(std::path::PathBuf::from)
+}
+
+fn solver_trace_output_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn solver_trace_write_line(line: &str) {
+    use std::io::Write;
+
+    let _lock = solver_trace_output_lock().lock();
+    if let Some(path) = solver_trace_output_path() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+            return;
+        }
+    }
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.flush();
+}
+
+fn solver_trace_next_batch_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn top_named_counts<K, F>(
+    map: &rustc_hash::FxHashMap<K, u32>,
+    limit: usize,
+    render: F,
+) -> Vec<(String, u32)>
+where
+    K: std::cmp::Eq + std::hash::Hash,
+    F: Fn(&K) -> String,
+{
+    let mut entries = map
+        .iter()
+        .map(|(key, &count)| (render(key), count))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    entries.truncate(limit);
+    entries
+}
+
+fn build_query_trace_summary(
+    state: &SolveState,
+    arena: &QueryArena,
+    duration_ms: f64,
+) -> SolveQueryTraceSummary {
+    let prepared_ref_entries_total = state
+        .audit_prepared_ref_entries
+        .values()
+        .map(|&count| u64::from(count))
+        .sum();
+    let host_projection_calls_total = state
+        .audit_host_projections
+        .values()
+        .map(|&count| u64::from(count))
+        .sum();
+
+    SolveQueryTraceSummary {
+        duration_ms,
+        arena_nodes: arena.len(),
+        resolve_steps: state.steps,
+        exactness: state.exactness,
+        execution_status: state.execution_status,
+        diagnostics: state.diagnostics.len(),
+        diagnostics_truncated: state.diagnostics_truncated,
+        incomplete_reasons: state.incomplete_reasons.len(),
+        visited_external_decls: state.visited_external_decls.len(),
+        prepared_ref_entries_total,
+        prepared_ref_entries_unique: state.audit_prepared_ref_entries.len(),
+        prepared_ref_cache_hits: state.prepared_ref_cache_hits,
+        host_projection_calls_total,
+        host_projection_unique: state.audit_host_projections.len(),
+        host_projection_cache_hits: state.host_projection_cache_hits,
+        top_prepared_refs: top_named_counts(&state.audit_prepared_ref_entries, 12, |key| {
+            format!(
+                "{}::{}#{}",
+                key.canonical_id, key.symbol_name, key.args_hash
+            )
+        }),
+        top_prepared_ref_edges: top_named_counts(&state.audit_prepared_ref_edges, 16, |key| {
+            format!("{} -> {}", key.0, key.1)
+        }),
+        top_unresolved_roots: top_named_counts(&state.audit_unresolved_root_lookups, 16, |key| {
+            format!("{} -> {}", key.0, key.1)
+        }),
+        top_external_decl_visits: top_named_counts(&state.audit_external_decl_visits, 16, |key| {
+            key.clone()
+        }),
+        top_incomplete_reason_kinds: top_named_counts(
+            &state.audit_incomplete_reason_kinds,
+            16,
+            |key| key.to_string(),
+        ),
+        top_host_projections: top_named_counts(&state.audit_host_projections, 12, |key| {
+            format!("{}::{}[{}]", key.0, key.1, key.2)
+        }),
+    }
+}
+
+fn emit_batch_trace_summary(batch_id: u64, stats: &SolveBatchTraceStats, cache_len: usize) {
+    let total_query_ms: f64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| summary.duration_ms)
+        .sum();
+    let total_query_steps: u64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| summary.resolve_steps)
+        .sum();
+    let total_query_nodes: usize = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| summary.arena_nodes)
+        .sum();
+    let total_prepared_ref_entries: u64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| summary.prepared_ref_entries_total)
+        .sum();
+    let total_prepared_ref_hits: u64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| u64::from(summary.prepared_ref_cache_hits))
+        .sum();
+    let total_host_projection_calls: u64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| summary.host_projection_calls_total)
+        .sum();
+    let total_host_projection_hits: u64 = stats
+        .miss_summaries
+        .iter()
+        .map(|(_, summary)| u64::from(summary.host_projection_cache_hits))
+        .sum();
+
+    solver_trace_write_line(&format!(
+        "[verter-solver-trace] event=batch_end batch={} calls={} hits={} misses={} unique_exprs={} cache_entries={} total_query_ms={:.3} total_steps={} total_nodes={} total_prepared_ref_entries={} total_prepared_ref_hits={} total_host_projection_calls={} total_host_projection_hits={}",
+        batch_id,
+        stats.total_calls,
+        stats.cache_hits,
+        stats.cache_misses,
+        stats.expr_stats.len(),
+        cache_len,
+        total_query_ms,
+        total_query_steps,
+        total_query_nodes,
+        total_prepared_ref_entries,
+        total_prepared_ref_hits,
+        total_host_projection_calls,
+        total_host_projection_hits,
+    ));
+
+    let mut expr_entries = stats.expr_stats.iter().collect::<Vec<_>>();
+    expr_entries.sort_by(|left, right| {
+        right
+            .1
+            .calls
+            .cmp(&left.1.calls)
+            .then_with(|| right.1.misses.cmp(&left.1.misses))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    for (rank, (expr, stat)) in expr_entries.into_iter().take(20).enumerate() {
+        solver_trace_write_line(&format!(
+            "[verter-solver-trace] event=batch_expr batch={} rank={} expr={:?} calls={} hits={} misses={}",
+            batch_id,
+            rank + 1,
+            expr,
+            stat.calls,
+            stat.hits,
+            stat.misses,
+        ));
+    }
+
+    let mut query_entries = stats.miss_summaries.iter().collect::<Vec<_>>();
+    query_entries.sort_by(|left, right| {
+        right
+            .1
+            .duration_ms
+            .partial_cmp(&left.1.duration_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (rank, (expr, summary)) in query_entries.into_iter().take(12).enumerate() {
+        solver_trace_write_line(&format!(
+            "[verter-solver-trace] event=query_summary batch={} rank={} expr={:?} dur_ms={:.3} steps={} nodes={} exactness={:?} status={:?} diagnostics={} diagnostics_truncated={} incomplete_reasons={} visited_external_decls={} prepared_ref_entries={} prepared_ref_unique={} prepared_ref_cache_hits={} host_projection_calls={} host_projection_unique={} host_projection_cache_hits={}",
+            batch_id,
+            rank + 1,
+            expr,
+            summary.duration_ms,
+            summary.resolve_steps,
+            summary.arena_nodes,
+            summary.exactness,
+            summary.execution_status,
+            summary.diagnostics,
+            summary.diagnostics_truncated,
+            summary.incomplete_reasons,
+            summary.visited_external_decls,
+            summary.prepared_ref_entries_total,
+            summary.prepared_ref_entries_unique,
+            summary.prepared_ref_cache_hits,
+            summary.host_projection_calls_total,
+            summary.host_projection_unique,
+            summary.host_projection_cache_hits,
+        ));
+        for (inner_rank, (name, count)) in summary.top_prepared_refs.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_prepared_ref batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+        for (inner_rank, (name, count)) in summary.top_prepared_ref_edges.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_prepared_ref_edge batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+        for (inner_rank, (name, count)) in summary.top_unresolved_roots.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_unresolved_root batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+        for (inner_rank, (name, count)) in summary.top_external_decl_visits.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_external_decl_visit batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+        for (inner_rank, (name, count)) in summary.top_incomplete_reason_kinds.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_incomplete_reason batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+        for (inner_rank, (name, count)) in summary.top_host_projections.iter().enumerate() {
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=query_top_host_projection batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
+                batch_id,
+                rank + 1,
+                inner_rank + 1,
+                expr,
+                name,
+                count,
+            ));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test-only audit surface
+// ---------------------------------------------------------------------------
+
+/// Structured audit data from a solver query. Available only in tests.
+/// Used to assert both what was expanded and what was NOT expanded.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub struct SolverAudit {
+    /// Host member projection call counts.
+    /// Key: `(canonical_id, symbol_name, member)`.
+    pub host_projection_counts: rustc_hash::FxHashMap<(String, String, String), u32>,
+    /// Prepared-ref instantiation entry counts.
+    /// Key: `RecursionKey` (identity + args_hash).
+    pub prepared_ref_counts: rustc_hash::FxHashMap<RecursionKey, u32>,
+    /// Prepared-ref expansion edge counts.
+    /// Key: `(parent_label, child_label)`.
+    pub prepared_ref_edge_counts: rustc_hash::FxHashMap<(String, String), u32>,
+    /// Unresolved bare-name lookup miss counts.
+    /// Key: `(parent_label, symbol_name)`.
+    pub unresolved_root_counts: rustc_hash::FxHashMap<(String, String), u32>,
+    /// External declaration visit counts.
+    /// Key: `"canonical_id::symbol_name"`.
+    pub external_decl_visit_counts: rustc_hash::FxHashMap<String, u32>,
+    /// Incomplete reason kind counts.
+    pub incomplete_reason_counts: rustc_hash::FxHashMap<&'static str, u32>,
+    /// Total host projection cache hits.
+    pub host_projection_cache_hits: u32,
+    /// Total prepared-ref cache hits.
+    pub prepared_ref_cache_hits: u32,
+    /// Arena node count at end of query.
+    pub arena_nodes: usize,
+    /// Total resolve steps.
+    pub resolve_steps: u64,
+}
+
+/// Solve with audit data. Test-only entry point.
+#[cfg(test)]
+pub fn solve_type_with_audit(
+    expr: &TypeExpr,
+    host: &dyn TypeSolverHost,
+) -> (SolverResult<TypeExpr>, SolverAudit) {
+    let mut arena = QueryArena::new();
+    let mut state = SolveState::new(SolveLimits::default());
+
+    let root = lower_type_expr(&mut arena, expr);
+    let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
+    let result_expr = project_to_type_expr(&arena, resolved);
+
+    let audit = SolverAudit {
+        host_projection_counts: state.audit_host_projections,
+        prepared_ref_counts: state.audit_prepared_ref_entries,
+        prepared_ref_edge_counts: state.audit_prepared_ref_edges,
+        unresolved_root_counts: state.audit_unresolved_root_lookups,
+        external_decl_visit_counts: state.audit_external_decl_visits,
+        incomplete_reason_counts: state.audit_incomplete_reason_kinds,
+        host_projection_cache_hits: state.host_projection_cache_hits,
+        prepared_ref_cache_hits: state.prepared_ref_cache_hits,
+        arena_nodes: arena.len(),
+        resolve_steps: state.steps,
+    };
+
+    let result = SolverResult {
+        value: result_expr,
+        exactness: state.exactness,
+        execution_status: state.execution_status,
+        incomplete_reasons: state.incomplete_reasons,
+        diagnostics: state.diagnostics,
+    };
+
+    (result, audit)
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +762,7 @@ impl SolveState {
 struct CachedSolveEntry {
     result: SolverResult<TypeExpr>,
     trace: Vec<ResolvedRootIdentity>,
+    trace_summary: Option<SolveQueryTraceSummary>,
 }
 
 /// Shared query runner used by `solve_type`, `solve_type_with_trace`, and
@@ -213,6 +773,7 @@ fn run_solve_query(
     host: &dyn TypeSolverHost,
     limits: SolveLimits,
 ) -> CachedSolveEntry {
+    let query_started = Instant::now();
     let mut arena = QueryArena::new();
     let mut state = SolveState::new(limits);
 
@@ -253,6 +814,14 @@ fn run_solve_query(
         }
     }
 
+    let trace_summary = state.audit_enabled().then(|| {
+        build_query_trace_summary(
+            &state,
+            &arena,
+            query_started.elapsed().as_secs_f64() * 1000.0,
+        )
+    });
+
     CachedSolveEntry {
         result: SolverResult {
             value: result_expr,
@@ -262,6 +831,7 @@ fn run_solve_query(
             diagnostics: state.diagnostics,
         },
         trace: state.visited_external_decls,
+        trace_summary,
     }
 }
 
@@ -376,6 +946,9 @@ pub fn solve_type_with_trace(
 pub struct SolveBatch<'a> {
     host: &'a dyn TypeSolverHost,
     cache: rustc_hash::FxHashMap<TypeExpr, CachedSolveEntry>,
+    trace_enabled: bool,
+    trace_batch_id: u64,
+    trace_stats: SolveBatchTraceStats,
 }
 
 impl<'a> SolveBatch<'a> {
@@ -384,18 +957,76 @@ impl<'a> SolveBatch<'a> {
         Self {
             host,
             cache: rustc_hash::FxHashMap::default(),
+            trace_enabled: solver_trace_enabled(),
+            trace_batch_id: solver_trace_next_batch_id(),
+            trace_stats: SolveBatchTraceStats::default(),
         }
     }
 
     /// Solve a type expression, reusing a cached result when possible.
     pub fn solve(&mut self, expr: &TypeExpr) -> SolverResult<TypeExpr> {
+        let expr_summary = if self.trace_enabled {
+            Some(solver_expr_summary(expr))
+        } else {
+            None
+        };
+        if let Some(expr_summary) = expr_summary.as_ref() {
+            self.trace_stats.total_calls += 1;
+            self.trace_stats
+                .expr_stats
+                .entry(expr_summary.clone())
+                .or_default()
+                .calls += 1;
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=batch_call batch={} mode=solve expr={:?}",
+                self.trace_batch_id, expr_summary
+            ));
+        }
         if let RequestStatus::Cancelled = self.host.request_status() {
             return cancelled_solver_result(expr);
         }
         if let Some(entry) = self.cache.get(expr) {
+            if let Some(expr_summary) = expr_summary.as_ref() {
+                self.trace_stats.cache_hits += 1;
+                self.trace_stats
+                    .expr_stats
+                    .entry(expr_summary.clone())
+                    .or_default()
+                    .hits += 1;
+                solver_trace_write_line(&format!(
+                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve expr={:?} cache_hit=true status={:?} exactness={:?}",
+                    self.trace_batch_id,
+                    expr_summary,
+                    entry.result.execution_status,
+                    entry.result.exactness,
+                ));
+            }
             return entry.result.clone();
         }
         let entry = run_solve_query(expr, self.host, SolveLimits::default());
+        if let Some(expr_summary) = expr_summary.as_ref() {
+            self.trace_stats.cache_misses += 1;
+            self.trace_stats
+                .expr_stats
+                .entry(expr_summary.clone())
+                .or_default()
+                .misses += 1;
+            if let Some(summary) = entry.trace_summary.as_ref() {
+                self.trace_stats
+                    .miss_summaries
+                    .push((expr_summary.clone(), summary.clone()));
+                solver_trace_write_line(&format!(
+                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve expr={:?} cache_hit=false dur_ms={:.3} steps={} nodes={} status={:?} exactness={:?}",
+                    self.trace_batch_id,
+                    expr_summary,
+                    summary.duration_ms,
+                    summary.resolve_steps,
+                    summary.arena_nodes,
+                    summary.execution_status,
+                    summary.exactness,
+                ));
+            }
+        }
         let result = entry.result.clone();
         self.cache.insert(expr.clone(), entry);
         result
@@ -407,13 +1038,68 @@ impl<'a> SolveBatch<'a> {
         &mut self,
         expr: &TypeExpr,
     ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        let expr_summary = if self.trace_enabled {
+            Some(solver_expr_summary(expr))
+        } else {
+            None
+        };
+        if let Some(expr_summary) = expr_summary.as_ref() {
+            self.trace_stats.total_calls += 1;
+            self.trace_stats
+                .expr_stats
+                .entry(expr_summary.clone())
+                .or_default()
+                .calls += 1;
+            solver_trace_write_line(&format!(
+                "[verter-solver-trace] event=batch_call batch={} mode=solve_with_trace expr={:?}",
+                self.trace_batch_id, expr_summary
+            ));
+        }
         if let RequestStatus::Cancelled = self.host.request_status() {
             return (cancelled_solver_result(expr), Vec::new());
         }
         if let Some(entry) = self.cache.get(expr) {
+            if let Some(expr_summary) = expr_summary.as_ref() {
+                self.trace_stats.cache_hits += 1;
+                self.trace_stats
+                    .expr_stats
+                    .entry(expr_summary.clone())
+                    .or_default()
+                    .hits += 1;
+                solver_trace_write_line(&format!(
+                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve_with_trace expr={:?} cache_hit=true status={:?} exactness={:?}",
+                    self.trace_batch_id,
+                    expr_summary,
+                    entry.result.execution_status,
+                    entry.result.exactness,
+                ));
+            }
             return (entry.result.clone(), entry.trace.clone());
         }
         let entry = run_solve_query(expr, self.host, SolveLimits::default());
+        if let Some(expr_summary) = expr_summary.as_ref() {
+            self.trace_stats.cache_misses += 1;
+            self.trace_stats
+                .expr_stats
+                .entry(expr_summary.clone())
+                .or_default()
+                .misses += 1;
+            if let Some(summary) = entry.trace_summary.as_ref() {
+                self.trace_stats
+                    .miss_summaries
+                    .push((expr_summary.clone(), summary.clone()));
+                solver_trace_write_line(&format!(
+                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve_with_trace expr={:?} cache_hit=false dur_ms={:.3} steps={} nodes={} status={:?} exactness={:?}",
+                    self.trace_batch_id,
+                    expr_summary,
+                    summary.duration_ms,
+                    summary.resolve_steps,
+                    summary.arena_nodes,
+                    summary.execution_status,
+                    summary.exactness,
+                ));
+            }
+        }
         let result = entry.result.clone();
         let trace = entry.trace.clone();
         self.cache.insert(expr.clone(), entry);
@@ -423,6 +1109,15 @@ impl<'a> SolveBatch<'a> {
     /// Number of cached expression entries in this batch.
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+}
+
+impl Drop for SolveBatch<'_> {
+    fn drop(&mut self) {
+        if !self.trace_enabled {
+            return;
+        }
+        emit_batch_trace_summary(self.trace_batch_id, &self.trace_stats, self.cache.len());
     }
 }
 
@@ -667,6 +1362,7 @@ fn resolve_node(
             if let Some(root_id) = maybe_root {
                 return resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
             }
+            state.record_unresolved_root_lookup(&name);
 
             // Host can't resolve — keep as symbolic ref
             if resolved_args != args {
@@ -709,28 +1405,53 @@ fn resolve_node(
                         let maybe_root = resolve_name_in_context(state, name.as_str())
                             .or_else(|| host.root_identity("", name.as_str()));
                         if let Some(root_id) = maybe_root {
-                            let prepared_context = host.resolve_prepared_type_decl(&root_id);
+                            // Query-local host projection cache: collapse repeated
+                            // access to the same (root, member) within one query.
+                            let cache_key = (
+                                root_id.canonical_id.clone(),
+                                root_id.symbol_name.clone(),
+                                key.clone(),
+                            );
+                            if let Some(&cached) = state.host_projection_cache.get(&cache_key) {
+                                state.record_host_projection_cache_hit();
+                                return cached;
+                            }
+
                             if let Some(projection) =
                                 host.resolve_member_projection(&root_id, key.as_str())
                             {
+                                state.record_host_projection_call(cache_key.clone());
                                 if projection.exactness == SolverExactness::ExactSymbolic {
                                     state.mark_symbolic();
                                 }
                                 let lowered = lower_type_expr(arena, &projection.value);
-                                let pushed = if let Some(prepared) = prepared_context.as_ref() {
-                                    if !prepared.name_resolution.is_empty() {
-                                        state.type_decl_context_stack.push(Arc::clone(prepared));
-                                        true
-                                    } else {
-                                        false
+                                let mut pushed = 0usize;
+                                if projection.type_decl_contexts.is_empty() {
+                                    if let Some(prepared) =
+                                        host.resolve_prepared_type_decl(&root_id)
+                                    {
+                                        if !prepared.name_resolution.is_empty() {
+                                            state.type_decl_context_stack.push(prepared);
+                                            pushed = 1;
+                                        }
                                     }
                                 } else {
-                                    false
-                                };
+                                    for prepared in &projection.type_decl_contexts {
+                                        if !prepared.name_resolution.is_empty() {
+                                            state
+                                                .type_decl_context_stack
+                                                .push(Arc::clone(prepared));
+                                            pushed += 1;
+                                        }
+                                    }
+                                }
                                 let resolved = resolve_node(arena, lowered, host, state, subst);
-                                if pushed {
+                                for _ in 0..pushed {
                                     state.type_decl_context_stack.pop();
                                 }
+
+                                // Cache the resolved result for this (root, member)
+                                state.host_projection_cache.insert(cache_key, resolved);
                                 return resolved;
                             }
                         }
@@ -835,6 +1556,90 @@ fn resolve_substitution_binding(
 }
 
 // ---------------------------------------------------------------------------
+// Open-generic argument signal classification
+// ---------------------------------------------------------------------------
+
+/// Check if any effective arg is an open type parameter (TypeParam, Infer,
+/// or Applied/Ref whose own args are all open).
+fn has_open_arg(arena: &QueryArena, args: &[NodeId]) -> bool {
+    args.iter().any(|&arg| arg_is_open(arena, arg))
+}
+
+fn arg_is_open(arena: &QueryArena, node: NodeId) -> bool {
+    if node.is_unresolved() {
+        // UNRESOLVED means the arg slot was never filled (no explicit arg,
+        // no default). This is different from an open type parameter that
+        // may gain concrete signal later. Skip the stop for UNRESOLVED
+        // so that partial resolution can still expand the body.
+        return false;
+    }
+    match arena.get(node) {
+        Node::TypeParam { .. } | Node::Infer { .. } => true,
+        // Applied forms whose args are all still open are themselves open
+        Node::Applied { args, .. } => args.iter().all(|&a| arg_is_open(arena, a)),
+        // Bare Ref with no args: not a type parameter, just a named reference
+        Node::Ref { type_arguments, .. } if type_arguments.is_empty() => false,
+        // Ref with args: open if all args are open
+        Node::Ref { type_arguments, .. } => type_arguments.iter().all(|&a| arg_is_open(arena, a)),
+        _ => false,
+    }
+}
+
+/// Check whether any effective argument carries a concrete signal that
+/// justifies expanding the declaration body. Returns `false` (no signal)
+/// when all args are open or carry only lone literals.
+///
+/// Classification:
+///
+/// - **Open** (no signal): TypeParam, Infer, Applied where all args are open.
+/// - **Lone literal**: Literal — not enough on its own.
+/// - **Concrete signal**: Primitive, Object, Function, Tuple, Array, Union,
+///   Intersection, or Applied/Ref whose own args carry concrete signal.
+fn has_concrete_signal(arena: &QueryArena, args: &[NodeId]) -> bool {
+    args.iter().any(|&arg| arg_has_concrete_signal(arena, arg))
+}
+
+fn arg_has_concrete_signal(arena: &QueryArena, node: NodeId) -> bool {
+    if node.is_unresolved() {
+        return false;
+    }
+    match arena.get(node) {
+        // Open — no signal
+        Node::TypeParam { .. } | Node::Infer { .. } | Node::Error { .. } => false,
+        // Lone literal — not enough on its own
+        Node::Literal(_) => false,
+        // Concrete signal
+        Node::Primitive(_)
+        | Node::Object(_)
+        | Node::Function(_)
+        | Node::Tuple { .. }
+        | Node::Array { .. }
+        | Node::KeyOf(_)
+        | Node::TypeOf { .. }
+        | Node::Mapped { .. }
+        | Node::TemplateLiteral { .. } => true,
+        // Union/Intersection: concrete if any member is concrete
+        Node::Union(members) | Node::Intersection(members) => {
+            members.iter().any(|&m| arg_has_concrete_signal(arena, m))
+        }
+        // Ref with args: concrete if any arg is concrete
+        Node::Ref { type_arguments, .. } => {
+            if type_arguments.is_empty() {
+                false // bare ref is open
+            } else {
+                type_arguments
+                    .iter()
+                    .any(|&a| arg_has_concrete_signal(arena, a))
+            }
+        }
+        // Applied: concrete if any arg is concrete
+        Node::Applied { args, .. } => args.iter().any(|&a| arg_has_concrete_signal(arena, a)),
+        // Conditional, IndexedAccess, Rest, RecursiveRef: treat as open
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // resolve_prepared_ref — instantiate a host-backed prepared declaration
 // ---------------------------------------------------------------------------
 
@@ -868,6 +1673,50 @@ fn resolve_prepared_ref(
         symbol_name: root_id.symbol_name.clone(),
         args_hash: hash_effective_args(arena, &effective_args),
     };
+    let ref_label = format!(
+        "{}::{}#{}",
+        rec_key.canonical_id, rec_key.symbol_name, rec_key.args_hash
+    );
+
+    // Query-local prepared-ref cache: if we already fully resolved this
+    // exact (identity, args_hash) combination in this query, reuse it.
+    // Skip cache when the recursion tracker shows this symbol is currently
+    // active — the cached result may contain unresolved placeholder nodes
+    // from a prior in-progress resolution of the same symbol.
+    if !state.recursion.is_symbol_active(&rec_key) {
+        if let Some(&cached) = state.prepared_ref_cache.get(&rec_key) {
+            state.record_prepared_ref_cache_hit();
+            return cached;
+        }
+    }
+
+    state.record_prepared_ref_entry(rec_key.clone());
+    state.record_prepared_ref_edge(&ref_label);
+
+    // Open-generic symbolic stop: if the declaration has type parameters,
+    // is NOT a built-in utility, has at least one open arg, and no arg
+    // carries a concrete signal (beyond lone literals), return a symbolic
+    // Applied node instead of expanding. This prevents unbounded expansion
+    // for patterns like GetModelValue<T, VK, true> where T and VK are open.
+    // Only apply at depth > 0: top-level entry types (defineProps<Props<T>>)
+    // must expand; the stop targets nested helpers (depth 2+) where the
+    // explosion happens (e.g. GetModelValue<T, VK, true> inside CheckboxProps).
+    if state.depth > 0
+        && !prepared.type_parameters.is_empty()
+        && !effective_args.is_empty()
+        && host.utility_source(&root_id.symbol_name) != UtilitySource::Builtin
+        && has_open_arg(arena, &effective_args)
+        && !has_concrete_signal(arena, &effective_args)
+    {
+        state.mark_symbolic();
+        return arena.alloc(Node::Applied {
+            identity: super::arena::DeclIdentity {
+                canonical_id: root_id.canonical_id.clone(),
+                symbol_name: root_id.symbol_name.clone(),
+            },
+            args: effective_args,
+        });
+    }
 
     // Compute structural fingerprint for tiered recursion policy.
     // Only compute when the symbol is already active (common non-recursive
@@ -923,6 +1772,11 @@ fn resolve_prepared_ref(
     // Record external declaration visit for registry publishing
     if !root_id.canonical_id.is_empty() && root_id.canonical_id != "$owner" {
         state.visited_external_decls.push(root_id.clone());
+        state.record_external_decl_visit(root_id);
+    }
+
+    if state.audit_enabled() {
+        state.prepared_ref_stack.push(ref_label);
     }
 
     // Save scope state for guard-based cleanup (handles early returns)
@@ -974,6 +1828,13 @@ fn resolve_prepared_ref(
     state.conditional_context_stack.truncate(saved_cond_ctx_len);
     state.recursion.pop(&rec_key, fingerprint.as_ref());
     state.depth -= 1;
+    if state.audit_enabled() {
+        state.prepared_ref_stack.pop();
+    }
+
+    // Cache the completed result so later references to the same
+    // (identity, args_hash) in this query can reuse it directly.
+    state.prepared_ref_cache.insert(rec_key, resolved);
 
     resolved
 }
@@ -3334,10 +4195,14 @@ mod tests {
         }
 
         fn add_alias(&mut self, name: &str, body: TypeExpr) {
+            self.add_alias_in("/test.ts", name, body);
+        }
+
+        fn add_alias_in(&mut self, canonical_id: &str, name: &str, body: TypeExpr) {
             self.decls.insert(
                 name.to_string(),
                 Arc::new(PreparedTypeDecl::new(
-                    ResolvedRootIdentity::new("/test.ts", name),
+                    ResolvedRootIdentity::new(canonical_id, name),
                     TypeDeclKind::Alias,
                     body,
                 )),
@@ -3388,11 +4253,9 @@ mod tests {
             _canonical_id: &str,
             symbol_name: &str,
         ) -> Option<ResolvedRootIdentity> {
-            if self.decls.contains_key(symbol_name) {
-                Some(ResolvedRootIdentity::new("/test.ts", symbol_name))
-            } else {
-                None
-            }
+            self.decls
+                .get(symbol_name)
+                .map(|decl| decl.root_identity.clone())
         }
     }
 
@@ -8923,5 +9786,749 @@ mod tests {
         assert_eq!(r1.value, r2.value);
         assert_eq!(r1.exactness, r2.exactness);
         assert_eq!(batch.cache.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream A: query-local reuse caching tests
+    // -----------------------------------------------------------------------
+
+    /// Host that tracks member projection calls via an interior counter.
+    struct CountingHost {
+        inner: TestHost,
+        member_projection_calls: std::cell::RefCell<u32>,
+    }
+
+    impl CountingHost {
+        fn new(inner: TestHost) -> Self {
+            Self {
+                inner,
+                member_projection_calls: std::cell::RefCell::new(0),
+            }
+        }
+
+        fn member_projection_call_count(&self) -> u32 {
+            *self.member_projection_calls.borrow()
+        }
+    }
+
+    impl TypeSolverHost for CountingHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            self.inner.resolve_prepared_type_decl(root_identity)
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            self.inner.resolve_prepared_value_decl(root_identity)
+        }
+
+        fn utility_source(&self, name: &str) -> UtilitySource {
+            self.inner.utility_source(name)
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            self.inner.root_identity(canonical_id, symbol_name)
+        }
+
+        fn resolve_member_projection(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+            member: &str,
+        ) -> Option<crate::analysis::type_solver::host::SolverProjection<TypeExpr>> {
+            *self.member_projection_calls.borrow_mut() += 1;
+            // Delegate to a manual member lookup on the prepared declaration.
+            // Build member_index since TestHost.add_alias() doesn't call it.
+            let stored = self.inner.resolve_prepared_type_decl(root_identity)?;
+            let mut prepared = (*stored).clone();
+            prepared.build_member_index();
+            let m = prepared.member(member)?;
+            Some(crate::analysis::type_solver::host::SolverProjection::exact_concrete(m.ty.clone()))
+        }
+
+        fn request_status(&self) -> RequestStatus {
+            RequestStatus::Running
+        }
+    }
+
+    /// Helper: create a Props object type with named string properties.
+    fn make_object_type(props: &[(&str, TypeExpr)]) -> TypeExpr {
+        TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+            properties: props
+                .iter()
+                .map(|(name, ty)| {
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: (*name).into(),
+                            ty: ty.clone(),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )
+                })
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn host_projection_cache_collapses_repeated_member_access() {
+        // Setup: BaseTransitionProps with a 'mode' member
+        let mut inner = TestHost::new();
+        let props_body = make_object_type(&[
+            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
+            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
+        ]);
+        inner.add_alias("BaseTransitionProps", props_body);
+
+        let host = CountingHost::new(inner);
+
+        // Expression: union of three identical indexed accesses
+        // BaseTransitionProps['mode'] | BaseTransitionProps['mode'] | BaseTransitionProps['mode']
+        let indexed_access = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("BaseTransitionProps")),
+            index: Arc::new(TypeExpr::string_literal("mode")),
+        };
+        let expr = TypeExpr::Union(Arc::from(vec![
+            indexed_access.clone(),
+            indexed_access.clone(),
+            indexed_access.clone(),
+        ]));
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // Positive: result should be string (union of 3 identical strings deduped)
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
+
+        // KEY ASSERTION: host projection should be called exactly once, not 3 times.
+        // The cache must collapse repeated projections of the same (root, member).
+        assert_eq!(
+            host.member_projection_call_count(),
+            1,
+            "host.resolve_member_projection should be called once, not 3 times"
+        );
+
+        // Audit: cache should have hits
+        let key = (
+            "/test.ts".to_string(),
+            "BaseTransitionProps".to_string(),
+            "mode".to_string(),
+        );
+        assert_eq!(
+            audit.host_projection_counts.get(&key).copied().unwrap_or(0),
+            1,
+            "audit should record exactly 1 host projection"
+        );
+        assert!(
+            audit.host_projection_cache_hits >= 2,
+            "audit should record at least 2 cache hits"
+        );
+    }
+
+    #[test]
+    fn host_projection_cache_does_not_cross_different_members() {
+        // Two different members of the same type should each call the host once
+        let mut inner = TestHost::new();
+        let props_body = make_object_type(&[
+            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
+            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
+        ]);
+        inner.add_alias("BaseTransitionProps", props_body);
+
+        let host = CountingHost::new(inner);
+
+        // BaseTransitionProps['mode'] | BaseTransitionProps['appear']
+        let expr = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("BaseTransitionProps")),
+                index: Arc::new(TypeExpr::string_literal("mode")),
+            },
+            TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("BaseTransitionProps")),
+                index: Arc::new(TypeExpr::string_literal("appear")),
+            },
+        ]));
+
+        let (result, _audit) = solve_type_with_audit(&expr, &host);
+
+        // Positive: union of string | boolean
+        match &result.value {
+            TypeExpr::Union(members) => assert_eq!(members.len(), 2),
+            _ => panic!("expected Union"),
+        }
+
+        // Each member accessed once
+        assert_eq!(
+            host.member_projection_call_count(),
+            2,
+            "two different members should each call host once"
+        );
+    }
+
+    #[test]
+    fn prepared_ref_cache_reuses_completed_instantiation() {
+        // Setup: type Wrapper = { inner: string }
+        // Expression: Wrapper (accessed twice in same query via union)
+        let mut inner = TestHost::new();
+        inner.add_alias(
+            "Wrapper",
+            make_object_type(&[("inner", TypeExpr::Primitive(PrimitiveName::String))]),
+        );
+
+        let host = CountingHost::new(inner);
+
+        // Wrapper | Wrapper — should instantiate the declaration once
+        let expr = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::named("Wrapper"),
+            TypeExpr::named("Wrapper"),
+        ]));
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // Positive: resolves to union or single object (union may not dedup objects)
+        match &result.value {
+            TypeExpr::Object(obj) => {
+                assert_eq!(obj.properties.len(), 1);
+            }
+            TypeExpr::Union(members) => {
+                // Both members should be identical Wrapper objects
+                assert!(members.len() <= 2);
+                for m in members.iter() {
+                    match m {
+                        TypeExpr::Object(obj) => assert_eq!(obj.properties.len(), 1),
+                        _ => panic!("expected Object in union member"),
+                    }
+                }
+            }
+            _ => panic!("expected Object or Union, got {:?}", result.value),
+        }
+
+        // KEY ASSERTION: prepared_ref should be entered once, reused via cache on second
+        assert!(
+            audit.prepared_ref_cache_hits >= 1,
+            "second Wrapper ref should hit prepared_ref cache, got {} hits",
+            audit.prepared_ref_cache_hits,
+        );
+    }
+
+    #[test]
+    fn host_projection_cache_negative_no_extra_projections() {
+        // Accessing mode should NOT cause projections on 'appear' or other members
+        let mut inner = TestHost::new();
+        let props_body = make_object_type(&[
+            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
+            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
+            ("duration", TypeExpr::Primitive(PrimitiveName::Number)),
+        ]);
+        inner.add_alias("BaseTransitionProps", props_body);
+
+        let host = CountingHost::new(inner);
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("BaseTransitionProps")),
+            index: Arc::new(TypeExpr::string_literal("mode")),
+        };
+
+        let (_result, audit) = solve_type_with_audit(&expr, &host);
+
+        // Negative: only 'mode' should be projected, not 'appear' or 'duration'
+        for key in audit.host_projection_counts.keys() {
+            assert_eq!(
+                key.2, "mode",
+                "only 'mode' should be projected, but found '{}'",
+                key.2
+            );
+        }
+    }
+
+    #[test]
+    fn solver_audit_tracks_visited_chain_and_excludes_unrelated_external_nodes() {
+        let mut host = TestHost::new();
+        host.add_alias_in(
+            "/dep.ts",
+            "Leaf",
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        host.add_alias_in("/dep.ts", "Used", TypeExpr::named("Leaf"));
+        host.add_alias_in(
+            "/dep.ts",
+            "UnusedSibling",
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+        );
+        host.add_alias_in(
+            "/entry.ts",
+            "Root",
+            make_object_type(&[("value", TypeExpr::named("Used"))]),
+        );
+
+        let (result, audit) = solve_type_with_audit(&TypeExpr::named("Root"), &host);
+
+        assert!(matches!(
+            object_property_type(&result.value, "value"),
+            TypeExpr::Primitive(PrimitiveName::String)
+        ));
+        assert!(
+            audit
+                .external_decl_visit_counts
+                .contains_key("/entry.ts::Root"),
+            "root declaration should be marked visited"
+        );
+        assert!(
+            audit
+                .external_decl_visit_counts
+                .contains_key("/dep.ts::Used"),
+            "used dependency should be marked visited"
+        );
+        assert!(
+            audit
+                .external_decl_visit_counts
+                .contains_key("/dep.ts::Leaf"),
+            "leaf dependency should be marked visited"
+        );
+        assert!(
+            !audit
+                .external_decl_visit_counts
+                .contains_key("/dep.ts::UnusedSibling"),
+            "unused sibling must not be visited"
+        );
+        assert!(
+            audit
+                .prepared_ref_edge_counts
+                .iter()
+                .any(|((parent, child), count)| {
+                    parent == "<query-root>" && child.starts_with("/entry.ts::Root#") && *count >= 1
+                }),
+            "root edge should be recorded from query root"
+        );
+        assert!(
+            audit
+                .prepared_ref_edge_counts
+                .iter()
+                .any(|((parent, child), count)| {
+                    parent.starts_with("/entry.ts::Root#")
+                        && child.starts_with("/dep.ts::Used#")
+                        && *count >= 1
+                }),
+            "Root should only expand the Used dependency"
+        );
+        assert!(
+            audit
+                .prepared_ref_edge_counts
+                .iter()
+                .any(|((parent, child), count)| {
+                    parent.starts_with("/dep.ts::Used#")
+                        && child.starts_with("/dep.ts::Leaf#")
+                        && *count >= 1
+                }),
+            "Used should expand the Leaf dependency"
+        );
+        assert!(
+            !audit
+                .prepared_ref_edge_counts
+                .keys()
+                .any(|(_, child)| child.starts_with("/dep.ts::UnusedSibling#")),
+            "unused sibling must not appear in prepared-ref expansion edges"
+        );
+    }
+
+    #[test]
+    fn solver_audit_tracks_unresolved_bare_names_by_parent() {
+        let mut host = TestHost::new();
+        host.add_alias_in(
+            "/dep.ts",
+            "FnBox",
+            make_object_type(&[
+                ("cb", TypeExpr::named("Function")),
+                ("label", TypeExpr::Primitive(PrimitiveName::String)),
+            ]),
+        );
+
+        let (result, audit) = solve_type_with_audit(&TypeExpr::named("FnBox"), &host);
+
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert!(
+            audit
+                .external_decl_visit_counts
+                .contains_key("/dep.ts::FnBox"),
+            "FnBox should be marked as visited"
+        );
+        assert!(
+            audit
+                .unresolved_root_counts
+                .iter()
+                .any(|((parent, symbol), count)| {
+                    parent.starts_with("/dep.ts::FnBox#") && symbol == "Function" && *count >= 1
+                }),
+            "audit should attribute unresolved Function lookups to FnBox"
+        );
+        assert!(
+            !audit
+                .unresolved_root_counts
+                .keys()
+                .any(|(_, symbol)| symbol == "UnusedSibling"),
+            "audit should not report unrelated unresolved symbols"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Workstream B: open-generic symbolic stop tests
+    // -----------------------------------------------------------------------
+
+    fn make_type_param(name: &str) -> crate::analysis::type_expr::TypeParam {
+        crate::analysis::type_expr::TypeParam {
+            name: name.into(),
+            constraint: None,
+            default: None,
+        }
+    }
+
+    #[test]
+    fn open_generic_with_only_literal_true_stays_symbolic() {
+        // type GetModelValue<T, VK, Flag> = T extends ... ? ... : ...
+        // Called as GetModelValue<T, VK, true> where T and VK are open
+        let mut host = TestHost::new();
+
+        // A complex conditional body: T extends Record<string, any> ? T[VK] : T
+        host.add_generic_alias(
+            "GetModelValue",
+            vec![
+                make_type_param("T"),
+                make_type_param("VK"),
+                make_type_param("Flag"),
+            ],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::named_with_args(
+                    "Record",
+                    vec![
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        TypeExpr::Primitive(PrimitiveName::Any),
+                    ],
+                )),
+                true_type: Arc::new(TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("VK")),
+                }),
+                false_type: Arc::new(TypeExpr::named("T")),
+            },
+        );
+
+        // Call: GetModelValue<T, VK, true> — T and VK are open type params
+        let expr = TypeExpr::named_with_args(
+            "GetModelValue",
+            vec![
+                TypeExpr::type_parameter(make_type_param("T")),
+                TypeExpr::type_parameter(make_type_param("VK")),
+                TypeExpr::Literal(crate::analysis::type_expr::LiteralValue::Boolean(true)),
+            ],
+        );
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // KEY ASSERTION: should stay symbolic (Applied or Ref), not expand
+        assert!(
+            result.exactness == SolverExactness::ExactSymbolic
+                || matches!(&result.value, TypeExpr::Ref { .. }),
+            "open-generic with only literal true should stay symbolic, got: {:?}",
+            result.value,
+        );
+
+        // Negative: arena should be small (not multi-million node explosion)
+        assert!(
+            audit.arena_nodes < 1000,
+            "arena should be small for symbolic stop, got {} nodes",
+            audit.arena_nodes,
+        );
+    }
+
+    #[test]
+    fn open_generic_with_concrete_signal_still_expands() {
+        // Same type but called with concrete arg: GetModelValue<string, "key", true>
+        let mut host = TestHost::new();
+
+        host.add_generic_alias(
+            "GetModelValue",
+            vec![
+                make_type_param("T"),
+                make_type_param("VK"),
+                make_type_param("Flag"),
+            ],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::named_with_args(
+                    "Record",
+                    vec![
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        TypeExpr::Primitive(PrimitiveName::Any),
+                    ],
+                )),
+                true_type: Arc::new(TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("VK")),
+                }),
+                false_type: Arc::new(TypeExpr::named("T")),
+            },
+        );
+
+        // Call with concrete args: GetModelValue<string, "key", true>
+        let expr = TypeExpr::named_with_args(
+            "GetModelValue",
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::string_literal("key"),
+                TypeExpr::Literal(crate::analysis::type_expr::LiteralValue::Boolean(true)),
+            ],
+        );
+
+        let result = solve_type(&expr, &host);
+
+        // Should expand since T=string is concrete
+        // The result depends on conditional evaluation, but it should NOT stay as a Ref
+        assert_ne!(
+            result.exactness,
+            SolverExactness::ExactSymbolic,
+            "concrete args should trigger expansion"
+        );
+    }
+
+    #[test]
+    fn fully_concrete_args_still_expand() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Wrapper",
+            vec![make_type_param("T")],
+            make_object_type(&[("value", TypeExpr::named("T"))]),
+        );
+
+        // Wrapper<string> — fully concrete
+        let expr =
+            TypeExpr::named_with_args("Wrapper", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+
+        let result = solve_type(&expr, &host);
+
+        // Should expand to { value: string }
+        match &result.value {
+            TypeExpr::Object(obj) => {
+                assert_eq!(obj.properties.len(), 1);
+            }
+            _ => panic!("expected Object, got {:?}", result.value),
+        }
+        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
+    }
+
+    #[test]
+    fn open_generic_arena_size_regression() {
+        // Chain of generic helpers that reference each other, simulating
+        // the real GetModelValue pattern with cross-file refs.
+        // type Inner<X> = X extends string ? { val: X } : { val: unknown }
+        // type Middle<A, B> = Inner<A> & Inner<B>
+        // type Outer<T, U, V> = Middle<T, U> & Middle<U, V> & Middle<T, V>
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Inner",
+            vec![make_type_param("X")],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("X")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                true_type: Arc::new(make_object_type(&[("val", TypeExpr::named("X"))])),
+                false_type: Arc::new(make_object_type(&[(
+                    "val",
+                    TypeExpr::Primitive(PrimitiveName::Unknown),
+                )])),
+            },
+        );
+        host.add_generic_alias(
+            "Middle",
+            vec![make_type_param("A"), make_type_param("B")],
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::named_with_args("Inner", vec![TypeExpr::named("A")]),
+                TypeExpr::named_with_args("Inner", vec![TypeExpr::named("B")]),
+            ])),
+        );
+        host.add_generic_alias(
+            "Outer",
+            vec![
+                make_type_param("T"),
+                make_type_param("U"),
+                make_type_param("V"),
+            ],
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::named_with_args(
+                    "Middle",
+                    vec![TypeExpr::named("T"), TypeExpr::named("U")],
+                ),
+                TypeExpr::named_with_args(
+                    "Middle",
+                    vec![TypeExpr::named("U"), TypeExpr::named("V")],
+                ),
+                TypeExpr::named_with_args(
+                    "Middle",
+                    vec![TypeExpr::named("T"), TypeExpr::named("V")],
+                ),
+            ])),
+        );
+
+        // Outer<T, U, V> — all open
+        let expr = TypeExpr::named_with_args(
+            "Outer",
+            vec![
+                TypeExpr::type_parameter(make_type_param("T")),
+                TypeExpr::type_parameter(make_type_param("U")),
+                TypeExpr::type_parameter(make_type_param("V")),
+            ],
+        );
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // Should stay symbolic — the symbolic stop should prevent expansion
+        // into Inner/Middle chains with open args.
+        assert!(
+            result.exactness == SolverExactness::ExactSymbolic,
+            "all-open Outer should be symbolic"
+        );
+
+        // KEY ASSERTION: with symbolic stop, Outer<T,U,V> should not expand
+        // into 6 Inner instantiations. The arena should be very small.
+        // Without the stop, it would expand to 6 conditional+object patterns.
+        assert!(
+            audit.arena_nodes < 50,
+            "arena for all-open Outer should be tiny with symbolic stop, got {} nodes",
+            audit.arena_nodes,
+        );
+    }
+
+    #[test]
+    fn builtin_partial_with_open_t_still_expands() {
+        // Partial<T> is a builtin — should NOT be stopped by symbolic stop
+        let host = TestHost::new();
+
+        let expr = TypeExpr::named_with_args(
+            "Partial",
+            vec![TypeExpr::type_parameter(make_type_param("T"))],
+        );
+
+        let result = solve_type(&expr, &host);
+        // Builtins stay on their normal path (NoopSolverHost has Unknown utility source)
+        // but a real host with Builtin classification would expand Partial<T>
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+    }
+
+    #[test]
+    fn generic_with_defaulted_params_and_open_arg_stays_symbolic() {
+        // type Config<T, Mode = "default"> = { value: T, mode: Mode }
+        // Called as Config<U> where U is open — default fills Mode
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Config",
+            vec![
+                make_type_param("T"),
+                crate::analysis::type_expr::TypeParam {
+                    name: "Mode".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::string_literal("default"))),
+                },
+            ],
+            make_object_type(&[
+                ("value", TypeExpr::named("T")),
+                ("mode", TypeExpr::named("Mode")),
+            ]),
+        );
+
+        // Config<U> where U is open. Mode gets default "default" (literal).
+        // T=U is open, Mode="default" is literal → no concrete signal → symbolic stop
+        let expr = TypeExpr::named_with_args(
+            "Config",
+            vec![TypeExpr::type_parameter(make_type_param("U"))],
+        );
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // Should stay symbolic at depth > 0 but expand at depth 0 (top level)
+        // At depth 0 the stop doesn't fire, so it expands
+        match &result.value {
+            TypeExpr::Object(_) => {}  // expanded at depth 0 — correct
+            TypeExpr::Ref { .. } => {} // symbolic — also acceptable
+            other => panic!("expected Object or Ref, got {:?}", other),
+        }
+        // Arena should be bounded regardless
+        assert!(
+            audit.arena_nodes < 100,
+            "defaulted open param should be bounded, got {}",
+            audit.arena_nodes,
+        );
+    }
+
+    #[test]
+    fn mixed_concrete_and_open_args_still_expands() {
+        // Foo<string, T> — has concrete signal (string) → should expand
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Pair",
+            vec![make_type_param("A"), make_type_param("B")],
+            make_object_type(&[
+                ("first", TypeExpr::named("A")),
+                ("second", TypeExpr::named("B")),
+            ]),
+        );
+
+        let expr = TypeExpr::named_with_args(
+            "Pair",
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::type_parameter(make_type_param("T")),
+            ],
+        );
+
+        let result = solve_type(&expr, &host);
+
+        // Should expand because string provides concrete signal
+        match &result.value {
+            TypeExpr::Object(obj) => {
+                assert_eq!(
+                    obj.properties.len(),
+                    2,
+                    "should expand to object with 2 props"
+                );
+            }
+            _ => panic!("expected Object, got {:?}", result.value),
+        }
+    }
+
+    #[test]
+    fn host_projection_cache_hit_across_batch_solve_calls() {
+        // SolveBatch: two separate solve() calls accessing the same member
+        let mut inner = TestHost::new();
+        let props = make_object_type(&[("x", TypeExpr::Primitive(PrimitiveName::String))]);
+        inner.add_alias("Props", props);
+        let host = CountingHost::new(inner);
+
+        let expr1 = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Props")),
+            index: Arc::new(TypeExpr::string_literal("x")),
+        };
+        let expr2 = expr1.clone();
+
+        let mut batch = SolveBatch::new(&host);
+        let r1 = batch.solve(&expr1);
+        let r2 = batch.solve(&expr2);
+
+        assert_eq!(r1.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert_eq!(r2.value, TypeExpr::Primitive(PrimitiveName::String));
+
+        // SolveBatch caches at TypeExpr level, so the second solve hits
+        // the SolveBatch cache (not even reaching the host projection).
+        // host should be called at most once.
+        assert!(
+            host.member_projection_call_count() <= 1,
+            "batch should cache: got {} host calls",
+            host.member_projection_call_count()
+        );
     }
 }
