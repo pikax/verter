@@ -9,6 +9,68 @@ import { ProjectSession } from "./project-session.js";
 import { encodeTestComponentMetaPayload } from "../type-graph.test-utils.js";
 import { nativeComponentMetaToComponentMeta } from "../native-component-meta.js";
 
+function createMockNativeProject(overrides: Record<string, unknown> = {}) {
+  return {
+    upsertBase() {},
+    ensureLoaded() {
+      return false;
+    },
+    refreshBase() {
+      return false;
+    },
+    configureProjects() {},
+    openSession() {
+      throw new Error("not used");
+    },
+    clearCaches() {},
+    shutdown() {},
+    get isShutdown() {
+      return false;
+    },
+    get sessionCount() {
+      return 1;
+    },
+    baseFileIds() {
+      return [];
+    },
+    ...overrides,
+  };
+}
+
+function createMockNativeSession(overrides: Record<string, unknown> = {}) {
+  return {
+    upsert() {},
+    delete() {},
+    reset() {},
+    getEffectiveSource() {
+      return "<template />" as string | null;
+    },
+    hasFile() {
+      return true;
+    },
+    trackedFileIds() {
+      return [];
+    },
+    close() {},
+    get isClosed() {
+      return false;
+    },
+    get overlayGeneration() {
+      return 0;
+    },
+    getComponentMeta() {
+      return null;
+    },
+    getDeclaredComponentMeta() {
+      return null;
+    },
+    getProvenance() {
+      return "{}";
+    },
+    ...overrides,
+  };
+}
+
 describe("ProjectSession", () => {
   it("decodes Buffer payloads from the native session instead of JSON strings", () => {
     const payload = encodeTestComponentMetaPayload({
@@ -16,60 +78,15 @@ describe("ProjectSession", () => {
       props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
       slots: [{ name: "default", returnType: "VNode[]" }],
     });
-    const nativeProject = {
-      upsertBase() {},
-      ensureLoaded() {
-        return false;
-      },
-      refreshBase() {
-        return false;
-      },
-      configureProjects() {},
-      openSession() {
-        throw new Error("not used");
-      },
-      clearCaches() {},
-      shutdown() {},
-      get isShutdown() {
-        return false;
-      },
-      get sessionCount() {
-        return 1;
-      },
-      baseFileIds() {
-        return [];
-      },
-    };
-    const nativeSession = {
-      upsert() {},
-      delete() {},
-      reset() {},
-      getEffectiveSource() {
-        return "<template />" as string | null;
-      },
-      hasFile() {
-        return true;
-      },
-      trackedFileIds() {
-        return [];
-      },
-      close() {},
-      get isClosed() {
-        return false;
-      },
-      get overlayGeneration() {
-        return 0;
-      },
+    const nativeProject = createMockNativeProject();
+    const nativeSession = createMockNativeSession({
       getComponentMeta() {
         return payload;
       },
       getDeclaredComponentMeta() {
         return payload;
       },
-      getProvenance() {
-        return "{}";
-      },
-    };
+    });
     const engine = new ProjectEngine("engine", "/project", nativeProject as any);
     const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
@@ -87,63 +104,12 @@ describe("ProjectSession", () => {
         { name: "resolvedLabel", type: { kind: "primitive", name: "string" }, required: true },
       ],
     });
-    const nativeProject = {
-      upsertBase() {},
-      ensureLoaded() {
-        return false;
-      },
-      refreshBase() {
-        return false;
-      },
-      configureProjects() {},
-      openSession() {
-        throw new Error("not used");
-      },
-      clearCaches() {},
-      shutdown() {},
-      get isShutdown() {
-        return false;
-      },
-      get sessionCount() {
-        return 1;
-      },
-      baseFileIds() {
-        return [];
-      },
-    };
-    const nativeSession = {
-      upsert() {},
-      delete() {},
-      reset() {},
-      getEffectiveSource() {
-        return "<template />" as string | null;
-      },
-      hasFile() {
-        return true;
-      },
-      trackedFileIds() {
-        return [];
-      },
-      close() {},
-      get isClosed() {
-        return false;
-      },
-      get overlayGeneration() {
-        return 0;
-      },
-      getComponentMeta() {
-        return null;
-      },
-      getDeclaredComponentMeta() {
-        return null;
-      },
+    const nativeProject = createMockNativeProject();
+    const nativeSession = createMockNativeSession({
       getResolvedComponentMeta() {
         return resolvedPayload;
       },
-      getProvenance() {
-        return "{}";
-      },
-    };
+    });
     const engine = new ProjectEngine("engine", "/project", nativeProject as any);
     const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
@@ -158,58 +124,10 @@ describe("ProjectSession", () => {
       props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
     });
     const getComponentMeta = vi.fn(() => payload);
-    const nativeProject = {
-      upsertBase() {},
-      ensureLoaded() {
-        return false;
-      },
-      refreshBase() {
-        return false;
-      },
-      configureProjects() {},
-      openSession() {
-        throw new Error("not used");
-      },
-      clearCaches() {},
-      shutdown() {},
-      get isShutdown() {
-        return false;
-      },
-      get sessionCount() {
-        return 1;
-      },
-      baseFileIds() {
-        return [];
-      },
-    };
-    const nativeSession = {
-      upsert() {},
-      delete() {},
-      reset() {},
-      getEffectiveSource() {
-        return "<template />" as string | null;
-      },
-      hasFile() {
-        return true;
-      },
-      trackedFileIds() {
-        return [];
-      },
-      close() {},
-      get isClosed() {
-        return false;
-      },
-      get overlayGeneration() {
-        return 0;
-      },
+    const nativeProject = createMockNativeProject();
+    const nativeSession = createMockNativeSession({
       getComponentMeta,
-      getDeclaredComponentMeta() {
-        return null;
-      },
-      getProvenance() {
-        return "{}";
-      },
-    };
+    });
     const engine = new ProjectEngine("engine", "/project", nativeProject as any);
     const session = new ProjectSession(engine, "lease-1", nativeSession as any);
 
@@ -217,5 +135,187 @@ describe("ProjectSession", () => {
       /resolved component-meta query/i,
     );
     expect(getComponentMeta).not.toHaveBeenCalled();
+  });
+
+  describe("decoded-result memo", () => {
+    it("repeated getDeclaredComponentMeta decodes only once", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const getDeclaredComponentMeta = vi.fn(() => payload);
+      const nativeProject = createMockNativeProject();
+      const nativeSession = createMockNativeSession({ getDeclaredComponentMeta });
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      const result1 = session.getDeclaredComponentMeta("/project/src/Button.vue");
+      const result2 = session.getDeclaredComponentMeta("/project/src/Button.vue");
+
+      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+      expect(result1).toBe(result2);
+    });
+
+    it("refreshBaseFile bumps baseGeneration and forces re-decode", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const getDeclaredComponentMeta = vi.fn(() => payload);
+      const nativeProject = createMockNativeProject({
+        refreshBase() {
+          return true;
+        },
+      });
+      const nativeSession = createMockNativeSession({ getDeclaredComponentMeta });
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      // First decode
+      session.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+
+      const genBefore = engine.baseGeneration;
+      session.refreshBaseFile("other.vue");
+      expect(engine.baseGeneration).toBeGreaterThan(genBefore);
+
+      // Second decode after base change — must call native again
+      session.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(2);
+    });
+
+    it("ensureBaseFile bumps baseGeneration when loaded, does not when already loaded", () => {
+      let loadCount = 0;
+      const nativeProject = createMockNativeProject({
+        ensureLoaded() {
+          loadCount++;
+          // First call returns true (newly loaded), second returns false (already loaded)
+          return loadCount <= 1;
+        },
+      });
+      const nativeSession = createMockNativeSession();
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      const gen0 = engine.baseGeneration;
+      session.ensureBaseFile("a.vue");
+      expect(engine.baseGeneration).toBe(gen0 + 1);
+
+      const gen1 = engine.baseGeneration;
+      session.ensureBaseFile("b.vue");
+      expect(engine.baseGeneration).toBe(gen1);
+    });
+
+    it("clearCaches bumps baseGeneration", () => {
+      const nativeProject = createMockNativeProject();
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+
+      const genBefore = engine.baseGeneration;
+      engine.clearCaches();
+      expect(engine.baseGeneration).toBeGreaterThan(genBefore);
+    });
+
+    it("overlay upsert invalidates memo for that session only", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const getDeclared1 = vi.fn(() => payload);
+      const getDeclared2 = vi.fn(() => payload);
+      const nativeProject = createMockNativeProject({
+        openSession() {
+          throw new Error("not used");
+        },
+      });
+      const nativeSession1 = createMockNativeSession({
+        getDeclaredComponentMeta: getDeclared1,
+      });
+      const nativeSession2 = createMockNativeSession({
+        getDeclaredComponentMeta: getDeclared2,
+      });
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session1 = new ProjectSession(engine, "lease-1", nativeSession1 as any);
+      const session2 = new ProjectSession(engine, "lease-2", nativeSession2 as any);
+
+      // Both sessions decode once
+      session1.getDeclaredComponentMeta("/project/src/Button.vue");
+      session2.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclared1).toHaveBeenCalledTimes(1);
+      expect(getDeclared2).toHaveBeenCalledTimes(1);
+
+      // session1 overlay upsert invalidates session1's memo
+      session1.upsert("test.vue", "new source");
+
+      // session1 must re-decode
+      session1.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclared1).toHaveBeenCalledTimes(2);
+
+      // session2 should still use its memo (no overlay change, no base change)
+      session2.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclared2).toHaveBeenCalledTimes(1);
+    });
+
+    it("restoreBaseFile bumps baseGeneration when it reloads base content", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const getDeclared1 = vi.fn(() => payload);
+      const getDeclared2 = vi.fn(() => payload);
+      const nativeProject = createMockNativeProject({
+        ensureLoaded() {
+          return true;
+        },
+      });
+      const nativeSession1 = createMockNativeSession({
+        getDeclaredComponentMeta: getDeclared1,
+        getEffectiveSource(canonicalId: string) {
+          return canonicalId === "/project/src/Base.vue" ? null : "<template />";
+        },
+      });
+      const nativeSession2 = createMockNativeSession({
+        getDeclaredComponentMeta: getDeclared2,
+      });
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session1 = new ProjectSession(engine, "lease-1", nativeSession1 as any);
+      const session2 = new ProjectSession(engine, "lease-2", nativeSession2 as any);
+
+      session2.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclared2).toHaveBeenCalledTimes(1);
+
+      const genBefore = engine.baseGeneration;
+      session1.restoreBaseFile("/project/src/Base.vue");
+      expect(engine.baseGeneration).toBeGreaterThan(genBefore);
+
+      session2.getDeclaredComponentMeta("/project/src/Button.vue");
+      expect(getDeclared2).toHaveBeenCalledTimes(2);
+    });
+
+    it("frozen memoized result prevents mutation", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const nativeProject = createMockNativeProject();
+      const nativeSession = createMockNativeSession({
+        getDeclaredComponentMeta() {
+          return payload;
+        },
+      });
+      const engine = new ProjectEngine("engine", "/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      const result = session.getDeclaredComponentMeta("/project/src/Button.vue") as any;
+
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(Object.isFrozen(result.props)).toBe(true);
+      expect(Object.isFrozen(result.props[0])).toBe(true);
+
+      // Attempting to mutate should throw in strict mode
+      expect(() => {
+        "use strict";
+        result.props = [];
+      }).toThrow();
+    });
   });
 });

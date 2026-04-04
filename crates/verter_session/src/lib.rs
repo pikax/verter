@@ -1023,6 +1023,7 @@ impl VerterHost {
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
                 entry.cached_resolved_meta.clear();
+                entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
                 entry.barrel_export_surface = None;
                 entry.import_route_cache.clear();
@@ -1035,6 +1036,7 @@ impl VerterHost {
                 entry.compile_slots.clear();
                 entry.template_analysis = None;
                 entry.cached_resolved_meta.clear();
+                entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
                 entry.barrel_export_surface = None;
                 entry.export_registry = None;
@@ -1319,6 +1321,7 @@ impl VerterHost {
             cc.cached_tsc_extract = None;
             cc.raw_template_analysis = None;
             cc.cached_resolved_meta.clear();
+            cc.cached_meta_payloads.clear();
             cc.cached_fallthrough = None;
             cc.barrel_export_surface = None;
             cc.import_route_cache.clear();

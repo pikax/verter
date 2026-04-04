@@ -1370,6 +1370,71 @@ impl VerterHost {
         }
     }
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Encoded payload cache (shared by NAPI/WASM)
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Try to return a cached encoded payload for the given meta kind.
+    /// Validates fact versions against the captured `store_view`.
+    pub(crate) fn try_get_cached_meta_payload(
+        &self,
+        canonical: &str,
+        kind: crate::types::MetaPayloadKind,
+        store_view: &crate::resolver_store::HostStoreView,
+    ) -> Option<Vec<u8>> {
+        #[cfg(feature = "scheduler")]
+        {
+            let entry = self.compile_cache.get(canonical)?;
+            let cached = entry.cached_meta_payloads.get(&kind)?;
+            if store_view.validates_all(&cached.fact_versions) {
+                return Some(cached.payload.clone());
+            }
+            None
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            use crate::shared::read_lock;
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical)?;
+            let cached = entry.cached_meta_payloads.get(&kind)?;
+            if store_view.validates_all(&cached.fact_versions) {
+                return Some(cached.payload.clone());
+            }
+            None
+        }
+    }
+
+    /// Store an encoded payload in the per-file cache.
+    pub(crate) fn store_meta_payload(
+        &self,
+        canonical: &str,
+        kind: crate::types::MetaPayloadKind,
+        fact_versions: &[crate::resolver_core::FactVersionRef],
+        payload: Vec<u8>,
+    ) {
+        let cached = crate::types::CachedMetaPayload {
+            fact_versions: fact_versions.to_vec(),
+            payload,
+        };
+
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(mut entry) = self.compile_cache.get_mut(canonical) {
+                entry.cached_meta_payloads.insert(kind, cached);
+            }
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            use crate::shared::write_lock;
+            let mut files = write_lock(&self.files);
+            if let Some(entry) = files.get_mut(canonical) {
+                entry.cached_meta_payloads.insert(kind, cached);
+            }
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn current_dependency_fact_versions(
         &self,

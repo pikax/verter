@@ -547,6 +547,7 @@ function decodeComponentMetaBody(
       graph,
     ),
     ...maybe("resolution", resolution),
+    ...decodeMacroExpansionDiagnostics(body, graph),
   } as unknown as Omit<NativeComponentMetaResult, "typeRegistry">;
 }
 
@@ -1491,6 +1492,31 @@ function decodeOptionalExpansionMetadata(
         readRequiredId(diagnostic.contextId, "expansion diagnostic context"),
       ),
       ...maybe("propertyName", graph.getStringMaybe(Number(diagnostic.propertyNameId ?? 0))),
+    })),
+  };
+}
+
+function decodeMacroExpansionDiagnostics(
+  body: ProtoRecord,
+  graph: DecodedTypeGraph,
+): { macroExpansionDiagnostics?: Record<string, unknown>[] } {
+  const entries = body.macroExpansionDiagnostics as ProtoRecord[] | undefined;
+  if (!entries || entries.length === 0) {
+    return {};
+  }
+  return {
+    macroExpansionDiagnostics: entries.map((entry) => ({
+      macroKind: graph.getString(readRequiredId(entry.macroKindId, "macro expansion kind")),
+      macroIndex: Number(entry.macroIndex ?? 0),
+      exactness: decodeExpansionExactness(Number(entry.exactness ?? 0)),
+      executionStatus: decodeExpansionExecutionStatus(Number(entry.executionStatus ?? 0)),
+      diagnostics: ((entry.diagnostics as ProtoRecord[] | undefined) ?? []).map((diagnostic) => ({
+        reason: decodeExpansionStopReason(Number(diagnostic.reason ?? 0)),
+        context: graph.getString(
+          readRequiredId(diagnostic.contextId, "expansion diagnostic context"),
+        ),
+        ...maybe("propertyName", graph.getStringMaybe(Number(diagnostic.propertyNameId ?? 0))),
+      })),
     })),
   };
 }

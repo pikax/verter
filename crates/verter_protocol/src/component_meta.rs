@@ -17,17 +17,18 @@ use crate::verter::v1::{
     CustomBlockMeta as ProtoCustomBlockMeta, EventMeta, ExpansionDiagnostic, ExpansionMetadata,
     ExposedMeta, FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry,
     FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
-    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode, MappedNode,
-    MemberAvailability, MemberProvenance, ModelMeta, ObjectMember as ProtoObjectMember, ObjectNode,
-    ParenthesizedNode, PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta,
-    RefNode, ResolvedEmitField, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta,
-    ResolvedNativeProp, ResolvedPropField, ResolvedRootStep, ResolvedSlotBinding,
-    ResolvedSlotField, ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability,
-    RootTargetRef, ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta,
-    SlotMeta, StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta,
-    TemplateLiteralNode, TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode,
-    TypeParameterNode, TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason,
-    UnresolvedRootTargetReason, VueApiCallMeta,
+    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
+    MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance, ModelMeta,
+    ObjectMember as ProtoObjectMember, ObjectNode, ParenthesizedNode, PartialBranchReason,
+    PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode, ResolvedEmitField,
+    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedPropField,
+    ResolvedRootStep, ResolvedSlotBinding, ResolvedSlotField, ResolvedTypeDeclaration, RestNode,
+    RootBranch, RootInfo, RootReachability, RootTargetRef, ScriptBlockMeta, SelectorMeta,
+    SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
+    StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta, TemplateLiteralNode,
+    TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode, TypeParameterNode,
+    TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason,
+    VueApiCallMeta,
 };
 
 pub const COMPONENT_META_SCHEMA_VERSION: u32 = 1;
@@ -190,6 +191,27 @@ fn component_meta_body_to_proto(
             .resolution
             .as_ref()
             .map(|resolution| component_meta_resolution_to_proto(builder, resolution)),
+        macro_expansion_diagnostics: meta
+            .macro_expansion_diagnostics
+            .iter()
+            .map(|entry| MacroExpansionDiagnosticEntry {
+                macro_kind_id: builder.string_id(&entry.macro_kind),
+                macro_index: entry.macro_index,
+                exactness: expansion_exactness_to_proto(&entry.exactness) as i32,
+                execution_status: expansion_execution_status_to_proto(&entry.execution_status)
+                    as i32,
+                diagnostics: entry
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| ExpansionDiagnostic {
+                        reason: expansion_reason_to_proto(&diagnostic.reason) as i32,
+                        context_id: builder.string_id(&diagnostic.context),
+                        property_name_id: builder
+                            .string_id_opt(diagnostic.property_name.as_deref()),
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -1440,6 +1462,7 @@ fn build_test_meta() -> FfiComponentMeta {
         fallthrough_surface: FfiFallthroughSurface::None {
             reason: FfiNoFallthroughReason::NoTemplate,
         },
+        macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: "/src/Tree.vue".to_string(),
         resolution: None,

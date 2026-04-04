@@ -104,8 +104,31 @@ pub struct ComponentMetaAnalysis {
     pub accepted_surface_completeness: AcceptedSurfaceCompleteness,
     /// Branch-structured inherited surface (host-populated).
     pub fallthrough_surface: FallthroughSurface,
+    /// Macro-wide expansion diagnostics that apply to the entire macro, not to a
+    /// specific property. Lifted out of per-field `type_expansion.diagnostics` to
+    /// avoid duplication across every prop/event/slot in the same macro.
+    pub macro_expansion_diagnostics: Vec<MacroExpansionDiagnostics>,
     pub options_api: bool,
     pub file_path: String,
+}
+
+/// Which macro kind produced the expansion diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroExpansionKind {
+    DefineProps,
+    DefineEmits,
+    DefineSlots,
+}
+
+/// Macro-wide expansion diagnostics that are not specific to any property.
+/// Stored once per macro instead of duplicated on every field.
+#[derive(Debug, Clone)]
+pub struct MacroExpansionDiagnostics {
+    pub macro_kind: MacroExpansionKind,
+    pub macro_index: usize,
+    pub diagnostics: Vec<crate::analysis::type_expand::ExpansionDiagnostic>,
+    pub exactness: crate::analysis::type_expand::ExpansionExactness,
+    pub execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
 }
 
 /// Analyzed prop from `defineProps` / Options API `props`.
@@ -1207,6 +1230,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
 
     let root_reachability = extract_root_reachability(input.template, &flags);
 
+    // Collect macro-wide expansion diagnostics (property_name == None) from
+    // each macro kind. These were previously duplicated on every field.
+    let macro_expansion_diagnostics =
+        collect_macro_expansion_diagnostics(evaluated_types, input.macros);
+
     ComponentMetaAnalysis {
         props,
         events,
@@ -1230,9 +1258,75 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         fallthrough_surface: FallthroughSurface::None {
             reason: NoFallthroughReason::NoTemplate,
         },
+        macro_expansion_diagnostics,
         options_api,
         file_path: input.file_path.to_string(),
     }
+}
+
+// ── Macro-wide diagnostics ────────────────────────────────────────────────
+
+fn collect_macro_expansion_diagnostics(
+    evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    macros: &[AnalyzedMacro],
+) -> Vec<MacroExpansionDiagnostics> {
+    let Some(evaluated) = evaluated else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+
+    for (macro_index, mac) in macros.iter().enumerate() {
+        let (kind, result) = match mac.kind {
+            AnalyzedMacroKind::DefineProps => {
+                let entry = evaluated
+                    .define_props
+                    .iter()
+                    .find(|e| e.macro_index == macro_index);
+                (MacroExpansionKind::DefineProps, entry.map(|e| &e.result))
+            }
+            AnalyzedMacroKind::DefineEmits => {
+                let entry = evaluated
+                    .define_emits
+                    .iter()
+                    .find(|e| e.macro_index == macro_index);
+                (MacroExpansionKind::DefineEmits, entry.map(|e| &e.result))
+            }
+            AnalyzedMacroKind::DefineSlots => {
+                let entry = evaluated
+                    .define_slots
+                    .iter()
+                    .find(|e| e.macro_index == macro_index);
+                (MacroExpansionKind::DefineSlots, entry.map(|e| &e.result))
+            }
+            _ => continue,
+        };
+
+        let Some(result) = result else { continue };
+
+        let global_diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.property_name.is_none())
+            .cloned()
+            .collect();
+
+        if !global_diags.is_empty()
+            || result.exactness != crate::analysis::type_expand::ExpansionExactness::ExactConcrete
+            || result.execution_status
+                != crate::analysis::type_expand::ExpansionExecutionStatus::Completed
+        {
+            out.push(MacroExpansionDiagnostics {
+                macro_kind: kind,
+                macro_index,
+                diagnostics: global_diags,
+                exactness: result.exactness,
+                execution_status: result.execution_status,
+            });
+        }
+    }
+
+    out
 }
 
 // ── Props ──────────────────────────────────────────────────────────────────
@@ -1400,14 +1494,14 @@ fn define_props_property_expansion_metadata(
         .iter()
         .find(|entry| entry.macro_index == macro_index)?;
 
+    // Only include diagnostics that are specific to this property.
+    // Macro-wide diagnostics (property_name == None) are collected separately
+    // into `macro_expansion_diagnostics` to avoid duplication across every prop.
     let diagnostics = entry
         .result
         .diagnostics
         .iter()
-        .filter(|diagnostic| {
-            diagnostic.property_name.is_none()
-                || diagnostic.property_name.as_deref() == Some(prop_name)
-        })
+        .filter(|diagnostic| diagnostic.property_name.as_deref() == Some(prop_name))
         .cloned()
         .collect();
 
@@ -1442,14 +1536,13 @@ fn macro_object_property_expansion_metadata(
     entry: &crate::analysis::type_expand::ExpandedMacroObjectShape,
     property_name: &str,
 ) -> crate::analysis::type_expand::ExpansionMetadata {
+    // Only include diagnostics specific to this property.
+    // Macro-wide diagnostics (property_name == None) are in `macro_expansion_diagnostics`.
     let diagnostics = entry
         .result
         .diagnostics
         .iter()
-        .filter(|diagnostic| {
-            diagnostic.property_name.is_none()
-                || diagnostic.property_name.as_deref() == Some(property_name)
-        })
+        .filter(|diagnostic| diagnostic.property_name.as_deref() == Some(property_name))
         .cloned()
         .collect();
 
@@ -2216,10 +2309,12 @@ fn expanded_define_emit_events(
             ),
             readonly: false,
         };
+        // Call-signature events have no per-field diagnostics. Macro-wide
+        // diagnostics are collected separately into `macro_expansion_diagnostics`.
         let payload_expansion = Some(crate::analysis::type_expand::ExpansionMetadata {
             exactness: entry.result.exactness,
             execution_status: entry.result.execution_status,
-            diagnostics: entry.result.diagnostics.clone(),
+            diagnostics: vec![],
         });
 
         match &first.ty {

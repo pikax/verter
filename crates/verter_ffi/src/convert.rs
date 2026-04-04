@@ -302,9 +302,44 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         root_info,
         root_reachability: root_reachability_to_ffi(analysis.root_reachability),
         fallthrough_surface: fallthrough_surface_to_ffi(analysis.fallthrough_surface),
+        macro_expansion_diagnostics: analysis
+            .macro_expansion_diagnostics
+            .into_iter()
+            .map(|entry| FfiMacroExpansionDiagnostics {
+                macro_kind: macro_expansion_kind_to_string(entry.macro_kind),
+                macro_index: entry.macro_index as u32,
+                exactness: expansion_exactness_to_string(entry.exactness),
+                execution_status: expansion_execution_status_to_string(entry.execution_status),
+                diagnostics: entry
+                    .diagnostics
+                    .into_iter()
+                    .map(|d| FfiExpansionDiagnostic {
+                        reason: expansion_stop_reason_to_string(d.reason),
+                        context: d.context,
+                        property_name: d.property_name,
+                    })
+                    .collect(),
+            })
+            .collect(),
         options_api: analysis.options_api,
         file_path: analysis.file_path,
         resolution: resolved_state.map(resolved_component_meta_to_ffi),
+    }
+}
+
+fn macro_expansion_kind_to_string(
+    kind: verter_semantic::analysis::component_meta::MacroExpansionKind,
+) -> String {
+    match kind {
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps => {
+            "defineProps".to_string()
+        }
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits => {
+            "defineEmits".to_string()
+        }
+        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineSlots => {
+            "defineSlots".to_string()
+        }
     }
 }
 
@@ -1997,6 +2032,7 @@ mod tests {
                     reason:
                         verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
                 },
+            macro_expansion_diagnostics: Vec::new(),
             options_api: false,
             file_path: "/src/App.vue".to_string(),
         };
@@ -2082,6 +2118,7 @@ mod tests {
                     reason:
                         verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
                 },
+            macro_expansion_diagnostics: Vec::new(),
             options_api: false,
             file_path: "/src/App.vue".to_string(),
         };
@@ -2215,6 +2252,7 @@ mod tests {
             fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
                 branches: Vec::new(),
             },
+            macro_expansion_diagnostics: Vec::new(),
             options_api: false,
             file_path: "/src/App.vue".to_string(),
         };

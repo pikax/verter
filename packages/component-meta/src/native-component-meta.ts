@@ -511,9 +511,18 @@ export interface NativeComponentMetaResult {
   rootInfo?: NativeRootInfo;
   rootReachability: NativeRootReachability;
   fallthroughSurface: NativeFallthroughSurface;
+  macroExpansionDiagnostics?: NativeMacroExpansionDiagnostics[];
   optionsApi: boolean;
   filePath: string;
   resolution?: NativeComponentMetaResolution;
+}
+
+export interface NativeMacroExpansionDiagnostics {
+  macroKind: "defineProps" | "defineEmits" | "defineSlots";
+  macroIndex: number;
+  exactness: NativeExpansionMetadata["exactness"];
+  executionStatus: NativeExpansionMetadata["executionStatus"];
+  diagnostics: NativeExpansionDiagnostic[];
 }
 
 function deriveComponentName(filePath: string): string {

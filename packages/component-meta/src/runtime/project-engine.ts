@@ -58,6 +58,12 @@ export class ProjectEngine {
   readonly workspace: CheckerWorkspace | undefined;
   readonly incarnation: number;
 
+  /**
+   * Monotonic counter bumped when shared base state changes.
+   * Used by session memos to detect cross-session invalidation.
+   */
+  baseGeneration = 0;
+
   private _nativeProject: NativeMetaProject;
   private _liveLeases = new Set<LeaseId>();
   private _lastActivityMs = Date.now();
@@ -126,6 +132,7 @@ export class ProjectEngine {
   clearCaches(): void {
     if (this._state === "closed") return;
     this._nativeProject.clearCaches();
+    this.baseGeneration++;
   }
 
   /**

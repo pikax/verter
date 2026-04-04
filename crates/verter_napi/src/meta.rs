@@ -38,6 +38,18 @@ use crate::{buffer_to_string, catch_panic, NapiHostConfig, NapiIdeProjectConfig}
 fn meta_err(e: ComponentMetaHostError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
 }
+
+/// Shared encode function passed to session payload methods.
+fn encode_meta_payload(
+    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolved: &verter_session::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<u8> {
+    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+        analysis,
+        Some(resolved),
+    );
+    verter_protocol::component_meta::encode_component_meta_payload(&ffi)
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeComponentMetaBackend {
     Tsserver,
@@ -1518,21 +1530,10 @@ impl NapiMetaSession {
     pub fn get_component_meta(&self, canonical_or_alias: String) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let result = session
-                .get_component_meta_with_resolution(&canonical_or_alias)
+            let payload = session
+                .get_component_meta_payload(&canonical_or_alias, encode_meta_payload)
                 .map_err(meta_err)?;
-            match result {
-                Some((analysis, resolved)) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                        analysis,
-                        Some(&resolved),
-                    );
-                    let payload =
-                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
-                    Ok(Some(Buffer::from(payload)))
-                }
-                None => Ok(None),
-            }
+            Ok(payload.map(Buffer::from))
         }))?
     }
 
@@ -1543,21 +1544,11 @@ impl NapiMetaSession {
     ) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let result = session
-                .get_component_meta_with_resolution(&canonical_or_alias)
+            // Resolved and Full share the same payload slot.
+            let payload = session
+                .get_component_meta_payload(&canonical_or_alias, encode_meta_payload)
                 .map_err(meta_err)?;
-            match result {
-                Some((analysis, resolved)) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                        analysis,
-                        Some(&resolved),
-                    );
-                    let payload =
-                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
-                    Ok(Some(Buffer::from(payload)))
-                }
-                None => Ok(None),
-            }
+            Ok(payload.map(Buffer::from))
         }))?
     }
 
@@ -1568,21 +1559,10 @@ impl NapiMetaSession {
     ) -> Result<Option<Buffer>> {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let result = session
-                .get_declared_component_meta_with_resolution(&canonical_or_alias)
+            let payload = session
+                .get_declared_component_meta_payload(&canonical_or_alias, encode_meta_payload)
                 .map_err(meta_err)?;
-            match result {
-                Some((analysis, resolved)) => {
-                    let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
-                        analysis,
-                        Some(&resolved),
-                    );
-                    let payload =
-                        verter_protocol::component_meta::encode_component_meta_payload(&ffi);
-                    Ok(Some(Buffer::from(payload)))
-                }
-                None => Ok(None),
-            }
+            Ok(payload.map(Buffer::from))
         }))?
     }
 

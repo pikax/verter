@@ -308,6 +308,12 @@ impl HostStoreView {
         self.dependency_resolutions.get(canonical_id)
     }
 
+    /// Returns true if ALL fact versions are still valid in this view.
+    pub(crate) fn validates_all(&self, facts: &[crate::resolver_core::FactVersionRef]) -> bool {
+        use crate::resolver_core::StoreView;
+        facts.iter().all(|fact| self.validates(fact))
+    }
+
     pub(crate) fn invalid_fact_details(
         &self,
         facts: &[crate::resolver_core::FactVersionRef],

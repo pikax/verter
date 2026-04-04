@@ -4,8 +4,13 @@
 
 import { create, toBinary } from "@bufbuild/protobuf";
 import { ComponentMetaPayloadSchema } from "@verter/proto";
+import {
+  ExpansionExactness,
+  ExpansionExecutionStatus,
+  ExpansionStopReason,
+  MacroExpansionDiagnosticEntrySchema,
+} from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 import { describe, expect, it } from "vitest";
-import { ExpansionStopReason } from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 
 import {
   nativeComponentMetaToComponentMeta,
@@ -407,5 +412,60 @@ describe("decodeComponentMetaPayload", () => {
         toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, badNodePayload)),
       ),
     ).toThrow(/node id/i);
+  });
+
+  it("decodes macroExpansionDiagnostics correctly from protobuf", () => {
+    const base = buildTestComponentMetaProtoPayload({
+      filePath: "/project/src/Button.vue",
+      props: [{ name: "label", type: { kind: "primitive", name: "string" } }],
+      typeRegistry: [
+        {
+          name: "Item",
+          type: {
+            kind: "object",
+            properties: [{ name: "value", type: { kind: "primitive", name: "string" } }],
+          },
+        },
+      ],
+    });
+
+    // Inject macroExpansionDiagnostics with one entry using graph string ids
+    // "defineProps" needs a string id — add it to the string table
+    const strings = base.typeGraph!.strings as string[];
+    const definePropsId = strings.length + 1;
+    strings.push("defineProps");
+    const budgetContextId = strings.length + 1;
+    strings.push("work budget exceeded");
+
+    (base.body as Record<string, unknown>).macroExpansionDiagnostics = [
+      create(MacroExpansionDiagnosticEntrySchema, {
+        macroKindId: definePropsId,
+        macroIndex: 0,
+        exactness: ExpansionExactness.EXACT_SYMBOLIC,
+        executionStatus: ExpansionExecutionStatus.COMPLETED,
+        diagnostics: [
+          {
+            reason: ExpansionStopReason.BUDGET_EXCEEDED,
+            contextId: budgetContextId,
+            propertyNameId: 0,
+          },
+        ],
+      }),
+    ];
+
+    const bytes = toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base));
+    const result = decodeComponentMetaPayload(bytes);
+
+    expect(result.macroExpansionDiagnostics).toBeDefined();
+    expect(result.macroExpansionDiagnostics).toHaveLength(1);
+
+    const entry = result.macroExpansionDiagnostics![0]!;
+    expect(entry.macroKind).toBe("defineProps");
+    expect(entry.macroIndex).toBe(0);
+    expect(entry.exactness).toBe("exactSymbolic");
+    expect(entry.executionStatus).toBe("completed");
+    expect(entry.diagnostics).toHaveLength(1);
+    expect(entry.diagnostics[0]!.reason).toBe("budgetExceeded");
+    expect(entry.diagnostics[0]!.context).toBe("work budget exceeded");
   });
 });

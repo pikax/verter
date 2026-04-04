@@ -226,10 +226,12 @@ impl VerterHost {
                 cc.style_overrides.clear();
                 cc.cached_tsc_extract = None;
                 cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
             }
             if changes.changed {
                 cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
             }
             if changes.changed && changes.semantic_changed {
@@ -237,6 +239,7 @@ impl VerterHost {
                 cc.latest_diagnostics.clear();
                 cc.diagnostics_generation += 1;
                 cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
             }
             if changes.changed
@@ -247,6 +250,7 @@ impl VerterHost {
             {
                 cc.cached_tsc_extract = None;
                 cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
             }
             if whole_hash_changed || changes.semantic_changed {
@@ -530,6 +534,7 @@ impl VerterHost {
                     cached_parse: None,
                     cached_tsc_extract: None,
                     cached_resolved_meta: FxHashMap::default(),
+                    cached_meta_payloads: FxHashMap::default(),
                     cached_fallthrough: None,
                     barrel_export_surface: None,
                     export_registry: None,
@@ -553,6 +558,7 @@ impl VerterHost {
             entry.cached_parse = cached_parse.map(Arc::new);
             if changes.changed {
                 entry.cached_resolved_meta.clear();
+                entry.cached_meta_payloads.clear();
             }
             if changes.changed
                 && (changes.slice_changes.script_changed
@@ -562,6 +568,7 @@ impl VerterHost {
             {
                 entry.cached_tsc_extract = None;
                 entry.cached_resolved_meta.clear();
+                entry.cached_meta_payloads.clear();
             }
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();

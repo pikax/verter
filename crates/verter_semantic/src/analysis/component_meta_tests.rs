@@ -3649,3 +3649,308 @@ fn root_reachability_v_model_radio_consumes_checked_and_change() {
         other => panic!("expected Branches, got: {:?}", other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic dedup: macro_expansion_diagnostics vs per-field diagnostics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
+    // Setup: defineProps<{ foo: string; bar: number }> with 3 diagnostics:
+    //  - one global (property_name=None, BudgetExceeded)
+    //  - one for "foo" (UnresolvedReference)
+    //  - one for "bar" (UnsupportedOperator)
+    let macros = vec![make_define_props(vec![
+        make_prop("foo", Some("string"), false),
+        make_prop("bar", Some("number"), false),
+    ])];
+
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            crate::analysis::type_expand::ExpandedField {
+                name: "foo".to_string(),
+                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                raw_type: None,
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            crate::analysis::type_expand::ExpandedField {
+                name: "bar".to_string(),
+                r#type: TypeExpr::Primitive(PrimitiveName::Number),
+                raw_type: None,
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::incomplete(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "foo".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "bar".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                vec![
+                    // Global diagnostic (no property_name)
+                    crate::analysis::type_expand::ExpansionDiagnostic {
+                        reason: crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+                        context: "global budget exceeded".to_string(),
+                        property_name: None,
+                    },
+                    // Per-field diagnostic for "foo"
+                    crate::analysis::type_expand::ExpansionDiagnostic {
+                        reason:
+                            crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+                        context: "unresolved Foo".to_string(),
+                        property_name: Some("foo".to_string()),
+                    },
+                    // Per-field diagnostic for "bar"
+                    crate::analysis::type_expand::ExpansionDiagnostic {
+                        reason:
+                            crate::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
+                        context: "unsupported op in bar".to_string(),
+                        property_name: Some("bar".to_string()),
+                    },
+                ],
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+
+    // --- macro_expansion_diagnostics ---
+    assert_eq!(
+        result.macro_expansion_diagnostics.len(),
+        1,
+        "should have exactly one macro-level diagnostic entry (for defineProps at index 0)"
+    );
+    let macro_diag = &result.macro_expansion_diagnostics[0];
+    assert_eq!(macro_diag.macro_kind, MacroExpansionKind::DefineProps);
+    assert_eq!(macro_diag.macro_index, 0);
+    assert_eq!(
+        macro_diag.diagnostics.len(),
+        1,
+        "macro-level entry should contain only the global diagnostic (property_name=None)"
+    );
+    assert_eq!(
+        macro_diag.diagnostics[0].reason,
+        crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+    );
+    assert!(
+        macro_diag.diagnostics[0].property_name.is_none(),
+        "macro-level diagnostic must have property_name=None"
+    );
+
+    // --- per-field diagnostics for "foo" ---
+    let foo_prop = result
+        .props
+        .iter()
+        .find(|p| p.name == "foo")
+        .expect("foo prop should exist");
+    let foo_expansion = foo_prop
+        .type_expansion
+        .as_ref()
+        .expect("foo should have expansion metadata");
+    assert_eq!(
+        foo_expansion.diagnostics.len(),
+        1,
+        "foo should have exactly 1 per-field diagnostic"
+    );
+    assert_eq!(
+        foo_expansion.diagnostics[0].reason,
+        crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference
+    );
+    assert_eq!(
+        foo_expansion.diagnostics[0].property_name.as_deref(),
+        Some("foo")
+    );
+    // Negative: foo must NOT contain the global BudgetExceeded diagnostic
+    assert!(
+        !foo_expansion
+            .diagnostics
+            .iter()
+            .any(|d| d.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded),
+        "per-field diagnostics for foo must NOT contain the global BudgetExceeded diagnostic"
+    );
+
+    // --- per-field diagnostics for "bar" ---
+    let bar_prop = result
+        .props
+        .iter()
+        .find(|p| p.name == "bar")
+        .expect("bar prop should exist");
+    let bar_expansion = bar_prop
+        .type_expansion
+        .as_ref()
+        .expect("bar should have expansion metadata");
+    assert_eq!(
+        bar_expansion.diagnostics.len(),
+        1,
+        "bar should have exactly 1 per-field diagnostic"
+    );
+    assert_eq!(
+        bar_expansion.diagnostics[0].reason,
+        crate::analysis::type_expand::ExpansionStopReason::UnsupportedOperator
+    );
+    // Negative: bar must NOT contain the global diagnostic
+    assert!(
+        !bar_expansion
+            .diagnostics
+            .iter()
+            .any(|d| d.property_name.is_none()),
+        "per-field diagnostics for bar must NOT contain any global (property_name=None) diagnostics"
+    );
+}
+
+#[test]
+fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() {
+    // Setup: defineEmits with call-signature style (e.g. (e: 'change', value: string) => void)
+    // with 2 diagnostics: one global (property_name=None), one for property "change"
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineEmits,
+        ..make_define_props(vec![])
+    }];
+
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::incomplete(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: Vec::new(),
+                    index_signatures: Vec::new(),
+                    call_signatures: vec![crate::analysis::type_expand::ExpandedCallSignature {
+                        parameters: vec![
+                            // First param is the event name literal
+                            crate::analysis::type_expand::ExpandedParameter {
+                                name: "e".to_string(),
+                                ty: TypeExpr::Literal(
+                                    crate::analysis::type_expr::LiteralValue::String(
+                                        "change".to_string(),
+                                    ),
+                                ),
+                                optional: false,
+                                rest: false,
+                            },
+                            // Second param is the payload
+                            crate::analysis::type_expand::ExpandedParameter {
+                                name: "value".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                rest: false,
+                            },
+                        ],
+                        return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                        type_parameters: Vec::new(),
+                    }],
+                },
+                crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                vec![
+                    // Global diagnostic
+                    crate::analysis::type_expand::ExpansionDiagnostic {
+                        reason: crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+                        context: "emits budget exceeded".to_string(),
+                        property_name: None,
+                    },
+                    // Per-property diagnostic for "change"
+                    crate::analysis::type_expand::ExpansionDiagnostic {
+                        reason:
+                            crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+                        context: "unresolved in change handler".to_string(),
+                        property_name: Some("change".to_string()),
+                    },
+                ],
+            ),
+        }],
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+
+    // --- macro_expansion_diagnostics should capture the global diagnostic ---
+    assert_eq!(
+        result.macro_expansion_diagnostics.len(),
+        1,
+        "should have one macro-level diagnostic entry for defineEmits"
+    );
+    let macro_diag = &result.macro_expansion_diagnostics[0];
+    assert_eq!(macro_diag.macro_kind, MacroExpansionKind::DefineEmits);
+    assert_eq!(macro_diag.macro_index, 0);
+    assert_eq!(
+        macro_diag.diagnostics.len(),
+        1,
+        "macro-level entry should contain only the global diagnostic"
+    );
+    assert_eq!(
+        macro_diag.diagnostics[0].reason,
+        crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+    );
+
+    // --- call-signature event "change" should have empty diagnostics ---
+    let change_event = result
+        .events
+        .iter()
+        .find(|e| e.name == "change")
+        .expect("change event should be extracted from call signature");
+    let change_expansion = change_event
+        .payload_expansion
+        .as_ref()
+        .expect("change event should have payload_expansion metadata");
+    assert!(
+        change_expansion.diagnostics.is_empty(),
+        "call-signature events must get empty diagnostics, not cloned macro-wide diagnostics; \
+         found {} diagnostics: {:?}",
+        change_expansion.diagnostics.len(),
+        change_expansion.diagnostics
+    );
+    // Negative: must not contain the global BudgetExceeded diagnostic
+    assert!(
+        !change_expansion
+            .diagnostics
+            .iter()
+            .any(|d| d.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded),
+        "call-signature event diagnostics must NOT contain the global BudgetExceeded diagnostic"
+    );
+    // Negative: must not contain the per-property "change" diagnostic either
+    // (call-signature events always get empty diagnostics)
+    assert!(
+        !change_expansion
+            .diagnostics
+            .iter()
+            .any(|d| d.property_name.as_deref() == Some("change")),
+        "call-signature event diagnostics must NOT contain per-property diagnostics"
+    );
+}

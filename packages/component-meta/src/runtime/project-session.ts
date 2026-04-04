@@ -10,6 +10,35 @@ import { decodeComponentMetaPayload } from "../type-graph.js";
 
 type OverlayEntry = { kind: "upsert"; source: string } | { kind: "delete" };
 
+/**
+ * Deep-freeze an object graph, handling cycles safely.
+ */
+function deepFreeze<T>(obj: T): T {
+  if (obj === null || obj === undefined || typeof obj !== "object") return obj;
+  const seen = new WeakSet<object>();
+  const stack: object[] = [obj as object];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    Object.freeze(current);
+    const values = Object.values(current);
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (v !== null && v !== undefined && typeof v === "object" && !Object.isFrozen(v)) {
+        stack.push(v);
+      }
+    }
+  }
+  return obj;
+}
+
+interface MemoEntry {
+  overlayGen: number;
+  baseGen: number;
+  value: unknown;
+}
+
 export class ProjectSession {
   readonly engine: ProjectEngine;
   readonly leaseId: LeaseId;
@@ -18,6 +47,8 @@ export class ProjectSession {
   private _overlays = new Map<string, OverlayEntry>();
   private _overlayGeneration = 0;
   private _localMemo = new Map<string, { gen: number; value: unknown }>();
+  /** Decoded native-meta memo: keyed by `"kind:canonicalId"`. */
+  private _decodedMemo = new Map<string, MemoEntry>();
   private _closed = false;
 
   constructor(engine: ProjectEngine, leaseId: LeaseId, nativeSession: NativeMetaSession) {
@@ -48,6 +79,7 @@ export class ProjectSession {
     this._overlays.set(canonicalId, { kind: "upsert", source });
     this._overlayGeneration++;
     this._localMemo.clear();
+    this._decodedMemo.clear();
     this._nativeSession.upsert(canonicalId, source);
     this.engine.markActivity();
   }
@@ -57,6 +89,7 @@ export class ProjectSession {
     this._overlays.set(canonicalId, { kind: "delete" });
     this._overlayGeneration++;
     this._localMemo.clear();
+    this._decodedMemo.clear();
     this._nativeSession.delete(canonicalId);
     this.engine.markActivity();
   }
@@ -68,9 +101,13 @@ export class ProjectSession {
       this._overlayGeneration++;
     }
     this._localMemo.clear();
+    this._decodedMemo.clear();
     this._nativeSession.reset(canonicalId);
     if (this._nativeSession.getEffectiveSource(canonicalId) === null) {
-      this.engine.nativeProject.ensureLoaded(canonicalId);
+      const loaded = this.engine.nativeProject.ensureLoaded(canonicalId);
+      if (loaded) {
+        this.engine.baseGeneration++;
+      }
     }
     this.engine.markActivity();
   }
@@ -106,7 +143,11 @@ export class ProjectSession {
   ensureBaseFile(canonicalId: string): boolean {
     this.ensureOpen();
     this.engine.markActivity();
-    return this.engine.nativeProject.ensureLoaded(canonicalId);
+    const loaded = this.engine.nativeProject.ensureLoaded(canonicalId);
+    if (loaded) {
+      this.engine.baseGeneration++;
+    }
+    return loaded;
   }
 
   /**
@@ -115,51 +156,92 @@ export class ProjectSession {
   refreshBaseFile(canonicalId: string): boolean {
     this.ensureOpen();
     this.engine.markActivity();
-    return this.engine.nativeProject.refreshBase(canonicalId);
+    const refreshed = this.engine.nativeProject.refreshBase(canonicalId);
+    this.engine.baseGeneration++;
+    return refreshed;
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Component-meta queries with decoded-result memo
+  // ─────────────────────────────────────────────────────────────────────
 
   /**
    * Single native component-meta query. Returns decoded protobuf metadata or null.
-   * Uses the native `getComponentMeta` method which combines enriched analysis
-   * + type evaluation in one call.
+   * Memoized: repeated calls with unchanged overlay + base state skip decode.
    */
   getComponentMeta(canonicalId: string): unknown | null {
-    this.ensureOpen();
-    this.engine.markActivity();
-    const payload = this._nativeSession.getComponentMeta(canonicalId);
-    if (payload === null || payload === undefined) return null;
-    return decodeComponentMetaPayload(payload);
+    return this._memoizedDecode("full", canonicalId, () => {
+      const payload = this._nativeSession.getComponentMeta(canonicalId);
+      if (payload === null || payload === undefined) return null;
+      return decodeComponentMetaPayload(payload);
+    });
   }
 
   /**
    * Declared-surface native component-meta query for Volar-compatible callers.
+   * Memoized: repeated calls with unchanged overlay + base state skip decode.
    */
   getDeclaredComponentMeta(canonicalId: string): unknown | null {
-    this.ensureOpen();
-    this.engine.markActivity();
-    const payload = this._nativeSession.getDeclaredComponentMeta(canonicalId);
-    if (payload === null || payload === undefined) return null;
-    return decodeComponentMetaPayload(payload);
+    return this._memoizedDecode("declared", canonicalId, () => {
+      const payload = this._nativeSession.getDeclaredComponentMeta(canonicalId);
+      if (payload === null || payload === undefined) return null;
+      return decodeComponentMetaPayload(payload);
+    });
   }
 
   /**
    * Full native component-meta query with resolution sidecars.
    */
   getResolvedComponentMeta(canonicalId: string): unknown | null {
+    return this._memoizedDecode("resolved", canonicalId, () => {
+      const nativeSession = this._nativeSession as {
+        getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
+      };
+      const getResolvedComponentMeta = nativeSession.getResolvedComponentMeta;
+      if (typeof getResolvedComponentMeta !== "function") {
+        throw new Error(
+          "Resolved component-meta query is unavailable on the active native session",
+        );
+      }
+      const payload = getResolvedComponentMeta.call(this._nativeSession, canonicalId);
+      if (payload === null || payload === undefined) return null;
+      return decodeComponentMetaPayload(payload as ArrayBuffer | ArrayBufferView);
+    });
+  }
+
+  /**
+   * Internal memo helper. Returns frozen decoded result on hit,
+   * or decodes, freezes, and caches on miss.
+   */
+  private _memoizedDecode(
+    kind: string,
+    canonicalId: string,
+    decode: () => unknown | null,
+  ): unknown | null {
     this.ensureOpen();
     this.engine.markActivity();
-    const nativeSession = this._nativeSession as {
-      getResolvedComponentMeta?: (canonicalId: string) => unknown | null;
-    };
-    const getResolvedComponentMeta = nativeSession.getResolvedComponentMeta;
-    if (typeof getResolvedComponentMeta !== "function") {
-      throw new Error(
-        "Resolved component-meta query is unavailable on the active native session",
-      );
+
+    const key = `${kind}:${canonicalId}`;
+    const entry = this._decodedMemo.get(key);
+    if (
+      entry &&
+      entry.overlayGen === this._overlayGeneration &&
+      entry.baseGen === this.engine.baseGeneration
+    ) {
+      return entry.value;
     }
-    const payload = getResolvedComponentMeta.call(this._nativeSession, canonicalId);
-    if (payload === null || payload === undefined) return null;
-    return decodeComponentMetaPayload(payload as ArrayBuffer | ArrayBufferView);
+
+    const result = decode();
+    // Deep-freeze so callers cannot mutate the shared memoized object
+    if (result !== null) {
+      deepFreeze(result);
+    }
+    this._decodedMemo.set(key, {
+      overlayGen: this._overlayGeneration,
+      baseGen: this.engine.baseGeneration,
+      value: result,
+    });
+    return result;
   }
 
   /**
@@ -200,5 +282,6 @@ export class ProjectSession {
     this.engine.releaseLease(this.leaseId);
     this._overlays.clear();
     this._localMemo.clear();
+    this._decodedMemo.clear();
   }
 }

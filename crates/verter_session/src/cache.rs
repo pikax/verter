@@ -270,6 +270,7 @@ mod tests {
             cached_parse: None,
             cached_tsc_extract: None,
             cached_resolved_meta: FxHashMap::default(),
+            cached_meta_payloads: FxHashMap::default(),
             cached_fallthrough: None,
             barrel_export_surface: None,
             export_registry: None,

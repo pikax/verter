@@ -211,6 +211,15 @@ message ComponentMetaBody {
   RootInfo root_info = 21;
   PublicInstanceMeta public_instance = 22;
   SfcBlocksMeta sfc_blocks = 23;
+  repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 24;
+}
+
+message MacroExpansionDiagnosticEntry {
+  uint32 macro_kind_id = 1;
+  uint32 macro_index = 2;
+  ExpansionExactness exactness = 3;
+  ExpansionExecutionStatus execution_status = 4;
+  repeated ExpansionDiagnostic diagnostics = 5;
 }
 
 message JsdocTag {

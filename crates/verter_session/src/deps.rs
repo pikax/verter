@@ -425,6 +425,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
             ) {
                 file.compile_slots.clear();
                 file.cached_resolved_meta.clear();
+                file.cached_meta_payloads.clear();
             }
         }
     }
@@ -472,6 +473,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
             if should_clear {
                 cc.compile_slots.clear();
                 cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
@@ -585,6 +587,7 @@ pub(crate) fn smart_invalidate_dependents(
             ) {
                 file.compile_slots.clear();
                 file.cached_resolved_meta.clear();
+                file.cached_meta_payloads.clear();
             }
         }
     }

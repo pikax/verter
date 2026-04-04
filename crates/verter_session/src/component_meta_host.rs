@@ -513,6 +513,55 @@ impl ComponentMetaSession {
         }
     }
 
+    /// Declared-meta as encoded payload. Cache-first on the Verter backend.
+    pub fn get_declared_component_meta_payload(
+        &self,
+        canonical_or_alias: &str,
+        encode_fn: impl FnOnce(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            &crate::meta_resolve::ResolvedComponentMetaState,
+        ) -> Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ComponentMetaHostError> {
+        match self.owner.backend {
+            TypeExpansionBackend::Verter => self
+                .inner
+                .get_declared_component_meta_payload(canonical_or_alias, encode_fn)
+                .map_err(ComponentMetaHostError::from),
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
+                let result =
+                    self.get_declared_component_meta_with_resolution(canonical_or_alias)?;
+                match result {
+                    Some((analysis, resolved)) => Ok(Some(encode_fn(analysis, &resolved))),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Full-meta as encoded payload. Cache-first on the Verter backend.
+    pub fn get_component_meta_payload(
+        &self,
+        canonical_or_alias: &str,
+        encode_fn: impl FnOnce(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            &crate::meta_resolve::ResolvedComponentMetaState,
+        ) -> Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ComponentMetaHostError> {
+        match self.owner.backend {
+            TypeExpansionBackend::Verter => self
+                .inner
+                .get_component_meta_payload(canonical_or_alias, encode_fn)
+                .map_err(ComponentMetaHostError::from),
+            TypeExpansionBackend::Tsserver | TypeExpansionBackend::Tsgo => {
+                let result = self.get_component_meta_with_resolution(canonical_or_alias)?;
+                match result {
+                    Some((analysis, resolved)) => Ok(Some(encode_fn(analysis, &resolved))),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
     /// Get the analysis snapshot in this session's overlay context.
     pub fn get_analysis(
         &self,

@@ -474,10 +474,25 @@ pub struct FfiComponentMeta {
     pub root_info: FfiRootInfo,
     pub root_reachability: FfiRootReachability,
     pub fallthrough_surface: FfiFallthroughSurface,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub macro_expansion_diagnostics: Vec<FfiMacroExpansionDiagnostics>,
     pub options_api: bool,
     pub file_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<FfiComponentMetaResolution>,
+}
+
+/// Macro-wide expansion diagnostics that apply to an entire macro, not to a
+/// specific property. One entry per macro that has global diagnostics.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiMacroExpansionDiagnostics {
+    pub macro_kind: String,
+    pub macro_index: u32,
+    pub exactness: String,
+    pub execution_status: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<FfiExpansionDiagnostic>,
 }
 
 #[derive(Serialize, Clone)]

@@ -1394,6 +1394,7 @@ mod tests {
             fallthrough_surface: FallthroughSurface::None {
                 reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
+            macro_expansion_diagnostics: Vec::new(),
             options_api: false,
             file_path: "/App.vue".to_string(),
         }

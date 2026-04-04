@@ -1198,6 +1198,8 @@ pub(crate) struct FileEntry {
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
+    /// Cached encoded protobuf payloads for component-meta queries.
+    pub(crate) cached_meta_payloads: FxHashMap<MetaPayloadKind, CachedMetaPayload>,
     /// Cached fallthrough resolution keyed by semantic fact versions and
     /// generic-root-propagation behavior.
     pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
@@ -1272,6 +1274,8 @@ pub(crate) struct CompileCacheEntry {
     pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
     /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
     pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
+    /// Cached encoded protobuf payloads for component-meta queries.
+    pub(crate) cached_meta_payloads: FxHashMap<MetaPayloadKind, CachedMetaPayload>,
 
     /// Raw template analysis (source-derived, profileless).
     /// Computed by compute_template_analysis_if_missing() from raw scheduler data.
@@ -1548,6 +1552,22 @@ pub(crate) struct CachedFallthroughEntry {
     pub resolution: Arc<FallthroughResolution>,
 }
 
+/// Which kind of component-meta payload is cached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MetaPayloadKind {
+    /// Declared-only meta (no enrichment).
+    Declared,
+    /// Full meta with enrichment + fallthrough.
+    Full,
+}
+
+/// Cached encoded protobuf payload for a component-meta query.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedMetaPayload {
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub payload: Vec<u8>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MetaProvenance — per-host counters for component-meta observability
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1577,6 +1597,9 @@ pub struct MetaProvenance {
     pub dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64,
     pub native_fs_read_dir_count: std::sync::atomic::AtomicU64,
     pub native_fs_read_file_miss_count: std::sync::atomic::AtomicU64,
+    pub payload_cache_hits: std::sync::atomic::AtomicU64,
+    pub payload_cache_misses: std::sync::atomic::AtomicU64,
+    pub payload_encodes: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1602,6 +1625,9 @@ impl Default for MetaProvenance {
             dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64::new(0),
             native_fs_read_dir_count: std::sync::atomic::AtomicU64::new(0),
             native_fs_read_file_miss_count: std::sync::atomic::AtomicU64::new(0),
+            payload_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            payload_cache_misses: std::sync::atomic::AtomicU64::new(0),
+            payload_encodes: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1687,6 +1713,12 @@ impl std::fmt::Debug for MetaProvenance {
                 "native_fs_read_file_miss_count",
                 &self.native_fs_read_file_miss_count.load(Relaxed),
             )
+            .field("payload_cache_hits", &self.payload_cache_hits.load(Relaxed))
+            .field(
+                "payload_cache_misses",
+                &self.payload_cache_misses.load(Relaxed),
+            )
+            .field("payload_encodes", &self.payload_encodes.load(Relaxed))
             .finish()
     }
 }
@@ -1722,6 +1754,9 @@ impl MetaProvenance {
             dir_index_dirty_rescan_count: self.dir_index_dirty_rescan_count.load(Relaxed),
             native_fs_read_dir_count: self.native_fs_read_dir_count.load(Relaxed),
             native_fs_read_file_miss_count: self.native_fs_read_file_miss_count.load(Relaxed),
+            payload_cache_hits: self.payload_cache_hits.load(Relaxed),
+            payload_cache_misses: self.payload_cache_misses.load(Relaxed),
+            payload_encodes: self.payload_encodes.load(Relaxed),
         }
     }
 
@@ -1749,6 +1784,9 @@ impl MetaProvenance {
         self.dir_index_dirty_rescan_count.store(0, Relaxed);
         self.native_fs_read_dir_count.store(0, Relaxed);
         self.native_fs_read_file_miss_count.store(0, Relaxed);
+        self.payload_cache_hits.store(0, Relaxed);
+        self.payload_cache_misses.store(0, Relaxed);
+        self.payload_encodes.store(0, Relaxed);
     }
 }
 
@@ -1799,6 +1837,9 @@ pub struct MetaProvenanceSnapshot {
     pub dir_index_dirty_rescan_count: u64,
     pub native_fs_read_dir_count: u64,
     pub native_fs_read_file_miss_count: u64,
+    pub payload_cache_hits: u64,
+    pub payload_cache_misses: u64,
+    pub payload_encodes: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

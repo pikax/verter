@@ -779,6 +779,150 @@ impl MetaSession {
         }
     }
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Payload cache helpers (shared by NAPI/WASM — skip encode on cache hit)
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Attempt to return a cached declared-meta payload, or compute + encode
+    /// via the provided `encode_fn`. The caller owns the FFI conversion and
+    /// protobuf encoding (which live in downstream crates).
+    pub fn get_declared_component_meta_payload(
+        &self,
+        canonical_or_alias: &str,
+        encode_fn: impl FnOnce(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            &crate::meta_resolve::ResolvedComponentMetaState,
+        ) -> Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, MetaError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.check_alive()?;
+        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
+            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+
+            // Attempt payload cache hit
+            if let Some(cached) = host.try_get_cached_meta_payload(
+                canonical.as_str(),
+                crate::types::MetaPayloadKind::Declared,
+                store_view,
+            ) {
+                host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
+                return Ok(Some(cached));
+            }
+            host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
+
+            // Miss — compute from scratch
+            let Some(resolved) = host.resolve_component_meta_in_view(
+                canonical.as_str(),
+                crate::types::ResolverMode::Expanded,
+                store_view,
+            ) else {
+                return Ok(None);
+            };
+            let analysis = crate::host_manage::extract_component_meta_from_resolved(
+                host,
+                canonical.as_str(),
+                &resolved,
+                false,
+                Some(store_view),
+            );
+
+            if let Some(err) = component_meta_resolution_budget_error(
+                canonical.as_str(),
+                Some(&analysis),
+                &resolved,
+            ) {
+                return Err(err);
+            }
+
+            let payload = encode_fn(analysis, &resolved);
+            host.provenance().payload_encodes.fetch_add(1, Relaxed);
+
+            // Store in cache
+            host.store_meta_payload(
+                canonical.as_str(),
+                crate::types::MetaPayloadKind::Declared,
+                &resolved.fact_versions,
+                payload.clone(),
+            );
+
+            Ok(Some(payload))
+        })?
+    }
+
+    /// Attempt to return a cached full-meta payload, or compute + encode
+    /// via the provided `encode_fn`.
+    ///
+    /// Full payloads are validated against fallthrough fact versions (which
+    /// include both resolved-state and child-component dependency facts).
+    pub fn get_component_meta_payload(
+        &self,
+        canonical_or_alias: &str,
+        encode_fn: impl FnOnce(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            &crate::meta_resolve::ResolvedComponentMetaState,
+        ) -> Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, MetaError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.check_alive()?;
+        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
+            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+
+            // Attempt payload cache hit (Full reuses the same slot as Resolved)
+            if let Some(cached) = host.try_get_cached_meta_payload(
+                canonical.as_str(),
+                crate::types::MetaPayloadKind::Full,
+                store_view,
+            ) {
+                host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
+                return Ok(Some(cached));
+            }
+            host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
+
+            // Miss — resolve + build with fallthrough in-view so we capture
+            // the fallthrough fact versions for cache validation.
+            let Some(resolved) = host.resolve_component_meta_in_view(
+                canonical.as_str(),
+                crate::types::ResolverMode::Expanded,
+                store_view,
+            ) else {
+                return Ok(None);
+            };
+
+            // Build full analysis with fallthrough and capture the fallthrough
+            // fact versions for the payload cache key.
+            let (analysis, fallthrough_fact_versions) =
+                crate::host_manage::extract_component_meta_from_resolved_with_facts(
+                    host,
+                    canonical.as_str(),
+                    &resolved,
+                    Some(store_view),
+                );
+
+            if let Some(err) = component_meta_resolution_budget_error(
+                canonical.as_str(),
+                Some(&analysis),
+                &resolved,
+            ) {
+                return Err(err);
+            }
+
+            let payload = encode_fn(analysis, &resolved);
+            host.provenance().payload_encodes.fetch_add(1, Relaxed);
+
+            // Store with fallthrough fact versions — these include both
+            // resolved-state facts and child-component dependency facts.
+            let facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
+            host.store_meta_payload(
+                canonical.as_str(),
+                crate::types::MetaPayloadKind::Full,
+                &facts,
+                payload.clone(),
+            );
+
+            Ok(Some(payload))
+        })?
+    }
+
     /// Return provenance counters for this session's host.
     pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;

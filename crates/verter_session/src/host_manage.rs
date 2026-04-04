@@ -7178,6 +7178,7 @@ impl VerterHost {
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.compile_slots.clear();
             cc.cached_resolved_meta.clear();
+            cc.cached_meta_payloads.clear();
         }
 
         #[cfg(not(feature = "scheduler"))]
@@ -7186,6 +7187,7 @@ impl VerterHost {
             if let Some(entry) = files.get_mut(&canonical) {
                 entry.compile_slots.clear();
                 entry.cached_resolved_meta.clear();
+                entry.cached_meta_payloads.clear();
             }
         }
     }
@@ -7242,6 +7244,7 @@ impl VerterHost {
                 if let Some(mut cc) = self.compile_cache.get_mut(owner) {
                     cc.compile_slots.clear();
                     cc.cached_resolved_meta.clear();
+                    cc.cached_meta_payloads.clear();
                 }
             }
 
@@ -7293,6 +7296,7 @@ impl VerterHost {
                     if let Some(file) = files.get_mut(owner) {
                         file.compile_slots.clear();
                         file.cached_resolved_meta.clear();
+                        file.cached_meta_payloads.clear();
                     }
                 }
             }
@@ -8463,6 +8467,54 @@ pub(crate) fn extract_component_meta_from_resolved(
         }
     }
     meta
+}
+
+/// Like [`extract_component_meta_from_resolved`] with `include_fallthrough=true`,
+/// but also returns the fallthrough resolution's fact versions (if available).
+/// Used by the payload cache to store Full payloads with the correct fact set.
+pub(crate) fn extract_component_meta_from_resolved_with_facts(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    store_view: Option<&HostStoreView>,
+) -> (
+    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    Option<Vec<crate::resolver_core::FactVersionRef>>,
+) {
+    let resolved_macros = resolver_component_meta_resolved_macros(
+        resolved.snapshot.macros.as_ref(),
+        &resolved.resolved_macros,
+    );
+    let resolved_type_registry =
+        resolver_component_meta_type_registry(&resolved.resolved_type_registry);
+    let mut meta = extract_component_meta_from_inputs(
+        host,
+        canonical_or_alias,
+        &resolved.snapshot,
+        &resolved_macros,
+        &resolved_type_registry,
+        resolved.evaluated_types.as_ref(),
+    );
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let fallthrough_facts = if let Some(resolution) = host
+        .compute_fallthrough_surface_from_resolved_state(
+            &canonical,
+            resolved,
+            None,
+            &mut visiting,
+            store_view,
+        ) {
+        let facts = resolution.fact_versions.clone();
+        meta.accepted_props = resolution.accepted_props;
+        meta.accepted_events = resolution.accepted_events;
+        meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+        meta.fallthrough_surface = resolution.fallthrough_surface;
+        Some(facts)
+    } else {
+        None
+    };
+    (meta, fallthrough_facts)
 }
 
 #[cfg(test)]

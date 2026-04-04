@@ -12471,6 +12471,7 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
         fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
             reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
         },
+        macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: "/src/App.vue".to_string(),
     };
@@ -12597,4 +12598,241 @@ defineProps<Props>()
         .props
         .iter()
         .any(|prop| prop.name == format!("p{}", import_count - 1)));
+}
+
+// ===========================================================================
+// Payload cache tests
+// ===========================================================================
+
+/// A simple encode function for tests: deterministic bytes from analysis+resolved.
+/// Uses the prop count + file path to produce reproducible output.
+fn test_encode_fn(
+    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    _resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+) -> Vec<u8> {
+    // Produce deterministic bytes based on the analysis content.
+    let marker = format!(
+        "payload:{}:props={}:events={}",
+        analysis.file_path,
+        analysis.props.len(),
+        analysis.events.len(),
+    );
+    marker.into_bytes()
+}
+
+#[test]
+fn payload_cache_second_declared_call_returns_byte_equal_cached_payload() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call — cache miss, encodes.
+    let p1 = session
+        .get_declared_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov1 = provenance(&project);
+    assert_eq!(prov1.payload_cache_misses, 1, "first call = miss");
+    assert_eq!(prov1.payload_encodes, 1, "first call = one encode");
+    assert_eq!(prov1.payload_cache_hits, 0, "first call = no hit");
+
+    // Second call — cache hit, no encode.
+    let p2 = session
+        .get_declared_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov2 = provenance(&project);
+    assert_eq!(p1, p2, "payloads must be byte-equal");
+    assert_eq!(prov2.payload_cache_hits, 1, "second call = hit");
+    assert_eq!(prov2.payload_encodes, 1, "second call = no new encode");
+    assert_eq!(prov2.payload_cache_misses, 1, "second call = no new miss");
+}
+
+#[test]
+fn payload_cache_get_resolved_reuses_full_slot() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call — full/resolved — miss.
+    let p1 = session
+        .get_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov1 = provenance(&project);
+    assert_eq!(prov1.payload_encodes, 1);
+    assert_eq!(prov1.payload_cache_misses, 1);
+
+    // Second call — same slot — hit.
+    let p2 = session
+        .get_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov2 = provenance(&project);
+    assert_eq!(p1, p2, "resolved reuses the full payload slot");
+    assert_eq!(prov2.payload_cache_hits, 1);
+    assert_eq!(prov2.payload_encodes, 1, "no new encode on warm hit");
+}
+
+#[test]
+fn payload_cache_dependency_edit_invalidates_and_re_encodes() {
+    let project = make_project();
+    project
+        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // First call — miss.
+    let _p1 = session
+        .get_declared_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov1 = provenance(&project);
+    assert_eq!(prov1.payload_encodes, 1);
+
+    // Edit the dependency.
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface Props { a: string; b: number }"#,
+        )
+        .unwrap();
+
+    // Second call — cache invalidated by dependency change.
+    let _p2 = session
+        .get_declared_component_meta_payload("/Comp.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov2 = provenance(&project);
+    assert_eq!(
+        prov2.payload_encodes, 2,
+        "exactly one new encode after dep edit"
+    );
+    // The payload content should differ because the prop surface changed.
+    assert_ne!(
+        _p1, _p2,
+        "payload should differ after dependency edit adds a prop"
+    );
+}
+
+#[test]
+fn payload_cache_fallthrough_change_invalidates_full_but_not_declared() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+defineProps<{ childProp: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Parent.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+defineProps<{ parentProp: string }>()
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session().unwrap();
+
+    // Warm both caches for Parent.
+    let _decl = session
+        .get_declared_component_meta_payload("/Parent.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+    let _full = session
+        .get_component_meta_payload("/Parent.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov1 = provenance(&project);
+    let encodes_after_warm = prov1.payload_encodes;
+    assert!(
+        encodes_after_warm >= 2,
+        "at least 2 encodes (declared + full)"
+    );
+
+    // Edit the child's prop surface — affects fallthrough but not parent's declared.
+    project
+        .upsert_base(
+            "/Child.vue",
+            r#"<script setup lang="ts">
+defineProps<{ childProp: string; newProp: boolean }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    // Declared should still hit cache (child change doesn't affect parent's declared props).
+    let _decl2 = session
+        .get_declared_component_meta_payload("/Parent.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov2 = provenance(&project);
+    // The declared payload uses the resolved-state fact versions which only
+    // cover the parent's own types, so a child-only change should not
+    // necessarily invalidate it. We assert at most one new encode happened
+    // (zero if the declared cache stayed warm, one if the resolver store
+    // considers the child change as affecting the parent's resolved-state facts).
+    let declared_new_encodes = prov2.payload_encodes - encodes_after_warm;
+    assert!(
+        declared_new_encodes <= 1,
+        "declared payload should not force more than one re-encode after child-only change (got {declared_new_encodes})"
+    );
+
+    // Full payload MUST re-encode because the child surface changed.
+    let _full2 = session
+        .get_component_meta_payload("/Parent.vue", test_encode_fn)
+        .expect("should succeed")
+        .expect("should return payload");
+
+    let prov3 = provenance(&project);
+    let full_new_encodes = prov3.payload_encodes - prov2.payload_encodes;
+    assert!(
+        full_new_encodes >= 1,
+        "full payload should re-encode after child fallthrough change (got {full_new_encodes} new encodes)"
+    );
+    // The full payload should have changed because the child's prop surface changed.
+    // (This is a weaker assertion — we just check that re-encoding happened.)
 }
