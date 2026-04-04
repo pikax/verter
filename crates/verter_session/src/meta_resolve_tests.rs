@@ -1678,9 +1678,17 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         Arc::make_mut(entry).snapshot = None;
     }
 
-    let materialized =
-        solve_component_meta_registry_decl_in_view(&host, "/src/types.ts", "Props", None)
-            .expect("solver-backed registry decl materialization should use cached prepared state");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            &host,
+            None,
+            "/src/types.ts",
+        );
+    let mut solve_batch =
+        crate::resolver_core::ComponentMetaSolveBatch::new(&host, None, &owner_solver_host);
+    let materialized = solve_batch
+        .solve_scoped("/src/types.ts", "Props")
+        .expect("solver-backed registry decl materialization should use cached prepared state");
 
     assert_eq!(
         materialized, decl.body,
@@ -4121,5 +4129,397 @@ defineProps<Props>()
         !prop_names.iter().any(|n| n.contains("internalState")),
         "ECMAScript #private fields should NOT appear as props: {:?}",
         prop_names
+    );
+}
+
+// ===========================================================================
+// B1: Declaration-aware batch scope isolation and reuse
+// ===========================================================================
+
+#[test]
+fn scoped_solve_batch_caches_by_scope_and_name() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface SharedType { a: string; b: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { SharedType } from './types'
+defineProps<SharedType>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut batch = crate::resolver_core::ComponentMetaSolveBatch::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    // First solve
+    let result1 = batch.solve_scoped("/src/types.ts", "SharedType");
+    assert!(result1.is_some(), "should resolve SharedType from types.ts");
+
+    // Second solve of same (scope, name) — should be cached
+    let result2 = batch.solve_scoped("/src/types.ts", "SharedType");
+    assert_eq!(
+        format!("{:?}", result1),
+        format!("{:?}", result2),
+        "second solve should return cached result"
+    );
+    assert_eq!(
+        batch.scoped_cache_len(),
+        1,
+        "should have exactly one cached entry (not two)"
+    );
+}
+
+#[test]
+fn scoped_solve_batch_different_scopes_do_not_alias() {
+    let project = make_project();
+    project
+        .upsert_base("/src/a.ts", "export type Foo = string")
+        .unwrap();
+    project
+        .upsert_base("/src/b.ts", "export type Foo = number")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Foo as FooA } from './a'
+import type { Foo as FooB } from './b'
+defineProps<{ a: FooA; b: FooB }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut batch = crate::resolver_core::ComponentMetaSolveBatch::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    let from_a = batch.solve_scoped("/src/a.ts", "Foo");
+    let from_b = batch.solve_scoped("/src/b.ts", "Foo");
+
+    assert!(from_a.is_some(), "Foo from a.ts should resolve");
+    assert!(from_b.is_some(), "Foo from b.ts should resolve");
+
+    // Same name, different scope — results should differ
+    let a_str = format!("{:?}", from_a);
+    let b_str = format!("{:?}", from_b);
+    assert_ne!(
+        a_str, b_str,
+        "Foo from a.ts (string) and Foo from b.ts (number) must not alias"
+    );
+    assert_eq!(
+        batch.scoped_cache_len(),
+        2,
+        "two different scopes should produce two cache entries"
+    );
+}
+
+#[test]
+fn resolve_component_meta_parts_populates_shared_owner_batch() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Local = { msg: string }
+defineProps<Local>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let resolver_host = super::HostComponentMetaResolver {
+        host,
+        store_view: Some(&store_view),
+        shared_owner_batch: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host),
+        )),
+    };
+
+    let _parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        "/src/App.vue",
+        &snapshot,
+        true,
+        None,
+    );
+
+    let batch_cell = resolver_host
+        .shared_owner_batch
+        .as_ref()
+        .expect("shared owner batch should still be available");
+    let before = batch_cell.borrow().cache_len();
+    assert!(before > 0, "phase 1 should populate the shared owner batch");
+
+    let result =
+        batch_cell
+            .borrow_mut()
+            .solve(&verter_semantic::analysis::type_expr::TypeExpr::named(
+                "Local",
+            ));
+    let after = batch_cell.borrow().cache_len();
+    assert_eq!(
+        after, before,
+        "owner-scoped solve should reuse the populated batch entry"
+    );
+
+    let result_json = serde_json::to_string(&result.value).unwrap();
+    assert!(
+        result_json.contains("\"msg\""),
+        "Local should still resolve to its object surface: {result_json}"
+    );
+}
+
+// ===========================================================================
+// C1/C2: Resolver view caches routes and declarations
+// ===========================================================================
+
+#[test]
+fn resolver_view_caches_prepared_alias_lookups() {
+    let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Props { msg: string }")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+
+    // First lookup
+    let result1 = view.resolve_prepared_alias("/src/types.ts", "Props");
+    assert!(result1.is_some(), "Props should resolve from types.ts");
+
+    // Second lookup — should hit cache (routes_count stays at 1)
+    let result2 = view.resolve_prepared_alias("/src/types.ts", "Props");
+    assert_eq!(
+        format!("{:?}", result1),
+        format!("{:?}", result2),
+        "second lookup should return cached result"
+    );
+    assert_eq!(
+        view.routes_count(),
+        1,
+        "should have exactly one cached route"
+    );
+}
+
+#[test]
+fn resolver_view_can_resolve_filters_builtins() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+defineProps<{ x: string }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+
+    // Built-in names should NOT be resolvable
+    assert!(
+        !view.can_resolve("/src/App.vue", "Partial", None),
+        "Partial is a builtin and should not be resolvable as a registry ref"
+    );
+    assert!(
+        !view.can_resolve("/src/App.vue", "Array", None),
+        "Array is a builtin and should not be resolvable as a registry ref"
+    );
+    assert!(
+        !view.can_resolve("/src/App.vue", "Record", None),
+        "Record is a builtin and should not be resolvable as a registry ref"
+    );
+}
+
+#[test]
+fn owner_imported_nested_registry_ref_materializes_through_registry_append() {
+    let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Imported { msg: string }")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Imported } from './types'
+type Props = { data: Imported }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let state = host
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("component meta should resolve");
+
+    let imported_entry = state
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Imported");
+    assert!(
+        imported_entry.is_some(),
+        "registry append should materialize nested owner imports through the owner import route"
+    );
+
+    let imported_meta = state
+        .resolved_type_registry_meta
+        .iter()
+        .find(|meta| meta.name == "Imported")
+        .expect("Imported entry should have declaration metadata");
+    assert_eq!(
+        imported_meta.declaration.canonical_source, "/src/types.ts",
+        "nested owner import should retain imported declaration provenance"
+    );
+}
+
+// ===========================================================================
+// D1: RecursiveRef in type_expr transport
+// ===========================================================================
+
+#[test]
+fn recursive_type_in_registry_produces_recursive_ref_not_unknown() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface TreeNode {
+  label: string
+  children: TreeNode[]
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Tree.vue",
+            r#"<script setup lang="ts">
+import type { TreeNode } from './types'
+defineProps<TreeNode>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let state = host
+        .resolve_component_meta("/src/Tree.vue", ResolverMode::Expanded)
+        .expect("should resolve component meta");
+
+    // Find TreeNode in the type registry
+    let tree_entry = state
+        .resolved_type_registry
+        .iter()
+        .find(|e| e.name == "TreeNode");
+    assert!(
+        tree_entry.is_some(),
+        "TreeNode should be in the type registry"
+    );
+
+    let type_json = serde_json::to_string(&tree_entry.unwrap().type_expr).unwrap();
+
+    // Assert+: Should contain a symbolic Ref("TreeNode") for the self-reference
+    // (not eagerly expanded to a giant tree). The registry preserves the symbolic
+    // graph structure; RecursiveRef appears when the solver fully expands.
+    assert!(
+        type_json.contains("\"name\":\"TreeNode\""),
+        "recursive type should preserve symbolic TreeNode ref in registry, got: {}",
+        &type_json[..type_json.len().min(500)]
+    );
+
+    // Assert-: Should NOT degrade to unknown
+    assert!(
+        !type_json.contains("\"kind\":\"unknown\""),
+        "recursive type should NOT degrade to unknown"
+    );
+
+    // Assert-: Should NOT be a giant expanded tree (compact transport)
+    assert!(
+        type_json.len() < 1000,
+        "registry type_expr should stay compact (symbolic), got {} bytes",
+        type_json.len()
+    );
+
+    // Assert+: props should be TreeNode's fields (label, children)
+    let prop_names = prop_names_from_resolved(&state);
+    assert!(
+        prop_names.contains(&"label".to_string()),
+        "label prop should be present: {:?}",
+        prop_names
+    );
+    assert!(
+        prop_names.contains(&"children".to_string()),
+        "children prop should be present: {:?}",
+        prop_names
+    );
+
+    // Assert+: raw_type / declaration provenance should be present
+    let tree_meta = state
+        .resolved_type_registry_meta
+        .iter()
+        .find(|m| m.name == "TreeNode");
+    assert!(
+        tree_meta.is_some(),
+        "TreeNode should have registry metadata"
+    );
+    assert!(
+        !tree_meta.unwrap().declaration.canonical_source.is_empty(),
+        "TreeNode declaration should have canonical source (provenance)"
     );
 }

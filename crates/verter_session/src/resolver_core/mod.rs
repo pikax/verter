@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 mod component_meta;
 mod component_meta_request;
+pub mod component_meta_resolver_view;
+pub mod component_meta_solve_batch;
 mod declaration_metadata;
 mod export_graph;
 mod external_macro_types;
@@ -37,6 +39,8 @@ pub use component_meta::{
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
+pub use component_meta_resolver_view::ComponentMetaResolverView;
+pub use component_meta_solve_batch::ComponentMetaSolveBatch;
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata,

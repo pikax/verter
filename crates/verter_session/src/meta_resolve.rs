@@ -581,11 +581,19 @@ impl VerterHost {
                 snapshot.script_flags,
             ),
         );
+        let owner_solver_host =
+            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+                self, store_view, canonical,
+            );
+        let mut resolver_host = HostComponentMetaResolver {
+            host: self,
+            store_view,
+            shared_owner_batch: Some(std::cell::RefCell::new(
+                verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host),
+            )),
+        };
         let parts = crate::resolver_core::resolve_component_meta_parts(
-            &HostComponentMetaResolver {
-                host: self,
-                store_view,
-            },
+            &resolver_host,
             canonical,
             &snapshot,
             mode == ResolverMode::Expanded,
@@ -597,6 +605,22 @@ impl VerterHost {
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = std::time::Instant::now();
+        let owner_batch = resolver_host
+            .shared_owner_batch
+            .take()
+            .map(std::cell::RefCell::into_inner)
+            .unwrap_or_else(|| {
+                verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host)
+            });
+        let mut solve_batch = crate::resolver_core::ComponentMetaSolveBatch::from_owner_batch(
+            self,
+            store_view,
+            owner_batch,
+        );
+        let mut resolver_view =
+            crate::resolver_core::ComponentMetaResolverView::new(self, store_view);
+        // Pre-seed routes for initial registry entries
+        resolver_view.pre_seed_routes(&parts.resolved_type_registry_meta, canonical);
         self.append_component_meta_registry_entries(
             canonical,
             &snapshot,
@@ -605,6 +629,8 @@ impl VerterHost {
             &mut parts.resolved_type_registry_meta,
             &mut parts.tracked_dependencies,
             store_view,
+            &mut solve_batch,
+            &mut resolver_view,
         );
         let final_store_view = self.resolver_store_view();
         parts.fact_versions = self.current_dependency_fact_versions_in_view(
@@ -662,6 +688,8 @@ impl VerterHost {
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         tracked_dependencies: &mut BTreeSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        solve_batch: &mut crate::resolver_core::ComponentMetaSolveBatch<'_>,
+        resolver_view: &mut crate::resolver_core::ComponentMetaResolverView<'_>,
     ) {
         fn track_component_meta_dependency(
             tracked_dependencies: &mut BTreeSet<String>,
@@ -672,8 +700,6 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
-
-        let mut append_cache = ComponentMetaRegistryAppendCache::default();
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
@@ -693,21 +719,10 @@ impl VerterHost {
                 meta.declaration.resolved_name.as_str()
             };
             let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                cached_resolve_prepared_symbol_dependency_alias_in_view(
-                    &mut append_cache,
-                    self,
-                    declaration_source,
-                    requested_exported_name,
-                    store_view,
-                )
+                resolver_view.resolve_prepared_alias(declaration_source, requested_exported_name)
             else {
                 continue;
             };
-            track_component_meta_dependency(
-                tracked_dependencies,
-                owner_canonical,
-                resolved_canonical_id.as_str(),
-            );
             track_component_meta_dependency(
                 tracked_dependencies,
                 owner_canonical,
@@ -721,14 +736,12 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved_canonical_id.clone();
-            let materialized = cached_solve_component_meta_registry_decl_in_view(
-                &mut append_cache,
-                self,
-                resolved_canonical_id.as_str(),
-                resolved_exported_name.as_str(),
-                store_view,
-            )
-            .unwrap_or_else(|| prepared.decl.body.clone());
+            let materialized = solve_batch
+                .solve_scoped(
+                    resolved_canonical_id.as_str(),
+                    resolved_exported_name.as_str(),
+                )
+                .unwrap_or_else(|| prepared.decl.body.clone());
             entry.type_expr = choose_preferred_component_meta_registry_candidate(
                 Some(entry.type_expr.clone()),
                 Some(materialized),
@@ -785,13 +798,8 @@ impl VerterHost {
                 .get(index)
                 .map(|meta| meta.declaration.canonical_source.as_str());
             if should_collect_component_meta_registry_nested_refs(owner_canonical, source_hint) {
-                let source_expr = cached_owner_component_meta_registry_collection_expr(
-                    &mut append_cache,
-                    self,
-                    owner_canonical,
-                    entry.name.as_str(),
-                    store_view,
-                );
+                let source_expr =
+                    resolver_view.owner_collection_expr(owner_canonical, entry.name.as_str());
                 collect_component_meta_registry_refs(
                     source_expr.as_ref().unwrap_or(&entry.type_expr),
                     &published_names,
@@ -835,13 +843,10 @@ impl VerterHost {
             if published_names.contains(&type_name) {
                 continue;
             }
-            if !cached_component_meta_registry_ref_can_resolve(
-                &mut append_cache,
-                self,
+            if !resolver_view.can_resolve(
                 owner_canonical,
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 pending_source_hint,
-                store_view,
             ) {
                 continue;
             }
@@ -851,19 +856,8 @@ impl VerterHost {
             {
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                    cached_resolve_prepared_symbol_dependency_alias_in_view(
-                        &mut append_cache,
-                        self,
-                        source_hint,
-                        requested_exported_name,
-                        store_view,
-                    )
+                    resolver_view.resolve_prepared_alias(source_hint, requested_exported_name)
                 {
-                    track_component_meta_dependency(
-                        tracked_dependencies,
-                        owner_canonical,
-                        resolved_canonical_id.as_str(),
-                    );
                     track_component_meta_dependency(
                         tracked_dependencies,
                         owner_canonical,
@@ -876,12 +870,9 @@ impl VerterHost {
                             dependency.as_str(),
                         );
                     }
-                    let mut declaration = cached_resolve_type_declaration_in_view(
-                        &mut append_cache,
-                        self,
+                    let mut declaration = resolver_view.resolve_type_declaration(
                         resolved_canonical_id.as_str(),
                         resolved_exported_name.as_str(),
-                        store_view,
                     );
                     if declaration.canonical_source.is_empty() {
                         declaration.canonical_source = resolved_canonical_id.clone();
@@ -891,14 +882,12 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
-                    let type_expr = cached_solve_component_meta_registry_decl_in_view(
-                        &mut append_cache,
-                        self,
-                        resolved_canonical_id.as_str(),
-                        resolved_exported_name.as_str(),
-                        store_view,
-                    )
-                    .unwrap_or_else(|| prepared.decl.body.clone());
+                    let type_expr = solve_batch
+                        .solve_scoped(
+                            resolved_canonical_id.as_str(),
+                            resolved_exported_name.as_str(),
+                        )
+                        .unwrap_or_else(|| prepared.decl.body.clone());
                     upsert_component_meta_registry_entry(
                         owner_canonical,
                         resolved_type_registry,
@@ -923,49 +912,21 @@ impl VerterHost {
                 owner_canonical,
                 declaration_owner,
             );
-            let mut declaration = cached_resolve_type_declaration_in_view(
-                &mut append_cache,
-                self,
-                declaration_owner,
-                type_name.as_str(),
-                store_view,
-            );
+            let mut declaration =
+                resolver_view.resolve_type_declaration(declaration_owner, type_name.as_str());
             if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
-                declaration = cached_resolve_type_declaration_in_view(
-                    &mut append_cache,
-                    self,
-                    owner_canonical,
-                    type_name.as_str(),
-                    store_view,
-                );
+                declaration =
+                    resolver_view.resolve_type_declaration(owner_canonical, type_name.as_str());
             }
             let mut materialized = if declaration_owner != owner_canonical {
-                cached_solve_component_meta_registry_decl_in_view(
-                    &mut append_cache,
-                    self,
-                    declaration_owner,
-                    type_name.as_str(),
-                    store_view,
-                )
+                solve_batch.solve_scoped(declaration_owner, type_name.as_str())
             } else {
                 None
             };
-            let owner_collection_expr = cached_owner_component_meta_registry_collection_expr(
-                &mut append_cache,
-                self,
-                owner_canonical,
-                type_name.as_str(),
-                store_view,
-            );
-            materialized = materialized.or_else(|| {
-                cached_solve_component_meta_registry_decl_in_view(
-                    &mut append_cache,
-                    self,
-                    owner_canonical,
-                    type_name.as_str(),
-                    store_view,
-                )
-            });
+            let owner_collection_expr =
+                resolver_view.owner_collection_expr(owner_canonical, type_name.as_str());
+            materialized =
+                materialized.or_else(|| solve_batch.solve_owner_named(type_name.as_str()));
             if materialized.is_some() && declaration.canonical_source.is_empty() {
                 if let Some(import) = snapshot
                     .imports
@@ -1633,25 +1594,6 @@ struct PendingComponentMetaRegistryRef {
     exported_name: Option<String>,
 }
 
-type PreparedAliasEntry = Option<(
-    String,
-    String,
-    crate::resolver_core::CachedPreparedImportedTypeAlias,
-)>;
-
-#[derive(Default)]
-struct ComponentMetaRegistryAppendCache {
-    owner_collection_exprs:
-        rustc_hash::FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
-    materialized_exprs: rustc_hash::FxHashMap<
-        (String, String),
-        Option<verter_semantic::analysis::type_expr::TypeExpr>,
-    >,
-    declarations: rustc_hash::FxHashMap<(String, String), ResolvedTypeDeclaration>,
-    prepared_aliases: rustc_hash::FxHashMap<(String, String), PreparedAliasEntry>,
-    resolvable_refs: rustc_hash::FxHashMap<(String, String), bool>,
-}
-
 fn upsert_component_meta_registry_entry(
     owner_canonical: &str,
     resolved_type_registry: &mut Vec<
@@ -1728,137 +1670,6 @@ fn upsert_component_meta_registry_entry(
     published_names.insert(name);
 }
 
-fn cached_owner_component_meta_registry_collection_expr(
-    cache: &mut ComponentMetaRegistryAppendCache,
-    host: &VerterHost,
-    owner_canonical: &str,
-    name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    if let Some(cached) = cache.owner_collection_exprs.get(name) {
-        return cached.clone();
-    }
-    let expr =
-        owner_component_meta_registry_collection_expr(host, owner_canonical, name, store_view);
-    cache
-        .owner_collection_exprs
-        .insert(name.to_string(), expr.clone());
-    expr
-}
-
-fn cached_solve_component_meta_registry_decl_in_view(
-    cache: &mut ComponentMetaRegistryAppendCache,
-    host: &VerterHost,
-    scope_canonical_id: &str,
-    requested_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    let key = (scope_canonical_id.to_string(), requested_name.to_string());
-    if let Some(cached) = cache.materialized_exprs.get(&key) {
-        return cached.clone();
-    }
-    let solved = solve_component_meta_registry_decl_in_view(
-        host,
-        scope_canonical_id,
-        requested_name,
-        store_view,
-    );
-    cache.materialized_exprs.insert(key, solved.clone());
-    solved
-}
-
-fn cached_resolve_type_declaration_in_view(
-    cache: &mut ComponentMetaRegistryAppendCache,
-    host: &VerterHost,
-    canonical_source: &str,
-    requested_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> ResolvedTypeDeclaration {
-    let key = (canonical_source.to_string(), requested_name.to_string());
-    if let Some(cached) = cache.declarations.get(&key) {
-        return cached.clone();
-    }
-    let declaration =
-        resolve_type_declaration_in_view(host, canonical_source, requested_name, store_view);
-    cache.declarations.insert(key, declaration.clone());
-    declaration
-}
-
-fn cached_resolve_prepared_symbol_dependency_alias_in_view(
-    cache: &mut ComponentMetaRegistryAppendCache,
-    host: &VerterHost,
-    canonical_id: &str,
-    exported_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<(
-    String,
-    String,
-    crate::resolver_core::CachedPreparedImportedTypeAlias,
-)> {
-    let key = (canonical_id.to_string(), exported_name.to_string());
-    if let Some(cached) = cache.prepared_aliases.get(&key) {
-        return cached.clone();
-    }
-    let resolved = host.resolve_prepared_symbol_dependency_alias_in_view(
-        canonical_id,
-        exported_name,
-        store_view,
-    );
-    cache.prepared_aliases.insert(key, resolved.clone());
-    resolved
-}
-
-fn cached_component_meta_registry_ref_can_resolve(
-    cache: &mut ComponentMetaRegistryAppendCache,
-    host: &VerterHost,
-    owner_canonical: &str,
-    name: &str,
-    source_hint: Option<&str>,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> bool {
-    if is_component_meta_registry_builtin_name(name) {
-        return false;
-    }
-
-    let scope_canonical_id = source_hint
-        .filter(|source| !source.is_empty())
-        .unwrap_or(owner_canonical);
-    let key = (scope_canonical_id.to_string(), name.to_string());
-    if let Some(cached) = cache.resolvable_refs.get(&key) {
-        return *cached;
-    }
-
-    let resolvable = if host
-        .prepared_type_decl_in_view(scope_canonical_id, name, store_view)
-        .is_some()
-    {
-        true
-    } else {
-        let (resolved_canonical_id, resolved_name) =
-            host.resolve_imported_type_root_in_view(scope_canonical_id, name, store_view);
-        (resolved_canonical_id != scope_canonical_id || resolved_name != name)
-            && host
-                .prepared_type_decl_in_view(
-                    resolved_canonical_id.as_str(),
-                    resolved_name.as_str(),
-                    store_view,
-                )
-                .is_some()
-    };
-
-    cache.resolvable_refs.insert(key, resolvable);
-    resolvable
-}
-
-fn is_component_meta_registry_builtin_name(name: &str) -> bool {
-    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
-        || matches!(name, "Array" | "ReadonlyArray" | "Promise")
-}
-
-fn is_component_meta_registry_package_source(source_hint: Option<&str>) -> bool {
-    source_hint.is_some_and(|source| source.contains("/node_modules/"))
-}
-
 fn should_collect_component_meta_registry_nested_refs(
     owner_canonical: &str,
     source_hint: Option<&str>,
@@ -1867,16 +1678,6 @@ fn should_collect_component_meta_registry_nested_refs(
         Some(source) => source == owner_canonical,
         None => true,
     }
-}
-
-fn owner_component_meta_registry_collection_expr(
-    host: &VerterHost,
-    owner_canonical: &str,
-    name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    host.prepared_type_decl_in_view(owner_canonical, name, store_view)
-        .map(|prepared| prepared.body.clone())
 }
 
 fn owner_component_meta_registry_import_binding(
@@ -1895,61 +1696,6 @@ fn owner_component_meta_registry_import_binding(
             .unwrap_or_else(|| local_name.to_string());
         Some((canonical_id.clone(), exported_name))
     })
-}
-
-fn solve_component_meta_registry_decl_in_view(
-    host: &VerterHost,
-    scope_canonical_id: &str,
-    requested_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    if is_component_meta_registry_package_source(Some(scope_canonical_id)) {
-        return host
-            .prepared_type_decl_in_view(scope_canonical_id, requested_name, store_view)
-            .map(|prepared| prepared.body.clone());
-    }
-
-    if let Some(prepared) =
-        host.prepared_type_decl_in_view(scope_canonical_id, requested_name, store_view)
-    {
-        let direct_surface = matches!(
-            &prepared.body,
-            verter_semantic::analysis::type_expr::TypeExpr::Object(_)
-                | verter_semantic::analysis::type_expr::TypeExpr::Union(_)
-                | verter_semantic::analysis::type_expr::TypeExpr::Intersection(_)
-                | verter_semantic::analysis::type_expr::TypeExpr::Array { .. }
-                | verter_semantic::analysis::type_expr::TypeExpr::Tuple { .. }
-                | verter_semantic::analysis::type_expr::TypeExpr::Function(_)
-                | verter_semantic::analysis::type_expr::TypeExpr::Mapped { .. }
-        );
-        let preserve_prepared_surface = direct_surface
-            && prepared.local_deps.is_empty()
-            && (prepared.external_deps.is_empty()
-                || prepared
-                    .external_deps
-                    .iter()
-                    .all(|dep| dep.canonical_id.contains("/node_modules/")));
-        if preserve_prepared_surface {
-            return Some(prepared.body.clone());
-        }
-    }
-
-    host.shallow_file_state_in_view(scope_canonical_id, store_view)?;
-    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
-        host,
-        store_view,
-        scope_canonical_id,
-    );
-    let type_ref = verter_semantic::analysis::type_expr::TypeExpr::named(requested_name);
-    let result = verter_semantic::analysis::type_solver::solve::solve_type(&type_ref, &solver_host);
-
-    match &result.value {
-        verter_semantic::analysis::type_expr::TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if name.as_ref() == requested_name && type_arguments.is_empty() => None,
-        _ => Some(result.value),
-    }
 }
 
 fn enqueue_component_meta_registry_ref(
@@ -2811,6 +2557,8 @@ fn resolved_meta_cache_key(
 struct HostComponentMetaResolver<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
+    shared_owner_batch:
+        Option<std::cell::RefCell<verter_semantic::analysis::type_solver::solve::SolveBatch<'a>>>,
 }
 
 impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
@@ -3005,15 +2753,39 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
         // Always run the solver-host macro path. The solver resolves cross-file
         // types on demand from the host's prepared-decl cache.
-        let computed_eval_types = self
-            .host
-            .compute_evaluated_types_with_tracking_from_owner_context_in_view(
-                owner_canonical,
-                snapshot,
-                eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-                &dep_resolutions,
-                self.store_view,
-            );
+        let computed_eval_types = if let Some(batch) = &self.shared_owner_batch {
+            let eval_source = eval_context
+                .and_then(|captured| captured.owner_eval_source.as_deref())
+                .map(str::to_string)
+                .or_else(|| {
+                    self.host
+                        .current_eval_state_in_view(owner_canonical, self.store_view)
+                        .map(|(source, cached_parse, _)| {
+                            VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
+                        })
+                });
+            eval_source.and_then(|eval_source| {
+                let mut batch = batch.borrow_mut();
+                self.host
+                    .compute_evaluated_types_from_owner_context_in_view(
+                        owner_canonical,
+                        snapshot,
+                        &eval_source,
+                        &dep_resolutions,
+                        self.store_view,
+                        Some(&mut *batch),
+                    )
+            })
+        } else {
+            self.host
+                .compute_evaluated_types_with_tracking_from_owner_context_in_view(
+                    owner_canonical,
+                    snapshot,
+                    eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
+                    &dep_resolutions,
+                    self.store_view,
+                )
+        };
         if let Some(compute_eval_start) = compute_eval_start {
             let elapsed = compute_eval_start.elapsed();
             component_meta_debug(format!(
@@ -3135,6 +2907,7 @@ pub(crate) fn resolve_type_declaration_in_view(
     let resolver = HostComponentMetaResolver {
         host,
         store_view: Some(current_view),
+        shared_owner_batch: None,
     };
     let key =
         crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);

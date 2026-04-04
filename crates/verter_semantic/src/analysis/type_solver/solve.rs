@@ -36,6 +36,8 @@ pub struct SolveLimits {
     pub max_resolve_steps: u64,
     /// Maximum nodes in the arena before hard stop.
     pub max_arena_nodes: u64,
+    /// Maximum non-semantic diagnostics to collect before truncating.
+    pub max_diagnostics: usize,
 }
 
 impl Default for SolveLimits {
@@ -44,6 +46,7 @@ impl Default for SolveLimits {
             max_instantiation_depth: 50,
             max_resolve_steps: 500_000,
             max_arena_nodes: 2_000_000,
+            max_diagnostics: 50,
         }
     }
 }
@@ -86,6 +89,8 @@ pub struct SolveState {
     pub conditional_context_base_stack: Vec<usize>,
     /// Non-semantic diagnostics collected during resolution.
     pub diagnostics: Vec<SolverDiagnostic>,
+    /// Count of diagnostics that were dropped after the cap was reached.
+    pub diagnostics_truncated: usize,
 }
 
 /// Structured capture of conditional context frames for a recursive ref.
@@ -118,6 +123,7 @@ impl SolveState {
             conditional_context_stack: Vec::new(),
             conditional_context_base_stack: Vec::new(),
             diagnostics: Vec::new(),
+            diagnostics_truncated: 0,
         }
     }
 
@@ -175,9 +181,14 @@ impl SolveState {
     }
 
     /// Record a non-semantic diagnostic. Does NOT affect exactness or
-    /// execution status.
+    /// execution status. Diagnostics beyond `max_diagnostics` are silently
+    /// dropped and counted in `diagnostics_truncated`.
     pub(crate) fn record_diagnostic(&mut self, diagnostic: SolverDiagnostic) {
-        self.diagnostics.push(diagnostic);
+        if self.diagnostics.len() < self.limits.max_diagnostics {
+            self.diagnostics.push(diagnostic);
+        } else {
+            self.diagnostics_truncated += 1;
+        }
     }
 }
 
@@ -407,6 +418,11 @@ impl<'a> SolveBatch<'a> {
         let trace = entry.trace.clone();
         self.cache.insert(expr.clone(), entry);
         (result, trace)
+    }
+
+    /// Number of cached expression entries in this batch.
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
     }
 }
 
@@ -4897,6 +4913,7 @@ mod tests {
                 max_instantiation_depth: 16,
                 max_resolve_steps: 2_000,
                 max_arena_nodes: 100_000,
+                ..SolveLimits::default()
             },
         );
         let json = serde_json::to_string(&result.value).unwrap();
@@ -7640,6 +7657,7 @@ mod tests {
                 max_instantiation_depth: 24,
                 max_resolve_steps: 4_000,
                 max_arena_nodes: 200_000,
+                ..SolveLimits::default()
             },
         );
         let json = serde_json::to_string(&result.value).unwrap();
@@ -8779,5 +8797,131 @@ mod tests {
             state.diagnostics.is_empty(),
             "context truncation should only be reported once a recursive placeholder is created"
         );
+    }
+
+    #[test]
+    fn diagnostic_cap_limits_collected_diagnostics() {
+        // A solve on a deeply recursive conditional type can produce many
+        // ConditionalContextTruncated diagnostics. With the cap, diagnostics
+        // should be limited and a truncated_count should be tracked.
+        let mut state = SolveState::new(SolveLimits::default());
+
+        // Simulate recording 100 diagnostics
+        for i in 0..100 {
+            state.record_diagnostic(SolverDiagnostic::ConditionalContextTruncated {
+                available: 20 + i,
+                captured: 8,
+            });
+        }
+
+        // After the cap, diagnostics vec should be at most max_diagnostics
+        assert!(
+            state.diagnostics.len() <= state.limits.max_diagnostics,
+            "diagnostics should be capped at max_diagnostics ({}), got {}",
+            state.limits.max_diagnostics,
+            state.diagnostics.len()
+        );
+        // Should have recorded that some were truncated
+        assert!(
+            state.diagnostics_truncated > 0,
+            "should track truncated diagnostic count"
+        );
+        assert_eq!(
+            state.diagnostics.len() + state.diagnostics_truncated,
+            100,
+            "kept + truncated should equal total recorded"
+        );
+    }
+
+    #[test]
+    fn diagnostic_cap_does_not_truncate_under_limit() {
+        let mut state = SolveState::new(SolveLimits::default());
+
+        // Record fewer diagnostics than the cap
+        for i in 0..3 {
+            state.record_diagnostic(SolverDiagnostic::ConditionalContextTruncated {
+                available: 10 + i,
+                captured: 8,
+            });
+        }
+
+        assert_eq!(state.diagnostics.len(), 3);
+        assert_eq!(state.diagnostics_truncated, 0);
+    }
+
+    #[test]
+    fn solve_batch_caches_hard_stop_result() {
+        let mut host = TestHost::new();
+        // Create a deeply recursive type that triggers HardStop via depth limit
+        // type Deep<T> = { value: Deep<Deep<T>> }
+        host.add_generic_alias(
+            "Deep",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "value".into(),
+                        ty: TypeExpr::named_with_args(
+                            "Deep",
+                            vec![TypeExpr::named_with_args(
+                                "Deep",
+                                vec![TypeExpr::named("T")],
+                            )],
+                        ),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        let expr =
+            TypeExpr::named_with_args("Deep", vec![TypeExpr::Primitive(PrimitiveName::String)]);
+
+        let mut batch = SolveBatch::new(&host);
+
+        // First solve — actually runs the solver
+        let result1 = batch.solve(&expr);
+        // The recursive type should hit HardStop or complete with RecursiveRef
+        let status1 = result1.execution_status;
+
+        // Second solve — should hit cache, returning identical result
+        let result2 = batch.solve(&expr);
+
+        assert_eq!(
+            result2.execution_status, status1,
+            "second solve should return cached status"
+        );
+        assert_eq!(
+            format!("{:?}", result2.value),
+            format!("{:?}", result1.value),
+            "second solve should return cached value"
+        );
+        // Verify the cache actually has the entry (batch has exactly 1 cached entry)
+        assert_eq!(
+            batch.cache.len(),
+            1,
+            "batch should have exactly one cached entry"
+        );
+    }
+
+    #[test]
+    fn solve_batch_reuses_across_identical_expressions() {
+        let mut host = TestHost::new();
+        host.add_alias("MyType", TypeExpr::Primitive(PrimitiveName::String));
+
+        let expr = TypeExpr::named("MyType");
+        let mut batch = SolveBatch::new(&host);
+
+        let r1 = batch.solve(&expr);
+        let r2 = batch.solve(&expr);
+
+        assert_eq!(r1.value, r2.value);
+        assert_eq!(r1.exactness, r2.exactness);
+        assert_eq!(batch.cache.len(), 1);
     }
 }

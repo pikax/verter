@@ -1349,12 +1349,13 @@ pub fn expand_macro_types(
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     let binding_entries = collect_binding_entries_from_env(env, local_binding_names);
+    let mut batch = crate::analysis::type_solver::solve::SolveBatch::new(solver_host);
     expand_macro_types_impl(
         macros,
         source,
         binding_entries.as_slice(),
         Some(env),
-        solver_host,
+        &mut batch,
     )
 }
 
@@ -1363,14 +1364,27 @@ pub fn expand_macro_types(
 ///
 /// This is the cache-owned production path used by `verter_session`, where
 /// local binding types come from prepared value declarations rather than an
-/// `EvalEnv`.
+/// `EvalEnv`. Creates its own internal `SolveBatch`.
 pub fn expand_macro_types_with_bindings(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_impl(macros, source, binding_entries, None, solver_host)
+    let mut batch = crate::analysis::type_solver::solve::SolveBatch::new(solver_host);
+    expand_macro_types_impl(macros, source, binding_entries, None, &mut batch)
+}
+
+/// Like `expand_macro_types_with_bindings`, but accepts an external
+/// `SolveBatch` so the caller can share a single batch across multiple
+/// phases (macro expansion + registry append).
+pub fn expand_macro_types_with_batch(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    binding_entries: &[(String, TypeExpr)],
+    batch: &mut crate::analysis::type_solver::solve::SolveBatch<'_>,
+) -> crate::analysis::type_expand::ExpandedComponentTypes {
+    expand_macro_types_impl(macros, source, binding_entries, None, batch)
 }
 
 fn collect_binding_entries_from_env(
@@ -1397,7 +1411,7 @@ fn expand_macro_types_impl(
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     mut debug_env: Option<&mut EvalEnv>,
-    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
+    batch: &mut crate::analysis::type_solver::solve::SolveBatch<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
         solver_result_to_normalized_expansion, solver_result_to_object_expansion,
@@ -1406,7 +1420,6 @@ fn expand_macro_types_impl(
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
     use crate::analysis::type_solver::result::SolverResult;
-    use crate::analysis::type_solver::solve::SolveBatch;
 
     // Shared solver-result → expansion-result conversion (replaces local ad hoc mapping)
     fn solver_to_expr_result(
@@ -1421,7 +1434,6 @@ fn expand_macro_types_impl(
         solver_result_to_object_expansion(result)
     }
 
-    let mut batch = SolveBatch::new(solver_host);
     let mut result = ExpandedComponentTypes::default();
     let macro_type_params = source.map(collect_define_macro_type_params);
     let mut define_props_index = 0usize;

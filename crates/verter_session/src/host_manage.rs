@@ -4542,6 +4542,7 @@ impl VerterHost {
             &eval_source,
             dep_resolutions,
             store_view,
+            None,
         )
     }
 
@@ -4689,13 +4690,14 @@ impl VerterHost {
             .collect()
     }
 
-    fn compute_evaluated_types_from_owner_context_in_view(
+    pub(crate) fn compute_evaluated_types_from_owner_context_in_view(
         &self,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        external_batch: Option<&mut verter_semantic::analysis::type_solver::solve::SolveBatch<'_>>,
     ) -> Option<ComputedEvaluatedTypes> {
         {
             let _trace = component_meta_trace_scope!(
@@ -4728,9 +4730,6 @@ impl VerterHost {
                 store_view,
             )
         };
-        let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
-            self, store_view, canonical,
-        );
         // Solver start precondition: ensure the owner's direct imports are
         // present in the host cache before macro expansion starts.
         //
@@ -4767,12 +4766,24 @@ impl VerterHost {
                     store_view.is_some(),
                 ),
             );
-            verter_semantic::analysis::type_eval_build::expand_macro_types_with_bindings(
-                snapshot.macros.as_ref(),
-                Some(eval_source),
-                binding_entries.as_slice(),
-                &solver_host,
-            )
+            if let Some(batch) = external_batch {
+                verter_semantic::analysis::type_eval_build::expand_macro_types_with_batch(
+                    snapshot.macros.as_ref(),
+                    Some(eval_source),
+                    binding_entries.as_slice(),
+                    batch,
+                )
+            } else {
+                let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+                    self, store_view, canonical,
+                );
+                verter_semantic::analysis::type_eval_build::expand_macro_types_with_bindings(
+                    snapshot.macros.as_ref(),
+                    Some(eval_source),
+                    binding_entries.as_slice(),
+                    &solver_host,
+                )
+            }
         };
         // Dependency tracking comes from the frontier/shallow-file-state path.
         let discovered_dependencies = std::collections::BTreeSet::<String>::new();
