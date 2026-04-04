@@ -422,6 +422,11 @@ fn resolve_node(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> NodeId {
+    if node.is_unresolved() {
+        state.mark_symbolic();
+        return node;
+    }
+
     // Check cancellation
     if host.request_status() == RequestStatus::Cancelled {
         state.execution_status = ExecutionStatus::Cancelled;
@@ -497,6 +502,12 @@ fn resolve_node(
             let mut saw_empty_object = false;
 
             for member in resolved {
+                if member.is_unresolved() {
+                    state.mark_symbolic();
+                    simplified.push(member);
+                    continue;
+                }
+
                 match arena.get(member) {
                     Node::Primitive(PrimitiveKind::Never) => return member,
                     Node::Object(obj)
@@ -665,6 +676,11 @@ fn resolve_node(
 
         // -- indexed access T[K] --
         Node::IndexedAccess { object, index } => {
+            if object.is_unresolved() || index.is_unresolved() {
+                state.mark_symbolic();
+                return arena.indexed_access(object, index);
+            }
+
             if let Node::Literal(super::arena::SolverLiteral::String(key)) =
                 arena.get(index).clone()
             {
@@ -994,19 +1010,63 @@ fn build_effective_args(
     let mut default_subst = parent_subst.clone();
 
     for (index, param) in prepared.type_parameters.iter().enumerate() {
-        let arg = if let Some(&explicit) = args.get(index) {
-            materialize_effective_arg(arena, explicit, &default_subst)
+        let (mut arg, used_default) = if let Some(&explicit) = args.get(index) {
+            (
+                materialize_effective_arg(arena, explicit, &default_subst),
+                false,
+            )
         } else if let Some(default) = &param.default {
             let lowered = lower_type_expr(arena, default);
-            materialize_effective_arg(arena, lowered, &default_subst)
+            (
+                materialize_effective_arg(arena, lowered, &default_subst),
+                true,
+            )
         } else {
-            continue;
+            (NodeId::UNRESOLVED, false)
+        };
+
+        if used_default {
+            arg = constrain_default_effective_arg(
+                arena,
+                param.constraint.as_deref(),
+                arg,
+                &default_subst,
+            );
         };
         effective_args.push(arg);
         default_subst.bind(param.name.clone(), arg);
     }
 
     effective_args
+}
+
+fn constrain_default_effective_arg(
+    arena: &mut QueryArena,
+    constraint: Option<&TypeExpr>,
+    arg: NodeId,
+    subst: &SubstitutionEnv,
+) -> NodeId {
+    let Some(constraint) = constraint else {
+        return arg;
+    };
+
+    let lowered_constraint = lower_type_expr(arena, constraint);
+    let materialized_constraint = materialize_effective_arg(arena, lowered_constraint, subst);
+    let mut caches = super::arena::SolverCaches::new();
+    let mut relation_state =
+        super::relate::RelationState::new(super::relate::RelationLimits::default());
+
+    match super::relate::relate(
+        arena,
+        &mut caches,
+        arg,
+        materialized_constraint,
+        super::result::RelationMode::Assignable,
+        &mut relation_state,
+    ) {
+        super::result::RelationResult::NotAssignable => materialized_constraint,
+        super::result::RelationResult::Assignable | super::result::RelationResult::Unknown => arg,
+    }
 }
 
 fn materialize_effective_arg(
@@ -1644,6 +1704,11 @@ fn resolve_indexed_access(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> NodeId {
+    if object.is_unresolved() || index.is_unresolved() {
+        state.mark_symbolic();
+        return arena.indexed_access(object, index);
+    }
+
     // Clone index node to release borrow before recursion/allocation.
     let index_node = arena.get(index).clone();
 
@@ -1950,10 +2015,14 @@ fn resolve_mapped(
             // Key remapping: if name_type exists, resolve it to get the actual property name
             let prop_name = if let Some(nt) = name_type {
                 let remapped = resolve_node(arena, nt, host, state, &child_subst);
-                match arena.get(remapped) {
-                    Node::Literal(super::arena::SolverLiteral::String(s)) => s.clone(),
-                    Node::Primitive(PrimitiveKind::Never) => continue, // filtered out
-                    _ => key.clone(), // can't resolve statically — keep original
+                if remapped.is_unresolved() {
+                    key.clone()
+                } else {
+                    match arena.get(remapped) {
+                        Node::Literal(super::arena::SolverLiteral::String(s)) => s.clone(),
+                        Node::Primitive(PrimitiveKind::Never) => continue, // filtered out
+                        _ => key.clone(), // can't resolve statically — keep original
+                    }
                 }
             } else {
                 key
@@ -2005,6 +2074,10 @@ fn collect_finite_keys(arena: &QueryArena, node: NodeId) -> Option<Vec<String>> 
     let mut stack = vec![node];
 
     while let Some(id) = stack.pop() {
+        if id.is_unresolved() {
+            return None;
+        }
+
         match arena.get(id) {
             Node::Literal(super::arena::SolverLiteral::String(s)) => {
                 keys.push(s.clone());
@@ -2022,6 +2095,10 @@ fn collect_finite_keys(arena: &QueryArena, node: NodeId) -> Option<Vec<String>> 
 }
 
 fn should_eagerly_resolve_open_mapped_value(arena: &QueryArena, source: NodeId) -> bool {
+    if source.is_unresolved() {
+        return false;
+    }
+
     match arena.get(source) {
         Node::Primitive(
             PrimitiveKind::String
@@ -3303,6 +3380,23 @@ mod tests {
         }
     }
 
+    fn object_property_type<'a>(expr: &'a TypeExpr, property_name: &str) -> &'a TypeExpr {
+        let TypeExpr::Object(obj) = expr else {
+            panic!("expected object result, got {expr:?}");
+        };
+        obj.properties
+            .iter()
+            .find_map(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(prop)
+                    if prop.name == property_name =>
+                {
+                    Some(&prop.ty)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing property {property_name} in {expr:?}"))
+    }
+
     // -- Host-backed resolution tests --
 
     #[test]
@@ -3459,6 +3553,199 @@ mod tests {
             }
             other => panic!("expected Array, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn solve_partial_default_arguments_preserve_positional_alignment() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Mixed",
+            vec![
+                crate::analysis::type_expr::TypeParam {
+                    name: "A".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "B".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "C".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Boolean))),
+                },
+            ],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "a".into(),
+                            ty: TypeExpr::named("A"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "b".into(),
+                            ty: TypeExpr::named("B"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "c".into(),
+                            ty: TypeExpr::named("C"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                ],
+            })),
+        );
+
+        let result = solve_type(
+            &TypeExpr::named_with_args("Mixed", vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            &host,
+        );
+
+        assert_eq!(
+            object_property_type(&result.value, "a"),
+            &TypeExpr::Primitive(PrimitiveName::String)
+        );
+        assert_eq!(
+            object_property_type(&result.value, "b"),
+            &TypeExpr::Primitive(PrimitiveName::Number)
+        );
+        assert_eq!(
+            object_property_type(&result.value, "c"),
+            &TypeExpr::Primitive(PrimitiveName::Boolean)
+        );
+    }
+
+    #[test]
+    fn solve_undefaulted_middle_parameter_stays_unresolved() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Skip",
+            vec![
+                crate::analysis::type_expr::TypeParam {
+                    name: "A".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "B".into(),
+                    constraint: None,
+                    default: None,
+                },
+                crate::analysis::type_expr::TypeParam {
+                    name: "C".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Boolean))),
+                },
+            ],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "a".into(),
+                            ty: TypeExpr::named("A"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "b".into(),
+                            ty: TypeExpr::named("B"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "c".into(),
+                            ty: TypeExpr::named("C"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                ],
+            })),
+        );
+
+        let result = solve_type(
+            &TypeExpr::named_with_args("Skip", vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            &host,
+        );
+
+        assert_eq!(
+            object_property_type(&result.value, "a"),
+            &TypeExpr::Primitive(PrimitiveName::String)
+        );
+        assert!(
+            matches!(object_property_type(&result.value, "b"), TypeExpr::Unknown { .. }),
+            "undefaulted middle parameters should remain unresolved instead of stealing a later default"
+        );
+        assert_ne!(
+            object_property_type(&result.value, "b"),
+            &TypeExpr::Primitive(PrimitiveName::Boolean),
+            "the middle type parameter must not be rebound to C's boolean default"
+        );
+        assert_eq!(
+            object_property_type(&result.value, "c"),
+            &TypeExpr::Primitive(PrimitiveName::Boolean)
+        );
+    }
+
+    #[test]
+    fn solve_default_argument_honors_satisfied_constraint() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Good",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                default: Some(Arc::new(TypeExpr::string_literal("hello"))),
+            }],
+            TypeExpr::named("T"),
+        );
+
+        let result = solve_type(&TypeExpr::named("Good"), &host);
+
+        assert_eq!(result.value, TypeExpr::string_literal("hello"));
+        assert_ne!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "a satisfying literal default should remain intact"
+        );
+    }
+
+    #[test]
+    fn solve_default_argument_falls_back_to_constraint_when_invalid() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Bad",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Number))),
+            }],
+            TypeExpr::named("T"),
+        );
+
+        let result = solve_type(&TypeExpr::named("Bad"), &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert_ne!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::Number),
+            "invalid defaults should fall back to the constraint instead of leaking the bad default"
+        );
     }
 
     #[test]

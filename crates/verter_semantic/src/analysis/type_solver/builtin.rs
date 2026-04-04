@@ -149,6 +149,13 @@ pub fn expand_builtin(
     if args.len() < utility.expected_arity() {
         return None;
     }
+    if args
+        .iter()
+        .take(utility.expected_arity())
+        .any(|arg| arg.is_unresolved())
+    {
+        return None;
+    }
 
     match utility {
         // -- Compiler string intrinsics --
@@ -795,6 +802,21 @@ mod tests {
     }
 
     #[test]
+    fn lowercase_literal() {
+        let mut arena = QueryArena::new();
+        let lit = arena.string_literal("HELLO");
+        let result = expand_builtin(&mut arena, BuiltinUtility::Lowercase, &[lit]).unwrap();
+        assert!(matches!(
+            arena.get(result),
+            Node::Literal(SolverLiteral::String(s)) if s == "hello"
+        ));
+        assert!(
+            !matches!(arena.get(result), Node::Literal(SolverLiteral::String(s)) if s == "HELLO"),
+            "Lowercase should transform the literal instead of leaving it unchanged"
+        );
+    }
+
+    #[test]
     fn noinfer_is_identity() {
         let mut arena = QueryArena::new();
         let arg = arena.primitive(PrimitiveKind::String);
@@ -851,6 +873,131 @@ mod tests {
         let mut arena = QueryArena::new();
         let arg = arena.primitive(PrimitiveKind::String);
         assert!(expand_builtin(&mut arena, BuiltinUtility::Record, &[arg]).is_none());
+    }
+
+    fn make_thenable(arena: &mut QueryArena, resolved: NodeId) -> NodeId {
+        let void_ty = arena.primitive(PrimitiveKind::Void);
+        let callback = arena.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("value".into()),
+                    ty: resolved,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+        let then = arena.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("cb".into()),
+                    ty: callback,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+        arena.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "then".into(),
+                ty: then,
+                optional: false,
+                readonly: false,
+                is_method: true,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        })
+    }
+
+    #[test]
+    fn awaited_unwraps_simple_thenable() {
+        let mut arena = QueryArena::new();
+        let string_ty = arena.primitive(PrimitiveKind::String);
+        let thenable = make_thenable(&mut arena, string_ty);
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::Awaited, &[thenable]).unwrap();
+
+        assert!(matches!(
+            arena.get(result),
+            Node::Primitive(PrimitiveKind::String)
+        ));
+        assert!(
+            !matches!(arena.get(result), Node::Primitive(PrimitiveKind::Any)),
+            "Awaited should not degrade a simple thenable to any"
+        );
+    }
+
+    #[test]
+    fn awaited_distributes_over_union() {
+        let mut arena = QueryArena::new();
+        let string_ty = arena.primitive(PrimitiveKind::String);
+        let number_ty = arena.primitive(PrimitiveKind::Number);
+        let thenable = make_thenable(&mut arena, string_ty);
+        let union = arena.union(vec![thenable, number_ty]);
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::Awaited, &[union]).unwrap();
+
+        match arena.get(result) {
+            Node::Union(members) => {
+                assert!(
+                    members.iter().any(|member| matches!(
+                        arena.get(*member),
+                        Node::Primitive(PrimitiveKind::String)
+                    )),
+                    "Awaited should unwrap the thenable branch to string"
+                );
+                assert!(
+                    members.iter().any(|member| matches!(
+                        arena.get(*member),
+                        Node::Primitive(PrimitiveKind::Number)
+                    )),
+                    "Awaited should preserve the non-thenable branch"
+                );
+            }
+            other => panic!("expected union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awaited_nested_thenable() {
+        let mut arena = QueryArena::new();
+        let string_ty = arena.primitive(PrimitiveKind::String);
+        let inner = make_thenable(&mut arena, string_ty);
+        let outer = make_thenable(&mut arena, inner);
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::Awaited, &[outer]).unwrap();
+
+        assert!(matches!(
+            arena.get(result),
+            Node::Primitive(PrimitiveKind::String)
+        ));
+        assert!(
+            !matches!(arena.get(result), Node::Object(_)),
+            "Nested Awaited should fully unwrap thenables instead of stopping at an object"
+        );
+    }
+
+    #[test]
+    fn awaited_non_thenable_passthrough() {
+        let mut arena = QueryArena::new();
+        let number_ty = arena.primitive(PrimitiveKind::Number);
+
+        let result = expand_builtin(&mut arena, BuiltinUtility::Awaited, &[number_ty]).unwrap();
+
+        assert!(matches!(
+            arena.get(result),
+            Node::Primitive(PrimitiveKind::Number)
+        ));
+        assert!(
+            !matches!(arena.get(result), Node::Primitive(PrimitiveKind::Any)),
+            "Awaited<number> should stay number"
+        );
     }
 
     fn make_obj(arena: &mut QueryArena, props: &[(&str, NodeId, bool)]) -> NodeId {

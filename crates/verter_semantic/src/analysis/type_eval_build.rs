@@ -549,7 +549,10 @@ fn extract_variable(
         object_shape = extract_initializer_object_shape(init, source);
 
         if type_annotation.is_none() {
-            let inferred = infer_expression_type(init, source);
+            let mut inferred = infer_expression_type(init, source);
+            if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
+                inferred = widen_literal_type(inferred);
+            }
             if !matches!(inferred, TypeExpr::Primitive(PrimitiveName::Any)) {
                 type_annotation = Some(inferred);
             }
@@ -683,23 +686,98 @@ fn extract_object_literal(obj: &ObjectExpression<'_>, source: &str) -> ObjectExp
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = property_key_name(&p.key) {
-                    // Try to get type from type annotation or infer from value
                     let ty = infer_expression_type(&p.value, source);
-                    members.push(ObjectMember::Property(type_expr::ObjectProperty {
-                        name,
-                        ty,
-                        optional: false,
-                        readonly: false,
-                    }));
+                    push_object_property_with_override(
+                        &mut members,
+                        type_expr::ObjectProperty {
+                            name,
+                            ty,
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
                 }
             }
             ObjectPropertyKind::SpreadProperty(_) => {
-                // Can't statically extract spread properties
+                // This function returns ObjectExpr only — can't represent intersections.
+                // Use extract_object_literal_as_type() for spread-aware inference.
             }
         }
     }
     ObjectExpr {
         properties: members,
+    }
+}
+
+/// Like `extract_object_literal`, but returns a `TypeExpr` directly so it can
+/// represent intersections when the object contains spread of non-literal sources.
+fn extract_object_literal_as_type(obj: &ObjectExpression<'_>, source: &str) -> TypeExpr {
+    let mut members = Vec::new();
+    let mut spread_types: Vec<TypeExpr> = Vec::new();
+    for prop in &obj.properties {
+        match prop {
+            ObjectPropertyKind::ObjectProperty(p) => {
+                if let Some(name) = property_key_name(&p.key) {
+                    let ty = infer_expression_type(&p.value, source);
+                    push_object_property_with_override(
+                        &mut members,
+                        type_expr::ObjectProperty {
+                            name,
+                            ty,
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
+                }
+            }
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                let spread_ty = infer_expression_type(&spread.argument, source);
+                match spread_ty {
+                    TypeExpr::Object(ref obj_expr) => {
+                        for member in &obj_expr.properties {
+                            push_object_member_with_override(&mut members, member.clone());
+                        }
+                    }
+                    ty if !matches!(ty, TypeExpr::Primitive(PrimitiveName::Any)) => {
+                        spread_types.push(ty);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let own_obj = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: members,
+    }));
+
+    if spread_types.is_empty() {
+        own_obj
+    } else if matches!(&own_obj, TypeExpr::Object(obj) if obj.properties.is_empty()) {
+        TypeExpr::intersection(spread_types)
+    } else {
+        spread_types.push(own_obj);
+        TypeExpr::Intersection(spread_types.into())
+    }
+}
+
+fn push_object_property_with_override(
+    members: &mut Vec<ObjectMember>,
+    property: type_expr::ObjectProperty,
+) {
+    if let Some(existing_index) = members.iter().position(|member| match member {
+        ObjectMember::Property(existing) => existing.name == property.name,
+        _ => false,
+    }) {
+        members.remove(existing_index);
+    }
+    members.push(ObjectMember::Property(property));
+}
+
+fn push_object_member_with_override(members: &mut Vec<ObjectMember>, member: ObjectMember) {
+    match member {
+        ObjectMember::Property(property) => push_object_property_with_override(members, property),
+        other => members.push(other),
     }
 }
 
@@ -771,13 +849,40 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
         Expression::ParenthesizedExpression(paren) => {
             infer_expression_type(&paren.expression, source)
         }
-        Expression::ArrayExpression(_) => TypeExpr::Array {
-            element: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
-            readonly: false,
-        },
-        Expression::ObjectExpression(obj) => {
-            TypeExpr::Object(Arc::new(extract_object_literal(obj, source)))
+        Expression::ArrayExpression(arr) => {
+            let mut element_types = Vec::new();
+            for element in &arr.elements {
+                match element {
+                    oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                        append_spread_array_element_types(
+                            &spread.argument,
+                            source,
+                            &mut element_types,
+                        );
+                    }
+                    oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
+                    _ => {
+                        if let Some(expr) = element.as_expression() {
+                            append_union_members(
+                                &mut element_types,
+                                infer_expression_type(expr, source),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let element = if element_types.is_empty() {
+                TypeExpr::Primitive(PrimitiveName::Any)
+            } else {
+                TypeExpr::union(element_types)
+            };
+            TypeExpr::Array {
+                element: Arc::new(element),
+                readonly: false,
+            }
         }
+        Expression::ObjectExpression(obj) => extract_object_literal_as_type(obj, source),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
@@ -785,6 +890,7 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
             }
             TypeExpr::string_literal(value)
         }
+        Expression::TemplateLiteral(_) => TypeExpr::Primitive(PrimitiveName::String),
         Expression::ArrowFunctionExpression(arrow) => {
             let sig = extract_arrow_signature(arrow, source);
             TypeExpr::Function(Arc::new(FunctionExpr {
@@ -804,11 +910,222 @@ fn infer_expression_type(expr: &Expression<'_>, source: &str) -> TypeExpr {
             }
         }
         Expression::TSSatisfiesExpression(sat) => {
-            // const x = value satisfies SomeType → use the satisfies type
-            lower_ts_type(&sat.type_annotation, source)
+            // const x = value satisfies SomeType → infer from the underlying value expression,
+            // not the annotation. `satisfies` validates but doesn't widen.
+            infer_expression_type(&sat.expression, source)
+        }
+        Expression::StaticMemberExpression(member) => {
+            // obj.foo → typeof obj.foo (build a dotted path)
+            let mut path = Vec::new();
+            collect_static_member_path(member, &mut path);
+            if path.is_empty() {
+                TypeExpr::Primitive(PrimitiveName::Any)
+            } else {
+                TypeExpr::TypeOf(ValueRef { path })
+            }
+        }
+        Expression::CallExpression(call) => {
+            // fn() → ReturnType<typeof fn>
+            let callee_type = infer_expression_type(&call.callee, source);
+            if matches!(callee_type, TypeExpr::Primitive(PrimitiveName::Any)) {
+                TypeExpr::Primitive(PrimitiveName::Any)
+            } else {
+                TypeExpr::Ref {
+                    name: Arc::from("ReturnType"),
+                    type_arguments: Arc::from(vec![callee_type]),
+                }
+            }
         }
         _ => TypeExpr::Primitive(PrimitiveName::Any),
     }
+}
+
+/// Collect a dotted member path from a static member expression chain.
+/// `a.b.c` → `["a", "b", "c"]` (in order). Non-identifier roots abort (clear path).
+fn collect_static_member_path(
+    member: &oxc_ast::ast::StaticMemberExpression<'_>,
+    path: &mut Vec<String>,
+) {
+    match &member.object {
+        Expression::Identifier(ident) => {
+            path.push(ident.name.as_str().to_string());
+        }
+        Expression::StaticMemberExpression(parent) => {
+            collect_static_member_path(parent, path);
+            if path.is_empty() {
+                return; // ancestor failed — propagate
+            }
+        }
+        _ => {
+            // Non-static root (e.g., computed, call) — can't build a simple path
+            path.clear();
+            return;
+        }
+    }
+    path.push(member.property.name.as_str().to_string());
+}
+
+fn append_spread_array_element_types(
+    expr: &Expression<'_>,
+    source: &str,
+    element_types: &mut Vec<TypeExpr>,
+) {
+    let spread_ty = infer_expression_type(expr, source);
+    if let Some(spread_elements) = collect_array_element_types_from_type(&spread_ty) {
+        element_types.extend(spread_elements);
+    } else {
+        element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
+    }
+}
+
+fn collect_array_element_types_from_type(ty: &TypeExpr) -> Option<Vec<TypeExpr>> {
+    match ty {
+        TypeExpr::Array { element, .. } => {
+            let mut members = Vec::new();
+            append_union_members(&mut members, element.as_ref().clone());
+            Some(members)
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            let mut members = Vec::new();
+            for element in elements.iter() {
+                append_union_members(&mut members, element.ty.clone());
+            }
+            Some(members)
+        }
+        TypeExpr::Union(members) => {
+            let mut collected = Vec::new();
+            for member in members.iter() {
+                let nested = collect_array_element_types_from_type(member)?;
+                collected.extend(nested);
+            }
+            Some(collected)
+        }
+        _ => None,
+    }
+}
+
+fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
+    match ty {
+        TypeExpr::Union(members) => into.extend(members.iter().cloned()),
+        other => into.push(other),
+    }
+}
+
+fn widen_literal_type(expr: TypeExpr) -> TypeExpr {
+    match expr {
+        TypeExpr::Literal(type_expr::LiteralValue::String(_)) => {
+            TypeExpr::Primitive(PrimitiveName::String)
+        }
+        TypeExpr::Literal(type_expr::LiteralValue::Number(_)) => {
+            TypeExpr::Primitive(PrimitiveName::Number)
+        }
+        TypeExpr::Literal(type_expr::LiteralValue::Boolean(_)) => {
+            TypeExpr::Primitive(PrimitiveName::Boolean)
+        }
+        TypeExpr::Literal(type_expr::LiteralValue::BigInt(_)) => {
+            TypeExpr::Primitive(PrimitiveName::BigInt)
+        }
+        TypeExpr::Union(members) => TypeExpr::union(dedupe_type_exprs(
+            members
+                .iter()
+                .cloned()
+                .map(widen_literal_type)
+                .collect::<Vec<_>>(),
+        )),
+        TypeExpr::Intersection(members) => TypeExpr::intersection(
+            members
+                .iter()
+                .cloned()
+                .map(widen_literal_type)
+                .collect::<Vec<_>>(),
+        ),
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: Arc::new(widen_literal_type(element.as_ref().clone())),
+            readonly,
+        },
+        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: Arc::from(
+                elements
+                    .iter()
+                    .cloned()
+                    .map(|mut element| {
+                        element.ty = widen_literal_type(element.ty);
+                        element
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            readonly,
+        },
+        TypeExpr::Object(obj) => TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: obj
+                .properties
+                .iter()
+                .cloned()
+                .map(widen_object_member)
+                .collect(),
+        })),
+        TypeExpr::Function(function) => TypeExpr::Function(Arc::new(FunctionExpr {
+            parameters: function.parameters.clone(),
+            return_type: function
+                .return_type
+                .as_ref()
+                .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
+            type_parameters: function.type_parameters.clone(),
+        })),
+        other => other,
+    }
+}
+
+fn widen_object_member(member: ObjectMember) -> ObjectMember {
+    match member {
+        ObjectMember::Property(mut property) => {
+            property.ty = widen_literal_type(property.ty);
+            ObjectMember::Property(property)
+        }
+        ObjectMember::IndexSignature(mut signature) => {
+            signature.value_type = widen_literal_type(signature.value_type);
+            ObjectMember::IndexSignature(signature)
+        }
+        ObjectMember::CallSignature(function) => ObjectMember::CallSignature(FunctionExpr {
+            parameters: function.parameters,
+            return_type: function
+                .return_type
+                .as_ref()
+                .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
+            type_parameters: function.type_parameters,
+        }),
+        ObjectMember::ConstructSignature(function) => {
+            ObjectMember::ConstructSignature(FunctionExpr {
+                parameters: function.parameters,
+                return_type: function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| Arc::new(widen_literal_type(return_type.as_ref().clone()))),
+                type_parameters: function.type_parameters,
+            })
+        }
+        ObjectMember::Method(mut method) => {
+            method.function =
+                FunctionExpr {
+                    parameters: method.function.parameters,
+                    return_type: method.function.return_type.as_ref().map(|return_type| {
+                        Arc::new(widen_literal_type(return_type.as_ref().clone()))
+                    }),
+                    type_parameters: method.function.type_parameters,
+                };
+            ObjectMember::Method(method)
+        }
+    }
+}
+
+fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
+    let mut unique = Vec::new();
+    for ty in types {
+        if !unique.contains(&ty) {
+            unique.push(ty);
+        }
+    }
+    unique
 }
 
 fn is_const_assertion_type_expr(expr: &TypeExpr) -> bool {

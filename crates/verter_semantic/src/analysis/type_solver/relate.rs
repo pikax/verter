@@ -7,7 +7,8 @@
 //! - readonly arrays/tuples: covariant
 //! - function return types: covariant
 //! - mutable containers: invariant (unless builtin rule says otherwise)
-//! - method/function parameters: bivariant (initial pass, matches TS declaration files)
+//! - standalone function parameters: covariant (TS uses contravariant under --strict; not yet implemented)
+//! - method parameters: bivariant (matches TS method/property shorthand behavior)
 
 use super::arena::{
     CallSignatureNode, FunctionNode, Node, NodeId, ObjectNode, PrimitiveKind, QueryArena,
@@ -109,6 +110,10 @@ pub fn relate(
     mode: RelationMode,
     state: &mut RelationState,
 ) -> RelationResult {
+    if source.is_unresolved() || target.is_unresolved() {
+        return RelationResult::Unknown;
+    }
+
     if let Some(cached) = caches.get_relation(source, target, mode) {
         return cached;
     }
@@ -376,7 +381,7 @@ fn relate_objects(
     for t_prop in &target.properties {
         let prop_result =
             if let Some(s_prop) = source.properties.iter().find(|p| p.name == t_prop.name) {
-                relate(arena, caches, s_prop.ty, t_prop.ty, mode, state)
+                relate_property_pair(arena, caches, s_prop, t_prop, mode, state)
             } else if let Some(index_result) =
                 relate_property_via_source_index(arena, caches, source, t_prop, mode, state)
             {
@@ -419,6 +424,39 @@ fn relate_objects(
     result
 }
 
+fn relate_property_pair(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: &super::arena::PropertyNode,
+    target: &super::arena::PropertyNode,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    if source.is_method && target.is_method {
+        relate_method_property_types(arena, caches, source.ty, target.ty, mode, state)
+    } else {
+        relate(arena, caches, source.ty, target.ty, mode, state)
+    }
+}
+
+fn relate_method_property_types(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: NodeId,
+    target: NodeId,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    match (arena.get(source), arena.get(target)) {
+        (Node::Function(source_fn), Node::Function(target_fn)) => {
+            relate_functions_with_bivariant_method_parameters(
+                arena, caches, source_fn, target_fn, mode, state,
+            )
+        }
+        _ => relate(arena, caches, source, target, mode, state),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Function comparison
 // ---------------------------------------------------------------------------
@@ -443,6 +481,37 @@ fn relate_functions(
     for t_sig in &target.signatures {
         let sig_ok = source.signatures.iter().any(|s_sig| {
             relate_call_signatures(arena, caches, s_sig, t_sig, mode, state)
+                == RelationResult::Assignable
+        });
+        if !sig_ok {
+            result = result.and(RelationResult::NotAssignable);
+        }
+    }
+
+    state.exit_depth();
+    result
+}
+
+fn relate_functions_with_bivariant_method_parameters(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: &FunctionNode,
+    target: &FunctionNode,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    if target.signatures.is_empty() {
+        return RelationResult::Assignable;
+    }
+
+    if let Some(bail) = state.enter_depth() {
+        return bail;
+    }
+
+    let mut result = RelationResult::Assignable;
+    for t_sig in &target.signatures {
+        let sig_ok = source.signatures.iter().any(|s_sig| {
+            relate_method_call_signatures(arena, caches, s_sig, t_sig, mode, state)
                 == RelationResult::Assignable
         });
         if !sig_ok {
@@ -488,6 +557,41 @@ fn relate_call_signatures(
     ));
 
     result
+}
+
+fn relate_method_call_signatures(
+    arena: &QueryArena,
+    caches: &mut SolverCaches,
+    source: &CallSignatureNode,
+    target: &CallSignatureNode,
+    mode: RelationMode,
+    state: &mut RelationState,
+) -> RelationResult {
+    if target.parameters.len() > source.parameters.len() {
+        return RelationResult::NotAssignable;
+    }
+
+    let mut result = RelationResult::Assignable;
+
+    for (s_param, t_param) in source.parameters.iter().zip(target.parameters.iter()) {
+        let param_result = if contains_infer(arena, t_param.ty) {
+            relate(arena, caches, s_param.ty, t_param.ty, mode, state)
+        } else {
+            let forward = relate(arena, caches, t_param.ty, s_param.ty, mode, state);
+            let backward = relate(arena, caches, s_param.ty, t_param.ty, mode, state);
+            forward.or(backward)
+        };
+        result = result.and(param_result);
+    }
+
+    result.and(relate(
+        arena,
+        caches,
+        source.return_type,
+        target.return_type,
+        mode,
+        state,
+    ))
 }
 
 fn contains_infer(arena: &QueryArena, node: NodeId) -> bool {
@@ -804,6 +908,21 @@ mod tests {
         assert_eq!(
             relate(&a, &mut c, s, s, RelationMode::Assignable, &mut st),
             RelationResult::Assignable
+        );
+    }
+
+    #[test]
+    fn unresolved_relation_is_unknown() {
+        let (mut a, mut c, mut st) = fresh();
+        let s = NodeId::UNRESOLVED;
+        let t = a.primitive(PrimitiveKind::String);
+        assert_eq!(
+            relate(&a, &mut c, s, t, RelationMode::Assignable, &mut st),
+            RelationResult::Unknown
+        );
+        assert_eq!(
+            relate(&a, &mut c, t, s, RelationMode::Assignable, &mut st),
+            RelationResult::Unknown
         );
     }
 
@@ -1348,6 +1467,153 @@ mod tests {
                 &mut st
             ),
             RelationResult::NotAssignable
+        );
+    }
+
+    #[test]
+    fn method_parameters_are_bivariant() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let number_ty = a.primitive(PrimitiveKind::Number);
+        let string_or_number = a.union(vec![string_ty, number_ty]);
+        let void_ty = a.primitive(PrimitiveKind::Void);
+
+        let narrow_method = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("value".into()),
+                    ty: string_ty,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+        let wide_method = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![ParamNode {
+                    name: Some("value".into()),
+                    ty: string_or_number,
+                    optional: false,
+                    rest: false,
+                }],
+                return_type: void_ty,
+            }],
+        });
+
+        let narrow_source = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "handle".into(),
+                ty: narrow_method,
+                optional: false,
+                readonly: false,
+                is_method: true,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+        let wide_source = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "handle".into(),
+                ty: wide_method,
+                optional: false,
+                readonly: false,
+                is_method: true,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                narrow_source,
+                wide_source,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::Assignable,
+            "methods should accept the narrow-to-wide direction under bivariance"
+        );
+
+        let mut reverse_state = RelationState::new(RelationLimits::default());
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                wide_source,
+                narrow_source,
+                RelationMode::Assignable,
+                &mut reverse_state
+            ),
+            RelationResult::Assignable,
+            "methods should also accept the wide-to-narrow direction under bivariance"
+        );
+    }
+
+    #[test]
+    fn method_returns_remain_covariant() {
+        let (mut a, mut c, mut st) = fresh();
+        let string_ty = a.primitive(PrimitiveKind::String);
+        let number_ty = a.primitive(PrimitiveKind::Number);
+        let string_or_number = a.union(vec![string_ty, number_ty]);
+
+        let narrow_return_method = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![],
+                return_type: string_ty,
+            }],
+        });
+        let wide_return_method = a.function(FunctionNode {
+            signatures: vec![CallSignatureNode {
+                type_parameters: vec![],
+                parameters: vec![],
+                return_type: string_or_number,
+            }],
+        });
+
+        let wide_source = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "make".into(),
+                ty: wide_return_method,
+                optional: false,
+                readonly: false,
+                is_method: true,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+        let narrow_target = a.object(ObjectNode {
+            properties: vec![PropertyNode {
+                name: "make".into(),
+                ty: narrow_return_method,
+                optional: false,
+                readonly: false,
+                is_method: true,
+            }],
+            index_signatures: vec![],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        });
+
+        assert_eq!(
+            relate(
+                &a,
+                &mut c,
+                wide_source,
+                narrow_target,
+                RelationMode::Assignable,
+                &mut st
+            ),
+            RelationResult::NotAssignable,
+            "method bivariance must not relax return-type covariance"
         );
     }
 

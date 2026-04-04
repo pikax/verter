@@ -274,7 +274,12 @@ defineProps<ButtonProps>()
     const slot = meta.props.find((prop) => prop.name === "slot");
 
     expect(slot).toBeDefined();
-    expect(slot?.type).toContain("LocalConfig");
+    // The solver expands through the renamed import alias and resolves the
+    // indexed access `LocalConfig<string>['slot']` → `SlotInfo<ComponentConfig<string>>`
+    // → `{ value: ComponentConfig<string> }`.  With the optional `?`, it becomes
+    // `{ value: ComponentConfig<string>; } | undefined`.
+    expect(slot?.type).toContain("ComponentConfig");
+    expect(slot?.type).toContain("undefined");
     expect(slot?.schema).toBeDefined();
   });
 

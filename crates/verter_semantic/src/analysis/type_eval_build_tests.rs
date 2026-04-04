@@ -311,6 +311,568 @@ fn extracts_let_variable() {
     assert_eq!(decl.kind, ValueDeclKind::Let);
 }
 
+#[test]
+fn infers_non_empty_array_element_types() {
+    let env = parse_and_build_env("const items = [1, 2, 3]");
+    let decl = &env.value_symbols["items"];
+    let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected inferred array type, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    assert!(
+        !matches!(element.as_ref(), TypeExpr::Primitive(PrimitiveName::Any)),
+        "non-empty arrays should not infer Array<any>"
+    );
+    match element.as_ref() {
+        TypeExpr::Primitive(PrimitiveName::Number) => {}
+        TypeExpr::Literal(LiteralValue::Number(_)) => {}
+        TypeExpr::Union(members) => {
+            assert!(
+                members.iter().all(|member| matches!(
+                    member,
+                    TypeExpr::Literal(LiteralValue::Number(_))
+                        | TypeExpr::Primitive(PrimitiveName::Number)
+                )),
+                "array element union should stay numeric, got {members:?}"
+            );
+        }
+        other => panic!("expected numeric element type, got {other:?}"),
+    }
+}
+
+#[test]
+fn infers_mixed_array_element_union() {
+    let env = parse_and_build_env(r#"const mixed = [1, "hello", true]"#);
+    let decl = &env.value_symbols["mixed"];
+    let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected inferred array type, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let TypeExpr::Union(members) = element.as_ref() else {
+        panic!("mixed arrays should infer a union element type, got {element:?}");
+    };
+    assert!(
+        members.iter().any(|member| matches!(
+            member,
+            TypeExpr::Literal(LiteralValue::Number(_)) | TypeExpr::Primitive(PrimitiveName::Number)
+        )),
+        "mixed array should include a numeric branch"
+    );
+    assert!(
+        members.iter().any(|member| matches!(
+            member,
+            TypeExpr::Literal(LiteralValue::String(value)) if value == "hello"
+        ) || matches!(
+            member,
+            TypeExpr::Primitive(PrimitiveName::String)
+        )),
+        "mixed array should include a string branch"
+    );
+    assert!(
+        members.iter().any(|member| matches!(
+            member,
+            TypeExpr::Literal(LiteralValue::Boolean(true))
+                | TypeExpr::Primitive(PrimitiveName::Boolean)
+        )),
+        "mixed array should include a boolean branch"
+    );
+    assert!(
+        !members
+            .iter()
+            .any(|member| matches!(member, TypeExpr::Primitive(PrimitiveName::Any))),
+        "mixed arrays should not keep any once element types are known"
+    );
+}
+
+#[test]
+fn infers_array_spread_literal_element_types() {
+    let env = parse_and_build_env(r#"const mixed = [...[1, 2], "hello"]"#);
+    let decl = &env.value_symbols["mixed"];
+    let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected inferred array type, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let TypeExpr::Union(members) = element.as_ref() else {
+        panic!("array spread literal should infer a union element type, got {element:?}");
+    };
+    assert!(
+        members.iter().any(|member| matches!(
+            member,
+            TypeExpr::Literal(LiteralValue::Number(_)) | TypeExpr::Primitive(PrimitiveName::Number)
+        )),
+        "spread literal array should contribute numeric element types"
+    );
+    assert!(
+        members.iter().any(|member| matches!(
+            member,
+            TypeExpr::Literal(LiteralValue::String(value)) if value == "hello"
+        ) || matches!(
+            member,
+            TypeExpr::Primitive(PrimitiveName::String)
+        )),
+        "array literal should retain the non-spread string branch"
+    );
+}
+
+#[test]
+fn empty_array_stays_any_array() {
+    let env = parse_and_build_env("const empty = []");
+    let decl = &env.value_symbols["empty"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Array {
+            element: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
+            readonly: false,
+        })
+    );
+}
+
+#[test]
+fn infers_template_literal_with_expressions_as_string() {
+    let env = parse_and_build_env(r#"const name = "world"; const label = `hello ${name}`"#);
+    let decl = &env.value_symbols["label"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Any)),
+        "template literals with expressions should not fall back to any"
+    );
+}
+
+#[test]
+fn const_preserves_literal_initializer_type() {
+    let env = parse_and_build_env(r#"const greeting = "hello""#);
+    let decl = &env.value_symbols["greeting"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::string_literal("hello"))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        "const literal initializers should remain literal types"
+    );
+}
+
+#[test]
+fn let_widens_string_literal_initializer() {
+    let env = parse_and_build_env(r#"let greeting = "hello""#);
+    let decl = &env.value_symbols["greeting"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::string_literal("hello")),
+        "let string initializers should widen away from literal types"
+    );
+}
+
+#[test]
+fn let_widens_number_literal_initializer() {
+    let env = parse_and_build_env("let count = 42");
+    let decl = &env.value_symbols["count"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Number))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::number_literal(42.0)),
+        "let number initializers should widen away from literal types"
+    );
+}
+
+#[test]
+fn let_widens_boolean_literal_initializer() {
+    let env = parse_and_build_env("let enabled = true");
+    let decl = &env.value_symbols["enabled"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Boolean))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::boolean_literal(true)),
+        "let boolean initializers should widen away from literal types"
+    );
+}
+
+#[test]
+fn var_widens_string_literal_initializer() {
+    let env = parse_and_build_env(r#"var greeting = "hello""#);
+    let decl = &env.value_symbols["greeting"];
+
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String))
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::string_literal("hello")),
+        "var string initializers should widen away from literal types"
+    );
+}
+
+#[test]
+fn let_widens_nested_object_literal_properties() {
+    let env = parse_and_build_env(r#"let settings = { mode: "dark", nested: { count: 1 } }"#);
+    let decl = &env.value_symbols["settings"];
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected object type for let object initializer, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let mode_ty = obj.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(prop) if prop.name == "mode" => Some(&prop.ty),
+        _ => None,
+    });
+    assert_eq!(mode_ty, Some(&TypeExpr::Primitive(PrimitiveName::String)));
+
+    let nested_ty = obj.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(prop) if prop.name == "nested" => Some(&prop.ty),
+        _ => None,
+    });
+    let Some(TypeExpr::Object(nested)) = nested_ty else {
+        panic!("expected nested object property, got {nested_ty:?}");
+    };
+    let count_ty = nested.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(prop) if prop.name == "count" => Some(&prop.ty),
+        _ => None,
+    });
+    assert_eq!(count_ty, Some(&TypeExpr::Primitive(PrimitiveName::Number)));
+}
+
+#[test]
+fn let_widens_array_element_literals() {
+    let env = parse_and_build_env("let flags = [true, false]");
+    let decl = &env.value_symbols["flags"];
+    let Some(TypeExpr::Array { element, .. }) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected array type for let array initializer, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    assert_eq!(
+        element.as_ref(),
+        &TypeExpr::Primitive(PrimitiveName::Boolean)
+    );
+}
+
+// =============================================================================
+// satisfies expression inference
+// =============================================================================
+
+#[test]
+fn satisfies_preserves_underlying_value_type() {
+    let env = parse_and_build_env(
+        r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#,
+    );
+    let decl = &env.value_symbols["config"];
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "satisfies should infer the underlying object literal type, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    // The value type should have literal/inferred properties from the expression,
+    // not abstract types from the satisfies annotation
+    let x_prop = obj.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(p) if p.name == "x" => Some(&p.ty),
+        _ => None,
+    });
+    assert!(
+        x_prop.is_some(),
+        "satisfies result should include x property from the value"
+    );
+
+    // x should be a number literal (1), not just `number`
+    assert!(
+        matches!(x_prop.unwrap(), TypeExpr::Literal(LiteralValue::Number(_))),
+        "satisfies should preserve literal types from the value expression, got {:?}",
+        x_prop,
+    );
+}
+
+#[test]
+fn satisfies_does_not_use_annotation_type() {
+    // When using satisfies, the expression type should win, not the annotation
+    let env = parse_and_build_env(r#"const label = "hello" satisfies string"#);
+    let decl = &env.value_symbols["label"];
+
+    // Should be the literal "hello", not widened string
+    assert_eq!(
+        decl.type_annotation,
+        Some(TypeExpr::string_literal("hello")),
+        "satisfies should preserve the value's literal type"
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        "satisfies should not widen to the annotation type"
+    );
+}
+
+// =============================================================================
+// Object spread in extract_object_literal
+// =============================================================================
+
+#[test]
+fn object_spread_identifier_produces_intersection() {
+    let env = parse_and_build_env(r#"const extended = { ...base, extra: true }"#);
+    let decl = &env.value_symbols["extended"];
+
+    // Should not lose the spread source — at minimum, the explicit props must be present
+    // AND the spread source should be represented (as typeof base in an intersection)
+    match decl.type_annotation.as_ref() {
+        Some(TypeExpr::Intersection(members)) => {
+            assert!(
+                members.iter().any(|m| matches!(m, TypeExpr::TypeOf(_))),
+                "spread identifier should produce a typeof reference in the intersection"
+            );
+            assert!(
+                members.iter().any(|m| matches!(m, TypeExpr::Object(_))),
+                "explicit properties should be present in the intersection"
+            );
+        }
+        Some(TypeExpr::Object(obj)) => {
+            // At minimum, if we flatten, the explicit property must exist
+            assert!(
+                obj.properties.iter().any(|member| matches!(
+                    member,
+                    ObjectMember::Property(p) if p.name == "extra"
+                )),
+                "explicit property 'extra' must be present"
+            );
+            panic!(
+                "spread source was lost — expected intersection with typeof base, got plain object"
+            );
+        }
+        other => panic!("expected intersection or object, got {other:?}"),
+    }
+}
+
+#[test]
+fn object_spread_object_literal_merges_properties() {
+    let env = parse_and_build_env(r#"const merged = { ...{ a: 1, b: 2 }, c: 3 }"#);
+    let decl = &env.value_symbols["merged"];
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected object type for merged spread, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let names: Vec<&str> = obj
+        .properties
+        .iter()
+        .filter_map(|m| match m {
+            ObjectMember::Property(p) => Some(p.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        names.contains(&"a"),
+        "spread object literal property 'a' should be merged"
+    );
+    assert!(
+        names.contains(&"b"),
+        "spread object literal property 'b' should be merged"
+    );
+    assert!(
+        names.contains(&"c"),
+        "explicit property 'c' should be present"
+    );
+    assert_eq!(
+        names.len(),
+        3,
+        "should have exactly 3 properties after merge"
+    );
+}
+
+#[test]
+fn object_spread_later_property_overrides_spread_property() {
+    let env = parse_and_build_env(r#"const merged = { ...{ a: 1 }, a: "override" }"#);
+    let decl = &env.value_symbols["merged"];
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected object type for merged spread override, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let props: Vec<_> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        props.len(),
+        1,
+        "later explicit properties should replace earlier spread properties"
+    );
+    assert_eq!(props[0], &TypeExpr::string_literal("override"));
+}
+
+#[test]
+fn object_spread_later_spread_overrides_earlier_property() {
+    let env = parse_and_build_env(r#"const merged = { a: 1, ...{ a: "override" } }"#);
+    let decl = &env.value_symbols["merged"];
+
+    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
+        panic!(
+            "expected object type for merged spread override, got {:?}",
+            decl.type_annotation
+        );
+    };
+
+    let props: Vec<_> = obj
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(prop) if prop.name == "a" => Some(&prop.ty),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        props.len(),
+        1,
+        "later spread properties should replace earlier explicit properties"
+    );
+    assert_eq!(props[0], &TypeExpr::string_literal("override"));
+}
+
+// =============================================================================
+// MemberExpression inference
+// =============================================================================
+
+#[test]
+fn static_member_expression_infers_typeof_path() {
+    let env = parse_and_build_env(r#"const value = obj.foo"#);
+    let decl = &env.value_symbols["value"];
+
+    match decl.type_annotation.as_ref() {
+        Some(TypeExpr::TypeOf(vr)) => {
+            assert_eq!(
+                vr.path,
+                vec!["obj".to_string(), "foo".to_string()],
+                "static member expression should produce typeof with dotted path"
+            );
+        }
+        other => panic!("expected TypeOf with path [obj, foo], got {other:?}"),
+    }
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Any)),
+        "member expression should not degrade to any"
+    );
+}
+
+#[test]
+fn nested_member_expression_infers_deep_typeof_path() {
+    let env = parse_and_build_env(r#"const value = a.b.c"#);
+    let decl = &env.value_symbols["value"];
+
+    match decl.type_annotation.as_ref() {
+        Some(TypeExpr::TypeOf(vr)) => {
+            assert_eq!(
+                vr.path,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                "nested member expression should produce typeof with full path"
+            );
+        }
+        other => panic!("expected TypeOf with path [a, b, c], got {other:?}"),
+    }
+}
+
+#[test]
+fn member_on_call_expression_degrades_to_any() {
+    // fn().prop — the root is a CallExpression, not an Identifier, so we can't build a simple path
+    let env = parse_and_build_env(r#"const value = getObj().prop"#);
+    let decl = &env.value_symbols["value"];
+
+    // Should not produce a broken partial path like ["prop"] without the root
+    match decl.type_annotation.as_ref() {
+        Some(TypeExpr::TypeOf(vr)) => {
+            panic!(
+                "call-rooted member path should not produce TypeOf, got path {:?}",
+                vr.path
+            );
+        }
+        _ => {} // Any or None is acceptable — the key assertion is no broken partial path
+    }
+}
+
+// =============================================================================
+// CallExpression inference
+// =============================================================================
+
+#[test]
+fn simple_call_expression_does_not_degrade_to_any() {
+    let env = parse_and_build_env(r#"const result = someFunction()"#);
+    let decl = &env.value_symbols["result"];
+
+    // For unknown function calls, should produce ReturnType<typeof someFunction>
+    // rather than degrading to Any
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Any)),
+        "call expression should not degrade to any — should produce ReturnType<typeof fn>"
+    );
+    // Should be some kind of structured type reference
+    assert!(
+        decl.type_annotation.is_some(),
+        "call expression should produce a type annotation"
+    );
+}
+
+#[test]
+fn method_call_expression_does_not_degrade_to_any() {
+    let env = parse_and_build_env(r#"const result = obj.create()"#);
+    let decl = &env.value_symbols["result"];
+
+    assert!(
+        decl.type_annotation.is_some(),
+        "method call expression should produce a type, not None (filtered-out Any)"
+    );
+    assert_ne!(
+        decl.type_annotation,
+        Some(TypeExpr::Primitive(PrimitiveName::Any)),
+        "method call expression should not degrade to any"
+    );
+}
+
 // =============================================================================
 // Class extraction
 // =============================================================================
