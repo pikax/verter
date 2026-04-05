@@ -1349,13 +1349,13 @@ pub fn expand_macro_types(
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     let binding_entries = collect_binding_entries_from_env(env, local_binding_names);
-    let mut batch = crate::analysis::type_solver::solve::SolveBatch::new(solver_host);
+    let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
     expand_macro_types_impl(
         macros,
         source,
         binding_entries.as_slice(),
         Some(env),
-        &mut batch,
+        &mut engine,
     )
 }
 
@@ -1364,27 +1364,27 @@ pub fn expand_macro_types(
 ///
 /// This is the cache-owned production path used by `verter_session`, where
 /// local binding types come from prepared value declarations rather than an
-/// `EvalEnv`. Creates its own internal `SolveBatch`.
+/// `EvalEnv`. Creates its own internal `TypeQueryEngine`.
 pub fn expand_macro_types_with_bindings(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    let mut batch = crate::analysis::type_solver::solve::SolveBatch::new(solver_host);
-    expand_macro_types_impl(macros, source, binding_entries, None, &mut batch)
+    let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
+    expand_macro_types_impl(macros, source, binding_entries, None, &mut engine)
 }
 
 /// Like `expand_macro_types_with_bindings`, but accepts an external
-/// `SolveBatch` so the caller can share a single batch across multiple
-/// phases (macro expansion + registry append).
-pub fn expand_macro_types_with_batch(
+/// request-scoped `TypeQueryEngine` so the caller can share one engine across
+/// macro expansion and later registry projection.
+pub fn expand_macro_types_with_engine(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
-    batch: &mut crate::analysis::type_solver::solve::SolveBatch<'_>,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_impl(macros, source, binding_entries, None, batch)
+    expand_macro_types_impl(macros, source, binding_entries, None, engine)
 }
 
 fn collect_binding_entries_from_env(
@@ -1411,7 +1411,7 @@ fn expand_macro_types_impl(
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     mut debug_env: Option<&mut EvalEnv>,
-    batch: &mut crate::analysis::type_solver::solve::SolveBatch<'_>,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
         solver_result_to_normalized_expansion, solver_result_to_object_expansion,
@@ -1468,7 +1468,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = batch.solve(&parsed);
+                    let solved = engine.solve(&parsed);
                     let expanded = solver_to_expr_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1507,7 +1507,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = batch.solve(lowered);
+                    let solved = engine.solve(lowered);
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1545,7 +1545,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = batch.solve(lowered);
+                    let solved = engine.solve(lowered);
                     let shape_result = solver_to_object_shape_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1580,7 +1580,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = batch.solve(&parsed);
+                    let solved = engine.solve(&parsed);
                     let expanded = solver_to_expr_result(solved);
                     log_expand_stage(
                         stage_log,
@@ -1625,7 +1625,7 @@ fn expand_macro_types_impl(
                         if let Some(env) = debug_env.as_deref_mut() {
                             env.preserve_canonical_vue_vnode_slot_returns = true;
                         }
-                        let solved = batch.solve(lowered);
+                        let solved = engine.solve(lowered);
                         if let (Some(previous), Some(env)) =
                             (previous_slot_return_mode, debug_env.as_deref_mut())
                         {
@@ -1674,7 +1674,7 @@ fn expand_macro_types_impl(
                             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                         };
                         log_expand_stage_start(&stage_log);
-                        let solved = batch.solve(&parsed);
+                        let solved = engine.solve(&parsed);
                         let expanded = solver_to_expr_result(solved);
                         log_expand_stage(
                             stage_log,
@@ -1710,7 +1710,7 @@ fn expand_macro_types_impl(
             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
         };
         log_expand_stage_start(&stage_log);
-        let solved = batch.solve(type_ann);
+        let solved = engine.solve(type_ann);
         let expanded = solver_to_expr_result(solved);
         log_expand_stage(
             stage_log,

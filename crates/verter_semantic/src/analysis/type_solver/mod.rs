@@ -34,12 +34,14 @@
 //! - [`display`]: Debug/display helpers for traces and tests.
 
 pub mod arena;
+pub mod audit;
 pub mod builtin;
 pub mod display;
 pub mod host;
 pub mod lower;
 pub mod prepared;
 pub mod project;
+pub mod query_engine;
 pub mod recursion;
 pub mod relate;
 pub mod result;
@@ -51,8 +53,7 @@ pub mod substitution;
 // ---------------------------------------------------------------------------
 
 pub use host::{
-    NoopSolverHost, RequestStatus, ResolvedRootIdentity, SolverProjection, TypeSolverHost,
-    UtilitySource,
+    NoopSolverHost, RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
 };
 pub use prepared::{PreparedTypeDecl, PreparedValueDecl};
 pub use result::{

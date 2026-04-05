@@ -1,7 +1,11 @@
-import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 
-import { getDefaultUiRoot, resolveComponentFile } from "./trace-component-resolver.js";
+import {
+  getDefaultUiRoot,
+  readComponentSourceForTrace,
+  resolveComponentFile,
+} from "./trace-component-resolver.js";
+import { raceWithTimeout } from "./query-timeout.js";
 import { loadVerterCompatModule } from "./verter-compat.js";
 
 const componentName = process.argv[2];
@@ -33,7 +37,7 @@ try {
   process.exit(2);
 }
 
-const source = readFileSync(file.replace(/\//g, "\\"), "utf-8");
+const source = readComponentSourceForTrace(file);
 maybeGc();
 const heapBeforeSetup = formatMemoryUsage();
 const setupStart = performance.now();
@@ -92,11 +96,7 @@ try {
   const start = performance.now();
 
   // Race the query against a timeout so we can still report partial info on hang
-  const metaPromise = checker.getComponentMeta(file);
-  const timeoutPromise = new Promise<null>((resolve) =>
-    setTimeout(() => resolve(null), QUERY_TIMEOUT_MS),
-  );
-  const meta = await Promise.race([metaPromise, timeoutPromise]);
+  const meta = await raceWithTimeout(checker.getComponentMeta(file), QUERY_TIMEOUT_MS, null);
 
   const durationMs = Math.round(performance.now() - start);
   const timedOut = meta === null;

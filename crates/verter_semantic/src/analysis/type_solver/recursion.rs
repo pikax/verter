@@ -239,9 +239,11 @@ fn hash_node_local_shape(arena: &QueryArena, node: NodeId, hasher: &mut impl Has
         Node::Ref {
             name,
             type_arguments,
+            scope_canonical_id,
         } => {
             5u8.hash(hasher);
             name.hash(hasher);
+            scope_canonical_id.hash(hasher);
             type_arguments.len().hash(hasher);
         }
         Node::TypeParam { name, .. } => {
@@ -987,36 +989,44 @@ mod tests {
         let d_str = arena.alloc(Node::Ref {
             name: "D".into(),
             type_arguments: vec![leaf_string],
+            scope_canonical_id: None,
         });
         let c_str = arena.alloc(Node::Ref {
             name: "C".into(),
             type_arguments: vec![d_str],
+            scope_canonical_id: None,
         });
         let b_str = arena.alloc(Node::Ref {
             name: "B".into(),
             type_arguments: vec![c_str],
+            scope_canonical_id: None,
         });
         let a_str = arena.alloc(Node::Ref {
             name: "A".into(),
             type_arguments: vec![b_str],
+            scope_canonical_id: None,
         });
 
         // Chain with Number at the deepest level
         let d_num = arena.alloc(Node::Ref {
             name: "D".into(),
             type_arguments: vec![leaf_number],
+            scope_canonical_id: None,
         });
         let c_num = arena.alloc(Node::Ref {
             name: "C".into(),
             type_arguments: vec![d_num],
+            scope_canonical_id: None,
         });
         let b_num = arena.alloc(Node::Ref {
             name: "B".into(),
             type_arguments: vec![c_num],
+            scope_canonical_id: None,
         });
         let a_num = arena.alloc(Node::Ref {
             name: "A".into(),
             type_arguments: vec![b_num],
+            scope_canonical_id: None,
         });
 
         let fp_str = compute_structural_fingerprint(&arena, &[a_str], &[]);
@@ -1041,11 +1051,13 @@ mod tests {
             let node = arena.alloc(Node::Ref {
                 name: format!("T{}", i),
                 type_arguments: vec![],
+                scope_canonical_id: None,
             });
             members_str.push(node);
             let node = arena.alloc(Node::Ref {
                 name: format!("T{}", i),
                 type_arguments: vec![],
+                scope_canonical_id: None,
             });
             members_num.push(node);
         }
@@ -1077,11 +1089,13 @@ mod tests {
             let node = arena.alloc(Node::Ref {
                 name: format!("T{}", i),
                 type_arguments: vec![],
+                scope_canonical_id: None,
             });
             members_a.push(node);
             let node = arena.alloc(Node::Ref {
                 name: format!("T{}", i),
                 type_arguments: vec![],
+                scope_canonical_id: None,
             });
             members_b.push(node);
         }
@@ -1115,27 +1129,33 @@ mod tests {
             let r = arena.alloc(Node::Ref {
                 name: "X".into(),
                 type_arguments: vec![leaf],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "Y".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "Z".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "W".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "V".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             // At depth > cap, this Ref is truncated
             arena.alloc(Node::Ref {
                 name: "Deep".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             })
         };
 
@@ -1143,22 +1163,27 @@ mod tests {
             let r = arena.alloc(Node::Ref {
                 name: "X".into(),
                 type_arguments: vec![leaf],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "Y".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "Z".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "W".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             let r = arena.alloc(Node::Ref {
                 name: "V".into(),
                 type_arguments: vec![r],
+                scope_canonical_id: None,
             });
             // At depth > cap, this Union is truncated
             arena.alloc(Node::Union(vec![r]))
@@ -1182,10 +1207,12 @@ mod tests {
         let ref_a = arena.alloc(Node::Ref {
             name: "Foo".into(),
             type_arguments: vec![str_ty, num_ty],
+            scope_canonical_id: None,
         });
         let ref_b = arena.alloc(Node::Ref {
             name: "Foo".into(),
             type_arguments: vec![str_ty, num_ty],
+            scope_canonical_id: None,
         });
 
         let fp_a = compute_structural_fingerprint(&arena, &[ref_a], &[]);

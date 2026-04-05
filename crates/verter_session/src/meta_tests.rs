@@ -6434,6 +6434,158 @@ defineProps<FancyProps>()
 }
 
 #[test]
+fn evaluate_types_prefers_declaration_entrypoints_for_nested_package_helper_type_imports() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/helper/dist/helper.d.ts",
+            "export type Prettify<T> = { [K in keyof T]: T[K] }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/helper/dist/helper.js",
+            "export const runtimeOnly = true",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/fancy/dist/index.d.ts",
+            r#"
+import type { Prettify } from 'helper'
+export type FancyProps = Prettify<{ open: boolean }>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Consumer.vue",
+            r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "fancy".to_string(),
+            resolved_canonical_id: Some("/node_modules/fancy/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/node_modules/fancy/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "helper".to_string(),
+            resolved_canonical_id: Some("/node_modules/helper/dist/helper.js".to_string()),
+            possible_canonical_ids: vec![
+                "/node_modules/helper/dist/helper.js".to_string(),
+                "/node_modules/helper/dist/helper.d.ts".to_string(),
+            ],
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Consumer.vue")
+        .expect("should return component meta");
+
+    let open_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "open")
+        .expect("evaluated defineProps should include imported helper prop");
+    assert_eq!(
+        open_prop.type_expr,
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "nested helper type imports must resolve through declaration entrypoints instead of JS companions"
+    );
+    assert!(
+        !meta.props.iter().any(|p| p.name == "runtimeOnly"),
+        "runtime-only helper values must not leak through nested package helper type imports"
+    );
+}
+
+#[test]
+fn evaluate_types_prefers_declaration_entrypoints_for_nested_package_helper_plain_imports() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/helper/dist/helper.d.ts",
+            "export type Prettify<T> = { [K in keyof T]: T[K] }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/helper/dist/helper.js",
+            "export const runtimeOnly = true",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/fancy/dist/index.d.ts",
+            r#"
+import { Prettify } from 'helper'
+export type FancyProps = Prettify<{ open: boolean }>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Consumer.vue",
+            r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "fancy".to_string(),
+            resolved_canonical_id: Some("/node_modules/fancy/dist/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/node_modules/fancy/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "helper".to_string(),
+            resolved_canonical_id: Some("/node_modules/helper/dist/helper.js".to_string()),
+            possible_canonical_ids: vec![
+                "/node_modules/helper/dist/helper.js".to_string(),
+                "/node_modules/helper/dist/helper.d.ts".to_string(),
+            ],
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Consumer.vue")
+        .expect("should return component meta");
+
+    let open_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "open")
+        .expect("evaluated defineProps should include imported helper prop");
+    assert_eq!(
+        open_prop.type_expr,
+        TypeExpr::Primitive(PrimitiveName::Boolean),
+        "plain helper imports in declaration files must resolve through declaration entrypoints instead of JS companions"
+    );
+    assert!(
+        !meta.props.iter().any(|p| p.name == "runtimeOnly"),
+        "runtime-only helper values must not leak through nested package helper plain imports"
+    );
+}
+
+#[test]
 fn get_component_meta_materializes_imported_pick_indexed_access_props() {
     let project = make_project();
     project

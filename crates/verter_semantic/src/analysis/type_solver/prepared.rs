@@ -13,7 +13,9 @@ use rustc_hash::FxHashMap;
 
 use super::host::ResolvedRootIdentity;
 use crate::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
-use crate::analysis::type_expr::{ObjectExpr, ObjectMember, TypeExpr, TypeParam};
+use crate::analysis::type_expr::{
+    MappedModifier, ObjectExpr, ObjectMember, PrimitiveName, TypeExpr, TypeParam,
+};
 
 // ---------------------------------------------------------------------------
 // Prepared type declaration
@@ -69,6 +71,98 @@ pub struct PreparedTypeDecl {
     /// file hash, barrel/reexport participants, and local closure participants
     /// at preparation time. Used to check if this prepared entry is still valid.
     pub cache_deps: PreparedCacheDeps,
+
+    /// Structural wrapper classification computed at preparation time.
+    /// Enables the solver to fast-path identity wrappers, pure overlays,
+    /// key filters, key remaps, and transparent aliases.
+    pub wrapper_shape: PreparedWrapperShape,
+}
+
+// ---------------------------------------------------------------------------
+// Structural wrapper classification
+// ---------------------------------------------------------------------------
+
+/// Structural wrapper metadata classified at preparation time.
+///
+/// Enables the solver to fast-path identity wrappers, pure overlays,
+/// key filters, key remaps, and transparent aliases without lowering full
+/// bodies or dispatching on helper names.
+#[derive(Debug, Clone, Default)]
+pub struct PreparedWrapperShape {
+    pub kind: PreparedWrapperKind,
+    /// Which type parameter is the "source" (e.g., T in `{ [K in keyof T]: T[K] }`).
+    pub source_param_index: Option<u16>,
+    pub key_filter: PreparedKeyFilterShape,
+    pub key_remap: PreparedKeyRemapShape,
+    pub value_rule: PreparedValueRuleShape,
+    pub modifiers: PreparedSurfaceModifiers,
+}
+
+/// Classification of the wrapper kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreparedWrapperKind {
+    /// Not a recognized structural wrapper pattern.
+    #[default]
+    None,
+    /// Identity: `{ [K in keyof T]: T[K] }` — collapse to base subject.
+    Identity,
+    /// Pure overlay: only modifier changes (optional/readonly), no key/value transform.
+    PureOverlay,
+    /// Key filter: `Pick`/`Omit`-style literal key filtering.
+    KeyFilter,
+    /// Key remap: template literal or case transform on keys.
+    KeyRemap,
+    /// Transparent alias: body is a single `Ref` with args matching type params in order.
+    TransparentAlias,
+}
+
+/// How the declaration filters its source keyspace (classified at prep time).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PreparedKeyFilterShape {
+    #[default]
+    All,
+    IncludeLiteral(Vec<String>),
+    ExcludeLiteral(Vec<String>),
+    Opaque(TypeExpr),
+}
+
+/// How the declaration remaps key names (classified at prep time).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PreparedKeyRemapShape {
+    #[default]
+    Identity,
+    Prefix(String),
+    Suffix(String),
+    CaseTransform(PreparedCaseTransformKind),
+    Opaque(TypeExpr),
+}
+
+/// Case transform kinds for key remapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedCaseTransformKind {
+    Capitalize,
+    Uncapitalize,
+    Uppercase,
+    Lowercase,
+}
+
+/// How the declaration transforms member values (classified at prep time).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PreparedValueRuleShape {
+    /// Value is `T[K]` — pass through unchanged.
+    #[default]
+    PassThrough,
+    /// Value involves a transform over `T[K]`.
+    Transform(TypeExpr),
+}
+
+/// Surface modifiers (optional/readonly) for structural wrapper classification.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreparedSurfaceModifiers {
+    /// `Some(true)` = add optional, `Some(false)` = remove optional, `None` = unchanged.
+    pub optional: Option<bool>,
+    /// `Some(true)` = add readonly, `Some(false)` = remove readonly, `None` = unchanged.
+    pub readonly: Option<bool>,
 }
 
 /// A member in the prepared member index — pre-extracted from the declaration
@@ -259,6 +353,7 @@ impl PreparedTypeDecl {
             name_resolution: FxHashMap::default(),
             provenance: DeclProvenance::default(),
             cache_deps: PreparedCacheDeps::default(),
+            wrapper_shape: PreparedWrapperShape::default(),
         }
     }
 
@@ -324,6 +419,234 @@ impl PreparedTypeDecl {
     /// Classify using the broader PreparedDeclKind.
     pub fn prepared_kind(&self) -> PreparedDeclKind {
         PreparedDeclKind::from(self.kind)
+    }
+
+    /// Classify the structural wrapper shape from the body and type parameters.
+    ///
+    /// Must be called after `type_parameters` is populated. Sets `self.wrapper_shape`.
+    pub fn classify_wrapper_shape(&mut self) {
+        self.wrapper_shape = classify_wrapper_shape_inner(&self.body, &self.type_parameters);
+    }
+}
+
+/// Check if a TypeExpr is a bare `Ref` to the given name with no type args.
+fn is_bare_ref(expr: &TypeExpr, name: &str) -> bool {
+    matches!(expr, TypeExpr::Ref { name: n, type_arguments } if &**n == name && type_arguments.is_empty())
+}
+
+/// Check if a TypeExpr is `T[K]` (indexed access of base by param).
+fn is_passthrough_value(value: &TypeExpr, base_name: &str, param_name: &str) -> bool {
+    match value {
+        TypeExpr::IndexedAccess { object, index } => {
+            is_bare_ref(object, base_name) && is_bare_ref(index, param_name)
+        }
+        _ => false,
+    }
+}
+
+/// Classify the body of a mapped type declaration into a `PreparedWrapperShape`.
+fn classify_wrapper_shape_inner(
+    body: &TypeExpr,
+    type_params: &[TypeParam],
+) -> PreparedWrapperShape {
+    // Only classify mapped type bodies with at least one type param
+    let (param, source, value, optional, readonly, name_type) = match body {
+        TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } => (parameter, source, value, optional, readonly, name_type),
+        _ => {
+            // Check for transparent alias: body is Ref with args matching params in order
+            return classify_transparent_alias(body, type_params);
+        }
+    };
+
+    // Source must be `keyof T` where T is a type parameter
+    let base_param = match &**source {
+        TypeExpr::KeyOf(inner) => match &**inner {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => type_params
+                .iter()
+                .position(|tp| tp.name == **name)
+                .map(|idx| (idx, &**name)),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let (source_param_index, base_name) = match base_param {
+        Some((idx, name)) => (idx, name),
+        None => return PreparedWrapperShape::default(),
+    };
+
+    // Classify optional/readonly modifiers
+    let opt_mod = match optional {
+        MappedModifier::None => None,
+        MappedModifier::Add => Some(true),
+        MappedModifier::Remove => Some(false),
+    };
+    let ro_mod = match readonly {
+        MappedModifier::None => None,
+        MappedModifier::Add => Some(true),
+        MappedModifier::Remove => Some(false),
+    };
+    let modifiers = PreparedSurfaceModifiers {
+        optional: opt_mod,
+        readonly: ro_mod,
+    };
+
+    // Check value rule: is it `T[K]` (passthrough)?
+    let value_rule = if is_passthrough_value(value, base_name, param) {
+        PreparedValueRuleShape::PassThrough
+    } else {
+        PreparedValueRuleShape::Transform((**value).clone())
+    };
+
+    // Check name_type for key remap
+    let key_remap = match name_type {
+        None => PreparedKeyRemapShape::Identity,
+        Some(nt) => classify_key_remap(nt, param),
+    };
+
+    // Determine the kind
+    let is_passthrough = matches!(value_rule, PreparedValueRuleShape::PassThrough);
+    let is_identity_remap = matches!(key_remap, PreparedKeyRemapShape::Identity);
+
+    let kind = if is_passthrough && is_identity_remap && opt_mod.is_none() && ro_mod.is_none() {
+        PreparedWrapperKind::Identity
+    } else if is_passthrough && is_identity_remap {
+        PreparedWrapperKind::PureOverlay
+    } else if !is_identity_remap {
+        PreparedWrapperKind::KeyRemap
+    } else {
+        PreparedWrapperKind::None
+    };
+
+    PreparedWrapperShape {
+        kind,
+        source_param_index: Some(source_param_index as u16),
+        key_filter: PreparedKeyFilterShape::All,
+        key_remap,
+        value_rule,
+        modifiers,
+    }
+}
+
+/// Classify key remap from a name_type expression.
+fn classify_key_remap(name_type: &TypeExpr, param: &str) -> PreparedKeyRemapShape {
+    match name_type {
+        // `` `prefix${K & string}` `` or `` `${K & string}suffix` ``
+        TypeExpr::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            // Check for single expression that is K & string or just K
+            if expressions.len() == 1 && quasis.len() == 2 {
+                let expr_is_param = is_param_or_param_intersect_string(&expressions[0], param);
+                if expr_is_param {
+                    let prefix = &quasis[0];
+                    let suffix = &quasis[1];
+                    if suffix.is_empty() && !prefix.is_empty() {
+                        return PreparedKeyRemapShape::Prefix(prefix.clone());
+                    }
+                    if prefix.is_empty() && !suffix.is_empty() {
+                        return PreparedKeyRemapShape::Suffix(suffix.clone());
+                    }
+                }
+            }
+            PreparedKeyRemapShape::Opaque(name_type.clone())
+        }
+        // `Capitalize<K & string>` etc.
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.len() == 1 => {
+            let arg_is_param = is_param_or_param_intersect_string(&type_arguments[0], param);
+            if arg_is_param {
+                match &**name {
+                    "Capitalize" => {
+                        return PreparedKeyRemapShape::CaseTransform(
+                            PreparedCaseTransformKind::Capitalize,
+                        )
+                    }
+                    "Uncapitalize" => {
+                        return PreparedKeyRemapShape::CaseTransform(
+                            PreparedCaseTransformKind::Uncapitalize,
+                        )
+                    }
+                    "Uppercase" => {
+                        return PreparedKeyRemapShape::CaseTransform(
+                            PreparedCaseTransformKind::Uppercase,
+                        )
+                    }
+                    "Lowercase" => {
+                        return PreparedKeyRemapShape::CaseTransform(
+                            PreparedCaseTransformKind::Lowercase,
+                        )
+                    }
+                    _ => {}
+                }
+            }
+            PreparedKeyRemapShape::Opaque(name_type.clone())
+        }
+        _ => PreparedKeyRemapShape::Opaque(name_type.clone()),
+    }
+}
+
+/// Check if an expression is `K` or `K & string` (common in mapped type name remaps).
+fn is_param_or_param_intersect_string(expr: &TypeExpr, param: &str) -> bool {
+    // Direct param ref
+    if is_bare_ref(expr, param) {
+        return true;
+    }
+    // K & string
+    if let TypeExpr::Intersection(parts) = expr {
+        if parts.len() == 2 {
+            let has_param = parts.iter().any(|p| is_bare_ref(p, param));
+            let has_string = parts
+                .iter()
+                .any(|p| matches!(p, TypeExpr::Primitive(PrimitiveName::String)));
+            return has_param && has_string;
+        }
+    }
+    false
+}
+
+/// Classify transparent alias: body is a single Ref with type args matching
+/// type params in order (e.g., `type Alias<T, U> = Other<T, U>`).
+fn classify_transparent_alias(body: &TypeExpr, type_params: &[TypeParam]) -> PreparedWrapperShape {
+    if type_params.is_empty() {
+        return PreparedWrapperShape::default();
+    }
+
+    match body {
+        TypeExpr::Ref {
+            name: _,
+            type_arguments,
+        } if type_arguments.len() == type_params.len() => {
+            // Check each arg matches the corresponding type param
+            let all_match = type_arguments
+                .iter()
+                .zip(type_params.iter())
+                .all(|(arg, tp)| is_bare_ref(arg, &tp.name));
+
+            if all_match {
+                PreparedWrapperShape {
+                    kind: PreparedWrapperKind::TransparentAlias,
+                    ..PreparedWrapperShape::default()
+                }
+            } else {
+                PreparedWrapperShape::default()
+            }
+        }
+        TypeExpr::Parenthesized(inner) => classify_transparent_alias(inner, type_params),
+        _ => PreparedWrapperShape::default(),
     }
 }
 
@@ -673,5 +996,320 @@ mod tests {
 
         assert!(decl.member("first").is_some());
         assert!(decl.member("second").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrapper shape classification tests
+    // -----------------------------------------------------------------------
+
+    fn make_type_param(name: &str) -> TypeParam {
+        TypeParam {
+            name: name.into(),
+            constraint: None,
+            default: None,
+        }
+    }
+
+    /// Helper: `{ [K in keyof T]: T[K] }` — identity mapped type
+    fn identity_mapped_body(base: &str, param: &str) -> TypeExpr {
+        TypeExpr::Mapped {
+            parameter: param.into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named(base)))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named(base)),
+                index: Arc::new(TypeExpr::named(param)),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::None,
+            name_type: None,
+        }
+    }
+
+    #[test]
+    fn classify_identity_mapped_type() {
+        let body = identity_mapped_body("T", "K");
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Identity"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::Identity);
+        assert_eq!(decl.wrapper_shape.source_param_index, Some(0));
+        assert!(matches!(
+            decl.wrapper_shape.value_rule,
+            PreparedValueRuleShape::PassThrough
+        ));
+        assert!(matches!(
+            decl.wrapper_shape.key_remap,
+            PreparedKeyRemapShape::Identity
+        ));
+        // Negative: must not be PureOverlay or TransparentAlias
+        assert_ne!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_ne!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKind::TransparentAlias
+        );
+    }
+
+    #[test]
+    fn classify_partial_overlay() {
+        // { [K in keyof T]?: T[K] }
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::Add,
+            readonly: MappedModifier::None,
+            name_type: None,
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "MyPartial"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(decl.wrapper_shape.modifiers.optional, Some(true));
+        // Negative: readonly unchanged, key remap is identity, value is passthrough
+        assert_eq!(decl.wrapper_shape.modifiers.readonly, None);
+        assert!(matches!(
+            decl.wrapper_shape.key_remap,
+            PreparedKeyRemapShape::Identity
+        ));
+        assert!(matches!(
+            decl.wrapper_shape.value_rule,
+            PreparedValueRuleShape::PassThrough
+        ));
+    }
+
+    #[test]
+    fn classify_required_overlay() {
+        // { [K in keyof T]-?: T[K] }
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::Remove,
+            readonly: MappedModifier::None,
+            name_type: None,
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "MyRequired"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(decl.wrapper_shape.modifiers.optional, Some(false));
+        // Negative: readonly unchanged
+        assert_eq!(decl.wrapper_shape.modifiers.readonly, None);
+    }
+
+    #[test]
+    fn classify_readonly_overlay() {
+        // { readonly [K in keyof T]: T[K] }
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::Add,
+            name_type: None,
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "MyReadonly"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
+        assert_eq!(decl.wrapper_shape.modifiers.readonly, Some(true));
+        // Negative: optional unchanged
+        assert_eq!(decl.wrapper_shape.modifiers.optional, None);
+    }
+
+    #[test]
+    fn classify_prefix_key_remap() {
+        // { [K in keyof T as `data-${K & string}`]: T[K] }
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::None,
+            name_type: Some(Arc::new(TypeExpr::TemplateLiteral {
+                quasis: vec!["data-".into(), String::new()],
+                expressions: Arc::from(vec![TypeExpr::Intersection(Arc::from(vec![
+                    TypeExpr::named("K"),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                ]))]),
+            })),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "DataPrefixed"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::KeyRemap);
+        assert!(matches!(
+            decl.wrapper_shape.key_remap,
+            PreparedKeyRemapShape::Prefix(ref p) if p == "data-"
+        ));
+        // Negative: value is still passthrough
+        assert!(matches!(
+            decl.wrapper_shape.value_rule,
+            PreparedValueRuleShape::PassThrough
+        ));
+    }
+
+    #[test]
+    fn classify_capitalize_key_remap() {
+        // { [K in keyof T as Capitalize<K & string>]: T[K] }
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("T")),
+                index: Arc::new(TypeExpr::named("K")),
+            }),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::None,
+            name_type: Some(Arc::new(TypeExpr::named_with_args(
+                "Capitalize",
+                vec![TypeExpr::Intersection(Arc::from(vec![
+                    TypeExpr::named("K"),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                ]))],
+            ))),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "CapKeys"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::KeyRemap);
+        assert!(matches!(
+            decl.wrapper_shape.key_remap,
+            PreparedKeyRemapShape::CaseTransform(PreparedCaseTransformKind::Capitalize)
+        ));
+    }
+
+    #[test]
+    fn classify_transparent_alias() {
+        // type Alias<T, U> = Other<T, U>
+        let body =
+            TypeExpr::named_with_args("Other", vec![TypeExpr::named("T"), TypeExpr::named("U")]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Alias"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T"), make_type_param("U")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(
+            decl.wrapper_shape.kind,
+            PreparedWrapperKind::TransparentAlias
+        );
+        // Negative: source_param_index is None for transparent aliases (not mapped)
+        assert_eq!(decl.wrapper_shape.source_param_index, None);
+    }
+
+    #[test]
+    fn classify_non_structural_body() {
+        // type Foo<T> = T extends string ? T : never
+        let body = TypeExpr::Conditional {
+            check: Arc::new(TypeExpr::named("T")),
+            extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            true_type: Arc::new(TypeExpr::named("T")),
+            false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Foo"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        // Negative: source_param_index is None for non-structural bodies
+        assert_eq!(decl.wrapper_shape.source_param_index, None);
+    }
+
+    #[test]
+    fn classify_value_transform_not_identity() {
+        // { [K in keyof T]: Wrap<T[K]> } — value transform, not identity
+        let body = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+            value: Arc::new(TypeExpr::named_with_args(
+                "Wrap",
+                vec![TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("K")),
+                }],
+            )),
+            optional: MappedModifier::None,
+            readonly: MappedModifier::None,
+            name_type: None,
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Wrapped"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![make_type_param("T")];
+        decl.classify_wrapper_shape();
+
+        // Has a value transform, so not Identity or PureOverlay
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        assert!(matches!(
+            decl.wrapper_shape.value_rule,
+            PreparedValueRuleShape::Transform(_)
+        ));
+    }
+
+    #[test]
+    fn classify_no_type_params_is_none() {
+        // type Foo = string — no type params, no wrapper
+        let body = TypeExpr::Primitive(PrimitiveName::String);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Foo"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.classify_wrapper_shape();
+
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
+        // Negative: no source param for non-generic types
+        assert_eq!(decl.wrapper_shape.source_param_index, None);
     }
 }

@@ -4,6 +4,7 @@ use crate::resolver_core::{
 };
 use std::rc::Rc;
 use std::sync::Arc;
+use verter_semantic::analysis::Hash16;
 use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
 use verter_workspace::WorkspaceAccess;
 
@@ -62,6 +63,8 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
 struct CountingWorkspace {
     inner: Arc<verter_workspace::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+    exists_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+    manifest_read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
     resolve_counts: parking_lot::Mutex<rustc_hash::FxHashMap<(String, String), u64>>,
 }
 
@@ -72,6 +75,8 @@ impl CountingWorkspace {
                 verter_workspace::MemoryOptions::default(),
             )),
             read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            exists_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            manifest_read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolve_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         }
     }
@@ -91,6 +96,26 @@ impl CountingWorkspace {
 
     fn read_count(&self, path: &str) -> u64 {
         self.read_counts.lock().get(path).copied().unwrap_or(0)
+    }
+
+    fn reset_exists(&self) {
+        self.exists_counts.lock().clear();
+    }
+
+    fn exists_count(&self, path: &str) -> u64 {
+        self.exists_counts.lock().get(path).copied().unwrap_or(0)
+    }
+
+    fn reset_manifest_reads(&self) {
+        self.manifest_read_counts.lock().clear();
+    }
+
+    fn manifest_read_count(&self, path: &str) -> u64 {
+        self.manifest_read_counts
+            .lock()
+            .get(path)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn reset_resolves(&self) {
@@ -117,6 +142,11 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
+        *self
+            .exists_counts
+            .lock()
+            .entry(canonical_id.to_string())
+            .or_default() += 1;
         self.inner.file_exists(canonical_id)
     }
 
@@ -128,6 +158,11 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         &self,
         canonical_id: &str,
     ) -> Option<verter_workspace::PackageManifest> {
+        *self
+            .manifest_read_counts
+            .lock()
+            .entry(canonical_id.to_string())
+            .or_default() += 1;
         self.inner.read_package_manifest(canonical_id)
     }
 
@@ -999,6 +1034,415 @@ defineProps<{ button?: Button }>()
 }
 
 #[test]
+fn dependency_resolutions_for_eval_in_view_overrides_runtime_routes_for_declaration_type_imports() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/helper/dist/helper.d.ts",
+        "export type Prettify<T> = { [K in keyof T]: T[K] }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/helper/dist/helper.js",
+        "export const runtimeOnly = true\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/lib/dist/index.d.ts",
+        r#"
+import type { Prettify } from 'helper'
+export type FancyProps = Prettify<{ open: boolean }>
+"#,
+    );
+
+    host.set_import_dependencies(
+        "/workspace/node_modules/lib/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "helper".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/helper/dist/helper.js".to_string()),
+            possible_canonical_ids: vec![
+                "/workspace/node_modules/helper/dist/helper.js".to_string(),
+                "/workspace/node_modules/helper/dist/helper.d.ts".to_string(),
+            ],
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let resolutions = host
+        .dependency_resolutions_for_eval_in_view(
+            "/workspace/node_modules/lib/dist/index.d.ts",
+            Some(&view),
+        )
+        .expect("captured store view should expose dependency resolutions for declaration files");
+
+    assert_eq!(
+        resolutions
+            .get("helper")
+            .and_then(|resolution| resolution.effective_target()),
+        Some("/workspace/node_modules/helper/dist/helper.d.ts"),
+        "declaration-file type imports must override stale runtime routes with the declaration entrypoint",
+    );
+}
+
+#[test]
+fn dependency_resolutions_for_eval_in_view_reuses_cached_miss_for_unresolved_alias_imports() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    upsert_vue(
+        &host,
+        "/workspace/CheckboxGroup.vue",
+        r#"<script setup lang="ts">
+import theme from '#build/ui/checkbox-group'
+
+type Slots = typeof theme.slots
+defineProps<{ slots?: Slots }>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let view = host.resolver_store_view();
+
+    ws.reset_resolves();
+    ws.reset_reads();
+    ws.reset_manifest_reads();
+
+    let resolutions = host
+        .dependency_resolutions_for_eval_in_view("/workspace/CheckboxGroup.vue", Some(&view))
+        .expect("captured view should expose dependency resolutions for the current file");
+
+    let alias_resolution = resolutions
+        .get("#build/ui/checkbox-group")
+        .expect("structural dependency merge should preserve the unresolved alias import");
+    assert!(
+        alias_resolution.effective_target().is_none(),
+        "unresolved alias imports should stay unresolved inside the captured view",
+    );
+    assert_eq!(
+        ws.resolve_count("/workspace/CheckboxGroup.vue", "#build/ui/checkbox-group"),
+        0,
+        "cached miss entries in the captured view must not trigger a fresh workspace resolve",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/package.json"),
+        0,
+        "cached miss entries must not trigger package probing via direct file reads",
+    );
+    assert_eq!(
+        ws.manifest_read_count("/workspace/package.json"),
+        0,
+        "cached miss entries must not trigger package manifest probing",
+    );
+}
+
+#[test]
+fn prepared_type_decl_in_view_resolves_plain_declaration_import_helpers() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/helper/dist/helper.d.ts",
+        "export type Prettify<T> = { [K in keyof T]: T[K] }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/helper/dist/helper.js",
+        "export const runtimeOnly = true\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/lib/dist/index.d.ts",
+        r#"
+import { Prettify } from 'helper'
+export type FancyProps = Prettify<{ open: boolean }>
+"#,
+    );
+
+    host.set_import_dependencies(
+        "/workspace/node_modules/lib/dist/index.d.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "helper".to_string(),
+            resolved_canonical_id: Some("/workspace/node_modules/helper/dist/helper.js".to_string()),
+            possible_canonical_ids: vec![
+                "/workspace/node_modules/helper/dist/helper.js".to_string(),
+                "/workspace/node_modules/helper/dist/helper.d.ts".to_string(),
+            ],
+        }],
+    );
+
+    let prepared = host
+        .prepared_type_decl_in_view("/workspace/node_modules/lib/dist/index.d.ts", "FancyProps", None)
+        .expect("FancyProps should prepare from the imported declaration cache");
+
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("Prettify")
+            .map(|identity| (identity.canonical_id.as_str(), identity.symbol_name.as_str())),
+        Some(("/workspace/node_modules/helper/dist/helper.d.ts", "Prettify")),
+        "plain imports inside declaration files must resolve helper names through the declaration entrypoint rather than leaving them unresolved or pinned to JS companions",
+    );
+}
+
+#[test]
+fn prepared_type_decl_in_view_rebuilds_name_resolution_after_dependency_route_upgrade() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/.nuxt/ui/checkbox.ts",
+        "const theme = { slots: { root: 'slot' } } as const\nexport default theme\n",
+    );
+    upsert_vue(
+        &host,
+        "/workspace/Checkbox.vue",
+        r#"<script lang="ts">
+import theme from '#build/ui/checkbox'
+
+export interface CheckboxProps {
+  slots?: typeof theme.slots
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let initial = host
+        .prepared_type_decl_in_view("/workspace/Checkbox.vue", "CheckboxProps", None)
+        .expect("CheckboxProps should prepare before dependency routes are upgraded");
+    assert_eq!(
+        initial
+            .name_resolution
+            .get("theme")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("#build/ui/checkbox"),
+        "before the import route is upgraded the prepared decl should still carry the raw alias target",
+    );
+
+    host.set_import_dependencies(
+        "/workspace/Checkbox.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "#build/ui/checkbox".to_string(),
+            resolved_canonical_id: Some("/workspace/.nuxt/ui/checkbox.ts".to_string()),
+            possible_canonical_ids: vec!["/workspace/.nuxt/ui/checkbox.ts".to_string()],
+        }],
+    );
+
+    let rebuilt = host
+        .prepared_type_decl_in_view("/workspace/Checkbox.vue", "CheckboxProps", None)
+        .expect("CheckboxProps should rebuild after dependency routes are upgraded");
+    assert_eq!(
+        rebuilt
+            .name_resolution
+            .get("theme")
+            .map(|identity| (identity.canonical_id.as_str(), identity.symbol_name.as_str())),
+        Some(("/workspace/.nuxt/ui/checkbox.ts", "default")),
+        "prepared decl caches must rebuild when dependency resolutions improve so later typeof/name-resolution walks do not reopen the raw alias path",
+    );
+}
+
+#[test]
+fn prepared_type_decl_in_view_backfills_missing_local_symbol_when_cache_is_partial() {
+    let host = make_host();
+    let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
+    let source = r#"
+type Local = { open: boolean }
+export type FancyProps = Local
+"#;
+    upsert_non_sfc(&host, canonical_id, source);
+
+    let state = host
+        .shallow_file_state_in_view(canonical_id, None)
+        .expect("shallow state should exist for declaration file");
+    let partial_prepared = crate::resolver_core::build_prepared_type_decl_cache(
+        canonical_id,
+        state.as_ref(),
+        None,
+    )
+    .into_iter()
+    .filter(|(name, _)| name == "FancyProps")
+    .collect();
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut(canonical_id)
+            .expect("imported dependency cache entry should exist after upsert");
+        let entry = Arc::make_mut(entry);
+        entry.prepared_type_decls = partial_prepared;
+    }
+
+    let prepared = host
+        .prepared_type_decl_in_view(canonical_id, "Local", None)
+        .expect("missing local decl should be prepared from shallow state even when the cache already holds other entries");
+
+    assert_eq!(prepared.root_identity.canonical_id, canonical_id);
+    assert_eq!(prepared.root_identity.symbol_name, "Local");
+}
+
+#[test]
+fn prepared_type_decl_in_view_rebuilds_symbol_inventory_when_existing_entry_lacks_eval_source() {
+    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+
+    let host = make_host();
+    let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
+    let source = r#"
+type Local = { open: boolean }
+export type FancyProps = Local
+"#;
+    let allocator = oxc_allocator::Allocator::new();
+    let analysis = Arc::new(analyze_external_type_source(source, &allocator));
+    let shallow_without_eval = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+        Hash16::default(),
+        Arc::clone(&analysis),
+        None,
+    ));
+    assert!(
+        shallow_without_eval.symbols.is_empty(),
+        "the regression needs an entry whose shallow state was built without eval_source",
+    );
+    let rebuilt_with_eval = crate::resolver_core::ShallowFileState::from_analysis_with_source(
+        Hash16::default(),
+        Arc::clone(&analysis),
+        Some(source),
+        None,
+    );
+    assert!(
+        rebuilt_with_eval.symbols.contains_key("Local"),
+        "rebuilt shallow state should recover local symbols once eval_source is available",
+    );
+
+    host.imported_dependency_cache.lock().insert(
+        canonical_id.into(),
+        Arc::new(crate::ImportedDependencyCacheEntry {
+            workspace_generation: host.ws().content_generation(),
+            whole_hash: Hash16::default(),
+            resolved_canonical_id: canonical_id.into(),
+            raw_source: Arc::<str>::from(source),
+            cached_parse: None,
+            script_analysis: None,
+            export_signatures: None,
+            external_type_analysis: Some(analysis),
+            shallow_file_state: Some(shallow_without_eval),
+            snapshot: None,
+            eval_source: None,
+            required_owner_import_names: None,
+            exported_required_import_names: rustc_hash::FxHashMap::default(),
+            resolved_type_roots: rustc_hash::FxHashMap::default(),
+            resolved_type_declarations: rustc_hash::FxHashMap::default(),
+            prepared_type_decls: rustc_hash::FxHashMap::default(),
+            prepared_value_decls: rustc_hash::FxHashMap::default(),
+            dependency_resolutions: rustc_hash::FxHashMap::default(),
+        }),
+    );
+
+    let upgraded = host
+        .ensure_shallow_imported_dependency_state_in_view(canonical_id, None)
+        .expect("existing imported entry should be upgraded");
+    assert!(
+        upgraded.eval_source.is_some(),
+        "upgraded imported entries should retain an eval source",
+    );
+    assert!(
+        upgraded
+            .shallow_file_state
+            .as_ref()
+            .is_some_and(|state| state.symbols.contains_key("Local")),
+        "upgraded imported entries should replace export-only shallow state with a full symbol inventory",
+    );
+    assert!(
+        upgraded.prepared_type_decls.contains_key("Local"),
+        "upgraded imported entries should rebuild prepared type caches from the recovered symbol inventory",
+    );
+
+    let prepared = host
+        .prepared_type_decl_in_view(canonical_id, "Local", None)
+        .expect("cached imported entries without eval_source should be upgraded before prepared lookup");
+
+    assert_eq!(prepared.root_identity.symbol_name, "Local");
+    assert!(
+        host.shallow_file_state_in_view(canonical_id, None)
+            .is_some_and(|state| state.symbols.contains_key("Local")),
+        "the upgraded shallow state should retain the rebuilt local symbol inventory",
+    );
+}
+
+#[test]
+fn ensure_shallow_imported_dependency_state_replaces_stale_prepared_type_decls() {
+    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+    use verter_semantic::analysis::type_eval::TypeDeclKind;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+    use verter_semantic::analysis::type_solver::{PreparedTypeDecl, ResolvedRootIdentity};
+
+    let host = make_host();
+    let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
+    let source = r#"
+type Box<T> = { value: T }
+export type FancyProps = Box<string>
+"#;
+    let allocator = oxc_allocator::Allocator::new();
+    let analysis = Arc::new(analyze_external_type_source(source, &allocator));
+    let shallow_without_eval = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+        Hash16::default(),
+        Arc::clone(&analysis),
+        None,
+    ));
+
+    let mut stale_prepared = PreparedTypeDecl::new(
+        ResolvedRootIdentity::new(canonical_id, "Box"),
+        TypeDeclKind::Alias,
+        TypeExpr::named("stale"),
+    );
+    stale_prepared.cache_deps.defining_file = Some((canonical_id.to_string(), 0));
+
+    host.imported_dependency_cache.lock().insert(
+        canonical_id.into(),
+        Arc::new(crate::ImportedDependencyCacheEntry {
+            workspace_generation: host.ws().content_generation(),
+            whole_hash: Hash16::default(),
+            resolved_canonical_id: canonical_id.into(),
+            raw_source: Arc::<str>::from(source),
+            cached_parse: None,
+            script_analysis: None,
+            export_signatures: None,
+            external_type_analysis: Some(analysis),
+            shallow_file_state: Some(shallow_without_eval),
+            snapshot: None,
+            eval_source: None,
+            required_owner_import_names: None,
+            exported_required_import_names: rustc_hash::FxHashMap::default(),
+            resolved_type_roots: rustc_hash::FxHashMap::default(),
+            resolved_type_declarations: rustc_hash::FxHashMap::default(),
+            prepared_type_decls: rustc_hash::FxHashMap::from_iter([(
+                "Box".to_string(),
+                Arc::new(stale_prepared),
+            )]),
+            prepared_value_decls: rustc_hash::FxHashMap::default(),
+            dependency_resolutions: rustc_hash::FxHashMap::default(),
+        }),
+    );
+
+    let upgraded = host
+        .ensure_shallow_imported_dependency_state_in_view(canonical_id, None)
+        .expect("existing imported entry should be upgraded");
+    let upgraded_prepared = upgraded
+        .prepared_type_decls
+        .get("Box")
+        .expect("prepared Box should be rebuilt from the upgraded shallow state");
+    assert_eq!(
+        upgraded_prepared.type_parameters.len(),
+        1,
+        "richer rebuild should replace stale prepared generics instead of preserving the old entry",
+    );
+    assert!(
+        upgraded_prepared.member_index.contains_key("value"),
+        "richer rebuild should replace stale member indexes instead of preserving the old entry",
+    );
+
+    let prepared = host
+        .prepared_type_decl_in_view(canonical_id, "Box", None)
+        .expect("prepared type lookup should return the refreshed declaration");
+    assert_eq!(prepared.type_parameters.len(), 1);
+    assert!(prepared.member_index.contains_key("value"));
+}
+
+#[test]
 fn resolver_store_view_tracks_transitive_dependency_targets() {
     let host = strict_host();
 
@@ -1250,6 +1694,102 @@ fn store_view_generic_dependency_paths_promote_snapshot_and_env_into_imported_ca
     assert!(
         after.snapshot.is_some(),
         "store-view snapshot build should promote the snapshot into the imported dependency cache"
+    );
+}
+
+#[test]
+fn store_view_current_eval_state_does_not_seed_unloaded_imported_dependency_from_workspace() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+    ws.reset_reads();
+
+    assert!(
+        host.current_eval_state_in_view(canonical_id, Some(&view)).is_none(),
+        "store-view current_eval_state should not seed imported dependency source from workspace",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        0,
+        "current_eval_state must not touch the workspace for an unseeded imported dependency",
+    );
+}
+
+#[test]
+fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+    ws.reset_reads();
+
+    let entry = host
+        .ensure_shallow_imported_dependency_state_in_view(canonical_id, Some(&view))
+        .expect("explicit shallow seeding should load imported dependency state");
+    assert!(
+        entry.external_type_analysis.is_some(),
+        "explicit shallow seeding should build external type analysis",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "explicit shallow seeding should read the imported file once",
+    );
+
+    assert!(
+        host.current_eval_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "current_eval_state should reuse the imported cache after explicit seeding",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "current_eval_state should reuse the seeded imported cache without another workspace read",
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(canonical_id, Some(&view))
+        .expect("snapshot build should reuse the seeded imported cache");
+    assert!(
+        snapshot.bindings.is_empty(),
+        "simple declaration file should still produce a valid snapshot",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "snapshot materialization should not reread the imported file once seeded",
+    );
+
+    let env = host
+        .base_eval_env_in_view(canonical_id, Some(&view))
+        .expect("eval env build should reuse the seeded imported cache");
+    assert!(
+        env.type_symbols.contains_key("Alpha"),
+        "eval env should expose the imported declaration symbol",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "eval env build should not reread the imported file once seeded",
     );
 }
 
@@ -4461,6 +5001,271 @@ fn resolve_eval_dependency_canonical_in_view_ignores_empty_candidate_without_rea
 }
 
 #[test]
+fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before_raw_extensionless_probe() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    let resolved = host.resolve_eval_dependency_canonical_in_view(
+        "/workspace/src/runtime/types/html",
+        None,
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/src/runtime/types/html.ts"),
+        "extensionless dependency canonicalization should resolve to the typed companion",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "extensionless dependency canonicalization must stay on existence probes",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "extensionless dependency canonicalization should not probe the raw missing path before the typed companion candidates",
+    );
+}
+
+#[test]
+fn current_eval_state_in_view_normalizes_extensionless_canonical_before_fallback_load() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    let state = host.current_eval_state_in_view("/workspace/src/runtime/types/html", None);
+
+    assert!(
+        state.is_some(),
+        "extensionless canonical ids should still materialize eval state from the typed companion",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "materializing eval state must not read the raw missing extensionless path",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "materializing eval state must not probe the raw extensionless path before normalization",
+    );
+}
+
+#[test]
+fn get_raw_analysis_snapshot_in_view_normalizes_extensionless_canonical_before_building_snapshot() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    let snapshot =
+        host.get_raw_analysis_snapshot_in_view("/workspace/src/runtime/types/html", None);
+
+    assert!(
+        snapshot.is_some(),
+        "extensionless canonical ids should still build a raw snapshot from the typed companion",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "building the raw snapshot must not read the raw missing extensionless path",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "building the raw snapshot must not probe the raw extensionless path before normalization",
+    );
+}
+
+#[test]
+fn prepared_type_decl_in_view_normalizes_extensionless_canonical_before_shallow_backfill() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    let prepared = host.prepared_type_decl_in_view(
+        "/workspace/src/runtime/types/html",
+        "ButtonHTMLAttributes",
+        None,
+    );
+
+    assert!(
+        prepared.is_some(),
+        "prepared type lookup should backfill from the typed companion when the canonical id is extensionless",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "prepared type lookup must not read the raw missing extensionless path",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "prepared type lookup must not probe the raw extensionless path before normalization",
+    );
+}
+
+#[test]
+fn ensure_loaded_normalizes_extensionless_canonical_before_workspace_read() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    let loaded = host.ensure_loaded("/workspace/src/runtime/types/html");
+
+    assert!(
+        loaded,
+        "ensure_loaded should accept extensionless canonical ids when a typed companion exists",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "ensure_loaded must not read the raw missing extensionless path",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "ensure_loaded must not probe the raw missing extensionless path before normalization",
+    );
+}
+
+#[test]
+fn upsert_normalizes_extensionless_macro_type_blockers_before_scheduler_workspace_read() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/runtime/types/html.ts",
+        "export interface ButtonHTMLAttributes { disabled?: boolean }\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    upsert_vue(
+        &host,
+        "/workspace/src/runtime/components/Button.vue",
+        r#"<script setup lang="ts">
+import type { ButtonHTMLAttributes } from '../types/html'
+
+defineProps<ButtonHTMLAttributes>()
+</script>
+<template><button /></template>"#,
+    );
+
+    assert_eq!(
+        ws.read_count("/workspace/src/runtime/types/html"),
+        0,
+        "scheduler blocker ingestion must not read the raw extensionless dependency path",
+    );
+    assert_eq!(
+        ws.exists_count("/workspace/src/runtime/types/html"),
+        0,
+        "scheduler blocker ingestion must not probe the raw extensionless dependency path before normalization",
+    );
+    assert!(
+        ws.read_count("/workspace/src/runtime/types/html.ts") >= 1,
+        "scheduler blocker ingestion should read the normalized typed companion at least once",
+    );
+}
+
+#[test]
+fn read_analysis_source_and_current_eval_state_ignore_empty_canonical_ids() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    ws.reset_exists();
+    assert!(
+        host.read_analysis_source("").is_none(),
+        "empty canonical ids should not resolve analysis source",
+    );
+    assert!(
+        host.current_eval_state_in_view("", None).is_none(),
+        "empty canonical ids should not materialize eval state",
+    );
+    assert_eq!(
+        ws.read_count(""),
+        0,
+        "empty canonical ids must not trigger workspace reads",
+    );
+    assert_eq!(
+        ws.exists_count(""),
+        0,
+        "empty canonical ids must not trigger workspace existence probes",
+    );
+    assert!(
+        host.clone_current_imported_dependency_entry("", None)
+            .is_none(),
+        "empty canonical ids must not seed imported dependency cache entries",
+    );
+}
+
+#[test]
+fn read_analysis_source_and_current_eval_state_ignore_raw_import_specifiers() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    for specifier in ["../types/html", "#build/ui/checkbox", "@nuxt/schema", "vue"] {
+        ws.reset_reads();
+        ws.reset_exists();
+
+        assert!(
+            host.read_analysis_source(specifier).is_none(),
+            "raw import specifier {specifier} should not resolve analysis source",
+        );
+        assert!(
+            host.current_eval_state_in_view(specifier, None).is_none(),
+            "raw import specifier {specifier} should not materialize eval state",
+        );
+        assert_eq!(
+            ws.read_count(specifier),
+            0,
+            "raw import specifier {specifier} must not trigger workspace reads",
+        );
+        assert_eq!(
+            ws.exists_count(specifier),
+            0,
+            "raw import specifier {specifier} must not trigger workspace existence probes",
+        );
+        assert!(
+            host.clone_current_imported_dependency_entry(specifier, None)
+                .is_none(),
+            "raw import specifier {specifier} must not seed imported dependency cache entries",
+        );
+    }
+}
+
+#[test]
 fn external_type_analysis_in_view_uses_eval_source_for_vue_dependencies() {
     let host = make_host();
     upsert_non_sfc(
@@ -5929,6 +6734,132 @@ export type TargetEmits = { change: [value: string] }
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_local_symbols() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './b'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BOnly { unused: number }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        "export interface TargetProps { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.ensure_shallow_imported_dependency_state_in_view("/src/types/index.ts", None)
+        .expect("barrel should materialize shallow imported state");
+
+    ws.reset_resolves();
+
+    let prepared = host.prepared_type_decl_in_view("/src/types/index.ts", "TargetProps", None);
+
+    assert!(
+        prepared.is_none(),
+        "prepared decl lookup on an export-only barrel should stay local and defer route resolution",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./a"),
+        0,
+        "missing local prepared decl lookup must not resolve earlier wildcard siblings",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./b"),
+        0,
+        "missing local prepared decl lookup must not resolve intermediate wildcard siblings",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./target"),
+        0,
+        "missing local prepared decl lookup must not resolve the eventual wildcard target",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn current_dependency_fact_versions_in_view_keeps_imported_barrel_exact_resolution_shallow() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types/index.ts",
+        "export * from './a'\nexport * from './b'\nexport * from './target'\n",
+    );
+    ws.inject_file(
+        "/src/types/a.ts",
+        "export interface AOnly { unused: string }\n",
+    );
+    ws.inject_file(
+        "/src/types/b.ts",
+        "export interface BOnly { unused: number }\n",
+    );
+    ws.inject_file(
+        "/src/types/target.ts",
+        "export interface TargetProps { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.ensure_shallow_imported_dependency_state_in_view("/src/types/index.ts", None)
+        .expect("barrel should materialize shallow imported state");
+    let view = host.resolver_store_view();
+
+    ws.reset_resolves();
+
+    let facts = host.current_dependency_fact_versions_in_view(
+        "/src/types/index.ts",
+        &std::collections::BTreeSet::new(),
+        Some(&view),
+    );
+
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./a"),
+        0,
+        "captured fact-version lookup must not resolve earlier wildcard siblings for exact-resolution hashing",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./b"),
+        0,
+        "captured fact-version lookup must not resolve intermediate wildcard siblings for exact-resolution hashing",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./target"),
+        0,
+        "captured fact-version lookup must not resolve the matched wildcard target for exact-resolution hashing",
+    );
+    assert!(
+        !facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+                ..
+            } if canonical_id == "/src/types/index.ts"
+        )),
+        "captured fact-version lookup should not force an exact-resolution fact for a shallow imported barrel",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn ensure_export_registry_keeps_imported_barrels_export_only() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -6424,6 +7355,177 @@ export interface UnusedProps {
         ws.read_count("/src/Unused.vue"),
         0,
         "route selection should stop after the matched first-level wildcard child",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_unseeded_late_match_skips_earlier_wildcard_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        concat!(
+            "export * from './Accordion.vue'\n",
+            "export * from './Alert.vue'\n",
+            "export * from './AuthForm.vue'\n",
+            "export * from './Avatar.vue'\n",
+            "export * from './Checkbox.vue'\n",
+            "export * from './Unused.vue'\n",
+        ),
+    );
+    ws.inject_file(
+        "/src/Accordion.vue",
+        r#"<script lang="ts">
+export interface AccordionProps {
+  items?: string[]
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Alert.vue",
+        r#"<script lang="ts">
+export interface AlertProps {
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/AuthForm.vue",
+        r#"<script lang="ts">
+export interface AuthFormProps {
+  title?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Checkbox.vue",
+        r#"<script lang="ts">
+export interface CheckboxProps {
+  checked?: boolean
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let resolved =
+        host.resolve_named_type_export_target_in_view("/src/types.ts", "CheckboxProps", None);
+
+    assert_eq!(
+        resolved,
+        Some(("/src/Checkbox.vue".to_string(), "CheckboxProps".to_string())),
+        "late wildcard match should still resolve to the correct child",
+    );
+    assert_eq!(
+        ws.read_count("/src/Accordion.vue"),
+        0,
+        "late wildcard routing should not load unrelated earlier siblings while choosing the route",
+    );
+    assert_eq!(
+        ws.read_count("/src/Alert.vue"),
+        0,
+        "late wildcard routing should not load unrelated earlier siblings while choosing the route",
+    );
+    assert_eq!(
+        ws.read_count("/src/AuthForm.vue"),
+        0,
+        "late wildcard routing should not load unrelated earlier siblings while choosing the route",
+    );
+    assert_eq!(
+        ws.read_count("/src/Avatar.vue"),
+        0,
+        "late wildcard routing should not load unrelated earlier siblings while choosing the route",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "late wildcard routing should stop once the matched child is known",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_named_type_export_target_prefers_longest_wildcard_prefix_match() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Checkbox.vue'\nexport * from './CheckboxGroup.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Checkbox.vue",
+        r#"<script lang="ts">
+export interface CheckboxProps {
+  checked?: boolean
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/CheckboxGroup.vue",
+        r#"<script lang="ts">
+export interface CheckboxGroupProps {
+  items?: string[]
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let resolved = host.resolve_named_type_export_target_in_view(
+        "/src/types.ts",
+        "CheckboxGroupProps",
+        None,
+    );
+
+    assert_eq!(
+        resolved,
+        Some((
+            "/src/CheckboxGroup.vue".to_string(),
+            "CheckboxGroupProps".to_string()
+        )),
+        "route selection should prefer the longest matching wildcard source stem",
+    );
+    assert_eq!(
+        ws.read_count("/src/Checkbox.vue"),
+        0,
+        "the shorter prefix sibling should not be loaded before the longer exact match",
     );
 }
 

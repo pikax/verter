@@ -588,8 +588,10 @@ impl VerterHost {
         let mut resolver_host = HostComponentMetaResolver {
             host: self,
             store_view,
-            shared_owner_batch: Some(std::cell::RefCell::new(
-                verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host),
+            shared_owner_engine: Some(std::cell::RefCell::new(
+                verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                    &owner_solver_host,
+                ),
             )),
         };
         let parts = crate::resolver_core::resolve_component_meta_parts(
@@ -605,17 +607,19 @@ impl VerterHost {
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = std::time::Instant::now();
-        let owner_batch = resolver_host
-            .shared_owner_batch
+        let owner_engine = resolver_host
+            .shared_owner_engine
             .take()
             .map(std::cell::RefCell::into_inner)
             .unwrap_or_else(|| {
-                verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host)
+                verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                    &owner_solver_host,
+                )
             });
-        let mut solve_batch = crate::resolver_core::ComponentMetaSolveBatch::from_owner_batch(
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
             self,
             store_view,
-            owner_batch,
+            owner_engine,
         );
         let mut resolver_view =
             crate::resolver_core::ComponentMetaResolverView::new(self, store_view);
@@ -629,7 +633,7 @@ impl VerterHost {
             &mut parts.resolved_type_registry_meta,
             &mut parts.tracked_dependencies,
             store_view,
-            &mut solve_batch,
+            &mut query_engine,
             &mut resolver_view,
         );
         let final_store_view = self.resolver_store_view();
@@ -688,7 +692,7 @@ impl VerterHost {
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         tracked_dependencies: &mut BTreeSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        solve_batch: &mut crate::resolver_core::ComponentMetaSolveBatch<'_>,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         resolver_view: &mut crate::resolver_core::ComponentMetaResolverView<'_>,
     ) {
         fn track_component_meta_dependency(
@@ -740,7 +744,7 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved_canonical_id.clone();
-            let materialized = solve_batch
+            let materialized = query_engine
                 .solve_scoped(
                     resolved_canonical_id.as_str(),
                     resolved_exported_name.as_str(),
@@ -898,7 +902,7 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
-                    let type_expr = solve_batch
+                    let type_expr = query_engine
                         .solve_scoped(
                             resolved_canonical_id.as_str(),
                             resolved_exported_name.as_str(),
@@ -935,14 +939,14 @@ impl VerterHost {
                     resolver_view.resolve_type_declaration(owner_canonical, type_name.as_str());
             }
             let mut materialized = if declaration_owner != owner_canonical {
-                solve_batch.solve_scoped(declaration_owner, type_name.as_str())
+                query_engine.solve_scoped(declaration_owner, type_name.as_str())
             } else {
                 None
             };
             let owner_collection_expr =
                 resolver_view.owner_collection_expr(owner_canonical, type_name.as_str());
             materialized =
-                materialized.or_else(|| solve_batch.solve_owner_named(type_name.as_str()));
+                materialized.or_else(|| query_engine.solve_owner_named(type_name.as_str()));
             if materialized.is_some() && declaration.canonical_source.is_empty() {
                 if let Some(import) = snapshot
                     .imports
@@ -1011,6 +1015,8 @@ impl VerterHost {
             "get_raw_analysis_snapshot",
             format!("owner={} store_view={}", canonical, store_view.is_some()),
         );
+        let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical, store_view);
+        let canonical = normalized_canonical.as_ref();
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
         {
@@ -1025,6 +1031,9 @@ impl VerterHost {
         {
             let mut fallback_whole_hash = None;
             let mut fallback_source: Option<Arc<str>> = None;
+            let mut fallback_cached_parse: Option<
+                Arc<verter_compiler::parser::types::ParsedSfc>,
+            > = None;
             let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
             {
                 let whole_hash = store_view
@@ -1096,10 +1105,22 @@ impl VerterHost {
                     }
                 }
 
-                let source = self.read_analysis_source_in_view(canonical, store_view)?;
-                let whole_hash = crate::hash::hash_16(source.as_bytes());
+                let (source, whole_hash, cached_parse) = self
+                    .current_eval_state_in_view(canonical, store_view)
+                    .map(|(source, cached_parse, whole_hash)| (source, whole_hash, cached_parse))
+                    .or_else(|| {
+                        self.seed_imported_dependency_base_in_view(canonical, store_view)
+                            .map(|entry| {
+                                (
+                                    Arc::clone(&entry.raw_source),
+                                    entry.whole_hash,
+                                    entry.cached_parse.clone(),
+                                )
+                            })
+                    })?;
                 fallback_whole_hash = Some(whole_hash);
                 fallback_source = Some(Arc::clone(&source));
+                fallback_cached_parse = cached_parse.clone();
                 if store_view.is_none() {
                     if let Some(snapshot) =
                         self.clone_cached_raw_analysis_snapshot(canonical, whole_hash)
@@ -1133,7 +1154,7 @@ impl VerterHost {
                     "get_raw_analysis_snapshot_build_from_source",
                     format!("owner={} source_len={}", canonical, source.len()),
                 );
-                self.build_snapshot_from_source(canonical, &source)
+                self.build_snapshot_from_source_state(canonical, &source, cached_parse.as_deref())
             };
             self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
             self.enrich_destructured_bindings(&mut snapshot);
@@ -1150,7 +1171,7 @@ impl VerterHost {
                     canonical,
                     whole_hash,
                     source,
-                    None,
+                    fallback_cached_parse.clone(),
                     Some(Arc::new(snapshot.clone())),
                     None,
                     None,
@@ -1482,7 +1503,7 @@ impl VerterHost {
         ] {
             if let Some(hash) = store_view
                 .and_then(|view| view.derived_hash(canonical, kind))
-                .or_else(|| self.current_derived_fact_hash(canonical, kind))
+                .or_else(|| self.current_derived_fact_hash_in_view(canonical, kind, store_view))
             {
                 let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
                     canonical_id: canonical.to_string(),
@@ -1509,10 +1530,11 @@ impl VerterHost {
         }
     }
 
-    fn current_derived_fact_hash(
+    fn current_derived_fact_hash_in_view(
         &self,
         canonical_id: &str,
         kind: crate::resolver_core::DerivedFactKind,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Hash16> {
         match kind {
             crate::resolver_core::DerivedFactKind::DirectSource => {
@@ -1574,12 +1596,20 @@ impl VerterHost {
                         })
                 }
             }
-            crate::resolver_core::DerivedFactKind::ExactResolution => self
-                .dependency_resolutions_for_eval_in_view(canonical_id, None)
-                .and_then(|resolutions| {
-                    (!resolutions.is_empty())
-                        .then(|| crate::resolver_store::hash_dependency_resolutions(&resolutions))
-                }),
+            crate::resolver_core::DerivedFactKind::ExactResolution => {
+                if let Some(view) = store_view {
+                    return view.dependency_resolutions(canonical_id).and_then(|resolutions| {
+                        (!resolutions.is_empty())
+                            .then(|| crate::resolver_store::hash_dependency_resolutions(resolutions))
+                    });
+                }
+
+                self.dependency_resolutions_for_eval_in_view(canonical_id, None)
+                    .and_then(|resolutions| {
+                        (!resolutions.is_empty())
+                            .then(|| crate::resolver_store::hash_dependency_resolutions(&resolutions))
+                    })
+            }
         }
     }
 
@@ -2724,8 +2754,11 @@ fn resolved_meta_cache_key(
 struct HostComponentMetaResolver<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
-    shared_owner_batch:
-        Option<std::cell::RefCell<verter_semantic::analysis::type_solver::solve::SolveBatch<'a>>>,
+    shared_owner_engine: Option<
+        std::cell::RefCell<
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'a>,
+        >,
+    >,
 }
 
 impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
@@ -2920,7 +2953,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
         // Always run the solver-host macro path. The solver resolves cross-file
         // types on demand from the host's prepared-decl cache.
-        let computed_eval_types = if let Some(batch) = &self.shared_owner_batch {
+        let computed_eval_types = if let Some(engine) = &self.shared_owner_engine {
             let eval_source = eval_context
                 .and_then(|captured| captured.owner_eval_source.as_deref())
                 .map(str::to_string)
@@ -2932,7 +2965,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                         })
                 });
             eval_source.and_then(|eval_source| {
-                let mut batch = batch.borrow_mut();
+                let mut engine = engine.borrow_mut();
                 self.host
                     .compute_evaluated_types_from_owner_context_in_view(
                         owner_canonical,
@@ -2940,7 +2973,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                         &eval_source,
                         &dep_resolutions,
                         self.store_view,
-                        Some(&mut *batch),
+                        Some(&mut *engine),
                     )
             })
         } else {
@@ -3074,7 +3107,7 @@ pub(crate) fn resolve_type_declaration_in_view(
     let resolver = HostComponentMetaResolver {
         host,
         store_view: Some(current_view),
-        shared_owner_batch: None,
+        shared_owner_engine: None,
     };
     let key =
         crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);

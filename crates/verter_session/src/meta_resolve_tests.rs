@@ -1684,9 +1684,9 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
             None,
             "/src/types.ts",
         );
-    let mut solve_batch =
-        crate::resolver_core::ComponentMetaSolveBatch::new(&host, None, &owner_solver_host);
-    let materialized = solve_batch
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(&host, None, &owner_solver_host);
+    let materialized = query_engine
         .solve_scoped("/src/types.ts", "Props")
         .expect("solver-backed registry decl materialization should use cached prepared state");
 
@@ -4137,7 +4137,7 @@ defineProps<Props>()
 // ===========================================================================
 
 #[test]
-fn scoped_solve_batch_caches_by_scope_and_name() {
+fn component_meta_query_engine_caches_by_scope_and_name() {
     let project = make_project();
     project
         .upsert_base(
@@ -4164,32 +4164,32 @@ defineProps<SharedType>()
             Some(&store_view),
             "/src/App.vue",
         );
-    let mut batch = crate::resolver_core::ComponentMetaSolveBatch::new(
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
         Some(&store_view),
         &owner_solver_host,
     );
 
     // First solve
-    let result1 = batch.solve_scoped("/src/types.ts", "SharedType");
+    let result1 = query_engine.solve_scoped("/src/types.ts", "SharedType");
     assert!(result1.is_some(), "should resolve SharedType from types.ts");
 
     // Second solve of same (scope, name) — should be cached
-    let result2 = batch.solve_scoped("/src/types.ts", "SharedType");
+    let result2 = query_engine.solve_scoped("/src/types.ts", "SharedType");
     assert_eq!(
         format!("{:?}", result1),
         format!("{:?}", result2),
         "second solve should return cached result"
     );
     assert_eq!(
-        batch.scoped_cache_len(),
+        query_engine.scoped_cache_len(),
         1,
         "should have exactly one cached entry (not two)"
     );
 }
 
 #[test]
-fn scoped_solve_batch_different_scopes_do_not_alias() {
+fn component_meta_query_engine_different_scopes_do_not_alias() {
     let project = make_project();
     project
         .upsert_base("/src/a.ts", "export type Foo = string")
@@ -4217,14 +4217,14 @@ defineProps<{ a: FooA; b: FooB }>()
             Some(&store_view),
             "/src/App.vue",
         );
-    let mut batch = crate::resolver_core::ComponentMetaSolveBatch::new(
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
         Some(&store_view),
         &owner_solver_host,
     );
 
-    let from_a = batch.solve_scoped("/src/a.ts", "Foo");
-    let from_b = batch.solve_scoped("/src/b.ts", "Foo");
+    let from_a = query_engine.solve_scoped("/src/a.ts", "Foo");
+    let from_b = query_engine.solve_scoped("/src/b.ts", "Foo");
 
     assert!(from_a.is_some(), "Foo from a.ts should resolve");
     assert!(from_b.is_some(), "Foo from b.ts should resolve");
@@ -4237,14 +4237,14 @@ defineProps<{ a: FooA; b: FooB }>()
         "Foo from a.ts (string) and Foo from b.ts (number) must not alias"
     );
     assert_eq!(
-        batch.scoped_cache_len(),
+        query_engine.scoped_cache_len(),
         2,
         "two different scopes should produce two cache entries"
     );
 }
 
 #[test]
-fn resolve_component_meta_parts_populates_shared_owner_batch() {
+fn resolve_component_meta_parts_populates_shared_owner_engine() {
     let project = make_project();
     project
         .upsert_base(
@@ -4271,8 +4271,10 @@ defineProps<Local>()
     let resolver_host = super::HostComponentMetaResolver {
         host,
         store_view: Some(&store_view),
-        shared_owner_batch: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::solve::SolveBatch::new(&owner_solver_host),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
         )),
     };
 
@@ -4284,23 +4286,23 @@ defineProps<Local>()
         None,
     );
 
-    let batch_cell = resolver_host
-        .shared_owner_batch
+    let engine_cell = resolver_host
+        .shared_owner_engine
         .as_ref()
-        .expect("shared owner batch should still be available");
-    let before = batch_cell.borrow().cache_len();
-    assert!(before > 0, "phase 1 should populate the shared owner batch");
+        .expect("shared owner engine should still be available");
+    let before = engine_cell.borrow().cache_len();
+    assert!(before > 0, "phase 1 should populate the shared owner engine");
 
     let result =
-        batch_cell
+        engine_cell
             .borrow_mut()
             .solve(&verter_semantic::analysis::type_expr::TypeExpr::named(
                 "Local",
             ));
-    let after = batch_cell.borrow().cache_len();
+    let after = engine_cell.borrow().cache_len();
     assert_eq!(
         after, before,
-        "owner-scoped solve should reuse the populated batch entry"
+        "owner-scoped solve should reuse the populated engine entry"
     );
 
     let result_json = serde_json::to_string(&result.value).unwrap();

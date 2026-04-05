@@ -133,12 +133,16 @@ impl SnapshotData for HostArtifactData {
 #[cfg(feature = "scheduler")]
 pub struct HostStageExecutor {
     pub config: HostConfig,
+    pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
 }
 
 #[cfg(feature = "scheduler")]
 impl HostStageExecutor {
-    pub fn new(config: HostConfig) -> Self {
-        Self { config }
+    pub fn new(
+        config: HostConfig,
+        workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
+    ) -> Self {
+        Self { config, workspace }
     }
 }
 
@@ -203,6 +207,13 @@ impl StageExecutor for HostStageExecutor {
             None => return ExtractedDeps::default(),
         };
         let parse = &host_data.parse;
+        let workspace = self.workspace.read().clone();
+        let normalize_dep = |dep_id: String| {
+            crate::host_manage::resolve_eval_dependency_canonical_with(&dep_id, |candidate| {
+                workspace.file_exists(candidate)
+            })
+            .unwrap_or(dep_id)
+        };
 
         let mut forward_deps = Vec::new();
         let mut blocker_ids = Vec::new();
@@ -216,7 +227,7 @@ impl StageExecutor for HostStageExecutor {
         for imp in &parse.script_analysis.imports {
             if imp.source.starts_with('.') || imp.source.starts_with("../") {
                 let resolved = crate::id::resolve_external(canonical_id, &imp.source);
-                forward_deps.push(resolved);
+                forward_deps.push(normalize_dep(resolved));
             }
         }
 
@@ -226,7 +237,7 @@ impl StageExecutor for HostStageExecutor {
         for dep in &parse.script_analysis.macro_type_deps {
             if dep.import_source.starts_with('.') || dep.import_source.starts_with("../") {
                 let resolved = crate::id::resolve_external(canonical_id, &dep.import_source);
-                blocker_ids.push(resolved);
+                blocker_ids.push(normalize_dep(resolved));
             }
             // Bare specifier deps (e.g. "motion") are resolved via the workspace
             // resolver, not here. They'll be handled when exact resolutions are set.

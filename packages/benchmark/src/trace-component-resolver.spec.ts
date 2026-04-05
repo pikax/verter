@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
   loadGeneratedComponentRegistry,
+  readComponentSourceForTrace,
   resolveComponentFile,
 } from "./trace-component-resolver.js";
 
@@ -20,6 +22,19 @@ describe("loadGeneratedComponentRegistry", () => {
 });
 
 describe("resolveComponentFile", () => {
+  it("accepts benchmark-relative vue paths directly", () => {
+    const file = resolveComponentFile("src/runtime/components/prose/callout/Caution.vue", { uiRoot });
+
+    expect(file.replace(/\\/g, "/")).toContain("/src/runtime/components/prose/callout/Caution.vue");
+  });
+
+  it("accepts absolute vue paths directly", () => {
+    const absolutePath = resolve(uiRoot, "src/runtime/components/prose/callout/Caution.vue");
+    const file = resolveComponentFile(absolutePath, { uiRoot });
+
+    expect(file.replace(/\\/g, "/")).toBe(absolutePath.replace(/\\/g, "/"));
+  });
+
   it("resolves prose subdirectory components from their docs token", () => {
     const file = resolveComponentFile("Caution", { uiRoot });
 
@@ -30,5 +45,12 @@ describe("resolveComponentFile", () => {
     const file = resolveComponentFile("ProseCaution", { uiRoot });
 
     expect(file.replace(/\\/g, "/")).toContain("/src/runtime/components/prose/callout/Caution.vue");
+  });
+
+  it("returns a resolved component path that the trace helper can read directly", () => {
+    const file = resolveComponentFile("CheckboxGroup", { uiRoot });
+
+    expect(readComponentSourceForTrace(file)).toContain("export interface CheckboxGroupProps");
+    expect(() => readFileSync(file, "utf-8")).not.toThrow();
   });
 });

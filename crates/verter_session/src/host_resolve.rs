@@ -329,6 +329,12 @@ impl VerterHost {
             }
         }
 
+        // TODO(component-meta): wildcard reexport sources from large barrels such as
+        // `src/runtime/types/index.ts` still arrive here as shallow misses because
+        // dependency_resolutions currently tracks imports, not `export *` routes.
+        // The next architectural pass should fold wildcard reexport routes into a
+        // query-local or host-owned cache so barrel route selection does not emit
+        // one miss per sibling before landing on the requested symbol.
         component_meta_trace_event!(
             "cached_dependency_resolution_in_view_result",
             format!(
@@ -346,6 +352,14 @@ impl VerterHost {
             .resolved_canonical_id
             .clone()
             .or_else(|| resolution.effective_target().map(str::to_string))
+    }
+
+    fn dependency_resolution_is_known_miss(
+        resolution: &crate::types::DependencyResolution,
+    ) -> bool {
+        resolution.resolved_canonical_id.is_none()
+            && resolution.effective_target().is_none()
+            && resolution.possible_canonical_ids.is_empty()
     }
 
     fn runtime_like_dependency_target(path: &str) -> bool {
@@ -583,18 +597,20 @@ impl VerterHost {
         import_source: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
-        if let Some(resolved) = self
-            .cached_dependency_resolution_in_view(owner_canonical, import_source, store_view)
-            .and_then(|resolution| {
-                self.prefer_type_dependency_target_from_resolution_in_view(
-                    owner_canonical,
-                    import_source,
-                    &resolution,
-                    store_view,
-                )
-            })
+        if let Some(existing) =
+            self.cached_dependency_resolution_in_view(owner_canonical, import_source, store_view)
         {
-            return Some(resolved);
+            if let Some(resolved) = self.prefer_type_dependency_target_from_resolution_in_view(
+                owner_canonical,
+                import_source,
+                &existing,
+                store_view,
+            ) {
+                return Some(resolved);
+            }
+            if store_view.is_some() && Self::dependency_resolution_is_known_miss(&existing) {
+                return None;
+            }
         }
 
         if import_source.starts_with('.') {
@@ -653,18 +669,20 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
         if let Some(view) = store_view {
-            if let Some(resolved) = self
-                .cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
-                .and_then(|resolution| {
-                    self.prefer_type_dependency_target_from_resolution_in_view(
-                        owner_canonical,
-                        import_source,
-                        &resolution,
-                        Some(view),
-                    )
-                })
+            if let Some(existing) =
+                self.cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
             {
-                return Some(resolved);
+                if let Some(resolved) = self.prefer_type_dependency_target_from_resolution_in_view(
+                    owner_canonical,
+                    import_source,
+                    &existing,
+                    Some(view),
+                ) {
+                    return Some(resolved);
+                }
+                if Self::dependency_resolution_is_known_miss(&existing) {
+                    return None;
+                }
             }
             if import_source.starts_with('.') {
                 if let Some(resolved) = self
@@ -787,11 +805,15 @@ impl VerterHost {
         }
 
         if let Some(view) = store_view {
-            if let Some(resolved) = self
-                .cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
-                .and_then(|resolution| Self::dependency_resolution_target(&resolution))
+            if let Some(existing) =
+                self.cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
             {
-                return Some(resolved);
+                if let Some(resolved) = Self::dependency_resolution_target(&existing) {
+                    return Some(resolved);
+                }
+                if Self::dependency_resolution_is_known_miss(&existing) {
+                    return None;
+                }
             }
             return self
                 .ws()

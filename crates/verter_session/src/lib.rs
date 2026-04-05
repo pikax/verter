@@ -341,7 +341,10 @@ impl VerterHost {
 
         #[cfg(feature = "scheduler")]
         let scheduler = {
-            let executor = Arc::new(host_executor::HostStageExecutor::new(config.clone()));
+            let executor = Arc::new(host_executor::HostStageExecutor::new(
+                config.clone(),
+                Arc::clone(&workspace_lock),
+            ));
             let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
             verter_scheduler::scheduler::Scheduler::with_executor(
                 verter_scheduler::scheduler::SchedulerConfig::default(),
@@ -1343,6 +1346,8 @@ impl VerterHost {
     /// snapshots without re-submitting the source.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical_id, None);
+        let canonical_id = normalized_canonical.as_ref();
         // Fast path: already in host and not evicted
         #[cfg(feature = "scheduler")]
         {

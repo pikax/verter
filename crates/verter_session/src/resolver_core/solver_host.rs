@@ -10,7 +10,7 @@ use verter_semantic::analysis::type_eval::TypeDeclKind;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_semantic::analysis::type_solver::host::{
-    RequestStatus, ResolvedRootIdentity, SolverProjection, TypeSolverHost, UtilitySource,
+    RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
 };
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
@@ -23,359 +23,6 @@ use crate::VerterHost;
 struct ImportBinding {
     canonical_id: String,
     exported_name: String,
-}
-
-fn member_projection_debug_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
-            || std::env::var_os("VERTER_META_DEBUG").is_some()
-            || std::env::var_os("VERTER_SOLVER_DEBUG").is_some()
-    })
-}
-
-fn member_projection_debug(message: impl AsRef<str>) {
-    if member_projection_debug_enabled() {
-        eprintln!("[verter-solver] {}", message.as_ref());
-    }
-}
-
-fn projection_expr_summary(expr: &TypeExpr) -> String {
-    match expr {
-        TypeExpr::Primitive(name) => format!("Primitive({name:?})"),
-        TypeExpr::Literal(lit) => format!("Literal({lit:?})"),
-        TypeExpr::Union(types) => format!("Union({} members)", types.len()),
-        TypeExpr::Intersection(types) => format!("Intersection({} members)", types.len()),
-        TypeExpr::Array { .. } => "Array".to_string(),
-        TypeExpr::Tuple { elements, .. } => format!("Tuple({} elements)", elements.len()),
-        TypeExpr::Object(obj) => format!("Object({} members)", obj.properties.len()),
-        TypeExpr::Function(_) => "Function".to_string(),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if type_arguments.is_empty() {
-                format!("Ref({name})")
-            } else {
-                format!("Ref({name}<{} args>)", type_arguments.len())
-            }
-        }
-        TypeExpr::TypeParameter(param) => format!("TypeParameter({})", param.name),
-        TypeExpr::KeyOf(_) => "KeyOf".to_string(),
-        TypeExpr::TypeOf(value) => format!("TypeOf({})", value.path.join(".")),
-        TypeExpr::IndexedAccess { .. } => "IndexedAccess".to_string(),
-        TypeExpr::Conditional { .. } => "Conditional".to_string(),
-        TypeExpr::Mapped { parameter, .. } => format!("Mapped({parameter})"),
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            format!("TemplateLiteral({} exprs)", expressions.len())
-        }
-        TypeExpr::Infer { name } => format!("Infer({name})"),
-        TypeExpr::Rest(_) => "Rest".to_string(),
-        TypeExpr::Parenthesized(inner) => {
-            format!("Parenthesized({})", projection_expr_summary(inner))
-        }
-        TypeExpr::RecursiveRef {
-            name,
-            type_arguments,
-            ..
-        } => {
-            if type_arguments.is_empty() {
-                format!("RecursiveRef({name})")
-            } else {
-                format!("RecursiveRef({name}<{} args>)", type_arguments.len())
-            }
-        }
-        TypeExpr::Unknown { raw } => {
-            let preview: String = raw.chars().take(40).collect();
-            format!("Unknown({preview})")
-        }
-    }
-}
-
-fn transparent_alias_ref(expr: &TypeExpr) -> Option<(&str, &[TypeExpr])> {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => Some((name.as_ref(), type_arguments.as_ref())),
-        TypeExpr::Parenthesized(inner) => transparent_alias_ref(inner),
-        _ => None,
-    }
-}
-
-fn push_unique_projection_context(
-    contexts: &mut Vec<Arc<PreparedTypeDecl>>,
-    prepared: &Arc<PreparedTypeDecl>,
-) {
-    if contexts.iter().any(|existing| {
-        existing.root_identity.canonical_id == prepared.root_identity.canonical_id
-            && existing.root_identity.symbol_name == prepared.root_identity.symbol_name
-    }) {
-        return;
-    }
-    contexts.push(Arc::clone(prepared));
-}
-
-fn build_type_param_bindings(
-    prepared: &PreparedTypeDecl,
-    args: &[TypeExpr],
-) -> FxHashMap<String, TypeExpr> {
-    prepared
-        .type_parameters
-        .iter()
-        .zip(args.iter())
-        .map(|(param, arg)| (param.name.clone(), arg.clone()))
-        .collect()
-}
-
-fn substitute_type_expr(expr: &TypeExpr, bindings: &FxHashMap<String, TypeExpr>) -> TypeExpr {
-    fn substitute(
-        expr: &TypeExpr,
-        bindings: &FxHashMap<String, TypeExpr>,
-        shadowed: &mut Vec<String>,
-    ) -> TypeExpr {
-        let is_shadowed =
-            |name: &str, shadowed: &[String]| shadowed.iter().any(|item| item == name);
-
-        match expr {
-            TypeExpr::Primitive(_) | TypeExpr::Literal(_) | TypeExpr::Unknown { .. } => expr.clone(),
-            TypeExpr::TypeParameter(param)
-                if !is_shadowed(&param.name, shadowed) && bindings.contains_key(&param.name) =>
-            {
-                bindings.get(&param.name).cloned().unwrap_or_else(|| expr.clone())
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if type_arguments.is_empty()
-                && !is_shadowed(name.as_ref(), shadowed)
-                && bindings.contains_key(name.as_ref()) =>
-            {
-                bindings
-                    .get(name.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| expr.clone())
-            }
-            TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
-                types
-                    .iter()
-                    .map(|ty| substitute(ty, bindings, shadowed))
-                    .collect::<Vec<_>>(),
-            )),
-            TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
-                types
-                    .iter()
-                    .map(|ty| substitute(ty, bindings, shadowed))
-                    .collect::<Vec<_>>(),
-            )),
-            TypeExpr::Array { element, readonly } => TypeExpr::Array {
-                element: Arc::new(substitute(element, bindings, shadowed)),
-                readonly: *readonly,
-            },
-            TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
-                elements: Arc::from(
-                    elements
-                        .iter()
-                        .map(|element| verter_semantic::analysis::type_expr::TupleElement {
-                            ty: substitute(&element.ty, bindings, shadowed),
-                            optional: element.optional,
-                            rest: element.rest,
-                            label: element.label.clone(),
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                readonly: *readonly,
-            },
-            TypeExpr::Object(obj) => TypeExpr::Object(Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
-                properties: obj
-                    .properties
-                    .iter()
-                    .map(|member| match member {
-                        verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
-                            verter_semantic::analysis::type_expr::ObjectMember::Property(
-                                verter_semantic::analysis::type_expr::ObjectProperty {
-                                    name: prop.name.clone(),
-                                    ty: substitute(&prop.ty, bindings, shadowed),
-                                    optional: prop.optional,
-                                    readonly: prop.readonly,
-                                },
-                            )
-                        }
-                        verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(sig) => {
-                            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
-                                verter_semantic::analysis::type_expr::IndexSignature {
-                                    key_name: sig.key_name.clone(),
-                                    key_type: substitute(&sig.key_type, bindings, shadowed),
-                                    value_type: substitute(&sig.value_type, bindings, shadowed),
-                                    readonly: sig.readonly,
-                                },
-                            )
-                        }
-                        verter_semantic::analysis::type_expr::ObjectMember::CallSignature(func) => {
-                            verter_semantic::analysis::type_expr::ObjectMember::CallSignature(
-                                substitute_function_expr(func, bindings, shadowed),
-                            )
-                        }
-                        verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(func) => {
-                            verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
-                                substitute_function_expr(func, bindings, shadowed),
-                            )
-                        }
-                        verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                            verter_semantic::analysis::type_expr::ObjectMember::Method(
-                                verter_semantic::analysis::type_expr::MethodSignature {
-                                    name: method.name.clone(),
-                                    function: substitute_function_expr(
-                                        &method.function,
-                                        bindings,
-                                        shadowed,
-                                    ),
-                                    optional: method.optional,
-                                },
-                            )
-                        }
-                    })
-                    .collect(),
-            })),
-            TypeExpr::Function(func) => {
-                TypeExpr::Function(Arc::new(substitute_function_expr(func, bindings, shadowed)))
-            }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => TypeExpr::Ref {
-                name: Arc::clone(name),
-                type_arguments: Arc::from(
-                    type_arguments
-                        .iter()
-                        .map(|arg| substitute(arg, bindings, shadowed))
-                        .collect::<Vec<_>>(),
-                ),
-            },
-            TypeExpr::TypeParameter(_) => expr.clone(),
-            TypeExpr::KeyOf(inner) => {
-                TypeExpr::KeyOf(Arc::new(substitute(inner, bindings, shadowed)))
-            }
-            TypeExpr::TypeOf(value_ref) => TypeExpr::TypeOf(value_ref.clone()),
-            TypeExpr::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
-                object: Arc::new(substitute(object, bindings, shadowed)),
-                index: Arc::new(substitute(index, bindings, shadowed)),
-            },
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => TypeExpr::Conditional {
-                check: Arc::new(substitute(check, bindings, shadowed)),
-                extends: Arc::new(substitute(extends, bindings, shadowed)),
-                true_type: Arc::new(substitute(true_type, bindings, shadowed)),
-                false_type: Arc::new(substitute(false_type, bindings, shadowed)),
-            },
-            TypeExpr::Mapped {
-                parameter,
-                source,
-                value,
-                optional,
-                readonly,
-                name_type,
-            } => {
-                shadowed.push(parameter.clone());
-                let mapped = TypeExpr::Mapped {
-                    parameter: parameter.clone(),
-                    source: Arc::new(substitute(source, bindings, shadowed)),
-                    value: Arc::new(substitute(value, bindings, shadowed)),
-                    optional: *optional,
-                    readonly: *readonly,
-                    name_type: name_type
-                        .as_ref()
-                        .map(|name_type| Arc::new(substitute(name_type, bindings, shadowed))),
-                };
-                shadowed.pop();
-                mapped
-            }
-            TypeExpr::TemplateLiteral {
-                quasis,
-                expressions,
-            } => TypeExpr::TemplateLiteral {
-                quasis: quasis.clone(),
-                expressions: Arc::from(
-                    expressions
-                        .iter()
-                        .map(|expr| substitute(expr, bindings, shadowed))
-                        .collect::<Vec<_>>(),
-                ),
-            },
-            TypeExpr::Infer { .. } => expr.clone(),
-            TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(substitute(inner, bindings, shadowed))),
-            TypeExpr::Parenthesized(inner) => {
-                TypeExpr::Parenthesized(Arc::new(substitute(inner, bindings, shadowed)))
-            }
-            TypeExpr::RecursiveRef {
-                name,
-                type_arguments,
-                conditional_context,
-            } => TypeExpr::RecursiveRef {
-                name: Arc::clone(name),
-                type_arguments: Arc::from(
-                    type_arguments
-                        .iter()
-                        .map(|arg| substitute(arg, bindings, shadowed))
-                        .collect::<Vec<_>>(),
-                ),
-                conditional_context: Arc::clone(conditional_context),
-            },
-        }
-    }
-
-    fn substitute_function_expr(
-        func: &verter_semantic::analysis::type_expr::FunctionExpr,
-        bindings: &FxHashMap<String, TypeExpr>,
-        shadowed: &mut Vec<String>,
-    ) -> verter_semantic::analysis::type_expr::FunctionExpr {
-        let base_len = shadowed.len();
-        for param in &func.type_parameters {
-            shadowed.push(param.name.clone());
-        }
-        let substituted = verter_semantic::analysis::type_expr::FunctionExpr {
-            parameters: func
-                .parameters
-                .iter()
-                .map(
-                    |param| verter_semantic::analysis::type_expr::FunctionParam {
-                        name: param.name.clone(),
-                        ty: substitute(&param.ty, bindings, shadowed),
-                        optional: param.optional,
-                        rest: param.rest,
-                    },
-                )
-                .collect(),
-            return_type: func
-                .return_type
-                .as_ref()
-                .map(|ret| Arc::new(substitute(ret, bindings, shadowed))),
-            type_parameters: func
-                .type_parameters
-                .iter()
-                .map(|param| verter_semantic::analysis::type_expr::TypeParam {
-                    name: param.name.clone(),
-                    constraint: param
-                        .constraint
-                        .as_ref()
-                        .map(|constraint| Arc::new(substitute(constraint, bindings, shadowed))),
-                    default: param
-                        .default
-                        .as_ref()
-                        .map(|default| Arc::new(substitute(default, bindings, shadowed))),
-                })
-                .collect(),
-        };
-        shadowed.truncate(base_len);
-        substituted
-    }
-
-    substitute(expr, bindings, &mut Vec::new())
 }
 
 /// Host-backed `TypeSolverHost` that resolves from:
@@ -507,6 +154,73 @@ impl<'a> SessionSolverHost<'a> {
             scope_value_names,
             scope_type_bindings,
             import_bindings,
+        }
+    }
+
+    fn cached_imported_entry(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
+        self.host
+            .clone_current_imported_dependency_entry(canonical_id, self.store_view)
+    }
+
+    fn cached_symbol_exists_in_entry(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        symbol_name: &str,
+    ) -> bool {
+        entry.prepared_type_decls.contains_key(symbol_name)
+            || entry.prepared_value_decls.contains_key(symbol_name)
+            || entry
+                .shallow_file_state
+                .as_ref()
+                .is_some_and(|state| {
+                    state.symbol(symbol_name).is_some() || state.value_symbol(symbol_name).is_some()
+                })
+    }
+
+    fn resolve_cached_import_binding(
+        &self,
+        canonical_id: &str,
+        local_name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        let entry = self.cached_imported_entry(canonical_id)?;
+        let state = entry.shallow_file_state.as_ref()?;
+        let (source_specifier, imported_name) = state.import_target(local_name)?;
+        let resolved_id = entry
+            .dependency_resolutions
+            .get(source_specifier)
+            .and_then(|resolution| {
+                resolution
+                    .effective_target()
+                    .map(str::to_string)
+                    .or_else(|| resolution.resolved_canonical_id.clone())
+            })?;
+        Some(ResolvedRootIdentity::new(resolved_id, imported_name))
+    }
+
+    fn resolve_cached_namespace_member(
+        &self,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        let dot_pos = symbol_name.find('.')?;
+        let prefix = &symbol_name[..dot_pos];
+        let member = &symbol_name[dot_pos + 1..];
+        let binding = self.resolve_cached_import_binding(canonical_id, prefix)?;
+
+        let target_entry = self.cached_imported_entry(&binding.canonical_id)?;
+        if self.cached_symbol_exists_in_entry(&target_entry, member) {
+            return Some(ResolvedRootIdentity::new(&binding.canonical_id, member));
+        }
+
+        let target_state = target_entry.shallow_file_state.as_ref()?;
+        match target_state.export_target(member) {
+            Some(crate::resolver_core::ExportTarget::Local { symbol_name }) => {
+                Some(ResolvedRootIdentity::new(&binding.canonical_id, symbol_name))
+            }
+            _ => None,
         }
     }
 }
@@ -646,166 +360,6 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         )
     }
 
-    fn resolve_member_projection(
-        &self,
-        root_identity: &ResolvedRootIdentity,
-        member: &str,
-    ) -> Option<SolverProjection<TypeExpr>> {
-        let Some(prepared) = self.resolve_prepared_type_decl(root_identity) else {
-            member_projection_debug(format!(
-                "member_projection miss root={}:{} member={} reason=prepared_decl_missing",
-                root_identity.canonical_id, root_identity.symbol_name, member,
-            ));
-            component_meta_trace_event!(
-                "solver_member_projection_result",
-                format!(
-                    "root={}::{} member={} source=prepared_decl_missing hit=false store_view={}",
-                    root_identity.canonical_id,
-                    root_identity.symbol_name,
-                    member,
-                    self.store_view.is_some()
-                ),
-            );
-            return None;
-        };
-        // Direct member lookup
-        if let Some(m) = prepared.member(member) {
-            member_projection_debug(format!(
-                "member_projection hit root={}:{} member={} expr={}",
-                root_identity.canonical_id,
-                root_identity.symbol_name,
-                member,
-                projection_expr_summary(&m.ty),
-            ));
-            component_meta_trace_event!(
-                "solver_member_projection_result",
-                format!(
-                    "root={}::{} member={} source=direct_member hit=true store_view={}",
-                    root_identity.canonical_id,
-                    root_identity.symbol_name,
-                    member,
-                    self.store_view.is_some()
-                ),
-            );
-            return Some(SolverProjection::exact_concrete(m.ty.clone()));
-        }
-
-        // Bounded transparent alias chase: follow Ref wrappers through prepared
-        // data (up to 5 hops) to find the member. Generic alias hops substitute
-        // their active type arguments into the projected member while preserving
-        // the declaration contexts needed to resolve helper-local aliases and
-        // caller-local type arguments.
-        {
-            let mut visited = rustc_hash::FxHashSet::default();
-            visited.insert((
-                root_identity.canonical_id.clone(),
-                root_identity.symbol_name.clone(),
-            ));
-            let mut current_prepared = Arc::clone(&prepared);
-            let mut current_bindings = FxHashMap::default();
-            let mut projection_contexts = vec![Arc::clone(&prepared)];
-
-            for _hop in 0..5 {
-                let (ref_name, raw_type_arguments) =
-                    match transparent_alias_ref(&current_prepared.body) {
-                        Some((name, type_arguments)) => (name.to_string(), type_arguments.to_vec()),
-                        _ => break,
-                    };
-                let effective_type_arguments = raw_type_arguments
-                    .iter()
-                    .map(|arg| substitute_type_expr(arg, &current_bindings))
-                    .collect::<Vec<_>>();
-
-                // Resolve through name_resolution of the current declaration
-                let Some(next_root) = current_prepared.name_resolution.get(&ref_name) else {
-                    break;
-                };
-
-                // Cycle protection
-                if !visited.insert((
-                    next_root.canonical_id.clone(),
-                    next_root.symbol_name.clone(),
-                )) {
-                    break;
-                }
-
-                let Some(next_prepared) = self.host.prepared_type_decl_in_view(
-                    &next_root.canonical_id,
-                    &next_root.symbol_name,
-                    self.store_view,
-                ) else {
-                    break;
-                };
-                push_unique_projection_context(&mut projection_contexts, &next_prepared);
-                let next_bindings =
-                    build_type_param_bindings(&next_prepared, &effective_type_arguments);
-
-                // Check member on this hop
-                if let Some(m) = next_prepared.member(member) {
-                    let projected_ty = if next_bindings.is_empty() {
-                        m.ty.clone()
-                    } else {
-                        substitute_type_expr(&m.ty, &next_bindings)
-                    };
-                    member_projection_debug(format!(
-                        "member_projection hit (alias chase hop {}) root={}:{} via={}:{} member={} expr={}",
-                        _hop + 1,
-                        root_identity.canonical_id,
-                        root_identity.symbol_name,
-                        next_root.canonical_id,
-                        next_root.symbol_name,
-                        member,
-                        projection_expr_summary(&projected_ty),
-                    ));
-                    component_meta_trace_event!(
-                        "solver_member_projection_result",
-                        format!(
-                            "root={}::{} member={} source=alias_chase hop={} target={}::{} generic={} hit=true store_view={}",
-                            root_identity.canonical_id,
-                            root_identity.symbol_name,
-                            member,
-                            _hop + 1,
-                            next_root.canonical_id,
-                            next_root.symbol_name,
-                            !effective_type_arguments.is_empty(),
-                            self.store_view.is_some()
-                        ),
-                    );
-                    return Some(
-                        SolverProjection::exact_concrete(projected_ty)
-                            .with_type_decl_contexts(projection_contexts),
-                    );
-                }
-
-                // Continue chasing through the next declaration's body
-                current_prepared = next_prepared;
-                current_bindings = next_bindings;
-            }
-        }
-
-        let mut available = prepared.member_index.keys().cloned().collect::<Vec<_>>();
-        available.sort();
-        member_projection_debug(format!(
-            "member_projection miss root={}:{} member={} reason=member_missing available=[{}]",
-            root_identity.canonical_id,
-            root_identity.symbol_name,
-            member,
-            available.join(", "),
-        ));
-        component_meta_trace_event!(
-            "solver_member_projection_result",
-            format!(
-                "root={}::{} member={} source=member_missing hit=false available=[{}] store_view={}",
-                root_identity.canonical_id,
-                root_identity.symbol_name,
-                member,
-                available.join(", "),
-                self.store_view.is_some()
-            ),
-        );
-        None
-    }
-
     fn utility_source(&self, name: &str) -> UtilitySource {
         if self.scope_type_names.contains(name) || self.scope_type_bindings.contains_key(name) {
             return UtilitySource::Shadowed;
@@ -839,18 +393,42 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             }
         }
 
-        // 2. If canonical_id is provided and non-empty, use it directly
+        // 2. If canonical_id is provided and non-empty, resolve within that
+        // file's cached shallow/prepared scope before giving up.
         if !canonical_id.is_empty() {
+            if let Some(entry) = self.cached_imported_entry(canonical_id) {
+                if self.cached_symbol_exists_in_entry(&entry, symbol_name) {
+                    let resolved = ResolvedRootIdentity::new(canonical_id, symbol_name);
+                    component_meta_trace_event!(
+                        "solver_root_identity_result",
+                        format!(
+                            "requested_canonical={} requested_symbol={} source=explicit_cached_scope result={}::{} hit=true store_view={}",
+                            canonical_id,
+                            symbol_name,
+                            resolved.canonical_id,
+                            resolved.symbol_name,
+                            self.store_view.is_some()
+                        ),
+                    );
+                    return Some(resolved);
+                }
+            }
+
             if self
-                .host
-                .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
-                .is_some()
+                .cached_imported_entry(canonical_id)
+                .and_then(|entry| entry.shallow_file_state.clone())
+                .is_some_and(|state| {
+                    matches!(
+                        state.export_target(symbol_name),
+                        Some(crate::resolver_core::ExportTarget::Local { .. })
+                    )
+                })
             {
                 let resolved = ResolvedRootIdentity::new(canonical_id, symbol_name);
                 component_meta_trace_event!(
                     "solver_root_identity_result",
                     format!(
-                        "requested_canonical={} requested_symbol={} source=explicit_type_decl result={}::{} hit=true store_view={}",
+                        "requested_canonical={} requested_symbol={} source=explicit_cached_export_scope result={}::{} hit=true store_view={}",
                         canonical_id,
                         symbol_name,
                         resolved.canonical_id,
@@ -860,16 +438,26 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 );
                 return Some(resolved);
             }
-            if self
-                .host
-                .prepared_value_decl_in_view(canonical_id, symbol_name, self.store_view)
-                .is_some()
-            {
-                let resolved = ResolvedRootIdentity::new(canonical_id, symbol_name);
+            if let Some(resolved) = self.resolve_cached_import_binding(canonical_id, symbol_name) {
                 component_meta_trace_event!(
                     "solver_root_identity_result",
                     format!(
-                        "requested_canonical={} requested_symbol={} source=explicit_value_decl result={}::{} hit=true store_view={}",
+                        "requested_canonical={} requested_symbol={} source=explicit_import_binding result={}::{} hit=true store_view={}",
+                        canonical_id,
+                        symbol_name,
+                        resolved.canonical_id,
+                        resolved.symbol_name,
+                        self.store_view.is_some()
+                    ),
+                );
+                return Some(resolved);
+            }
+            if let Some(resolved) = self.resolve_cached_namespace_member(canonical_id, symbol_name)
+            {
+                component_meta_trace_event!(
+                    "solver_root_identity_result",
+                    format!(
+                        "requested_canonical={} requested_symbol={} source=explicit_namespace_binding result={}::{} hit=true store_view={}",
                         canonical_id,
                         symbol_name,
                         resolved.canonical_id,
@@ -1194,6 +782,192 @@ export const defaults: Props = {} as Props
     }
 
     #[test]
+    fn explicit_canonical_root_identity_resolves_import_bindings_from_shallow_state() {
+        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
+        use verter_semantic::analysis::Hash16;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let allocator = oxc_allocator::Allocator::new();
+
+        let helper_source = "export type Prettify<T> = { [K in keyof T]: T[K] }";
+        let helper_analysis = Arc::new(analyze_external_type_source(helper_source, &allocator));
+        let helper_env = parse_and_build_env(helper_source);
+        let helper_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            Hash16::default(),
+            Arc::clone(&helper_analysis),
+            Some(&helper_env),
+        ));
+        let helper_prepared = crate::resolver_core::build_prepared_type_decl_cache(
+            "/helper.d.ts",
+            &helper_state,
+            None,
+        );
+
+        host.imported_dependency_cache.lock().insert(
+            "/helper.d.ts".into(),
+            Arc::new(crate::ImportedDependencyCacheEntry {
+                workspace_generation: host.ws().content_generation(),
+                whole_hash: Hash16::default(),
+                resolved_canonical_id: "/helper.d.ts".into(),
+                raw_source: Arc::<str>::from(helper_source),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                external_type_analysis: Some(helper_analysis),
+                shallow_file_state: Some(helper_state),
+                snapshot: None,
+                eval_source: Some(Arc::<str>::from(helper_source)),
+                required_owner_import_names: None,
+                exported_required_import_names: FxHashMap::default(),
+                resolved_type_roots: FxHashMap::default(),
+                resolved_type_declarations: FxHashMap::default(),
+                prepared_type_decls: helper_prepared,
+                prepared_value_decls: FxHashMap::default(),
+                dependency_resolutions: FxHashMap::default(),
+            }),
+        );
+
+        let decl_source = r#"
+import { Prettify } from "./helper"
+export type FancyProps = Prettify<{ open: boolean }>
+"#;
+        let decl_analysis = Arc::new(analyze_external_type_source(decl_source, &allocator));
+        let decl_env = parse_and_build_env(decl_source);
+        let decl_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            Hash16::default(),
+            Arc::clone(&decl_analysis),
+            Some(&decl_env),
+        ));
+
+        host.imported_dependency_cache.lock().insert(
+            "/decl.d.ts".into(),
+            Arc::new(crate::ImportedDependencyCacheEntry {
+                workspace_generation: host.ws().content_generation(),
+                whole_hash: Hash16::default(),
+                resolved_canonical_id: "/decl.d.ts".into(),
+                raw_source: Arc::<str>::from(decl_source),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                external_type_analysis: Some(decl_analysis),
+                shallow_file_state: Some(decl_state),
+                snapshot: None,
+                eval_source: Some(Arc::<str>::from(decl_source)),
+                required_owner_import_names: None,
+                exported_required_import_names: FxHashMap::default(),
+                resolved_type_roots: FxHashMap::default(),
+                resolved_type_declarations: FxHashMap::default(),
+                prepared_type_decls: FxHashMap::default(),
+                prepared_value_decls: FxHashMap::default(),
+                dependency_resolutions: FxHashMap::from_iter([(
+                    "./helper".to_string(),
+                    crate::types::DependencyResolution {
+                        specifier: "./helper".to_string(),
+                        resolved_canonical_id: Some("/helper.d.ts".to_string()),
+                        possible_canonical_ids: vec!["/helper.d.ts".to_string()],
+                    },
+                )]),
+            }),
+        );
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let prettify = solver_host
+            .root_identity("/decl.d.ts", "Prettify")
+            .expect("explicit canonical lookups should resolve import bindings from cached shallow state");
+
+        assert_eq!(prettify.canonical_id, "/helper.d.ts");
+        assert_eq!(prettify.symbol_name, "Prettify");
+    }
+
+    #[test]
+    fn explicit_canonical_root_identity_does_not_follow_uncached_import_bindings() {
+        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
+        use verter_semantic::analysis::Hash16;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let allocator = oxc_allocator::Allocator::new();
+
+        let helper_source = "export type Prettify<T> = { [K in keyof T]: T[K] }";
+        let helper_analysis = Arc::new(analyze_external_type_source(helper_source, &allocator));
+        let helper_env = parse_and_build_env(helper_source);
+        let helper_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            Hash16::default(),
+            Arc::clone(&helper_analysis),
+            Some(&helper_env),
+        ));
+        let helper_prepared =
+            crate::resolver_core::build_prepared_type_decl_cache("/helper.d.ts", &helper_state, None);
+
+        host.imported_dependency_cache.lock().insert(
+            "/helper.d.ts".into(),
+            Arc::new(crate::ImportedDependencyCacheEntry {
+                workspace_generation: host.ws().content_generation(),
+                whole_hash: Hash16::default(),
+                resolved_canonical_id: "/helper.d.ts".into(),
+                raw_source: Arc::<str>::from(helper_source),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                external_type_analysis: Some(helper_analysis),
+                shallow_file_state: Some(helper_state),
+                snapshot: None,
+                eval_source: Some(Arc::<str>::from(helper_source)),
+                required_owner_import_names: None,
+                exported_required_import_names: FxHashMap::default(),
+                resolved_type_roots: FxHashMap::default(),
+                resolved_type_declarations: FxHashMap::default(),
+                prepared_type_decls: helper_prepared,
+                prepared_value_decls: FxHashMap::default(),
+                dependency_resolutions: FxHashMap::default(),
+            }),
+        );
+
+        let decl_source = r#"
+import { Prettify } from "./helper"
+export type FancyProps = Prettify<{ open: boolean }>
+"#;
+        let decl_analysis = Arc::new(analyze_external_type_source(decl_source, &allocator));
+        let decl_env = parse_and_build_env(decl_source);
+        let decl_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            Hash16::default(),
+            Arc::clone(&decl_analysis),
+            Some(&decl_env),
+        ));
+
+        host.imported_dependency_cache.lock().insert(
+            "/decl.d.ts".into(),
+            Arc::new(crate::ImportedDependencyCacheEntry {
+                workspace_generation: host.ws().content_generation(),
+                whole_hash: Hash16::default(),
+                resolved_canonical_id: "/decl.d.ts".into(),
+                raw_source: Arc::<str>::from(decl_source),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                external_type_analysis: Some(decl_analysis),
+                shallow_file_state: Some(decl_state),
+                snapshot: None,
+                eval_source: Some(Arc::<str>::from(decl_source)),
+                required_owner_import_names: None,
+                exported_required_import_names: FxHashMap::default(),
+                resolved_type_roots: FxHashMap::default(),
+                resolved_type_declarations: FxHashMap::default(),
+                prepared_type_decls: FxHashMap::default(),
+                prepared_value_decls: FxHashMap::default(),
+                dependency_resolutions: FxHashMap::default(),
+            }),
+        );
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        assert!(
+            solver_host.root_identity("/decl.d.ts", "Prettify").is_none(),
+            "canonical-scoped root lookups must stay cache-only and refuse uncached import routing",
+        );
+    }
+
+    #[test]
     fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
         use verter_semantic::analysis::type_eval_build::parse_and_build_env;
@@ -1498,16 +1272,6 @@ export type CheckboxGroup = ComponentConfig<Theme>
 
         let solver_host =
             SessionSolverHost::with_declaration_scope(&host, None, "/types/consumer.ts");
-        let projection = solver_host
-            .resolve_member_projection(
-                &ResolvedRootIdentity::new("/types/consumer.ts", "CheckboxGroup"),
-                "slots",
-            )
-            .expect("generic alias member projection should resolve slots");
-        assert_eq!(
-            projection.exactness,
-            verter_semantic::analysis::type_solver::result::SolverExactness::ExactConcrete
-        );
 
         let (solved, trace) = solve_type_with_trace(
             &TypeExpr::IndexedAccess {

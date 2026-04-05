@@ -156,7 +156,11 @@ impl VerterHost {
                     .imports
                     .iter()
                     .filter(|imp| imp.source.starts_with('.'))
-                    .map(|imp| crate::id::resolve_external(&canonical_id, &imp.source)),
+                    .map(|imp| {
+                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
+                        self.resolve_eval_dependency_canonical_in_view(&resolved, None)
+                            .unwrap_or(resolved)
+                    }),
             )
             .collect();
 
@@ -432,7 +436,11 @@ impl VerterHost {
                     .imports
                     .iter()
                     .filter(|imp| imp.source.starts_with('.'))
-                    .map(|imp| crate::id::resolve_external(&canonical_id, &imp.source)),
+                    .map(|imp| {
+                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
+                        self.resolve_eval_dependency_canonical_in_view(&resolved, None)
+                            .unwrap_or(resolved)
+                    }),
             )
             .collect();
 

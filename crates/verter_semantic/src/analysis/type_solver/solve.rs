@@ -4,17 +4,17 @@
 //! query-local arena, lowers the expression, and resolves references through
 //! the host. Returns a `SolverResult<TypeExpr>` projected back from the arena.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::OnceLock;
 
-use super::arena::{Node, NodeId, PrimitiveKind, QueryArena};
+use super::arena::{Node, NodeId, PrimitiveKind, QueryArena, SolverCaches};
 use super::builtin::{expand_builtin, BuiltinUtility};
 use super::display::display_node;
 use super::host::{RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource};
-use super::lower::lower_type_expr;
-use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
+use super::lower::{lower_type_expr, lower_type_expr_in_scope};
+use super::prepared::{
+    PreparedKeyFilterShape, PreparedTypeDecl, PreparedValueDecl, PreparedWrapperKind,
+};
 use super::recursion::{RecursionKey, RecursionTracker};
 use super::result::{
     ExecutionStatus, IncompleteReason, SolverDiagnostic, SolverExactness, SolverResult,
@@ -95,26 +95,9 @@ pub struct SolveState {
     /// Count of diagnostics that were dropped after the cap was reached.
     pub diagnostics_truncated: usize,
 
-    // -- Query-local reuse caches --
-    /// Cache for host member projections within a single query. Keyed by
-    /// `(canonical_id, symbol_name, member_name)` → resolved `NodeId`.
-    /// Collapses repeated indexed-access projections like `Foo['bar']`
-    /// that would otherwise re-lower and re-resolve the same host result.
-    pub(crate) host_projection_cache: rustc_hash::FxHashMap<(String, String, String), NodeId>,
-
-    /// Cache for completed `resolve_prepared_ref` results within a single
-    /// query. Keyed by `RecursionKey` (identity + args_hash) → resolved
-    /// `NodeId`. Prevents repeated full instantiation of the same
-    /// declaration with the same effective arguments.
-    pub(crate) prepared_ref_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
-
     // -- Query audit / trace counters --
     /// Whether structured solver tracing is enabled for this query.
     pub(crate) trace_enabled: bool,
-
-    /// Audit surface for tests: counts host member projection calls.
-    /// Key: `(canonical_id, symbol_name, member)`, Value: call count.
-    pub(crate) audit_host_projections: rustc_hash::FxHashMap<(String, String, String), u32>,
 
     /// Audit surface for tests: counts prepared-ref instantiation entries.
     /// Key: `RecursionKey`, Value: call count.
@@ -135,11 +118,26 @@ pub struct SolveState {
     /// Audit surface for tests/tracing: incomplete reason kind counts.
     pub(crate) audit_incomplete_reason_kinds: rustc_hash::FxHashMap<&'static str, u32>,
 
-    /// Audit: total host projection cache hits in this query.
-    pub(crate) host_projection_cache_hits: u32,
+    /// Audit: total instantiation-cache hits in this query.
+    pub(crate) instantiation_cache_hits: u32,
 
-    /// Audit: total prepared-ref cache hits in this query.
-    pub(crate) prepared_ref_cache_hits: u32,
+    /// Audit: total conditional deferrals (open check type).
+    pub(crate) conditional_deferrals: u32,
+
+    /// Audit: total indexed access open-generic skips.
+    pub(crate) indexed_access_open_skips: u32,
+
+    /// Cache for completed instantiation results.
+    ///
+    /// One-shot callers allocate this per solve. Request-scoped callers move the
+    /// cache into `SolveState` and take it back out after the solve completes.
+    pub(crate) instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
+
+    /// Relation caches accumulated across all conditionals in one query.
+    ///
+    /// One-shot callers allocate this per solve. Request-scoped callers move the
+    /// cache into `SolveState` and take it back out after the solve completes.
+    pub(crate) relation_caches: SolverCaches,
 
     /// Active prepared-ref expansion stack used to attribute nested traversal.
     pub(crate) prepared_ref_stack: Vec<String>,
@@ -160,6 +158,18 @@ impl SolveState {
     const MAX_CONDITIONAL_CONTEXT_FRAMES: usize = 8;
 
     pub fn new(limits: SolveLimits) -> Self {
+        Self::with_caches(
+            limits,
+            rustc_hash::FxHashMap::default(),
+            SolverCaches::default(),
+        )
+    }
+
+    pub fn with_caches(
+        limits: SolveLimits,
+        instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
+        relation_caches: SolverCaches,
+    ) -> Self {
         Self {
             depth: 0,
             steps: 0,
@@ -176,17 +186,17 @@ impl SolveState {
             conditional_context_base_stack: Vec::new(),
             diagnostics: Vec::new(),
             diagnostics_truncated: 0,
-            host_projection_cache: rustc_hash::FxHashMap::default(),
-            prepared_ref_cache: rustc_hash::FxHashMap::default(),
             trace_enabled: solver_trace_enabled(),
-            audit_host_projections: rustc_hash::FxHashMap::default(),
             audit_prepared_ref_entries: rustc_hash::FxHashMap::default(),
             audit_prepared_ref_edges: rustc_hash::FxHashMap::default(),
             audit_unresolved_root_lookups: rustc_hash::FxHashMap::default(),
             audit_external_decl_visits: rustc_hash::FxHashMap::default(),
             audit_incomplete_reason_kinds: rustc_hash::FxHashMap::default(),
-            host_projection_cache_hits: 0,
-            prepared_ref_cache_hits: 0,
+            instantiation_cache_hits: 0,
+            conditional_deferrals: 0,
+            indexed_access_open_skips: 0,
+            instantiation_cache,
+            relation_caches,
             prepared_ref_stack: Vec::new(),
         }
     }
@@ -265,13 +275,6 @@ impl SolveState {
         self.trace_enabled || cfg!(test)
     }
 
-    fn record_host_projection_call(&mut self, key: (String, String, String)) {
-        if !self.audit_enabled() {
-            return;
-        }
-        *self.audit_host_projections.entry(key).or_insert(0) += 1;
-    }
-
     fn record_prepared_ref_entry(&mut self, key: RecursionKey) {
         if !self.audit_enabled() {
             return;
@@ -318,15 +321,21 @@ impl SolveState {
             .or_insert(0) += 1;
     }
 
-    fn record_host_projection_cache_hit(&mut self) {
+    fn record_instantiation_cache_hit(&mut self) {
         if self.audit_enabled() {
-            self.host_projection_cache_hits += 1;
+            self.instantiation_cache_hits += 1;
         }
     }
 
-    fn record_prepared_ref_cache_hit(&mut self) {
+    fn record_conditional_deferral(&mut self) {
         if self.audit_enabled() {
-            self.prepared_ref_cache_hits += 1;
+            self.conditional_deferrals += 1;
+        }
+    }
+
+    fn record_indexed_access_open_skip(&mut self) {
+        if self.audit_enabled() {
+            self.indexed_access_open_skips += 1;
         }
     }
 }
@@ -340,47 +349,6 @@ fn incomplete_reason_kind(reason: &IncompleteReason) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone)]
-struct SolveQueryTraceSummary {
-    duration_ms: f64,
-    arena_nodes: usize,
-    resolve_steps: u64,
-    exactness: SolverExactness,
-    execution_status: ExecutionStatus,
-    diagnostics: usize,
-    diagnostics_truncated: usize,
-    incomplete_reasons: usize,
-    visited_external_decls: usize,
-    prepared_ref_entries_total: u64,
-    prepared_ref_entries_unique: usize,
-    prepared_ref_cache_hits: u32,
-    host_projection_calls_total: u64,
-    host_projection_unique: usize,
-    host_projection_cache_hits: u32,
-    top_prepared_refs: Vec<(String, u32)>,
-    top_prepared_ref_edges: Vec<(String, u32)>,
-    top_unresolved_roots: Vec<(String, u32)>,
-    top_external_decl_visits: Vec<(String, u32)>,
-    top_incomplete_reason_kinds: Vec<(String, u32)>,
-    top_host_projections: Vec<(String, u32)>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SolveBatchExprStats {
-    calls: u32,
-    hits: u32,
-    misses: u32,
-}
-
-#[derive(Debug, Default)]
-struct SolveBatchTraceStats {
-    total_calls: u32,
-    cache_hits: u32,
-    cache_misses: u32,
-    expr_stats: rustc_hash::FxHashMap<String, SolveBatchExprStats>,
-    miss_summaries: Vec<(String, SolveQueryTraceSummary)>,
-}
-
 fn solver_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -388,294 +356,6 @@ fn solver_trace_enabled() -> bool {
             || std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
             || std::env::var_os("VERTER_META_TRACE").is_some()
     })
-}
-
-fn solver_trace_output_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("VERTER_SOLVER_TRACE_PATH")
-        .or_else(|| std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH"))
-        .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
-        .map(std::path::PathBuf::from)
-}
-
-fn solver_trace_output_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn solver_trace_write_line(line: &str) {
-    use std::io::Write;
-
-    let _lock = solver_trace_output_lock().lock();
-    if let Some(path) = solver_trace_output_path() {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-            return;
-        }
-    }
-
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{line}");
-    let _ = stderr.flush();
-}
-
-fn solver_trace_next_batch_id() -> u64 {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn top_named_counts<K, F>(
-    map: &rustc_hash::FxHashMap<K, u32>,
-    limit: usize,
-    render: F,
-) -> Vec<(String, u32)>
-where
-    K: std::cmp::Eq + std::hash::Hash,
-    F: Fn(&K) -> String,
-{
-    let mut entries = map
-        .iter()
-        .map(|(key, &count)| (render(key), count))
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    entries.truncate(limit);
-    entries
-}
-
-fn build_query_trace_summary(
-    state: &SolveState,
-    arena: &QueryArena,
-    duration_ms: f64,
-) -> SolveQueryTraceSummary {
-    let prepared_ref_entries_total = state
-        .audit_prepared_ref_entries
-        .values()
-        .map(|&count| u64::from(count))
-        .sum();
-    let host_projection_calls_total = state
-        .audit_host_projections
-        .values()
-        .map(|&count| u64::from(count))
-        .sum();
-
-    SolveQueryTraceSummary {
-        duration_ms,
-        arena_nodes: arena.len(),
-        resolve_steps: state.steps,
-        exactness: state.exactness,
-        execution_status: state.execution_status,
-        diagnostics: state.diagnostics.len(),
-        diagnostics_truncated: state.diagnostics_truncated,
-        incomplete_reasons: state.incomplete_reasons.len(),
-        visited_external_decls: state.visited_external_decls.len(),
-        prepared_ref_entries_total,
-        prepared_ref_entries_unique: state.audit_prepared_ref_entries.len(),
-        prepared_ref_cache_hits: state.prepared_ref_cache_hits,
-        host_projection_calls_total,
-        host_projection_unique: state.audit_host_projections.len(),
-        host_projection_cache_hits: state.host_projection_cache_hits,
-        top_prepared_refs: top_named_counts(&state.audit_prepared_ref_entries, 12, |key| {
-            format!(
-                "{}::{}#{}",
-                key.canonical_id, key.symbol_name, key.args_hash
-            )
-        }),
-        top_prepared_ref_edges: top_named_counts(&state.audit_prepared_ref_edges, 16, |key| {
-            format!("{} -> {}", key.0, key.1)
-        }),
-        top_unresolved_roots: top_named_counts(&state.audit_unresolved_root_lookups, 16, |key| {
-            format!("{} -> {}", key.0, key.1)
-        }),
-        top_external_decl_visits: top_named_counts(&state.audit_external_decl_visits, 16, |key| {
-            key.clone()
-        }),
-        top_incomplete_reason_kinds: top_named_counts(
-            &state.audit_incomplete_reason_kinds,
-            16,
-            |key| key.to_string(),
-        ),
-        top_host_projections: top_named_counts(&state.audit_host_projections, 12, |key| {
-            format!("{}::{}[{}]", key.0, key.1, key.2)
-        }),
-    }
-}
-
-fn emit_batch_trace_summary(batch_id: u64, stats: &SolveBatchTraceStats, cache_len: usize) {
-    let total_query_ms: f64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| summary.duration_ms)
-        .sum();
-    let total_query_steps: u64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| summary.resolve_steps)
-        .sum();
-    let total_query_nodes: usize = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| summary.arena_nodes)
-        .sum();
-    let total_prepared_ref_entries: u64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| summary.prepared_ref_entries_total)
-        .sum();
-    let total_prepared_ref_hits: u64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| u64::from(summary.prepared_ref_cache_hits))
-        .sum();
-    let total_host_projection_calls: u64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| summary.host_projection_calls_total)
-        .sum();
-    let total_host_projection_hits: u64 = stats
-        .miss_summaries
-        .iter()
-        .map(|(_, summary)| u64::from(summary.host_projection_cache_hits))
-        .sum();
-
-    solver_trace_write_line(&format!(
-        "[verter-solver-trace] event=batch_end batch={} calls={} hits={} misses={} unique_exprs={} cache_entries={} total_query_ms={:.3} total_steps={} total_nodes={} total_prepared_ref_entries={} total_prepared_ref_hits={} total_host_projection_calls={} total_host_projection_hits={}",
-        batch_id,
-        stats.total_calls,
-        stats.cache_hits,
-        stats.cache_misses,
-        stats.expr_stats.len(),
-        cache_len,
-        total_query_ms,
-        total_query_steps,
-        total_query_nodes,
-        total_prepared_ref_entries,
-        total_prepared_ref_hits,
-        total_host_projection_calls,
-        total_host_projection_hits,
-    ));
-
-    let mut expr_entries = stats.expr_stats.iter().collect::<Vec<_>>();
-    expr_entries.sort_by(|left, right| {
-        right
-            .1
-            .calls
-            .cmp(&left.1.calls)
-            .then_with(|| right.1.misses.cmp(&left.1.misses))
-            .then_with(|| left.0.cmp(right.0))
-    });
-    for (rank, (expr, stat)) in expr_entries.into_iter().take(20).enumerate() {
-        solver_trace_write_line(&format!(
-            "[verter-solver-trace] event=batch_expr batch={} rank={} expr={:?} calls={} hits={} misses={}",
-            batch_id,
-            rank + 1,
-            expr,
-            stat.calls,
-            stat.hits,
-            stat.misses,
-        ));
-    }
-
-    let mut query_entries = stats.miss_summaries.iter().collect::<Vec<_>>();
-    query_entries.sort_by(|left, right| {
-        right
-            .1
-            .duration_ms
-            .partial_cmp(&left.1.duration_ms)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for (rank, (expr, summary)) in query_entries.into_iter().take(12).enumerate() {
-        solver_trace_write_line(&format!(
-            "[verter-solver-trace] event=query_summary batch={} rank={} expr={:?} dur_ms={:.3} steps={} nodes={} exactness={:?} status={:?} diagnostics={} diagnostics_truncated={} incomplete_reasons={} visited_external_decls={} prepared_ref_entries={} prepared_ref_unique={} prepared_ref_cache_hits={} host_projection_calls={} host_projection_unique={} host_projection_cache_hits={}",
-            batch_id,
-            rank + 1,
-            expr,
-            summary.duration_ms,
-            summary.resolve_steps,
-            summary.arena_nodes,
-            summary.exactness,
-            summary.execution_status,
-            summary.diagnostics,
-            summary.diagnostics_truncated,
-            summary.incomplete_reasons,
-            summary.visited_external_decls,
-            summary.prepared_ref_entries_total,
-            summary.prepared_ref_entries_unique,
-            summary.prepared_ref_cache_hits,
-            summary.host_projection_calls_total,
-            summary.host_projection_unique,
-            summary.host_projection_cache_hits,
-        ));
-        for (inner_rank, (name, count)) in summary.top_prepared_refs.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_prepared_ref batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-        for (inner_rank, (name, count)) in summary.top_prepared_ref_edges.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_prepared_ref_edge batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-        for (inner_rank, (name, count)) in summary.top_unresolved_roots.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_unresolved_root batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-        for (inner_rank, (name, count)) in summary.top_external_decl_visits.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_external_decl_visit batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-        for (inner_rank, (name, count)) in summary.top_incomplete_reason_kinds.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_incomplete_reason batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-        for (inner_rank, (name, count)) in summary.top_host_projections.iter().enumerate() {
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=query_top_host_projection batch={} rank={} inner_rank={} expr={:?} key={:?} count={}",
-                batch_id,
-                rank + 1,
-                inner_rank + 1,
-                expr,
-                name,
-                count,
-            ));
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,9 +367,6 @@ fn emit_batch_trace_summary(batch_id: u64, stats: &SolveBatchTraceStats, cache_l
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct SolverAudit {
-    /// Host member projection call counts.
-    /// Key: `(canonical_id, symbol_name, member)`.
-    pub host_projection_counts: rustc_hash::FxHashMap<(String, String, String), u32>,
     /// Prepared-ref instantiation entry counts.
     /// Key: `RecursionKey` (identity + args_hash).
     pub prepared_ref_counts: rustc_hash::FxHashMap<RecursionKey, u32>,
@@ -704,10 +381,12 @@ pub struct SolverAudit {
     pub external_decl_visit_counts: rustc_hash::FxHashMap<String, u32>,
     /// Incomplete reason kind counts.
     pub incomplete_reason_counts: rustc_hash::FxHashMap<&'static str, u32>,
-    /// Total host projection cache hits.
-    pub host_projection_cache_hits: u32,
-    /// Total prepared-ref cache hits.
-    pub prepared_ref_cache_hits: u32,
+    /// Total instantiation-cache hits.
+    pub instantiation_cache_hits: u32,
+    /// Total conditional deferrals (open check type).
+    pub conditional_deferrals: u32,
+    /// Total indexed access open-generic skips.
+    pub indexed_access_open_skips: u32,
     /// Arena node count at end of query.
     pub arena_nodes: usize,
     /// Total resolve steps.
@@ -728,14 +407,14 @@ pub fn solve_type_with_audit(
     let result_expr = project_to_type_expr(&arena, resolved);
 
     let audit = SolverAudit {
-        host_projection_counts: state.audit_host_projections,
         prepared_ref_counts: state.audit_prepared_ref_entries,
         prepared_ref_edge_counts: state.audit_prepared_ref_edges,
         unresolved_root_counts: state.audit_unresolved_root_lookups,
         external_decl_visit_counts: state.audit_external_decl_visits,
         incomplete_reason_counts: state.audit_incomplete_reason_kinds,
-        host_projection_cache_hits: state.host_projection_cache_hits,
-        prepared_ref_cache_hits: state.prepared_ref_cache_hits,
+        instantiation_cache_hits: state.instantiation_cache_hits,
+        conditional_deferrals: state.conditional_deferrals,
+        indexed_access_open_skips: state.indexed_access_open_skips,
         arena_nodes: arena.len(),
         resolve_steps: state.steps,
     };
@@ -755,92 +434,13 @@ pub fn solve_type_with_audit(
 // solve_type — top-level entry point
 // ---------------------------------------------------------------------------
 
-/// Cached entry from a single solver run, holding both the semantic result
-/// and the external declaration trace. Used by `SolveBatch` and the shared
-/// `run_solve_query` runner.
-#[derive(Debug, Clone)]
-struct CachedSolveEntry {
-    result: SolverResult<TypeExpr>,
-    trace: Vec<ResolvedRootIdentity>,
-    trace_summary: Option<SolveQueryTraceSummary>,
-}
-
-/// Shared query runner used by `solve_type`, `solve_type_with_trace`, and
-/// `SolveBatch`. Centralises arena creation, lowering, resolution, projection,
-/// and trace capture.
-fn run_solve_query(
-    expr: &TypeExpr,
-    host: &dyn TypeSolverHost,
-    limits: SolveLimits,
-) -> CachedSolveEntry {
-    let query_started = Instant::now();
-    let mut arena = QueryArena::new();
-    let mut state = SolveState::new(limits);
-
-    let root = lower_type_expr(&mut arena, expr);
-    let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
-    let result_expr = project_to_type_expr(&arena, resolved);
-
-    if solver_debug_enabled() {
-        let json_bytes = serde_json::to_string(&result_expr)
-            .map(|s| s.len())
-            .unwrap_or(0);
-        let input_summary = solver_expr_summary(expr);
-        if state.execution_status == ExecutionStatus::HardStop || state.steps > 10_000 {
-            eprintln!(
-                "[verter-solver] SLOW nodes={} steps={} depth={} payload={}B exactness={} status={} input={}",
-                arena.len(),
-                state.steps,
-                state.recursion.max_depth(),
-                json_bytes,
-                state.exactness,
-                state.execution_status,
-                input_summary,
-            );
-            // Log which symbols hit recursion limits
-            for reason in &state.incomplete_reasons {
-                eprintln!("  [verter-solver]   reason: {}", reason);
-            }
-        } else {
-            eprintln!(
-                "[verter-solver] nodes={} steps={} depth={} payload={}B exactness={} status={}",
-                arena.len(),
-                state.steps,
-                state.recursion.max_depth(),
-                json_bytes,
-                state.exactness,
-                state.execution_status,
-            );
-        }
-    }
-
-    let trace_summary = state.audit_enabled().then(|| {
-        build_query_trace_summary(
-            &state,
-            &arena,
-            query_started.elapsed().as_secs_f64() * 1000.0,
-        )
-    });
-
-    CachedSolveEntry {
-        result: SolverResult {
-            value: result_expr,
-            exactness: state.exactness,
-            execution_status: state.execution_status,
-            incomplete_reasons: state.incomplete_reasons,
-            diagnostics: state.diagnostics,
-        },
-        trace: state.visited_external_decls,
-        trace_summary,
-    }
-}
-
 /// Solve (normalize/expand) a `TypeExpr` using the host for cross-file
 /// declaration resolution.
 ///
-/// Production callers always run through the shared production limits source.
+/// One-shot callers create a fresh `TypeQueryEngine` per call.
 pub fn solve_type(expr: &TypeExpr, host: &dyn TypeSolverHost) -> SolverResult<TypeExpr> {
-    run_solve_query(expr, host, SolveLimits::default()).result
+    let mut engine = super::query_engine::TypeQueryEngine::new(host);
+    engine.solve(expr)
 }
 
 #[cfg(test)]
@@ -849,75 +449,18 @@ fn solve_type_with_limits(
     host: &dyn TypeSolverHost,
     limits: SolveLimits,
 ) -> SolverResult<TypeExpr> {
-    run_solve_query(expr, host, limits).result
-}
-
-fn solver_expr_summary(expr: &TypeExpr) -> String {
-    match expr {
-        TypeExpr::Primitive(p) => format!("Primitive({:?})", p),
-        TypeExpr::Literal(lit) => format!("Literal({:?})", lit),
-        TypeExpr::Union(members) => format!("Union({} members)", members.len()),
-        TypeExpr::Intersection(members) => format!("Intersection({} members)", members.len()),
-        TypeExpr::Array { .. } => "Array".into(),
-        TypeExpr::Tuple { elements, .. } => format!("Tuple({} elements)", elements.len()),
-        TypeExpr::Object(obj) => format!("Object({} members)", obj.properties.len()),
-        TypeExpr::Function(_) => "Function".into(),
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if type_arguments.is_empty() {
-                format!("Ref({})", name)
-            } else {
-                format!("Ref({}<{} args>)", name, type_arguments.len())
-            }
-        }
-        TypeExpr::TypeParameter(param) => format!("TypeParameter({})", param.name),
-        TypeExpr::KeyOf(_) => "KeyOf".into(),
-        TypeExpr::TypeOf(val) => format!("TypeOf({})", val.path.join(".")),
-        TypeExpr::IndexedAccess { .. } => "IndexedAccess".into(),
-        TypeExpr::Conditional { .. } => "Conditional".into(),
-        TypeExpr::Mapped { parameter, .. } => format!("Mapped({})", parameter),
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            format!("TemplateLiteral({} exprs)", expressions.len())
-        }
-        TypeExpr::Infer { name } => format!("Infer({})", name),
-        TypeExpr::Rest(_) => "Rest".into(),
-        TypeExpr::Parenthesized(inner) => format!("Parenthesized({})", solver_expr_summary(inner)),
-        TypeExpr::RecursiveRef {
-            name,
-            type_arguments,
-            ..
-        } => {
-            if type_arguments.is_empty() {
-                format!("RecursiveRef({})", name)
-            } else {
-                format!("RecursiveRef({}<{} args>)", name, type_arguments.len())
-            }
-        }
-        TypeExpr::Unknown { raw } => {
-            let preview: String = raw.chars().take(40).collect();
-            format!("Unknown({})", preview)
-        }
-    }
-}
-
-fn cancelled_solver_result(expr: &TypeExpr) -> SolverResult<TypeExpr> {
+    let mut arena = QueryArena::new();
+    let mut state = SolveState::new(limits);
+    let root = lower_type_expr(&mut arena, expr);
+    let resolved = resolve_node(&mut arena, root, host, &mut state, &SubstitutionEnv::new());
+    let result_expr = project_to_type_expr(&arena, resolved);
     SolverResult {
-        value: expr.clone(),
-        // Preserve the current uncached solver behavior: cancellation is tracked
-        // in execution status, while the projected value stays unchanged.
-        exactness: SolverExactness::ExactConcrete,
-        execution_status: ExecutionStatus::Cancelled,
-        incomplete_reasons: vec![],
-        diagnostics: vec![],
+        value: result_expr,
+        exactness: state.exactness,
+        execution_status: state.execution_status,
+        incomplete_reasons: state.incomplete_reasons,
+        diagnostics: state.diagnostics,
     }
-}
-
-fn solver_debug_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("VERTER_SOLVER_DEBUG").is_some())
 }
 
 /// Solve a type expression and return both the result and a trace of
@@ -930,195 +473,8 @@ pub fn solve_type_with_trace(
     expr: &TypeExpr,
     host: &dyn TypeSolverHost,
 ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
-    let entry = run_solve_query(expr, host, SolveLimits::default());
-    (entry.result, entry.trace)
-}
-
-// ---------------------------------------------------------------------------
-// SolveBatch — batch-scoped top-level solve memoization
-// ---------------------------------------------------------------------------
-
-/// Batch-scoped solve memoization. Created at the start of a macro-expansion
-/// function, dropped when that function returns. Caches `(TypeExpr → result)`
-/// within one fixed host and the shared production limits.
-///
-/// **Not** a host-global or cross-request cache — strictly query-scoped.
-pub struct SolveBatch<'a> {
-    host: &'a dyn TypeSolverHost,
-    cache: rustc_hash::FxHashMap<TypeExpr, CachedSolveEntry>,
-    trace_enabled: bool,
-    trace_batch_id: u64,
-    trace_stats: SolveBatchTraceStats,
-}
-
-impl<'a> SolveBatch<'a> {
-    /// Create a new batch pinned to one host.
-    pub fn new(host: &'a dyn TypeSolverHost) -> Self {
-        Self {
-            host,
-            cache: rustc_hash::FxHashMap::default(),
-            trace_enabled: solver_trace_enabled(),
-            trace_batch_id: solver_trace_next_batch_id(),
-            trace_stats: SolveBatchTraceStats::default(),
-        }
-    }
-
-    /// Solve a type expression, reusing a cached result when possible.
-    pub fn solve(&mut self, expr: &TypeExpr) -> SolverResult<TypeExpr> {
-        let expr_summary = if self.trace_enabled {
-            Some(solver_expr_summary(expr))
-        } else {
-            None
-        };
-        if let Some(expr_summary) = expr_summary.as_ref() {
-            self.trace_stats.total_calls += 1;
-            self.trace_stats
-                .expr_stats
-                .entry(expr_summary.clone())
-                .or_default()
-                .calls += 1;
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=batch_call batch={} mode=solve expr={:?}",
-                self.trace_batch_id, expr_summary
-            ));
-        }
-        if let RequestStatus::Cancelled = self.host.request_status() {
-            return cancelled_solver_result(expr);
-        }
-        if let Some(entry) = self.cache.get(expr) {
-            if let Some(expr_summary) = expr_summary.as_ref() {
-                self.trace_stats.cache_hits += 1;
-                self.trace_stats
-                    .expr_stats
-                    .entry(expr_summary.clone())
-                    .or_default()
-                    .hits += 1;
-                solver_trace_write_line(&format!(
-                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve expr={:?} cache_hit=true status={:?} exactness={:?}",
-                    self.trace_batch_id,
-                    expr_summary,
-                    entry.result.execution_status,
-                    entry.result.exactness,
-                ));
-            }
-            return entry.result.clone();
-        }
-        let entry = run_solve_query(expr, self.host, SolveLimits::default());
-        if let Some(expr_summary) = expr_summary.as_ref() {
-            self.trace_stats.cache_misses += 1;
-            self.trace_stats
-                .expr_stats
-                .entry(expr_summary.clone())
-                .or_default()
-                .misses += 1;
-            if let Some(summary) = entry.trace_summary.as_ref() {
-                self.trace_stats
-                    .miss_summaries
-                    .push((expr_summary.clone(), summary.clone()));
-                solver_trace_write_line(&format!(
-                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve expr={:?} cache_hit=false dur_ms={:.3} steps={} nodes={} status={:?} exactness={:?}",
-                    self.trace_batch_id,
-                    expr_summary,
-                    summary.duration_ms,
-                    summary.resolve_steps,
-                    summary.arena_nodes,
-                    summary.execution_status,
-                    summary.exactness,
-                ));
-            }
-        }
-        let result = entry.result.clone();
-        self.cache.insert(expr.clone(), entry);
-        result
-    }
-
-    /// Solve a type expression and return both the result and the visited
-    /// external declaration trace. On a cache hit the stored trace is cloned.
-    pub fn solve_with_trace(
-        &mut self,
-        expr: &TypeExpr,
-    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
-        let expr_summary = if self.trace_enabled {
-            Some(solver_expr_summary(expr))
-        } else {
-            None
-        };
-        if let Some(expr_summary) = expr_summary.as_ref() {
-            self.trace_stats.total_calls += 1;
-            self.trace_stats
-                .expr_stats
-                .entry(expr_summary.clone())
-                .or_default()
-                .calls += 1;
-            solver_trace_write_line(&format!(
-                "[verter-solver-trace] event=batch_call batch={} mode=solve_with_trace expr={:?}",
-                self.trace_batch_id, expr_summary
-            ));
-        }
-        if let RequestStatus::Cancelled = self.host.request_status() {
-            return (cancelled_solver_result(expr), Vec::new());
-        }
-        if let Some(entry) = self.cache.get(expr) {
-            if let Some(expr_summary) = expr_summary.as_ref() {
-                self.trace_stats.cache_hits += 1;
-                self.trace_stats
-                    .expr_stats
-                    .entry(expr_summary.clone())
-                    .or_default()
-                    .hits += 1;
-                solver_trace_write_line(&format!(
-                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve_with_trace expr={:?} cache_hit=true status={:?} exactness={:?}",
-                    self.trace_batch_id,
-                    expr_summary,
-                    entry.result.execution_status,
-                    entry.result.exactness,
-                ));
-            }
-            return (entry.result.clone(), entry.trace.clone());
-        }
-        let entry = run_solve_query(expr, self.host, SolveLimits::default());
-        if let Some(expr_summary) = expr_summary.as_ref() {
-            self.trace_stats.cache_misses += 1;
-            self.trace_stats
-                .expr_stats
-                .entry(expr_summary.clone())
-                .or_default()
-                .misses += 1;
-            if let Some(summary) = entry.trace_summary.as_ref() {
-                self.trace_stats
-                    .miss_summaries
-                    .push((expr_summary.clone(), summary.clone()));
-                solver_trace_write_line(&format!(
-                    "[verter-solver-trace] event=batch_call_result batch={} mode=solve_with_trace expr={:?} cache_hit=false dur_ms={:.3} steps={} nodes={} status={:?} exactness={:?}",
-                    self.trace_batch_id,
-                    expr_summary,
-                    summary.duration_ms,
-                    summary.resolve_steps,
-                    summary.arena_nodes,
-                    summary.execution_status,
-                    summary.exactness,
-                ));
-            }
-        }
-        let result = entry.result.clone();
-        let trace = entry.trace.clone();
-        self.cache.insert(expr.clone(), entry);
-        (result, trace)
-    }
-
-    /// Number of cached expression entries in this batch.
-    pub fn cache_len(&self) -> usize {
-        self.cache.len()
-    }
-}
-
-impl Drop for SolveBatch<'_> {
-    fn drop(&mut self) {
-        if !self.trace_enabled {
-            return;
-        }
-        emit_batch_trace_summary(self.trace_batch_id, &self.trace_stats, self.cache.len());
-    }
+    let mut engine = super::query_engine::TypeQueryEngine::new(host);
+    engine.solve_with_trace(expr)
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,7 +482,7 @@ impl Drop for SolveBatch<'_> {
 // ---------------------------------------------------------------------------
 
 /// Resolve a node in the arena, expanding references through the host.
-fn resolve_node(
+pub(crate) fn resolve_node(
     arena: &mut QueryArena,
     node: NodeId,
     host: &dyn TypeSolverHost,
@@ -1266,7 +622,9 @@ fn resolve_node(
             })
         }
 
-        // Object — resolve property types
+        // Object — resolve property types, but keep embedded function
+        // signatures shallow so slot/callback return types do not force
+        // unrelated deep expansion.
         Node::Object(mut obj) => {
             for prop in &mut obj.properties {
                 prop.ty = resolve_node(arena, prop.ty, host, state, subst);
@@ -1275,27 +633,48 @@ fn resolve_node(
                 idx.key_type = resolve_node(arena, idx.key_type, host, state, subst);
                 idx.value_type = resolve_node(arena, idx.value_type, host, state, subst);
             }
+            let mut in_progress = std::collections::HashSet::new();
             for sig in &mut obj.call_signatures {
-                sig.return_type = resolve_node(arena, sig.return_type, host, state, subst);
+                sig.return_type = materialize_effective_arg_inner(
+                    arena,
+                    sig.return_type,
+                    subst,
+                    &mut in_progress,
+                );
                 for param in &mut sig.parameters {
-                    param.ty = resolve_node(arena, param.ty, host, state, subst);
+                    param.ty =
+                        materialize_effective_arg_inner(arena, param.ty, subst, &mut in_progress);
                 }
             }
             for sig in &mut obj.construct_signatures {
-                sig.return_type = resolve_node(arena, sig.return_type, host, state, subst);
+                sig.return_type = materialize_effective_arg_inner(
+                    arena,
+                    sig.return_type,
+                    subst,
+                    &mut in_progress,
+                );
                 for param in &mut sig.parameters {
-                    param.ty = resolve_node(arena, param.ty, host, state, subst);
+                    param.ty =
+                        materialize_effective_arg_inner(arena, param.ty, subst, &mut in_progress);
                 }
             }
             arena.object(obj)
         }
 
-        // Function — resolve parameter and return types
+        // Function — materialize parameter and return types through the active
+        // substitution, but keep them shallow until demanded.
         Node::Function(mut func) => {
+            let mut in_progress = std::collections::HashSet::new();
             for sig in &mut func.signatures {
-                sig.return_type = resolve_node(arena, sig.return_type, host, state, subst);
+                sig.return_type = materialize_effective_arg_inner(
+                    arena,
+                    sig.return_type,
+                    subst,
+                    &mut in_progress,
+                );
                 for param in &mut sig.parameters {
-                    param.ty = resolve_node(arena, param.ty, host, state, subst);
+                    param.ty =
+                        materialize_effective_arg_inner(arena, param.ty, subst, &mut in_progress);
                 }
             }
             arena.function(func)
@@ -1305,31 +684,12 @@ fn resolve_node(
         Node::Ref {
             ref name,
             ref type_arguments,
+            ref scope_canonical_id,
         } => {
             let name = name.clone();
             let args = type_arguments.clone();
+            let scope_canonical_id = scope_canonical_id.clone();
 
-            // Check if it's a built-in utility type.
-            // Compiler intrinsics (Uppercase etc.) are never shadowable.
-            // Other builtins are only expanded if the host confirms they're
-            // not shadowed by user declarations.
-            if let Some(builtin) = BuiltinUtility::from_name(&name) {
-                let should_expand = builtin.is_compiler_intrinsic()
-                    || host.utility_source(&name) != UtilitySource::Shadowed;
-
-                if should_expand {
-                    let resolved_args: Vec<NodeId> = args
-                        .iter()
-                        .map(|&a| resolve_node(arena, a, host, state, subst))
-                        .collect();
-
-                    if let Some(expanded) = expand_builtin(arena, builtin, &resolved_args) {
-                        return resolve_node(arena, expanded, host, state, subst);
-                    }
-                }
-            }
-
-            // Check substitution env (for generic type params used as refs)
             if args.is_empty() {
                 if let Some(bound) = subst.resolve(&name) {
                     if let Some(guarded) = resolve_substitution_binding(
@@ -1347,6 +707,44 @@ fn resolve_node(
                 }
             }
 
+            // Check if it's a built-in utility type.
+            // Compiler intrinsics (Uppercase etc.) are never shadowable.
+            // Other builtins are only expanded if the host confirms they're
+            // not shadowed by user declarations.
+            if let Some(builtin) = BuiltinUtility::from_name(&name) {
+                let should_expand = builtin.is_compiler_intrinsic()
+                    || host.utility_source(&name) != UtilitySource::Shadowed;
+
+                if should_expand {
+                    if let Some(expanded) =
+                        try_expand_builtin_structurally(arena, builtin, &args, host, state, subst)
+                    {
+                        return expanded;
+                    }
+
+                    let resolved_args: Vec<NodeId> = args
+                        .iter()
+                        .map(|&a| resolve_node(arena, a, host, state, subst))
+                        .collect();
+
+                    if let Some(expanded) = expand_builtin(arena, builtin, &resolved_args) {
+                        return resolve_node(arena, expanded, host, state, subst);
+                    }
+                }
+            }
+
+            if let Some(expanded) = try_expand_prepared_wrapper_structurally(
+                arena,
+                &name,
+                &args,
+                scope_canonical_id.as_deref(),
+                host,
+                state,
+                subst,
+            ) {
+                return expanded;
+            }
+
             // Resolve type arguments first
             let resolved_args: Vec<NodeId> = args
                 .iter()
@@ -1358,7 +756,7 @@ fn resolve_node(
             // imported type body should resolve through the defining file's
             // scope (name_resolution), not the owner file's scope.
             let maybe_root =
-                resolve_name_in_context(state, &name).or_else(|| host.root_identity("", &name));
+                resolve_root_for_ref(state, host, scope_canonical_id.as_deref(), &name);
             if let Some(root_id) = maybe_root {
                 return resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
             }
@@ -1367,7 +765,7 @@ fn resolve_node(
             // Host can't resolve — keep as symbolic ref
             if resolved_args != args {
                 // Args changed, rebuild
-                arena.type_ref(name, resolved_args)
+                arena.scoped_type_ref(name, resolved_args, scope_canonical_id)
             } else {
                 state.mark_symbolic();
                 node
@@ -1388,79 +786,42 @@ fn resolve_node(
 
         // -- indexed access T[K] --
         Node::IndexedAccess { object, index } => {
+            if let Some(projected) =
+                try_resolve_structural_indexed_access_raw(arena, object, index, host, state, subst)
+            {
+                return projected;
+            }
+
             if object.is_unresolved() || index.is_unresolved() {
                 state.mark_symbolic();
                 return arena.indexed_access(object, index);
             }
 
-            if let Node::Literal(super::arena::SolverLiteral::String(key)) =
-                arena.get(index).clone()
-            {
-                if let Node::Ref {
-                    ref name,
-                    ref type_arguments,
-                } = arena.get(object).clone()
-                {
-                    if type_arguments.is_empty() {
-                        let maybe_root = resolve_name_in_context(state, name.as_str())
-                            .or_else(|| host.root_identity("", name.as_str()));
-                        if let Some(root_id) = maybe_root {
-                            // Query-local host projection cache: collapse repeated
-                            // access to the same (root, member) within one query.
-                            let cache_key = (
-                                root_id.canonical_id.clone(),
-                                root_id.symbol_name.clone(),
-                                key.clone(),
-                            );
-                            if let Some(&cached) = state.host_projection_cache.get(&cache_key) {
-                                state.record_host_projection_cache_hit();
-                                return cached;
-                            }
-
-                            if let Some(projection) =
-                                host.resolve_member_projection(&root_id, key.as_str())
-                            {
-                                state.record_host_projection_call(cache_key.clone());
-                                if projection.exactness == SolverExactness::ExactSymbolic {
-                                    state.mark_symbolic();
-                                }
-                                let lowered = lower_type_expr(arena, &projection.value);
-                                let mut pushed = 0usize;
-                                if projection.type_decl_contexts.is_empty() {
-                                    if let Some(prepared) =
-                                        host.resolve_prepared_type_decl(&root_id)
-                                    {
-                                        if !prepared.name_resolution.is_empty() {
-                                            state.type_decl_context_stack.push(prepared);
-                                            pushed = 1;
-                                        }
-                                    }
-                                } else {
-                                    for prepared in &projection.type_decl_contexts {
-                                        if !prepared.name_resolution.is_empty() {
-                                            state
-                                                .type_decl_context_stack
-                                                .push(Arc::clone(prepared));
-                                            pushed += 1;
-                                        }
-                                    }
-                                }
-                                let resolved = resolve_node(arena, lowered, host, state, subst);
-                                for _ in 0..pushed {
-                                    state.type_decl_context_stack.pop();
-                                }
-
-                                // Cache the resolved result for this (root, member)
-                                state.host_projection_cache.insert(cache_key, resolved);
-                                return resolved;
-                            }
-                        }
-                    }
-                }
-            }
-
             let resolved_obj = resolve_node(arena, object, host, state, subst);
             let resolved_idx = resolve_node(arena, index, host, state, subst);
+
+            // Open-generic symbolic stop: if the resolved object has open type
+            // parameters, stay symbolic instead of trying to expand.
+            if resolved_obj.is_unresolved() || resolved_idx.is_unresolved() {
+                state.mark_symbolic();
+                return arena.indexed_access(resolved_obj, resolved_idx);
+            }
+            match arena.get(resolved_obj) {
+                Node::Applied { args, .. } if has_open_arg(arena, args) => {
+                    state.mark_symbolic();
+                    state.record_indexed_access_open_skip();
+                    return arena.indexed_access(resolved_obj, resolved_idx);
+                }
+                Node::Ref { type_arguments, .. }
+                    if !type_arguments.is_empty() && has_open_arg(arena, type_arguments) =>
+                {
+                    state.mark_symbolic();
+                    state.record_indexed_access_open_skip();
+                    return arena.indexed_access(resolved_obj, resolved_idx);
+                }
+                _ => {}
+            }
+
             resolve_indexed_access(arena, resolved_obj, resolved_idx, host, state, subst)
         }
 
@@ -1531,6 +892,617 @@ fn resolve_node(
     }
 }
 
+fn try_resolve_structural_indexed_access_raw(
+    arena: &mut QueryArena,
+    object: NodeId,
+    index: NodeId,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    if object.is_unresolved() || index.is_unresolved() {
+        return None;
+    }
+
+    let key_names = finite_literal_key_names(arena, index)?;
+    let object_node = arena.get(object).clone();
+
+    let mut results = Vec::with_capacity(key_names.len());
+    for key_name in key_names {
+        let result = match &object_node {
+            Node::Ref {
+                name,
+                type_arguments,
+                scope_canonical_id,
+            } => try_resolve_structural_ref_member(
+                arena,
+                name,
+                type_arguments,
+                scope_canonical_id.as_deref(),
+                &key_name,
+                host,
+                state,
+                subst,
+            )?,
+            Node::RecursiveRef {
+                symbol_name,
+                type_arguments,
+                ..
+            } => try_resolve_structural_ref_member(
+                arena,
+                symbol_name,
+                type_arguments,
+                None,
+                &key_name,
+                host,
+                state,
+                subst,
+            )?,
+            _ => return None,
+        };
+        results.push(result);
+    }
+
+    match results.len() {
+        0 => None,
+        1 => Some(results[0]),
+        _ => Some(arena.union(results)),
+    }
+}
+
+fn finite_literal_key_names(arena: &QueryArena, index: NodeId) -> Option<Vec<String>> {
+    if index.is_unresolved() {
+        return None;
+    }
+
+    match arena.get(index).clone() {
+        Node::Literal(super::arena::SolverLiteral::String(s)) => Some(vec![s]),
+        Node::Union(members) => {
+            let mut keys = Vec::with_capacity(members.len());
+            for member in members {
+                let Node::Literal(super::arena::SolverLiteral::String(s)) =
+                    arena.get(member).clone()
+                else {
+                    return None;
+                };
+                keys.push(s);
+            }
+            Some(keys)
+        }
+        _ => None,
+    }
+}
+
+fn collect_literal_string_keys(arena: &QueryArena, node: NodeId) -> Vec<String> {
+    finite_literal_key_names(arena, node).unwrap_or_default()
+}
+
+fn try_resolve_structural_ref_member(
+    arena: &mut QueryArena,
+    name: &str,
+    type_arguments: &[NodeId],
+    scope_canonical_id: Option<&str>,
+    key_name: &str,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    if let Some(builtin) = BuiltinUtility::from_name(name) {
+        if builtin.is_compiler_intrinsic() || host.utility_source(name) != UtilitySource::Shadowed {
+            match builtin {
+                BuiltinUtility::Partial
+                | BuiltinUtility::Required
+                | BuiltinUtility::Readonly => {
+                    let key = arena.string_literal(key_name);
+                    return Some(resolve_indexed_access(
+                        arena,
+                        *type_arguments.first()?,
+                        key,
+                        host,
+                        state,
+                        subst,
+                    ));
+                }
+                BuiltinUtility::Pick => {
+                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
+                        arena,
+                        *type_arguments.get(1)?,
+                    )
+                    .into_iter()
+                    .collect();
+                    if !key_set.contains(key_name) {
+                        return Some(arena.primitive(PrimitiveKind::Undefined));
+                    }
+                    let key = arena.string_literal(key_name);
+                    return Some(resolve_indexed_access(
+                        arena,
+                        *type_arguments.first()?,
+                        key,
+                        host,
+                        state,
+                        subst,
+                    ));
+                }
+                BuiltinUtility::Omit => {
+                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
+                        arena,
+                        *type_arguments.get(1)?,
+                    )
+                    .into_iter()
+                    .collect();
+                    if key_set.contains(key_name) {
+                        return Some(arena.primitive(PrimitiveKind::Undefined));
+                    }
+                    let key = arena.string_literal(key_name);
+                    return Some(resolve_indexed_access(
+                        arena,
+                        *type_arguments.first()?,
+                        key,
+                        host,
+                        state,
+                        subst,
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let root_id = resolve_root_for_ref(state, host, scope_canonical_id, name)?;
+    let prepared = resolve_prepared_type_decl_cached(state, host, &root_id)?;
+    let shape = &prepared.wrapper_shape;
+    if let Some(source_index) = shape.source_param_index {
+        let source = *type_arguments.get(usize::from(source_index))?;
+        match shape.kind {
+            PreparedWrapperKind::Identity | PreparedWrapperKind::PureOverlay => {
+                let key = arena.string_literal(key_name);
+                return Some(resolve_indexed_access(
+                    arena,
+                    source,
+                    key,
+                    host,
+                    state,
+                    subst,
+                ));
+            }
+            PreparedWrapperKind::KeyFilter => match &shape.key_filter {
+                PreparedKeyFilterShape::IncludeLiteral(keys) => {
+                    if !keys.iter().any(|key| key == key_name) {
+                        return Some(arena.primitive(PrimitiveKind::Undefined));
+                    }
+                    let key = arena.string_literal(key_name);
+                    return Some(resolve_indexed_access(
+                        arena,
+                        source,
+                        key,
+                        host,
+                        state,
+                        subst,
+                    ));
+                }
+                PreparedKeyFilterShape::ExcludeLiteral(keys) => {
+                    if keys.iter().any(|key| key == key_name) {
+                        return Some(arena.primitive(PrimitiveKind::Undefined));
+                    }
+                    let key = arena.string_literal(key_name);
+                    return Some(resolve_indexed_access(
+                        arena,
+                        source,
+                        key,
+                        host,
+                        state,
+                        subst,
+                    ));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+struct StructuralPropertyDescriptor {
+    name: String,
+    optional: bool,
+    readonly: bool,
+    is_method: bool,
+}
+
+fn try_expand_builtin_structurally(
+    arena: &mut QueryArena,
+    utility: BuiltinUtility,
+    raw_args: &[NodeId],
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    match utility {
+        BuiltinUtility::Partial => try_expand_object_modifier_structurally(
+            arena,
+            raw_args.first().copied()?,
+            Some(true),
+            None,
+            host,
+            state,
+            subst,
+        ),
+        BuiltinUtility::Required => try_expand_object_modifier_structurally(
+            arena,
+            raw_args.first().copied()?,
+            Some(false),
+            None,
+            host,
+            state,
+            subst,
+        ),
+        BuiltinUtility::Readonly => try_expand_object_modifier_structurally(
+            arena,
+            raw_args.first().copied()?,
+            None,
+            Some(true),
+            host,
+            state,
+            subst,
+        ),
+        BuiltinUtility::Pick => {
+            let object = raw_args.first().copied()?;
+            let keys = resolve_node(arena, *raw_args.get(1)?, host, state, subst);
+            try_expand_pick_omit_structurally(arena, object, keys, true, host, state, subst)
+        }
+        BuiltinUtility::Omit => {
+            let object = raw_args.first().copied()?;
+            let keys = resolve_node(arena, *raw_args.get(1)?, host, state, subst);
+            try_expand_pick_omit_structurally(arena, object, keys, false, host, state, subst)
+        }
+        _ => None,
+    }
+}
+
+fn try_expand_prepared_wrapper_structurally(
+    arena: &mut QueryArena,
+    name: &str,
+    raw_args: &[NodeId],
+    scope_canonical_id: Option<&str>,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    let root_id = resolve_root_for_ref(state, host, scope_canonical_id, name)?;
+    let prepared = resolve_prepared_type_decl_cached(state, host, &root_id)?;
+    let shape = &prepared.wrapper_shape;
+    let source_index = usize::from(shape.source_param_index?);
+    let source = *raw_args.get(source_index)?;
+
+    match shape.kind {
+        PreparedWrapperKind::Identity => Some(resolve_node(arena, source, host, state, subst)),
+        PreparedWrapperKind::PureOverlay => try_expand_object_modifier_structurally(
+            arena,
+            source,
+            shape.modifiers.optional,
+            shape.modifiers.readonly,
+            host,
+            state,
+            subst,
+        ),
+        PreparedWrapperKind::KeyFilter => {
+            let keys = match &shape.key_filter {
+                PreparedKeyFilterShape::IncludeLiteral(keys) => Some(keys.clone()),
+                PreparedKeyFilterShape::ExcludeLiteral(keys) => Some(keys.clone()),
+                _ => None,
+            }?;
+            let key_nodes_vec = keys
+                .into_iter()
+                .map(|key| arena.string_literal(key))
+                .collect::<Vec<_>>();
+            let key_nodes = arena.union(key_nodes_vec);
+            try_expand_pick_omit_structurally(
+                arena,
+                source,
+                key_nodes,
+                matches!(shape.key_filter, PreparedKeyFilterShape::IncludeLiteral(_)),
+                host,
+                state,
+                subst,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn try_expand_object_modifier_structurally(
+    arena: &mut QueryArena,
+    object: NodeId,
+    optional_override: Option<bool>,
+    readonly_override: Option<bool>,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    let props = collect_structural_property_descriptors(arena, object, host, state)?;
+    let mut properties = Vec::with_capacity(props.len());
+
+    for prop in props {
+        let key = arena.string_literal(&prop.name);
+        let ty = resolve_indexed_access(arena, object, key, host, state, subst);
+        properties.push(super::arena::PropertyNode {
+            name: prop.name,
+            ty,
+            optional: optional_override.unwrap_or(prop.optional),
+            readonly: readonly_override.unwrap_or(prop.readonly),
+            is_method: prop.is_method,
+        });
+    }
+
+    Some(arena.object(super::arena::ObjectNode {
+        properties,
+        index_signatures: vec![],
+        call_signatures: vec![],
+        construct_signatures: vec![],
+    }))
+}
+
+fn try_expand_pick_omit_structurally(
+    arena: &mut QueryArena,
+    object: NodeId,
+    keys: NodeId,
+    is_pick: bool,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+) -> Option<NodeId> {
+    let key_set: std::collections::BTreeSet<String> =
+        collect_literal_string_keys(arena, keys).into_iter().collect();
+    if key_set.is_empty() {
+        return None;
+    }
+
+    let props = collect_structural_property_descriptors(arena, object, host, state)?;
+    let mut properties = Vec::new();
+
+    for prop in props {
+        let include = key_set.contains(&prop.name);
+        if (is_pick && !include) || (!is_pick && include) {
+            continue;
+        }
+
+        let key = arena.string_literal(&prop.name);
+        let ty = resolve_indexed_access(arena, object, key, host, state, subst);
+        if matches!(arena.get(ty), Node::Primitive(PrimitiveKind::Undefined)) {
+            continue;
+        }
+        properties.push(super::arena::PropertyNode {
+            name: prop.name,
+            ty,
+            optional: prop.optional,
+            readonly: prop.readonly,
+            is_method: prop.is_method,
+        });
+    }
+
+    Some(arena.object(super::arena::ObjectNode {
+        properties,
+        index_signatures: vec![],
+        call_signatures: vec![],
+        construct_signatures: vec![],
+    }))
+}
+
+fn collect_structural_property_descriptors(
+    arena: &QueryArena,
+    node: NodeId,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+) -> Option<Vec<StructuralPropertyDescriptor>> {
+    if node.is_unresolved() {
+        return None;
+    }
+
+    match arena.get(node).clone() {
+        Node::Object(obj) => Some(
+            obj.properties
+                .into_iter()
+                .map(|prop| StructuralPropertyDescriptor {
+                    name: prop.name,
+                    optional: prop.optional,
+                    readonly: prop.readonly,
+                    is_method: prop.is_method,
+                })
+                .collect(),
+        ),
+        Node::Intersection(members) => {
+            let mut merged: rustc_hash::FxHashMap<String, StructuralPropertyDescriptor> =
+                rustc_hash::FxHashMap::default();
+            for member in members {
+                let descriptors =
+                    collect_structural_property_descriptors(arena, member, host, state)?;
+                for prop in descriptors {
+                    if let Some(existing) = merged.get_mut(&prop.name) {
+                        existing.optional &= prop.optional;
+                        existing.readonly |= prop.readonly;
+                        existing.is_method &= prop.is_method;
+                    } else {
+                        merged.insert(prop.name.clone(), prop);
+                    }
+                }
+            }
+            let mut props: Vec<_> = merged.into_values().collect();
+            props.sort_by(|a, b| a.name.cmp(&b.name));
+            Some(props)
+        }
+        Node::Ref {
+            name,
+            type_arguments,
+            scope_canonical_id,
+        } => collect_structural_ref_properties(
+            arena,
+            &name,
+            &type_arguments,
+            scope_canonical_id.as_deref(),
+            host,
+            state,
+        ),
+        Node::RecursiveRef {
+            symbol_name,
+            type_arguments,
+            ..
+        } => collect_structural_ref_properties(
+            arena,
+            &symbol_name,
+            &type_arguments,
+            None,
+            host,
+            state,
+        ),
+        _ => None,
+    }
+}
+
+fn collect_structural_ref_properties(
+    arena: &QueryArena,
+    name: &str,
+    type_arguments: &[NodeId],
+    scope_canonical_id: Option<&str>,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+) -> Option<Vec<StructuralPropertyDescriptor>> {
+    if let Some(builtin) = BuiltinUtility::from_name(name) {
+        if builtin.is_compiler_intrinsic() || host.utility_source(name) != UtilitySource::Shadowed {
+            match builtin {
+                BuiltinUtility::Partial => {
+                    let mut props = collect_structural_property_descriptors(
+                        arena,
+                        *type_arguments.first()?,
+                        host,
+                        state,
+                    )?;
+                    for prop in &mut props {
+                        prop.optional = true;
+                    }
+                    return Some(props);
+                }
+                BuiltinUtility::Required => {
+                    let mut props = collect_structural_property_descriptors(
+                        arena,
+                        *type_arguments.first()?,
+                        host,
+                        state,
+                    )?;
+                    for prop in &mut props {
+                        prop.optional = false;
+                    }
+                    return Some(props);
+                }
+                BuiltinUtility::Readonly => {
+                    let mut props = collect_structural_property_descriptors(
+                        arena,
+                        *type_arguments.first()?,
+                        host,
+                        state,
+                    )?;
+                    for prop in &mut props {
+                        prop.readonly = true;
+                    }
+                    return Some(props);
+                }
+                BuiltinUtility::Pick | BuiltinUtility::Omit => {
+                    let mut props = collect_structural_property_descriptors(
+                        arena,
+                        *type_arguments.first()?,
+                        host,
+                        state,
+                    )?;
+                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
+                        arena,
+                        *type_arguments.get(1)?,
+                    )
+                    .into_iter()
+                    .collect();
+                    if key_set.is_empty() {
+                        return None;
+                    }
+                    props.retain(|prop| {
+                        let contains = key_set.contains(&prop.name);
+                        if builtin == BuiltinUtility::Pick {
+                            contains
+                        } else {
+                            !contains
+                        }
+                    });
+                    return Some(props);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let root_id = resolve_root_for_ref(state, host, scope_canonical_id, name)?;
+    let prepared = resolve_prepared_type_decl_cached(state, host, &root_id)?;
+    let shape = &prepared.wrapper_shape;
+    if let Some(source_index) = shape.source_param_index {
+        let source = *type_arguments.get(usize::from(source_index))?;
+        match shape.kind {
+            PreparedWrapperKind::Identity => {
+                return collect_structural_property_descriptors(arena, source, host, state);
+            }
+            PreparedWrapperKind::PureOverlay => {
+                let mut props =
+                    collect_structural_property_descriptors(arena, source, host, state)?;
+                if let Some(optional) = shape.modifiers.optional {
+                    for prop in &mut props {
+                        prop.optional = optional;
+                    }
+                }
+                if let Some(readonly) = shape.modifiers.readonly {
+                    for prop in &mut props {
+                        prop.readonly = readonly;
+                    }
+                }
+                return Some(props);
+            }
+            PreparedWrapperKind::KeyFilter => {
+                let mut props =
+                    collect_structural_property_descriptors(arena, source, host, state)?;
+                match &shape.key_filter {
+                    PreparedKeyFilterShape::IncludeLiteral(keys) => {
+                        let key_set: std::collections::BTreeSet<_> =
+                            keys.iter().cloned().collect();
+                        props.retain(|prop| key_set.contains(&prop.name));
+                        return Some(props);
+                    }
+                    PreparedKeyFilterShape::ExcludeLiteral(keys) => {
+                        let key_set: std::collections::BTreeSet<_> =
+                            keys.iter().cloned().collect();
+                        props.retain(|prop| !key_set.contains(&prop.name));
+                        return Some(props);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if prepared.member_index.is_empty() {
+        return None;
+    }
+
+    let mut props: Vec<_> = prepared
+        .member_index
+        .iter()
+        .map(|(name, member)| StructuralPropertyDescriptor {
+            name: name.clone(),
+            optional: member.optional,
+            readonly: member.readonly,
+            is_method: member.is_method,
+        })
+        .collect();
+    props.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(props)
+}
+
 fn resolve_substitution_binding(
     arena: &mut QueryArena,
     original_node: NodeId,
@@ -1558,6 +1530,39 @@ fn resolve_substitution_binding(
 // ---------------------------------------------------------------------------
 // Open-generic argument signal classification
 // ---------------------------------------------------------------------------
+
+/// Check if a node is open — contains unresolved type parameters that
+/// cannot be resolved through constraints alone.
+/// Used for conditional deferral and open-generic indexed access stops.
+///
+/// A bare `TypeParam` with a constraint is NOT considered open for conditional
+/// deferral purposes, because the relation check can still produce a definitive
+/// answer based on the constraint.
+fn node_is_open(arena: &QueryArena, node: NodeId) -> bool {
+    node_is_open_inner(arena, node, true)
+}
+
+fn node_is_open_inner(arena: &QueryArena, node: NodeId, top_level: bool) -> bool {
+    if node.is_unresolved() {
+        return true;
+    }
+    match arena.get(node) {
+        // Bare TypeParam: open unless it has a constraint and is the top-level check
+        // (constraints let the relation check produce definitive answers).
+        Node::TypeParam { constraint, .. } => !(top_level && constraint.is_some()),
+        Node::Infer { .. } => true,
+        Node::Applied { args, .. } => args.iter().any(|&a| node_is_open_inner(arena, a, false)),
+        Node::IndexedAccess { object, index } => {
+            node_is_open_inner(arena, *object, false) || node_is_open_inner(arena, *index, false)
+        }
+        Node::KeyOf(inner) => node_is_open_inner(arena, *inner, false),
+        Node::Ref { type_arguments, .. } if type_arguments.is_empty() => false,
+        Node::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|&a| node_is_open_inner(arena, a, false)),
+        _ => false,
+    }
+}
 
 /// Check if any effective arg is an open type parameter (TypeParam, Infer,
 /// or Applied/Ref whose own args are all open).
@@ -1657,7 +1662,7 @@ fn resolve_prepared_ref(
     // Look up the prepared declaration up front so recursion identity can use
     // effective, substitution-aware type arguments rather than raw call-site
     // nodes or fresh lowered defaults.
-    let Some(prepared) = host.resolve_prepared_type_decl(root_id) else {
+    let Some(prepared) = resolve_prepared_type_decl_cached(state, host, root_id) else {
         state.mark_incomplete(IncompleteReason::MissingSource {
             canonical_id: root_id.canonical_id.clone(),
             symbol_name: root_id.symbol_name.clone(),
@@ -1678,14 +1683,14 @@ fn resolve_prepared_ref(
         rec_key.canonical_id, rec_key.symbol_name, rec_key.args_hash
     );
 
-    // Query-local prepared-ref cache: if we already fully resolved this
+    // Query-local instantiation cache: if we already fully resolved this
     // exact (identity, args_hash) combination in this query, reuse it.
     // Skip cache when the recursion tracker shows this symbol is currently
     // active — the cached result may contain unresolved placeholder nodes
     // from a prior in-progress resolution of the same symbol.
     if !state.recursion.is_symbol_active(&rec_key) {
-        if let Some(&cached) = state.prepared_ref_cache.get(&rec_key) {
-            state.record_prepared_ref_cache_hit();
+        if let Some(&cached) = state.instantiation_cache.get(&rec_key) {
+            state.record_instantiation_cache_hit();
             return cached;
         }
     }
@@ -1789,7 +1794,11 @@ fn resolve_prepared_ref(
         .push(state.conditional_context_stack.len());
 
     // Lower the declaration body into the arena
-    let body_node = lower_type_expr(arena, &prepared.body);
+    let body_node = lower_type_expr_in_scope(
+        arena,
+        &prepared.body,
+        Some(prepared.root_identity.canonical_id.as_str()),
+    );
 
     // Build substitution: bind type params to effective args
     let param_names: Vec<String> = prepared
@@ -1806,24 +1815,16 @@ fn resolve_prepared_ref(
     }
 
     // Push the prepared declaration onto the context stack so bare-name
-    // refs in the body can be resolved through name_resolution.
-    // Only push if the declaration has name_resolution entries (avoids
-    // empty stack entries that would be checked by resolve_name_in_context).
-    let pushed = if !prepared.name_resolution.is_empty() {
-        state.type_decl_context_stack.push(Arc::clone(&prepared));
-        true
-    } else {
-        false
-    };
+    // refs in the body can resolve through the declaration's name map first
+    // and then through the declaration's defining-file canonical scope.
+    state.type_decl_context_stack.push(Arc::clone(&prepared));
 
     // Resolve the body with the new substitution
     let resolved = resolve_node(arena, body_node, host, state, &child_subst);
 
     // Pop all scope state: declaration context, conditional context base,
     // conditional context stack (truncate back), recursion tracker, depth.
-    if pushed {
-        state.type_decl_context_stack.pop();
-    }
+    state.type_decl_context_stack.pop();
     state.conditional_context_base_stack.pop();
     state.conditional_context_stack.truncate(saved_cond_ctx_len);
     state.recursion.pop(&rec_key, fingerprint.as_ref());
@@ -1834,7 +1835,7 @@ fn resolve_prepared_ref(
 
     // Cache the completed result so later references to the same
     // (identity, args_hash) in this query can reuse it directly.
-    state.prepared_ref_cache.insert(rec_key, resolved);
+    state.instantiation_cache.insert(rec_key, resolved);
 
     resolved
 }
@@ -1860,6 +1861,131 @@ fn resolve_name_in_context(state: &SolveState, name: &str) -> Option<ResolvedRoo
         }
     }
     None
+}
+
+fn resolve_root_identity_cached(
+    state: &mut SolveState,
+    host: &dyn TypeSolverHost,
+    canonical_id: &str,
+    symbol_name: &str,
+) -> Option<ResolvedRootIdentity> {
+    if let Some(cached) = state
+        .relation_caches
+        .get_root_identity(canonical_id, symbol_name)
+    {
+        return cached;
+    }
+
+    let resolved = host.root_identity(canonical_id, symbol_name);
+    state.relation_caches.set_root_identity(
+        canonical_id.to_string(),
+        symbol_name.to_string(),
+        resolved.clone(),
+    );
+    resolved
+}
+
+fn resolve_prepared_type_decl_cached(
+    state: &mut SolveState,
+    host: &dyn TypeSolverHost,
+    root_identity: &ResolvedRootIdentity,
+) -> Option<Arc<PreparedTypeDecl>> {
+    if let Some(cached) = state
+        .relation_caches
+        .get_prepared_type_decl(root_identity)
+    {
+        return cached;
+    }
+
+    let resolved = host.resolve_prepared_type_decl(root_identity);
+    state
+        .relation_caches
+        .set_prepared_type_decl(root_identity.clone(), resolved.clone());
+    resolved
+}
+
+fn resolve_prepared_value_decl_cached(
+    state: &mut SolveState,
+    host: &dyn TypeSolverHost,
+    root_identity: &ResolvedRootIdentity,
+) -> Option<Arc<PreparedValueDecl>> {
+    if let Some(cached) = state
+        .relation_caches
+        .get_prepared_value_decl(root_identity)
+    {
+        return cached;
+    }
+
+    let resolved = host.resolve_prepared_value_decl(root_identity);
+    state
+        .relation_caches
+        .set_prepared_value_decl(root_identity.clone(), resolved.clone());
+    resolved
+}
+
+/// Resolve a bare or qualified root name through the active declaration scope
+/// before falling back to owner/global lookup.
+///
+/// Order:
+/// 1. Active declaration `name_resolution` map.
+/// 2. Active type declaration canonical scope.
+/// 3. Active value declaration canonical scope.
+/// 4. Owner/global host fallback.
+fn resolve_root_in_context(
+    state: &mut SolveState,
+    host: &dyn TypeSolverHost,
+    name: &str,
+) -> Option<ResolvedRootIdentity> {
+    if let Some(identity) = resolve_name_in_context(state, name) {
+        return Some(identity);
+    }
+
+    if let Some(decl) = state.type_decl_context_stack.last() {
+        let canonical_id = decl.root_identity.canonical_id.clone();
+        if let Some(identity) =
+            resolve_root_identity_cached(state, host, &canonical_id, name)
+        {
+            return Some(identity);
+        }
+    }
+
+    if let Some(decl) = state.value_decl_context_stack.last() {
+        let canonical_id = decl.root_identity.canonical_id.clone();
+        if let Some(identity) =
+            resolve_root_identity_cached(state, host, &canonical_id, name)
+        {
+            return Some(identity);
+        }
+    }
+
+    resolve_root_identity_cached(state, host, "", name)
+}
+
+fn resolve_root_for_ref(
+    state: &mut SolveState,
+    host: &dyn TypeSolverHost,
+    scope_canonical_id: Option<&str>,
+    name: &str,
+) -> Option<ResolvedRootIdentity> {
+    let Some(scope_canonical_id) = scope_canonical_id.filter(|scope| !scope.is_empty()) else {
+        return resolve_root_in_context(state, host, name);
+    };
+
+    let scope_matches_active_context = state
+        .type_decl_context_stack
+        .last()
+        .is_some_and(|decl| decl.root_identity.canonical_id == scope_canonical_id)
+        || state
+            .value_decl_context_stack
+            .last()
+            .is_some_and(|decl| decl.root_identity.canonical_id == scope_canonical_id);
+
+    if scope_matches_active_context {
+        return resolve_root_in_context(state, host, name);
+    }
+
+    resolve_root_identity_cached(state, host, scope_canonical_id, name)
+        .or_else(|| resolve_root_identity_cached(state, host, "", name))
 }
 
 /// Build effective args: explicit call-site args plus lowered defaults
@@ -1893,7 +2019,11 @@ fn build_effective_args(
                 false,
             )
         } else if let Some(default) = &param.default {
-            let lowered = lower_type_expr(arena, default);
+            let lowered = lower_type_expr_in_scope(
+                arena,
+                default,
+                Some(prepared.root_identity.canonical_id.as_str()),
+            );
             (
                 materialize_effective_arg(arena, lowered, &default_subst),
                 true,
@@ -1905,6 +2035,7 @@ fn build_effective_args(
         if used_default {
             arg = constrain_default_effective_arg(
                 arena,
+                prepared.root_identity.canonical_id.as_str(),
                 param.constraint.as_deref(),
                 arg,
                 &default_subst,
@@ -1919,6 +2050,7 @@ fn build_effective_args(
 
 fn constrain_default_effective_arg(
     arena: &mut QueryArena,
+    declaring_canonical_id: &str,
     constraint: Option<&TypeExpr>,
     arg: NodeId,
     subst: &SubstitutionEnv,
@@ -1927,7 +2059,8 @@ fn constrain_default_effective_arg(
         return arg;
     };
 
-    let lowered_constraint = lower_type_expr(arena, constraint);
+    let lowered_constraint =
+        lower_type_expr_in_scope(arena, constraint, Some(declaring_canonical_id));
     let materialized_constraint = materialize_effective_arg(arena, lowered_constraint, subst);
     let mut caches = super::arena::SolverCaches::new();
     let mut relation_state =
@@ -1980,6 +2113,7 @@ fn materialize_effective_arg_inner(
         Node::Ref {
             name,
             type_arguments,
+            scope_canonical_id,
         } => {
             if type_arguments.is_empty() {
                 if let Some(bound) = subst.resolve(&name) {
@@ -1989,14 +2123,14 @@ fn materialize_effective_arg_inner(
                         .iter()
                         .map(|&arg| materialize_effective_arg_inner(arena, arg, subst, in_progress))
                         .collect();
-                    arena.type_ref(name, resolved_args)
+                    arena.scoped_type_ref(name, resolved_args, scope_canonical_id)
                 }
             } else {
                 let resolved_args: Vec<NodeId> = type_arguments
                     .iter()
                     .map(|&arg| materialize_effective_arg_inner(arena, arg, subst, in_progress))
                     .collect();
-                arena.type_ref(name, resolved_args)
+                arena.scoped_type_ref(name, resolved_args, scope_canonical_id)
             }
         }
         Node::Union(members) => {
@@ -2345,9 +2479,11 @@ fn hash_effective_arg_node(
         Node::Ref {
             name,
             type_arguments,
+            scope_canonical_id,
         } => {
             8u8.hash(hasher);
             name.hash(hasher);
+            scope_canonical_id.hash(hasher);
             type_arguments.len().hash(hasher);
             for &arg in type_arguments {
                 hash_effective_arg_node(arena, arg, hasher, in_progress, depth + 1, visited);
@@ -2500,6 +2636,11 @@ fn hash_effective_arg_node(
 /// new nodes. This is the standard Rust read-then-write pattern for a
 /// struct that is both read and mutated.
 fn resolve_keyof(arena: &mut QueryArena, operand: NodeId, state: &mut SolveState) -> NodeId {
+    if operand.is_unresolved() {
+        state.mark_symbolic();
+        return arena.key_of(operand);
+    }
+
     // Read phase: extract what we need into owned locals.
     let node = arena.get(operand).clone();
 
@@ -2622,7 +2763,7 @@ fn resolve_indexed_access(
         Node::Object(obj) => {
             if let Some(key) = key.as_ref() {
                 if let Some(prop) = obj.properties.iter().find(|p| p.name == *key) {
-                    return prop.ty;
+                    return resolve_node(arena, prop.ty, host, state, subst);
                 }
             }
 
@@ -2649,9 +2790,13 @@ fn resolve_indexed_access(
             }
 
             if matching_index_values.len() == 1 {
-                matching_index_values[0]
+                resolve_node(arena, matching_index_values[0], host, state, subst)
             } else {
-                arena.union(matching_index_values)
+                let resolved: Vec<NodeId> = matching_index_values
+                    .into_iter()
+                    .map(|value| resolve_node(arena, value, host, state, subst))
+                    .collect();
+                arena.union(resolved)
             }
         }
         Node::Union(members) => {
@@ -2674,6 +2819,67 @@ fn resolve_indexed_access(
                 1 => matches[0],
                 _ => arena.intersection(matches),
             }
+        }
+        // Ref/RecursiveRef with a literal key: attempt direct member lookup
+        // through the host's prepared type declarations. This handles the case
+        // where resolve_node produced a Ref/RecursiveRef (e.g., recursive types)
+        // that the solver couldn't fully expand to an Object.
+        Node::Ref {
+            ref name,
+            ref type_arguments,
+            ref scope_canonical_id,
+        } if key.is_some() && type_arguments.is_empty() => {
+            let member_key = key.as_ref().unwrap();
+            let maybe_root =
+                resolve_root_for_ref(state, host, scope_canonical_id.as_deref(), name.as_str());
+            if let Some(root_id) = maybe_root {
+                if let Some(prepared) = resolve_prepared_type_decl_cached(state, host, &root_id) {
+                    if let Some(m) = prepared.member(member_key) {
+                        let lowered = lower_type_expr_in_scope(
+                            arena,
+                            &m.ty,
+                            Some(prepared.root_identity.canonical_id.as_str()),
+                        );
+                        if !prepared.name_resolution.is_empty() {
+                            state.type_decl_context_stack.push(prepared);
+                            let resolved = resolve_node(arena, lowered, host, state, subst);
+                            state.type_decl_context_stack.pop();
+                            return resolved;
+                        }
+                        return resolve_node(arena, lowered, host, state, subst);
+                    }
+                }
+            }
+            state.mark_symbolic();
+            arena.indexed_access(object, index)
+        }
+        Node::RecursiveRef {
+            ref symbol_name,
+            ref type_arguments,
+            ..
+        } if key.is_some() && type_arguments.is_empty() => {
+            let member_key = key.as_ref().unwrap();
+            let maybe_root = resolve_root_in_context(state, host, symbol_name.as_str());
+            if let Some(root_id) = maybe_root {
+                if let Some(prepared) = resolve_prepared_type_decl_cached(state, host, &root_id) {
+                    if let Some(m) = prepared.member(member_key) {
+                        let lowered = lower_type_expr_in_scope(
+                            arena,
+                            &m.ty,
+                            Some(prepared.root_identity.canonical_id.as_str()),
+                        );
+                        if !prepared.name_resolution.is_empty() {
+                            state.type_decl_context_stack.push(prepared);
+                            let resolved = resolve_node(arena, lowered, host, state, subst);
+                            state.type_decl_context_stack.pop();
+                            return resolved;
+                        }
+                        return resolve_node(arena, lowered, host, state, subst);
+                    }
+                }
+            }
+            state.mark_symbolic();
+            arena.indexed_access(object, index)
         }
         _ => {
             state.mark_symbolic();
@@ -2718,6 +2924,106 @@ fn index_signature_matches_request(
     }
 }
 
+fn node_contains_infer(arena: &QueryArena, node: NodeId) -> bool {
+    fn visit(
+        arena: &QueryArena,
+        node: NodeId,
+        seen: &mut std::collections::HashSet<NodeId>,
+    ) -> bool {
+        if node.is_unresolved() || !seen.insert(node) {
+            return false;
+        }
+
+        match arena.get(node) {
+            Node::Infer { .. } => true,
+            Node::Primitive(_)
+            | Node::Literal(_)
+            | Node::TypeOf { .. }
+            | Node::TypeParam { .. }
+            | Node::Applied { .. }
+            | Node::Error { .. } => false,
+            Node::Union(members) | Node::Intersection(members) => {
+                members.iter().any(|&member| visit(arena, member, seen))
+            }
+            Node::Array { element, .. } | Node::KeyOf(element) | Node::Rest(element) => {
+                visit(arena, *element, seen)
+            }
+            Node::Tuple { elements, .. } => elements.iter().any(|element| visit(arena, element.ty, seen)),
+            Node::Object(obj) => {
+                obj.properties.iter().any(|prop| visit(arena, prop.ty, seen))
+                    || obj
+                        .index_signatures
+                        .iter()
+                        .any(|sig| visit(arena, sig.key_type, seen) || visit(arena, sig.value_type, seen))
+                    || obj.call_signatures.iter().any(|sig| visit_signature(arena, sig, seen))
+                    || obj
+                        .construct_signatures
+                        .iter()
+                        .any(|sig| visit_signature(arena, sig, seen))
+            }
+            Node::Function(func) => func.signatures.iter().any(|sig| visit_signature(arena, sig, seen)),
+            Node::Ref { type_arguments, .. } => {
+                type_arguments.iter().any(|&arg| visit(arena, arg, seen))
+            }
+            Node::IndexedAccess { object, index } => {
+                visit(arena, *object, seen) || visit(arena, *index, seen)
+            }
+            Node::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                ..
+            } => {
+                visit(arena, *check, seen)
+                    || visit(arena, *extends, seen)
+                    || visit(arena, *true_branch, seen)
+                    || visit(arena, *false_branch, seen)
+            }
+            Node::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                visit(arena, *source, seen)
+                    || visit(arena, *value, seen)
+                    || name_type.is_some_and(|name_type| visit(arena, name_type, seen))
+            }
+            Node::TemplateLiteral { expressions, .. } => {
+                expressions.iter().any(|&expr| visit(arena, expr, seen))
+            }
+            Node::RecursiveRef {
+                type_arguments,
+                conditional_context,
+                ..
+            } => {
+                type_arguments.iter().any(|&arg| visit(arena, arg, seen))
+                    || conditional_context.iter().any(|frame| {
+                        visit(arena, frame.check, seen) || visit(arena, frame.extends, seen)
+                    })
+            }
+        }
+    }
+
+    fn visit_signature(
+        arena: &QueryArena,
+        signature: &super::arena::CallSignatureNode,
+        seen: &mut std::collections::HashSet<NodeId>,
+    ) -> bool {
+        signature.type_parameters.iter().any(|param| {
+            param.constraint.is_some_and(|node| visit(arena, node, seen))
+                || param.default.is_some_and(|node| visit(arena, node, seen))
+        }) || signature
+            .parameters
+            .iter()
+            .any(|param| visit(arena, param.ty, seen))
+            || visit(arena, signature.return_type, seen)
+    }
+
+    visit(arena, node, &mut std::collections::HashSet::new())
+}
+
 // ---------------------------------------------------------------------------
 // resolve_conditional
 // ---------------------------------------------------------------------------
@@ -2741,7 +3047,6 @@ fn resolve_conditional(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> NodeId {
-    use super::arena::SolverCaches;
     use super::relate::{relate, RelationLimits, RelationState};
     use super::result::RelationMode;
 
@@ -2769,14 +3074,25 @@ fn resolve_conditional(
         }
     }
 
+    // Open-check deferral: if the check type contains unresolved type parameters,
+    // defer the conditional entirely instead of eagerly resolving both branches.
+    // This avoids exponential blowup when nested conditionals have open checks.
+    if node_is_open(arena, check) {
+        state.mark_symbolic();
+        state.record_conditional_deferral();
+        let true_branch = materialize_effective_arg(arena, true_branch, subst);
+        let false_branch = materialize_effective_arg(arena, false_branch, subst);
+        return arena.conditional(check, extends, true_branch, false_branch, distributive);
+    }
+
     // Set up relation check with infer binding collection.
-    let mut caches = SolverCaches::new();
+    // Uses query-scoped relation caches to avoid recomputing same relations.
     let mut rel_state = RelationState::new(RelationLimits::default());
     rel_state.begin_infer(); // enable infer binding collection
 
     let relation = relate(
         arena,
-        &mut caches,
+        &mut state.relation_caches,
         check,
         extends,
         RelationMode::Assignable,
@@ -2831,6 +3147,11 @@ fn resolve_conditional(
         }
         super::result::RelationResult::Unknown => {
             state.mark_symbolic();
+            if node_contains_infer(arena, extends) || node_contains_infer(arena, check) {
+                let tb = materialize_effective_arg(arena, true_branch, subst);
+                let fb = materialize_effective_arg(arena, false_branch, subst);
+                return arena.conditional(check, extends, tb, fb, distributive);
+            }
             // Push undecided true-branch context for symbolic walk
             state
                 .conditional_context_stack
@@ -3012,23 +3333,28 @@ fn resolve_typeof(
     let mut consumed_segments = 1usize;
     let qualified_root = if path.len() > 1 {
         let qualified = format!("{}.{}", path[0], path[1]);
-        resolve_name_in_context(state, &qualified).or_else(|| host.root_identity("", &qualified))
+        resolve_root_in_context(state, host, &qualified)
     } else {
         None
     };
-    // First check declaration context (for typeof inside imported type bodies),
-    // then host's root_identity (for import bindings). Fall back to the
-    // original ("", name) identity which checks owner env directly.
+    // First check declaration context (for typeof inside imported type/value
+    // bodies), then the defining-file canonical scope of the active
+    // declaration, then the original owner/global fallback.
     let root_id = if let Some(identity) = qualified_root {
         consumed_segments = 2;
-        identity
+        Some(identity)
     } else {
-        resolve_name_in_context(state, root_name)
-            .or_else(|| host.root_identity("", root_name))
-            .unwrap_or_else(|| ResolvedRootIdentity::new("", root_name))
+        resolve_root_in_context(state, host, root_name)
     };
 
-    if let Some(prepared) = host.resolve_prepared_value_decl(&root_id) {
+    let Some(root_id) = root_id else {
+        state.mark_symbolic();
+        return arena.alloc(Node::TypeOf {
+            path: path.to_vec(),
+        });
+    };
+
+    if let Some(prepared) = resolve_prepared_value_decl_cached(state, host, &root_id) {
         // Priority: type_annotation > object_shape > function_signature > enum_members
         let base_type = if let Some(ref ty_ann) = prepared.type_annotation {
             Some(lower_type_expr(arena, ty_ann))
@@ -3089,12 +3415,7 @@ fn resolve_typeof(
         };
 
         if let Some(base) = base_type {
-            let pushed = if !prepared.name_resolution.is_empty() {
-                state.value_decl_context_stack.push(Arc::clone(&prepared));
-                true
-            } else {
-                false
-            };
+            state.value_decl_context_stack.push(Arc::clone(&prepared));
 
             let resolved_base = resolve_node(arena, base, host, state, &SubstitutionEnv::new());
             let result = if path.len() > consumed_segments {
@@ -3105,7 +3426,8 @@ fn resolve_typeof(
                     match node {
                         Node::Object(obj) => {
                             if let Some(prop) = obj.properties.iter().find(|p| p.name == *segment) {
-                                current = prop.ty;
+                                current =
+                                    resolve_node(arena, prop.ty, host, state, &SubstitutionEnv::new());
                             } else {
                                 ok = false;
                                 break;
@@ -3122,9 +3444,7 @@ fn resolve_typeof(
                 Some(resolved_base)
             };
 
-            if pushed {
-                state.value_decl_context_stack.pop();
-            }
+            state.value_decl_context_stack.pop();
 
             if let Some(result) = result {
                 return result;
@@ -3274,7 +3594,7 @@ fn format_number(n: f64) -> String {
 ///
 /// This is the inverse of `lower_type_expr`. It converts the solver's internal
 /// representation back to the public output type.
-fn project_to_type_expr(arena: &QueryArena, node: NodeId) -> TypeExpr {
+pub(crate) fn project_to_type_expr(arena: &QueryArena, node: NodeId) -> TypeExpr {
     project_inner(arena, node, &mut Vec::new(), 0)
 }
 
@@ -3394,6 +3714,7 @@ fn project_inner(
         Node::Ref {
             name,
             type_arguments,
+            ..
         } => TypeExpr::Ref {
             name: Arc::from(name.as_str()),
             type_arguments: Arc::from(
@@ -3734,6 +4055,7 @@ fn project_recursive_summary_inner(
         Node::Ref {
             name,
             type_arguments,
+            ..
         } => TypeExpr::Ref {
             name: Arc::from(name.as_str()),
             type_arguments: Arc::from(
@@ -4125,6 +4447,204 @@ mod tests {
     }
 
     #[test]
+    fn repeated_missing_root_lookup_is_cached_within_one_solve() {
+        struct CountingHost {
+            root_calls: std::cell::Cell<usize>,
+        }
+
+        impl TypeSolverHost for CountingHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                None
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedValueDecl>> {
+                None
+            }
+
+            fn utility_source(&self, _name: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                _symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                self.root_calls.set(self.root_calls.get() + 1);
+                None
+            }
+        }
+
+        let host = CountingHost {
+            root_calls: std::cell::Cell::new(0),
+        };
+        let expr = TypeExpr::Union(Arc::new([
+            TypeExpr::Ref {
+                name: Arc::from("Missing"),
+                type_arguments: Arc::from([]),
+            },
+            TypeExpr::Ref {
+                name: Arc::from("Missing"),
+                type_arguments: Arc::from([]),
+            },
+        ]));
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.root_calls.get(),
+            1,
+            "repeated missing root lookups should reuse the same query-local miss",
+        );
+    }
+
+    #[test]
+    fn repeated_prepared_type_hit_is_cached_within_one_solve() {
+        struct CountingHost {
+            root_calls: std::cell::Cell<usize>,
+            prepared_calls: std::cell::Cell<usize>,
+            prepared: Arc<PreparedTypeDecl>,
+        }
+
+        impl TypeSolverHost for CountingHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.prepared_calls.set(self.prepared_calls.get() + 1);
+                Some(Arc::clone(&self.prepared))
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedValueDecl>> {
+                None
+            }
+
+            fn utility_source(&self, _name: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                self.root_calls.set(self.root_calls.get() + 1);
+                Some(ResolvedRootIdentity::new("$local", symbol_name))
+            }
+        }
+
+        let mut prepared = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("$local", "Foo"),
+            crate::analysis::type_eval::TypeDeclKind::Alias,
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        prepared.build_member_index();
+        prepared.classify_wrapper_shape();
+        let host = CountingHost {
+            root_calls: std::cell::Cell::new(0),
+            prepared_calls: std::cell::Cell::new(0),
+            prepared: Arc::new(prepared),
+        };
+        let expr = TypeExpr::Union(Arc::new([
+            TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from([]),
+            },
+            TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from([]),
+            },
+        ]));
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert_eq!(
+            host.root_calls.get(),
+            1,
+            "repeated root hits should reuse the same query-local resolution",
+        );
+        assert_eq!(
+            host.prepared_calls.get(),
+            1,
+            "repeated prepared-type hits should reuse the same query-local declaration",
+        );
+    }
+
+    #[test]
+    fn repeated_prepared_type_miss_is_cached_within_one_solve() {
+        struct CountingHost {
+            root_calls: std::cell::Cell<usize>,
+            prepared_calls: std::cell::Cell<usize>,
+        }
+
+        impl TypeSolverHost for CountingHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.prepared_calls.set(self.prepared_calls.get() + 1);
+                None
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedValueDecl>> {
+                None
+            }
+
+            fn utility_source(&self, _name: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                self.root_calls.set(self.root_calls.get() + 1);
+                Some(ResolvedRootIdentity::new("$local", symbol_name))
+            }
+        }
+
+        let host = CountingHost {
+            root_calls: std::cell::Cell::new(0),
+            prepared_calls: std::cell::Cell::new(0),
+        };
+        let expr = TypeExpr::Union(Arc::new([
+            TypeExpr::Ref {
+                name: Arc::from("MissingPrepared"),
+                type_arguments: Arc::from([]),
+            },
+            TypeExpr::Ref {
+                name: Arc::from("MissingPrepared"),
+                type_arguments: Arc::from([]),
+            },
+        ]));
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(result.exactness, SolverExactness::Incomplete);
+        assert_eq!(host.root_calls.get(), 1);
+        assert_eq!(
+            host.prepared_calls.get(),
+            1,
+            "repeated prepared-type misses should reuse the same query-local miss",
+        );
+    }
+
+    #[test]
     fn solve_non_nullable_builtin() {
         let expr = TypeExpr::Ref {
             name: Arc::from("NonNullable"),
@@ -4199,14 +4719,14 @@ mod tests {
         }
 
         fn add_alias_in(&mut self, canonical_id: &str, name: &str, body: TypeExpr) {
-            self.decls.insert(
-                name.to_string(),
-                Arc::new(PreparedTypeDecl::new(
-                    ResolvedRootIdentity::new(canonical_id, name),
-                    TypeDeclKind::Alias,
-                    body,
-                )),
+            let mut decl = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new(canonical_id, name),
+                TypeDeclKind::Alias,
+                body,
             );
+            decl.build_member_index();
+            decl.classify_wrapper_shape();
+            self.decls.insert(name.to_string(), Arc::new(decl));
         }
 
         fn add_generic_alias(
@@ -4221,6 +4741,8 @@ mod tests {
                 body,
             );
             decl.type_parameters = params;
+            decl.build_member_index();
+            decl.classify_wrapper_shape();
             self.decls.insert(name.to_string(), Arc::new(decl));
         }
     }
@@ -4647,6 +5169,202 @@ mod tests {
     }
 
     #[test]
+    fn solve_uses_active_type_decl_canonical_scope_when_name_resolution_is_empty() {
+        struct ScopedTypeHost {
+            decls: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
+        }
+
+        impl TypeSolverHost for ScopedTypeHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.decls
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                None
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if canonical_id.is_empty() {
+                    return (symbol_name == "Entry")
+                        .then(|| ResolvedRootIdentity::new("/scoped.ts", "Entry"));
+                }
+
+                self.decls
+                    .contains_key(&(canonical_id.to_string(), symbol_name.to_string()))
+                    .then(|| ResolvedRootIdentity::new(canonical_id, symbol_name))
+            }
+        }
+
+        let host = ScopedTypeHost {
+            decls: {
+                let mut map = FxHashMap::default();
+                map.insert(
+                    ("/scoped.ts".into(), "Entry".into()),
+                    Arc::new(PreparedTypeDecl::new(
+                        ResolvedRootIdentity::new("/scoped.ts", "Entry"),
+                        TypeDeclKind::Alias,
+                        TypeExpr::named("Helper"),
+                    )),
+                );
+                map.insert(
+                    ("/scoped.ts".into(), "Helper".into()),
+                    Arc::new(PreparedTypeDecl::new(
+                        ResolvedRootIdentity::new("/scoped.ts", "Helper"),
+                        TypeDeclKind::Alias,
+                        TypeExpr::Primitive(PrimitiveName::String),
+                    )),
+                );
+                map
+            },
+        };
+
+        let result = solve_type(&TypeExpr::named("Entry"), &host);
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "same-file helpers should resolve through the active declaration canonical scope even without name_resolution entries",
+        );
+    }
+
+    #[test]
+    fn solve_typeof_uses_active_value_decl_canonical_scope_when_name_resolution_is_empty() {
+        struct ScopedValueHost {
+            types: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
+            values:
+                FxHashMap<(String, String), Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+        }
+
+        impl TypeSolverHost for ScopedValueHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.types
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.values
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if canonical_id.is_empty() {
+                    return match symbol_name {
+                        "Alias" | "theme" => Some(ResolvedRootIdentity::new("/value.ts", symbol_name)),
+                        _ => None,
+                    };
+                }
+
+                if self
+                    .types
+                    .contains_key(&(canonical_id.to_string(), symbol_name.to_string()))
+                    || self
+                        .values
+                        .contains_key(&(canonical_id.to_string(), symbol_name.to_string()))
+                {
+                    Some(ResolvedRootIdentity::new(canonical_id, symbol_name))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut theme = crate::analysis::type_solver::prepared::PreparedValueDecl::new(
+            ResolvedRootIdentity::new("/value.ts", "theme"),
+            crate::analysis::type_eval::ValueDeclKind::Const,
+        );
+        theme.type_annotation = Some(TypeExpr::named("Helper"));
+
+        let host = ScopedValueHost {
+            types: {
+                let mut map = FxHashMap::default();
+                map.insert(
+                    ("/value.ts".into(), "Alias".into()),
+                    Arc::new(PreparedTypeDecl::new(
+                        ResolvedRootIdentity::new("/value.ts", "Alias"),
+                        TypeDeclKind::Alias,
+                        TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
+                            path: vec!["theme".into()],
+                        }),
+                    )),
+                );
+                map.insert(
+                    ("/value.ts".into(), "Helper".into()),
+                    Arc::new(PreparedTypeDecl::new(
+                        ResolvedRootIdentity::new("/value.ts", "Helper"),
+                        TypeDeclKind::Alias,
+                        TypeExpr::Primitive(PrimitiveName::String),
+                    )),
+                );
+                map
+            },
+            values: {
+                let mut map = FxHashMap::default();
+                map.insert(("/value.ts".into(), "theme".into()), Arc::new(theme));
+                map
+            },
+        };
+
+        let result = solve_type(&TypeExpr::named("Alias"), &host);
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "prepared value annotations should resolve helpers through the active value declaration canonical scope even without name_resolution entries",
+        );
+    }
+
+    #[test]
     fn solve_typeof_resolves_imported_names_inside_prepared_value_annotations() {
         struct ValueContextHost {
             types: FxHashMap<String, Arc<PreparedTypeDecl>>,
@@ -4841,6 +5559,63 @@ mod tests {
             names,
             std::collections::BTreeSet::from(["label".to_string(), "root".to_string()]),
             "typeof should be able to consume the namespace qualifier as part of the root value lookup",
+        );
+    }
+
+    #[test]
+    fn solve_typeof_with_unresolved_root_stays_symbolic_without_value_lookup() {
+        struct CountingValueHost {
+            value_lookup_calls: std::cell::Cell<usize>,
+        }
+
+        impl TypeSolverHost for CountingValueHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                None
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                self.value_lookup_calls
+                    .set(self.value_lookup_calls.get() + 1);
+                None
+            }
+
+            fn utility_source(&self, _name: &str) -> UtilitySource {
+                UtilitySource::Unknown
+            }
+
+            fn root_identity(
+                &self,
+                _canonical_id: &str,
+                _symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                None
+            }
+        }
+
+        let host = CountingValueHost {
+            value_lookup_calls: std::cell::Cell::new(0),
+        };
+
+        let expr = TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
+            path: vec!["theme".into(), "slots".into()],
+        });
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(
+            result.value, expr,
+            "unresolved typeof roots should stay symbolic"
+        );
+        assert_eq!(
+            host.value_lookup_calls.get(),
+            0,
+            "unresolved typeof roots must not trigger prepared value lookups on synthetic empty roots",
         );
     }
 
@@ -5404,6 +6179,68 @@ mod tests {
             }
             other => panic!("expected numeric literal union, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn solve_keyof_generic_alias_with_missing_arg_stays_symbolic() {
+        let mut host = TestHost::new();
+        host.add_generic_alias(
+            "Keys",
+            vec![crate::analysis::type_expr::TypeParam {
+                name: "T".into(),
+                constraint: None,
+                default: None,
+            }],
+            TypeExpr::KeyOf(Arc::new(TypeExpr::TypeParameter(
+                crate::analysis::type_expr::TypeParam {
+                    name: "T".into(),
+                    constraint: None,
+                    default: None,
+                },
+            ))),
+        );
+
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Keys"),
+            type_arguments: Arc::from([]),
+        };
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(result.execution_status, ExecutionStatus::Completed);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert!(
+            matches!(result.value, TypeExpr::KeyOf(_) | TypeExpr::Unknown { .. }),
+            "missing generic arg keyof should stay symbolic, got {:?}",
+            result.value
+        );
+    }
+
+    #[test]
+    fn solve_function_return_ref_stays_shallow() {
+        let mut host = TestHost::new();
+        host.add_alias("Foo", TypeExpr::Primitive(PrimitiveName::String));
+
+        let function_expr = TypeExpr::Function(Arc::new(
+            crate::analysis::type_expr::FunctionExpr {
+                parameters: vec![],
+                return_type: Some(Arc::new(TypeExpr::named("Foo"))),
+                type_parameters: vec![],
+            },
+        ));
+
+        let result = solve_type(&function_expr, &host);
+        let TypeExpr::Function(function) = result.value else {
+            panic!("expected function result");
+        };
+        assert!(
+            matches!(
+                function.return_type.as_deref(),
+                Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Foo"
+            ),
+            "function return type should stay symbolic on the surface, got {:?}",
+            function.return_type
+        );
     }
 
     #[test]
@@ -6784,6 +7621,144 @@ mod tests {
         assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
     }
 
+    #[test]
+    fn solve_pick_does_not_resolve_unselected_external_intersection_branch() {
+        let mut host = TestHost::new();
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+        host.add_alias(
+            "Base",
+            TypeExpr::Intersection(Arc::from(vec![
+                make_object_type(&[("keep", TypeExpr::Primitive(PrimitiveName::String))]),
+                TypeExpr::named("Noise"),
+            ])),
+        );
+
+        let expr = TypeExpr::Ref {
+            name: Arc::from("Pick"),
+            type_arguments: Arc::from(vec![
+                TypeExpr::named("Base"),
+                TypeExpr::string_literal("keep"),
+            ]),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(
+            object_property_type(&result.value, "keep"),
+            &TypeExpr::Primitive(PrimitiveName::String)
+        );
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "Pick should project only the selected key without resolving unrelated external branches, got visits {:?}",
+            audit.external_decl_visit_counts
+        );
+    }
+
+    #[test]
+    fn solve_required_indexed_access_does_not_resolve_unrelated_external_intersection_branch() {
+        let mut host = TestHost::new();
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+        host.add_alias(
+            "Base",
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "keep".into(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        },
+                    )],
+                })),
+                TypeExpr::named("Noise"),
+            ])),
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: Arc::from("Required"),
+                type_arguments: Arc::from(vec![TypeExpr::named("Base")]),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "Required<T>['keep'] should reuse the selected member without resolving unrelated external branches, got visits {:?}",
+            audit.external_decl_visit_counts
+        );
+    }
+
+    #[test]
+    fn solve_userland_required_style_indexed_access_does_not_resolve_unrelated_external_branch() {
+        let mut host = TestHost::new();
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+        host.add_alias(
+            "Base",
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "keep".into(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        },
+                    )],
+                })),
+                TypeExpr::named("Noise"),
+            ])),
+        );
+        host.add_generic_alias(
+            "Strictify",
+            vec![make_type_param("T")],
+            TypeExpr::Mapped {
+                parameter: "K".into(),
+                source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+                value: Arc::new(TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::named("T")),
+                    index: Arc::new(TypeExpr::named("K")),
+                }),
+                optional: crate::analysis::type_expr::MappedModifier::Remove,
+                readonly: crate::analysis::type_expr::MappedModifier::None,
+                name_type: None,
+            },
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: Arc::from("Strictify"),
+                type_arguments: Arc::from(vec![TypeExpr::named("Base")]),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "userland required-style wrappers should stay structural and avoid unrelated external branches, got visits {:?}",
+            audit.external_decl_visit_counts
+        );
+    }
+
     // ===================================================================
     // Edge case and fix-verification tests
     // ===================================================================
@@ -7045,297 +8020,6 @@ mod tests {
             result.execution_status,
             ExecutionStatus::Completed,
             "should NOT report Completed"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // SolveBatch tests
-    // -----------------------------------------------------------------------
-
-    /// A counting solver host that tracks how many times `resolve_prepared_type_decl`
-    /// is called. Delegates to an inner `FxHashMap` for actual resolution.
-    struct CountingSolverHost {
-        types: FxHashMap<String, Arc<PreparedTypeDecl>>,
-        resolve_count: std::cell::Cell<u32>,
-    }
-
-    impl CountingSolverHost {
-        fn new() -> Self {
-            Self {
-                types: FxHashMap::default(),
-                resolve_count: std::cell::Cell::new(0),
-            }
-        }
-
-        fn with_type(mut self, id: &str, name: &str, body: TypeExpr) -> Self {
-            self.types.insert(
-                name.to_string(),
-                Arc::new(PreparedTypeDecl::new(
-                    ResolvedRootIdentity::new(id, name),
-                    TypeDeclKind::Alias,
-                    body,
-                )),
-            );
-            self
-        }
-
-        fn resolve_calls(&self) -> u32 {
-            self.resolve_count.get()
-        }
-    }
-
-    impl TypeSolverHost for CountingSolverHost {
-        fn resolve_prepared_type_decl(
-            &self,
-            root_identity: &ResolvedRootIdentity,
-        ) -> Option<Arc<PreparedTypeDecl>> {
-            self.resolve_count.set(self.resolve_count.get() + 1);
-            self.types.get(&root_identity.symbol_name).cloned()
-        }
-
-        fn resolve_prepared_value_decl(
-            &self,
-            _root_identity: &ResolvedRootIdentity,
-        ) -> Option<Arc<PreparedValueDecl>> {
-            None
-        }
-
-        fn utility_source(&self, name: &str) -> UtilitySource {
-            if BuiltinUtility::from_name(name).is_some() {
-                UtilitySource::Builtin
-            } else {
-                UtilitySource::Unknown
-            }
-        }
-
-        fn root_identity(
-            &self,
-            _canonical_id: &str,
-            symbol_name: &str,
-        ) -> Option<ResolvedRootIdentity> {
-            if self.types.contains_key(symbol_name) {
-                Some(ResolvedRootIdentity::new("/types.ts", symbol_name))
-            } else {
-                None
-            }
-        }
-    }
-
-    #[test]
-    fn solve_batch_reuses_same_expr_without_second_host_lookup() {
-        let host = CountingSolverHost::new().with_type(
-            "/types.ts",
-            "Shared",
-            TypeExpr::Primitive(PrimitiveName::String),
-        );
-        let expr = TypeExpr::Ref {
-            name: Arc::from("Shared"),
-            type_arguments: Arc::from(vec![]),
-        };
-
-        let mut batch = SolveBatch::new(&host);
-
-        let result1 = batch.solve(&expr);
-        let calls_after_first = host.resolve_calls();
-        assert!(
-            calls_after_first > 0,
-            "first call should trigger host lookup"
-        );
-
-        let result2 = batch.solve(&expr);
-        let calls_after_second = host.resolve_calls();
-
-        // Positive: both produce the same semantic result
-        assert_eq!(result1.value, result2.value);
-        assert_eq!(
-            result1.value,
-            TypeExpr::Primitive(PrimitiveName::String),
-            "should resolve Shared to String"
-        );
-        // Negative: second call must not increase host lookup count
-        assert_eq!(
-            calls_after_first, calls_after_second,
-            "cached hit should not trigger another host lookup"
-        );
-        // Negative: result should not be Unknown or a leftover Ref
-        assert_ne!(result1.exactness, SolverExactness::Incomplete);
-    }
-
-    #[test]
-    fn solve_batch_preserves_trace_on_hit() {
-        // Use a type hosted on an external canonical file so the trace is non-empty.
-        // The solver records external decl visits when the canonical_id is not "$owner".
-        let host = CountingSolverHost::new().with_type(
-            "/dep.ts",
-            "Imported",
-            TypeExpr::Primitive(PrimitiveName::Number),
-        );
-        let expr = TypeExpr::Ref {
-            name: Arc::from("Imported"),
-            type_arguments: Arc::from(vec![]),
-        };
-
-        let mut batch = SolveBatch::new(&host);
-
-        let (result1, trace1) = batch.solve_with_trace(&expr);
-        let (result2, trace2) = batch.solve_with_trace(&expr);
-
-        // Positive: both produce the same result
-        assert_eq!(result1.value, result2.value);
-        assert_eq!(
-            result1.value,
-            TypeExpr::Primitive(PrimitiveName::Number),
-            "should resolve to Number"
-        );
-        // Positive: trace should be non-empty (external file)
-        assert!(
-            !trace1.is_empty(),
-            "trace should capture visited external declaration /dep.ts::Imported"
-        );
-        // Positive: cached trace matches original
-        assert_eq!(
-            trace1, trace2,
-            "cached trace should match the original trace"
-        );
-    }
-
-    #[test]
-    fn solve_batch_distinguishes_distinct_exprs() {
-        let host = CountingSolverHost::new()
-            .with_type(
-                "/types.ts",
-                "Alpha",
-                TypeExpr::Primitive(PrimitiveName::String),
-            )
-            .with_type(
-                "/types.ts",
-                "Beta",
-                TypeExpr::Primitive(PrimitiveName::Number),
-            );
-
-        let expr_a = TypeExpr::Ref {
-            name: Arc::from("Alpha"),
-            type_arguments: Arc::from(vec![]),
-        };
-        let expr_b = TypeExpr::Ref {
-            name: Arc::from("Beta"),
-            type_arguments: Arc::from(vec![]),
-        };
-
-        let mut batch = SolveBatch::new(&host);
-
-        let result_a = batch.solve(&expr_a);
-        let result_b = batch.solve(&expr_b);
-
-        // Positive: different expressions produce different results
-        assert_ne!(result_a.value, result_b.value);
-        assert_eq!(result_a.value, TypeExpr::Primitive(PrimitiveName::String));
-        assert_eq!(result_b.value, TypeExpr::Primitive(PrimitiveName::Number));
-        // Positive: both should have triggered host lookups
-        assert!(
-            host.resolve_calls() >= 2,
-            "distinct expressions should each trigger at least one host lookup"
-        );
-        // Negative: neither should be incomplete
-        assert_eq!(result_a.execution_status, ExecutionStatus::Completed);
-        assert_eq!(result_b.execution_status, ExecutionStatus::Completed);
-    }
-
-    #[test]
-    fn solve_batch_matches_uncached_result_on_first_miss() {
-        let host = CountingSolverHost::new().with_type(
-            "/types.ts",
-            "Props",
-            TypeExpr::Primitive(PrimitiveName::Boolean),
-        );
-        let expr = TypeExpr::Ref {
-            name: Arc::from("Props"),
-            type_arguments: Arc::from(vec![]),
-        };
-
-        // Uncached path
-        let uncached = solve_type(&expr, &host);
-
-        let mut batch = SolveBatch::new(&host);
-        let batched = batch.solve(&expr);
-
-        // Positive: batch first-miss matches uncached
-        assert_eq!(
-            uncached.value, batched.value,
-            "batch first-miss should match uncached solve_type"
-        );
-        assert_eq!(uncached.exactness, batched.exactness);
-        assert_eq!(uncached.execution_status, batched.execution_status);
-        // Negative: should not produce Unknown
-        assert_ne!(
-            batched.value,
-            TypeExpr::Primitive(PrimitiveName::Unknown),
-            "should not fall back to Unknown"
-        );
-    }
-
-    /// Verify cancelled requests get a cheap cancelled outcome without running
-    /// resolution. Uses a Ref type that would require host lookup if not cancelled.
-    #[test]
-    fn solve_batch_respects_cancellation() {
-        struct CancelledHost;
-
-        impl TypeSolverHost for CancelledHost {
-            fn resolve_prepared_type_decl(
-                &self,
-                _: &ResolvedRootIdentity,
-            ) -> Option<Arc<PreparedTypeDecl>> {
-                panic!("should not be called on cancelled request");
-            }
-
-            fn resolve_prepared_value_decl(
-                &self,
-                _: &ResolvedRootIdentity,
-            ) -> Option<Arc<PreparedValueDecl>> {
-                panic!("should not be called on cancelled request");
-            }
-
-            fn utility_source(&self, _: &str) -> UtilitySource {
-                UtilitySource::Unknown
-            }
-
-            fn request_status(&self) -> RequestStatus {
-                RequestStatus::Cancelled
-            }
-        }
-
-        let host = CancelledHost;
-        // Use a Ref that would normally trigger host resolution — the
-        // cancellation check must prevent this from ever reaching the host.
-        let expr = TypeExpr::Ref {
-            name: Arc::from("ShouldNotResolve"),
-            type_arguments: Arc::from(vec![]),
-        };
-
-        let mut batch = SolveBatch::new(&host);
-        let result = batch.solve(&expr);
-        let uncached = solve_type(&expr, &host);
-
-        // Positive: execution status is Cancelled
-        assert_eq!(result.execution_status, ExecutionStatus::Cancelled);
-        assert_eq!(
-            result.value, uncached.value,
-            "cancelled batch path should preserve the uncached projected value"
-        );
-        assert_eq!(
-            result.exactness, uncached.exactness,
-            "cancelled batch path should preserve uncached exactness semantics"
-        );
-        // Negative: should not be Completed or HardStop
-        assert_ne!(result.execution_status, ExecutionStatus::Completed);
-        assert_ne!(result.execution_status, ExecutionStatus::HardStop);
-
-        // Also test solve_with_trace path
-        let (trace_result, trace) = batch.solve_with_trace(&expr);
-        assert_eq!(trace_result.execution_status, ExecutionStatus::Cancelled);
-        assert!(
-            trace.is_empty(),
-            "cancelled request should produce empty trace"
         );
     }
 
@@ -8546,6 +9230,379 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deferred_imported_alias_resolution_keeps_declaring_file_scope() {
+        use std::cell::RefCell;
+
+        #[derive(Default)]
+        struct ScopedHost {
+            decls: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
+            root_queries: RefCell<Vec<(String, String)>>,
+        }
+
+        impl ScopedHost {
+            fn insert_generic_decl(
+                &mut self,
+                canonical_id: &str,
+                name: &str,
+                type_parameters: Vec<crate::analysis::type_expr::TypeParam>,
+                body: TypeExpr,
+            ) {
+                let mut decl = PreparedTypeDecl::new(
+                    ResolvedRootIdentity::new(canonical_id, name),
+                    TypeDeclKind::Alias,
+                    body,
+                );
+                decl.type_parameters = type_parameters;
+                decl.build_member_index();
+                decl.classify_wrapper_shape();
+                self.decls.insert(
+                    (canonical_id.to_string(), name.to_string()),
+                    Arc::new(decl),
+                );
+            }
+
+            fn clear_queries(&self) {
+                self.root_queries.borrow_mut().clear();
+            }
+
+            fn has_query(&self, canonical_id: &str, symbol_name: &str) -> bool {
+                self.root_queries
+                    .borrow()
+                    .iter()
+                    .any(|(canonical, symbol)| canonical == canonical_id && symbol == symbol_name)
+            }
+        }
+
+        impl TypeSolverHost for ScopedHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.decls
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                None
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                self.root_queries
+                    .borrow_mut()
+                    .push((canonical_id.to_string(), symbol_name.to_string()));
+                self.decls
+                    .get(&(canonical_id.to_string(), symbol_name.to_string()))
+                    .map(|decl| decl.root_identity.clone())
+            }
+        }
+
+        let mut host = ScopedHost::default();
+        host.insert_generic_decl(
+            "/utils.ts",
+            "DotPathKeys",
+            vec![make_type_param("T")],
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::KeyOf(Arc::new(TypeExpr::named("T"))),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ])),
+        );
+        host.insert_generic_decl(
+            "/utils.ts",
+            "Deferred",
+            vec![make_type_param("T"), make_type_param("VK")],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("VK")),
+                extends: Arc::new(TypeExpr::named_with_args(
+                    "DotPathKeys",
+                    vec![TypeExpr::named("T")],
+                )),
+                true_type: Arc::new(TypeExpr::named("T")),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+            },
+        );
+        host.insert_generic_decl(
+            "/utils.ts",
+            "DeferredHelper",
+            vec![make_type_param("T"), make_type_param("VK")],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("VK")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                true_type: Arc::new(TypeExpr::named_with_args(
+                    "DotPathKeys",
+                    vec![TypeExpr::named("T")],
+                )),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+            },
+        );
+
+        let mut arena = QueryArena::new();
+        let mut setup_state = SolveState::new(SolveLimits::default());
+        let concrete_object = lower_type_expr(
+            &mut arena,
+            &TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "label".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+        let open_value_key = lower_type_expr(
+            &mut arena,
+            &TypeExpr::type_parameter(make_type_param("VK")),
+        );
+        let deferred = resolve_prepared_ref(
+            &mut arena,
+            &host,
+            &mut setup_state,
+            &SubstitutionEnv::new(),
+            &ResolvedRootIdentity::new("/utils.ts", "Deferred"),
+            &[concrete_object, open_value_key],
+        );
+
+        assert!(
+            matches!(arena.get(deferred), Node::Conditional { .. }),
+            "expected imported helper to stay deferred until caller provides VK, got {:?}",
+            arena.get(deferred)
+        );
+
+        host.clear_queries();
+
+        let mut caller_state = SolveState::new(SolveLimits::default());
+        caller_state.type_decl_context_stack.push(Arc::new(PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/input.ts", "Wrapper"),
+            TypeDeclKind::Alias,
+            TypeExpr::Primitive(PrimitiveName::Unknown),
+        )));
+        let mut caller_subst = SubstitutionEnv::new();
+        caller_subst.bind("VK", arena.string_literal("label"));
+        let resolved = resolve_node(
+            &mut arena,
+            deferred,
+            &host,
+            &mut caller_state,
+            &caller_subst,
+        );
+
+        assert!(
+            !matches!(arena.get(resolved), Node::Error { .. }),
+            "deferred imported helper should resolve cleanly once caller provides VK"
+        );
+        assert!(
+            !host.has_query("/input.ts", "T") && !host.has_query("", "T"),
+            "deferred conditional branches should capture substituted T instead of reopening it in the caller scope: {:?}",
+            host.root_queries.borrow()
+        );
+
+        host.clear_queries();
+
+        let helper_deferred = resolve_prepared_ref(
+            &mut arena,
+            &host,
+            &mut setup_state,
+            &SubstitutionEnv::new(),
+            &ResolvedRootIdentity::new("/utils.ts", "DeferredHelper"),
+            &[concrete_object, open_value_key],
+        );
+
+        assert!(
+            matches!(arena.get(helper_deferred), Node::Conditional { .. }),
+            "expected imported helper ref to stay deferred until caller provides VK, got {:?}",
+            arena.get(helper_deferred)
+        );
+
+        let resolved_helper = resolve_node(
+            &mut arena,
+            helper_deferred,
+            &host,
+            &mut caller_state,
+            &caller_subst,
+        );
+
+        assert!(
+            !matches!(arena.get(resolved_helper), Node::Error { .. }),
+            "deferred imported helper ref should resolve cleanly once caller provides VK"
+        );
+        assert!(
+            !host.has_query("/input.ts", "DotPathKeys") && !host.has_query("", "DotPathKeys"),
+            "deferred imported helper refs should resolve through their declaring file scope instead of reopening the caller scope: {:?}",
+            host.root_queries.borrow()
+        );
+    }
+
+    #[test]
+    fn unknown_conditional_with_infer_stays_symbolic_without_reopening_infer_names() {
+        use std::cell::RefCell;
+
+        #[derive(Default)]
+        struct ScopedHost {
+            decls: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
+            root_queries: RefCell<Vec<(String, String)>>,
+        }
+
+        impl ScopedHost {
+            fn insert_generic_decl(
+                &mut self,
+                canonical_id: &str,
+                name: &str,
+                type_parameters: Vec<crate::analysis::type_expr::TypeParam>,
+                body: TypeExpr,
+            ) {
+                let mut decl = PreparedTypeDecl::new(
+                    ResolvedRootIdentity::new(canonical_id, name),
+                    TypeDeclKind::Alias,
+                    body,
+                );
+                decl.type_parameters = type_parameters;
+                decl.build_member_index();
+                decl.classify_wrapper_shape();
+                self.decls.insert(
+                    (canonical_id.to_string(), name.to_string()),
+                    Arc::new(decl),
+                );
+            }
+        }
+
+        impl TypeSolverHost for ScopedHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.decls
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                None
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                self.root_queries
+                    .borrow_mut()
+                    .push((canonical_id.to_string(), symbol_name.to_string()));
+                self.decls
+                    .get(&(canonical_id.to_string(), symbol_name.to_string()))
+                    .map(|decl| decl.root_identity.clone())
+            }
+        }
+
+        let mut host = ScopedHost::default();
+        host.insert_generic_decl(
+            "/utils.ts",
+            "PathValue",
+            vec![make_type_param("T"), make_type_param("P")],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("P")),
+                extends: Arc::new(TypeExpr::TemplateLiteral {
+                    quasis: vec!["".into(), ".".into(), "".into()],
+                    expressions: Arc::from(vec![
+                        TypeExpr::Infer { name: "K".into() },
+                        TypeExpr::Infer {
+                            name: "Rest".into(),
+                        },
+                    ]),
+                }),
+                true_type: Arc::new(TypeExpr::Conditional {
+                    check: Arc::new(TypeExpr::named("K")),
+                    extends: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::named("T")))),
+                    true_type: Arc::new(TypeExpr::IndexedAccess {
+                        object: Arc::new(TypeExpr::named("T")),
+                        index: Arc::new(TypeExpr::named("K")),
+                    }),
+                    false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+                }),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+            },
+        );
+
+        let mut arena = QueryArena::new();
+        let mut state = SolveState::new(SolveLimits::default());
+        let concrete_object = lower_type_expr(
+            &mut arena,
+            &TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "label".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+        let string_type = lower_type_expr(&mut arena, &TypeExpr::Primitive(PrimitiveName::String));
+        let input = resolve_prepared_ref(
+            &mut arena,
+            &host,
+            &mut state,
+            &SubstitutionEnv::new(),
+            &ResolvedRootIdentity::new("/utils.ts", "PathValue"),
+            &[concrete_object, string_type],
+        );
+
+        assert!(
+            matches!(arena.get(input), Node::Conditional { .. }),
+            "unknown infer conditional should stay symbolic, got {:?}",
+            arena.get(input)
+        );
+        assert!(
+            !host
+                .root_queries
+                .borrow()
+                .iter()
+                .any(|(canonical, symbol)| {
+                    (canonical == "/utils.ts" || canonical.is_empty())
+                        && (symbol == "K" || symbol == "Rest")
+                }),
+            "infer binders should not be reopened as roots during symbolic conditional resolution: {:?}",
+            host.root_queries.borrow()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // #23 — branch-sensitive: Bar<T> vs Bar<string> remain distinct
     // -----------------------------------------------------------------------
@@ -9712,152 +10769,6 @@ mod tests {
         assert_eq!(state.diagnostics_truncated, 0);
     }
 
-    #[test]
-    fn solve_batch_caches_hard_stop_result() {
-        let mut host = TestHost::new();
-        // Create a deeply recursive type that triggers HardStop via depth limit
-        // type Deep<T> = { value: Deep<Deep<T>> }
-        host.add_generic_alias(
-            "Deep",
-            vec![crate::analysis::type_expr::TypeParam {
-                name: "T".into(),
-                constraint: None,
-                default: None,
-            }],
-            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
-                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                    crate::analysis::type_expr::ObjectProperty {
-                        name: "value".into(),
-                        ty: TypeExpr::named_with_args(
-                            "Deep",
-                            vec![TypeExpr::named_with_args(
-                                "Deep",
-                                vec![TypeExpr::named("T")],
-                            )],
-                        ),
-                        optional: false,
-                        readonly: false,
-                    },
-                )],
-            })),
-        );
-
-        let expr =
-            TypeExpr::named_with_args("Deep", vec![TypeExpr::Primitive(PrimitiveName::String)]);
-
-        let mut batch = SolveBatch::new(&host);
-
-        // First solve — actually runs the solver
-        let result1 = batch.solve(&expr);
-        // The recursive type should hit HardStop or complete with RecursiveRef
-        let status1 = result1.execution_status;
-
-        // Second solve — should hit cache, returning identical result
-        let result2 = batch.solve(&expr);
-
-        assert_eq!(
-            result2.execution_status, status1,
-            "second solve should return cached status"
-        );
-        assert_eq!(
-            format!("{:?}", result2.value),
-            format!("{:?}", result1.value),
-            "second solve should return cached value"
-        );
-        // Verify the cache actually has the entry (batch has exactly 1 cached entry)
-        assert_eq!(
-            batch.cache.len(),
-            1,
-            "batch should have exactly one cached entry"
-        );
-    }
-
-    #[test]
-    fn solve_batch_reuses_across_identical_expressions() {
-        let mut host = TestHost::new();
-        host.add_alias("MyType", TypeExpr::Primitive(PrimitiveName::String));
-
-        let expr = TypeExpr::named("MyType");
-        let mut batch = SolveBatch::new(&host);
-
-        let r1 = batch.solve(&expr);
-        let r2 = batch.solve(&expr);
-
-        assert_eq!(r1.value, r2.value);
-        assert_eq!(r1.exactness, r2.exactness);
-        assert_eq!(batch.cache.len(), 1);
-    }
-
-    // -----------------------------------------------------------------------
-    // Workstream A: query-local reuse caching tests
-    // -----------------------------------------------------------------------
-
-    /// Host that tracks member projection calls via an interior counter.
-    struct CountingHost {
-        inner: TestHost,
-        member_projection_calls: std::cell::RefCell<u32>,
-    }
-
-    impl CountingHost {
-        fn new(inner: TestHost) -> Self {
-            Self {
-                inner,
-                member_projection_calls: std::cell::RefCell::new(0),
-            }
-        }
-
-        fn member_projection_call_count(&self) -> u32 {
-            *self.member_projection_calls.borrow()
-        }
-    }
-
-    impl TypeSolverHost for CountingHost {
-        fn resolve_prepared_type_decl(
-            &self,
-            root_identity: &ResolvedRootIdentity,
-        ) -> Option<Arc<PreparedTypeDecl>> {
-            self.inner.resolve_prepared_type_decl(root_identity)
-        }
-
-        fn resolve_prepared_value_decl(
-            &self,
-            root_identity: &ResolvedRootIdentity,
-        ) -> Option<Arc<PreparedValueDecl>> {
-            self.inner.resolve_prepared_value_decl(root_identity)
-        }
-
-        fn utility_source(&self, name: &str) -> UtilitySource {
-            self.inner.utility_source(name)
-        }
-
-        fn root_identity(
-            &self,
-            canonical_id: &str,
-            symbol_name: &str,
-        ) -> Option<ResolvedRootIdentity> {
-            self.inner.root_identity(canonical_id, symbol_name)
-        }
-
-        fn resolve_member_projection(
-            &self,
-            root_identity: &ResolvedRootIdentity,
-            member: &str,
-        ) -> Option<crate::analysis::type_solver::host::SolverProjection<TypeExpr>> {
-            *self.member_projection_calls.borrow_mut() += 1;
-            // Delegate to a manual member lookup on the prepared declaration.
-            // Build member_index since TestHost.add_alias() doesn't call it.
-            let stored = self.inner.resolve_prepared_type_decl(root_identity)?;
-            let mut prepared = (*stored).clone();
-            prepared.build_member_index();
-            let m = prepared.member(member)?;
-            Some(crate::analysis::type_solver::host::SolverProjection::exact_concrete(m.ty.clone()))
-        }
-
-        fn request_status(&self) -> RequestStatus {
-            RequestStatus::Running
-        }
-    }
-
     /// Helper: create a Props object type with named string properties.
     fn make_object_type(props: &[(&str, TypeExpr)]) -> TypeExpr {
         TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
@@ -9875,177 +10786,6 @@ mod tests {
                 })
                 .collect(),
         }))
-    }
-
-    #[test]
-    fn host_projection_cache_collapses_repeated_member_access() {
-        // Setup: BaseTransitionProps with a 'mode' member
-        let mut inner = TestHost::new();
-        let props_body = make_object_type(&[
-            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
-            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
-        ]);
-        inner.add_alias("BaseTransitionProps", props_body);
-
-        let host = CountingHost::new(inner);
-
-        // Expression: union of three identical indexed accesses
-        // BaseTransitionProps['mode'] | BaseTransitionProps['mode'] | BaseTransitionProps['mode']
-        let indexed_access = TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("BaseTransitionProps")),
-            index: Arc::new(TypeExpr::string_literal("mode")),
-        };
-        let expr = TypeExpr::Union(Arc::from(vec![
-            indexed_access.clone(),
-            indexed_access.clone(),
-            indexed_access.clone(),
-        ]));
-
-        let (result, audit) = solve_type_with_audit(&expr, &host);
-
-        // Positive: result should be string (union of 3 identical strings deduped)
-        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
-        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
-
-        // KEY ASSERTION: host projection should be called exactly once, not 3 times.
-        // The cache must collapse repeated projections of the same (root, member).
-        assert_eq!(
-            host.member_projection_call_count(),
-            1,
-            "host.resolve_member_projection should be called once, not 3 times"
-        );
-
-        // Audit: cache should have hits
-        let key = (
-            "/test.ts".to_string(),
-            "BaseTransitionProps".to_string(),
-            "mode".to_string(),
-        );
-        assert_eq!(
-            audit.host_projection_counts.get(&key).copied().unwrap_or(0),
-            1,
-            "audit should record exactly 1 host projection"
-        );
-        assert!(
-            audit.host_projection_cache_hits >= 2,
-            "audit should record at least 2 cache hits"
-        );
-    }
-
-    #[test]
-    fn host_projection_cache_does_not_cross_different_members() {
-        // Two different members of the same type should each call the host once
-        let mut inner = TestHost::new();
-        let props_body = make_object_type(&[
-            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
-            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
-        ]);
-        inner.add_alias("BaseTransitionProps", props_body);
-
-        let host = CountingHost::new(inner);
-
-        // BaseTransitionProps['mode'] | BaseTransitionProps['appear']
-        let expr = TypeExpr::Union(Arc::from(vec![
-            TypeExpr::IndexedAccess {
-                object: Arc::new(TypeExpr::named("BaseTransitionProps")),
-                index: Arc::new(TypeExpr::string_literal("mode")),
-            },
-            TypeExpr::IndexedAccess {
-                object: Arc::new(TypeExpr::named("BaseTransitionProps")),
-                index: Arc::new(TypeExpr::string_literal("appear")),
-            },
-        ]));
-
-        let (result, _audit) = solve_type_with_audit(&expr, &host);
-
-        // Positive: union of string | boolean
-        match &result.value {
-            TypeExpr::Union(members) => assert_eq!(members.len(), 2),
-            _ => panic!("expected Union"),
-        }
-
-        // Each member accessed once
-        assert_eq!(
-            host.member_projection_call_count(),
-            2,
-            "two different members should each call host once"
-        );
-    }
-
-    #[test]
-    fn prepared_ref_cache_reuses_completed_instantiation() {
-        // Setup: type Wrapper = { inner: string }
-        // Expression: Wrapper (accessed twice in same query via union)
-        let mut inner = TestHost::new();
-        inner.add_alias(
-            "Wrapper",
-            make_object_type(&[("inner", TypeExpr::Primitive(PrimitiveName::String))]),
-        );
-
-        let host = CountingHost::new(inner);
-
-        // Wrapper | Wrapper — should instantiate the declaration once
-        let expr = TypeExpr::Union(Arc::from(vec![
-            TypeExpr::named("Wrapper"),
-            TypeExpr::named("Wrapper"),
-        ]));
-
-        let (result, audit) = solve_type_with_audit(&expr, &host);
-
-        // Positive: resolves to union or single object (union may not dedup objects)
-        match &result.value {
-            TypeExpr::Object(obj) => {
-                assert_eq!(obj.properties.len(), 1);
-            }
-            TypeExpr::Union(members) => {
-                // Both members should be identical Wrapper objects
-                assert!(members.len() <= 2);
-                for m in members.iter() {
-                    match m {
-                        TypeExpr::Object(obj) => assert_eq!(obj.properties.len(), 1),
-                        _ => panic!("expected Object in union member"),
-                    }
-                }
-            }
-            _ => panic!("expected Object or Union, got {:?}", result.value),
-        }
-
-        // KEY ASSERTION: prepared_ref should be entered once, reused via cache on second
-        assert!(
-            audit.prepared_ref_cache_hits >= 1,
-            "second Wrapper ref should hit prepared_ref cache, got {} hits",
-            audit.prepared_ref_cache_hits,
-        );
-    }
-
-    #[test]
-    fn host_projection_cache_negative_no_extra_projections() {
-        // Accessing mode should NOT cause projections on 'appear' or other members
-        let mut inner = TestHost::new();
-        let props_body = make_object_type(&[
-            ("mode", TypeExpr::Primitive(PrimitiveName::String)),
-            ("appear", TypeExpr::Primitive(PrimitiveName::Boolean)),
-            ("duration", TypeExpr::Primitive(PrimitiveName::Number)),
-        ]);
-        inner.add_alias("BaseTransitionProps", props_body);
-
-        let host = CountingHost::new(inner);
-
-        let expr = TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("BaseTransitionProps")),
-            index: Arc::new(TypeExpr::string_literal("mode")),
-        };
-
-        let (_result, audit) = solve_type_with_audit(&expr, &host);
-
-        // Negative: only 'mode' should be projected, not 'appear' or 'duration'
-        for key in audit.host_projection_counts.keys() {
-            assert_eq!(
-                key.2, "mode",
-                "only 'mode' should be projected, but found '{}'",
-                key.2
-            );
-        }
     }
 
     #[test]
@@ -10499,36 +11239,5 @@ mod tests {
             }
             _ => panic!("expected Object, got {:?}", result.value),
         }
-    }
-
-    #[test]
-    fn host_projection_cache_hit_across_batch_solve_calls() {
-        // SolveBatch: two separate solve() calls accessing the same member
-        let mut inner = TestHost::new();
-        let props = make_object_type(&[("x", TypeExpr::Primitive(PrimitiveName::String))]);
-        inner.add_alias("Props", props);
-        let host = CountingHost::new(inner);
-
-        let expr1 = TypeExpr::IndexedAccess {
-            object: Arc::new(TypeExpr::named("Props")),
-            index: Arc::new(TypeExpr::string_literal("x")),
-        };
-        let expr2 = expr1.clone();
-
-        let mut batch = SolveBatch::new(&host);
-        let r1 = batch.solve(&expr1);
-        let r2 = batch.solve(&expr2);
-
-        assert_eq!(r1.value, TypeExpr::Primitive(PrimitiveName::String));
-        assert_eq!(r2.value, TypeExpr::Primitive(PrimitiveName::String));
-
-        // SolveBatch caches at TypeExpr level, so the second solve hits
-        // the SolveBatch cache (not even reaching the host projection).
-        // host should be called at most once.
-        assert!(
-            host.member_projection_call_count() <= 1,
-            "batch should cache: got {} host calls",
-            host.member_projection_call_count()
-        );
     }
 }

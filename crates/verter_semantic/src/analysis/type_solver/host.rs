@@ -13,8 +13,6 @@
 use std::sync::Arc;
 
 use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
-use super::result::SolverExactness;
-use crate::analysis::type_expr::TypeExpr;
 
 // ---------------------------------------------------------------------------
 // Root identity
@@ -42,62 +40,6 @@ impl ResolvedRootIdentity {
 impl std::fmt::Display for ResolvedRootIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}::{}", self.canonical_id, self.symbol_name)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Solver projection
-// ---------------------------------------------------------------------------
-
-/// Shared projection wrapper used by solver-facing APIs.
-#[derive(Debug, Clone)]
-pub struct SolverProjection<T> {
-    pub exactness: SolverExactness,
-    pub value: T,
-    pub type_decl_contexts: Vec<Arc<PreparedTypeDecl>>,
-}
-
-impl<T> SolverProjection<T> {
-    pub fn exact_concrete(value: T) -> Self {
-        Self {
-            exactness: SolverExactness::ExactConcrete,
-            value,
-            type_decl_contexts: Vec::new(),
-        }
-    }
-
-    pub fn exact_symbolic(value: T) -> Self {
-        Self {
-            exactness: SolverExactness::ExactSymbolic,
-            value,
-            type_decl_contexts: Vec::new(),
-        }
-    }
-
-    pub fn incomplete(value: T) -> Self {
-        Self {
-            exactness: SolverExactness::Incomplete,
-            value,
-            type_decl_contexts: Vec::new(),
-        }
-    }
-
-    pub fn with_type_decl_context(mut self, prepared: Arc<PreparedTypeDecl>) -> Self {
-        self.type_decl_contexts.push(prepared);
-        self
-    }
-
-    pub fn with_type_decl_contexts(mut self, prepared: Vec<Arc<PreparedTypeDecl>>) -> Self {
-        self.type_decl_contexts = prepared;
-        self
-    }
-
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SolverProjection<U> {
-        SolverProjection {
-            exactness: self.exactness,
-            value: f(self.value),
-            type_decl_contexts: self.type_decl_contexts,
-        }
     }
 }
 
@@ -148,10 +90,6 @@ pub enum RequestStatus {
 /// - `resolve_prepared_value_decl`: same for value declarations (needed for
 ///   `typeof`).
 ///
-/// - `resolve_member_projection`: optional optimization seam for direct member
-///   lookup on a prepared declaration. May return `None` to indicate the solver
-///   should fall back to its own member projection logic.
-///
 /// - `utility_source`: classifies whether a name is a built-in utility, a
 ///   user-shadowed name, or unknown.
 ///
@@ -171,17 +109,6 @@ pub trait TypeSolverHost {
         &self,
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedValueDecl>>;
-
-    /// Optional: direct member projection on a prepared declaration.
-    /// Returns `None` to let the solver handle it internally.
-    fn resolve_member_projection(
-        &self,
-        root_identity: &ResolvedRootIdentity,
-        member: &str,
-    ) -> Option<SolverProjection<TypeExpr>> {
-        let _ = (root_identity, member);
-        None
-    }
 
     /// Classify whether a type name is a built-in utility.
     fn utility_source(&self, name: &str) -> UtilitySource;
@@ -235,6 +162,7 @@ impl TypeSolverHost for EvalEnvSolverHost {
                 PreparedTypeDecl::new(root_identity.clone(), decl.kind, decl.body.clone());
             prepared.type_parameters = decl.type_parameters.clone();
             prepared.build_member_index();
+            prepared.classify_wrapper_shape();
             return Some(Arc::new(prepared));
         }
 
@@ -245,6 +173,7 @@ impl TypeSolverHost for EvalEnvSolverHost {
             bound.as_ref().clone(),
         );
         prepared.build_member_index();
+        prepared.classify_wrapper_shape();
         Some(Arc::new(prepared))
     }
 
@@ -336,7 +265,6 @@ mod tests {
 
         assert!(host.resolve_prepared_type_decl(&id).is_none());
         assert!(host.resolve_prepared_value_decl(&id).is_none());
-        assert!(host.resolve_member_projection(&id, "foo").is_none());
         assert_eq!(host.utility_source("Partial"), UtilitySource::Unknown);
         assert!(host.root_identity("/types.ts", "Props").is_none());
         assert_eq!(host.request_status(), RequestStatus::Running);
@@ -376,29 +304,5 @@ mod tests {
                 "input"
             ))
         );
-    }
-
-    #[test]
-    fn solver_projection_constructors() {
-        let p = SolverProjection::exact_concrete(42);
-        assert_eq!(p.exactness, SolverExactness::ExactConcrete);
-        assert_eq!(p.value, 42);
-        assert!(p.type_decl_contexts.is_empty());
-
-        let p = SolverProjection::exact_symbolic("open");
-        assert_eq!(p.exactness, SolverExactness::ExactSymbolic);
-        assert!(p.type_decl_contexts.is_empty());
-
-        let p = SolverProjection::incomplete(false);
-        assert_eq!(p.exactness, SolverExactness::Incomplete);
-        assert!(p.type_decl_contexts.is_empty());
-    }
-
-    #[test]
-    fn solver_projection_map() {
-        let p = SolverProjection::exact_concrete(10);
-        let mapped = p.map(|x| x * 2);
-        assert_eq!(mapped.value, 20);
-        assert_eq!(mapped.exactness, SolverExactness::ExactConcrete);
     }
 }

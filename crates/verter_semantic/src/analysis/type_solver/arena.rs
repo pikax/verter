@@ -10,9 +10,12 @@
 //! cloning needed.
 
 use std::fmt;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use super::host::ResolvedRootIdentity;
+use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
 use super::result::{Keyspace, RelationMode, RelationResult, SolverExactness};
 
 // ---------------------------------------------------------------------------
@@ -82,6 +85,7 @@ pub enum Node {
     Ref {
         name: String,
         type_arguments: Vec<NodeId>,
+        scope_canonical_id: Option<String>,
     },
     /// An applied/instantiated declaration: decl identity + resolved args.
     Applied {
@@ -365,6 +369,13 @@ impl QueryArena {
         let mut seen_primitives = rustc_hash::FxHashSet::default();
         let mut seen_literals = rustc_hash::FxHashSet::default();
         for member in members {
+            if member.is_unresolved() {
+                if seen.insert(member) {
+                    flattened.push(member);
+                }
+                continue;
+            }
+
             match self.get(member) {
                 Node::Union(inner) => {
                     for nested in inner {
@@ -422,9 +433,19 @@ impl QueryArena {
     }
 
     pub fn type_ref(&mut self, name: impl Into<String>, args: Vec<NodeId>) -> NodeId {
+        self.scoped_type_ref(name, args, None)
+    }
+
+    pub fn scoped_type_ref(
+        &mut self,
+        name: impl Into<String>,
+        args: Vec<NodeId>,
+        scope_canonical_id: Option<String>,
+    ) -> NodeId {
         self.alloc(Node::Ref {
             name: name.into(),
             type_arguments: args,
+            scope_canonical_id,
         })
     }
 
@@ -500,6 +521,10 @@ fn union_member_is_new(
     seen_primitives: &mut rustc_hash::FxHashSet<PrimitiveKind>,
     seen_literals: &mut rustc_hash::FxHashSet<SolverLiteral>,
 ) -> bool {
+    if member.is_unresolved() {
+        return seen.insert(member);
+    }
+
     match arena.get(member) {
         Node::Primitive(kind) => seen_primitives.insert(*kind),
         Node::Literal(literal) => seen_literals.insert(literal.clone()),
@@ -520,6 +545,9 @@ pub struct SolverCaches {
     pub instantiation: FxHashMap<(DeclIdentity, Vec<NodeId>), NodeId>,
     pub keyspace: FxHashMap<NodeId, Keyspace>,
     pub member: FxHashMap<NodeId, FxHashMap<String, (NodeId, SolverExactness)>>,
+    pub root_identity: FxHashMap<(String, String), Option<ResolvedRootIdentity>>,
+    pub prepared_type_decl: FxHashMap<ResolvedRootIdentity, Option<Arc<PreparedTypeDecl>>>,
+    pub prepared_value_decl: FxHashMap<ResolvedRootIdentity, Option<Arc<PreparedValueDecl>>>,
 }
 
 impl SolverCaches {
@@ -552,9 +580,8 @@ impl SolverCaches {
 
     pub fn get_instantiation(&self, identity: &DeclIdentity, args: &[NodeId]) -> Option<NodeId> {
         self.instantiation
-            .iter()
-            .find(|((id, a), _)| id == identity && a.as_slice() == args)
-            .map(|(_, &node)| node)
+            .get(&(identity.clone(), args.to_vec()))
+            .copied()
     }
 
     pub fn set_instantiation(&mut self, identity: DeclIdentity, args: Vec<NodeId>, node: NodeId) {
@@ -592,6 +619,62 @@ impl SolverCaches {
             .or_default()
             .insert(key, (value, exactness));
     }
+
+    // -- Root identity --
+
+    pub fn get_root_identity(
+        &self,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<Option<ResolvedRootIdentity>> {
+        self.root_identity
+            .get(&(canonical_id.to_string(), symbol_name.to_string()))
+            .cloned()
+    }
+
+    pub fn set_root_identity(
+        &mut self,
+        canonical_id: String,
+        symbol_name: String,
+        result: Option<ResolvedRootIdentity>,
+    ) {
+        self.root_identity
+            .insert((canonical_id, symbol_name), result);
+    }
+
+    // -- Prepared type decl --
+
+    pub fn get_prepared_type_decl(
+        &self,
+        root_identity: &ResolvedRootIdentity,
+    ) -> Option<Option<Arc<PreparedTypeDecl>>> {
+        self.prepared_type_decl.get(root_identity).cloned()
+    }
+
+    pub fn set_prepared_type_decl(
+        &mut self,
+        root_identity: ResolvedRootIdentity,
+        result: Option<Arc<PreparedTypeDecl>>,
+    ) {
+        self.prepared_type_decl.insert(root_identity, result);
+    }
+
+    // -- Prepared value decl --
+
+    pub fn get_prepared_value_decl(
+        &self,
+        root_identity: &ResolvedRootIdentity,
+    ) -> Option<Option<Arc<PreparedValueDecl>>> {
+        self.prepared_value_decl.get(root_identity).cloned()
+    }
+
+    pub fn set_prepared_value_decl(
+        &mut self,
+        root_identity: ResolvedRootIdentity,
+        result: Option<Arc<PreparedValueDecl>>,
+    ) {
+        self.prepared_value_decl.insert(root_identity, result);
+    }
 }
 
 impl fmt::Debug for SolverCaches {
@@ -601,6 +684,9 @@ impl fmt::Debug for SolverCaches {
             .field("instantiation", &self.instantiation.len())
             .field("keyspace", &self.keyspace.len())
             .field("member", &self.member.len())
+            .field("root_identity", &self.root_identity.len())
+            .field("prepared_type_decl", &self.prepared_type_decl.len())
+            .field("prepared_value_decl", &self.prepared_value_decl.len())
             .finish()
     }
 }
@@ -652,6 +738,22 @@ mod tests {
         let s = arena.primitive(PrimitiveKind::String);
         let u = arena.union(vec![s]);
         assert_eq!(u, s);
+    }
+
+    #[test]
+    fn union_preserves_unresolved_members_without_panicking() {
+        let mut arena = QueryArena::new();
+        let s = arena.primitive(PrimitiveKind::String);
+        let u = arena.union(vec![NodeId::UNRESOLVED, s]);
+
+        match arena.get(u) {
+            Node::Union(members) => {
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0], NodeId::UNRESOLVED);
+                assert_eq!(members[1], s);
+            }
+            other => panic!("expected unresolved/string union, got {other:?}"),
+        }
     }
 
     #[test]
@@ -763,5 +865,68 @@ mod tests {
 
         assert_eq!(arena.len(), 5); // str, num, obj, arr, union
         assert!(matches!(arena.get(union), Node::Union(_)));
+    }
+
+    #[test]
+    fn instantiation_cache_hashmap_lookup() {
+        let mut caches = SolverCaches::default();
+        let mut arena = QueryArena::new();
+
+        // Pre-allocate a shared arg node
+        let shared_arg = arena.primitive(PrimitiveKind::Number);
+
+        // Insert 200 entries with different identities but same arg NodeId
+        for i in 0u32..200 {
+            let identity = DeclIdentity {
+                canonical_id: "file.ts".into(),
+                symbol_name: format!("T{i}"),
+            };
+            let result = arena.primitive(PrimitiveKind::String);
+            caches.set_instantiation(identity, vec![shared_arg], result);
+        }
+
+        // Look up the 50th entry
+        let target_identity = DeclIdentity {
+            canonical_id: "file.ts".into(),
+            symbol_name: "T50".to_string(),
+        };
+        let found = caches.get_instantiation(&target_identity, &[shared_arg]);
+        assert!(found.is_some(), "should find T50 among 200 entries");
+
+        // Negative: non-existent entry
+        let missing_identity = DeclIdentity {
+            canonical_id: "file.ts".into(),
+            symbol_name: "T999".to_string(),
+        };
+        let not_found = caches.get_instantiation(&missing_identity, &[shared_arg]);
+        assert!(not_found.is_none(), "should not find non-existent entry");
+    }
+
+    #[test]
+    fn instantiation_cache_multi_arg_round_trip() {
+        let mut caches = SolverCaches::default();
+        let mut arena = QueryArena::new();
+
+        let identity = DeclIdentity {
+            canonical_id: "a.ts".into(),
+            symbol_name: "Foo".into(),
+        };
+        let arg1 = arena.primitive(PrimitiveKind::String);
+        let arg2 = arena.primitive(PrimitiveKind::Number);
+        let result = arena.primitive(PrimitiveKind::Boolean);
+
+        caches.set_instantiation(identity.clone(), vec![arg1, arg2], result);
+
+        // Exact match
+        let found = caches.get_instantiation(&identity, &[arg1, arg2]);
+        assert_eq!(found, Some(result));
+
+        // Wrong arg order
+        let wrong_order = caches.get_instantiation(&identity, &[arg2, arg1]);
+        assert_eq!(wrong_order, None, "different arg order must not match");
+
+        // Subset of args
+        let subset = caches.get_instantiation(&identity, &[arg1]);
+        assert_eq!(subset, None, "subset of args must not match");
     }
 }

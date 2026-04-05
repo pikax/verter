@@ -133,6 +133,27 @@ function resolveViaSourceScan(
   return matches[0]?.filePath ?? null;
 }
 
+function resolveDirectVuePath(
+  token: string,
+  options: Required<ResolveComponentFileOptions>,
+): string | null {
+  if (!token.endsWith(".vue")) {
+    return null;
+  }
+
+  const directCandidates = token.startsWith("/")
+    ? [token]
+    : [resolve(options.uiRoot, token), resolve(options.componentsRoot, token)];
+
+  for (const candidate of directCandidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function resolveComponentFileInner(
   token: string,
   options: Required<ResolveComponentFileOptions>,
@@ -142,6 +163,11 @@ function resolveComponentFileInner(
     throw new Error(`Recursive component alias detected for "${token}"`);
   }
   seen.add(token);
+
+  const directVuePath = resolveDirectVuePath(token, options);
+  if (directVuePath) {
+    return directVuePath;
+  }
 
   const candidates = buildRegistryCandidates(token);
 
@@ -189,4 +215,8 @@ export function resolveComponentFile(
     { componentsRoot, registry, uiRoot, vueFiles },
     new Set(),
   );
+}
+
+export function readComponentSourceForTrace(filePath: string): string {
+  return readFileSync(filePath, "utf-8");
 }

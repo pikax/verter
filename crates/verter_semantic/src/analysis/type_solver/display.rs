@@ -159,6 +159,7 @@ fn display_node_inner(
         Node::Ref {
             name,
             type_arguments,
+            ..
         } => {
             buf.push_str(name);
             if !type_arguments.is_empty() {

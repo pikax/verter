@@ -25,23 +25,37 @@ use crate::analysis::type_expr::{
 /// solver's job. This simply interns the declaration's symbolic body into
 /// the arena's node graph.
 pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
+    lower_type_expr_in_scope(arena, expr, None)
+}
+
+pub fn lower_type_expr_in_scope(
+    arena: &mut QueryArena,
+    expr: &TypeExpr,
+    scope_canonical_id: Option<&str>,
+) -> NodeId {
     match expr {
         TypeExpr::Primitive(prim) => arena.primitive(lower_primitive(*prim)),
 
         TypeExpr::Literal(lit) => arena.literal(lower_literal(lit)),
 
         TypeExpr::Union(members) => {
-            let ids: Vec<NodeId> = members.iter().map(|m| lower_type_expr(arena, m)).collect();
+            let ids: Vec<NodeId> = members
+                .iter()
+                .map(|m| lower_type_expr_in_scope(arena, m, scope_canonical_id))
+                .collect();
             arena.union(ids)
         }
 
         TypeExpr::Intersection(members) => {
-            let ids: Vec<NodeId> = members.iter().map(|m| lower_type_expr(arena, m)).collect();
+            let ids: Vec<NodeId> = members
+                .iter()
+                .map(|m| lower_type_expr_in_scope(arena, m, scope_canonical_id))
+                .collect();
             arena.intersection(ids)
         }
 
         TypeExpr::Array { element, readonly } => {
-            let el = lower_type_expr(arena, element);
+            let el = lower_type_expr_in_scope(arena, element, scope_canonical_id);
             arena.array(el, *readonly)
         }
 
@@ -50,7 +64,7 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
                 .iter()
                 .map(|el| TupleNodeElement {
                     label: el.label.clone(),
-                    ty: lower_type_expr(arena, &el.ty),
+                    ty: lower_type_expr_in_scope(arena, &el.ty, scope_canonical_id),
                     optional: el.optional,
                     rest: el.rest,
                 })
@@ -61,9 +75,9 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
             })
         }
 
-        TypeExpr::Object(obj) => lower_object(arena, obj),
+        TypeExpr::Object(obj) => lower_object(arena, obj, scope_canonical_id),
 
-        TypeExpr::Function(func) => lower_function(arena, func),
+        TypeExpr::Function(func) => lower_function(arena, func, scope_canonical_id),
 
         TypeExpr::Ref {
             name,
@@ -71,14 +85,24 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
         } => {
             let args: Vec<NodeId> = type_arguments
                 .iter()
-                .map(|a| lower_type_expr(arena, a))
+                .map(|a| lower_type_expr_in_scope(arena, a, scope_canonical_id))
                 .collect();
-            arena.type_ref(name.as_ref(), args)
+            arena.scoped_type_ref(
+                name.as_ref(),
+                args,
+                scope_canonical_id.map(str::to_string),
+            )
         }
 
         TypeExpr::TypeParameter(param) => {
-            let constraint = param.constraint.as_ref().map(|c| lower_type_expr(arena, c));
-            let default = param.default.as_ref().map(|d| lower_type_expr(arena, d));
+            let constraint = param
+                .constraint
+                .as_ref()
+                .map(|c| lower_type_expr_in_scope(arena, c, scope_canonical_id));
+            let default = param
+                .default
+                .as_ref()
+                .map(|d| lower_type_expr_in_scope(arena, d, scope_canonical_id));
             arena.alloc(Node::TypeParam {
                 name: param.name.clone(),
                 constraint,
@@ -87,7 +111,7 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
         }
 
         TypeExpr::KeyOf(operand) => {
-            let op = lower_type_expr(arena, operand);
+            let op = lower_type_expr_in_scope(arena, operand, scope_canonical_id);
             arena.key_of(op)
         }
 
@@ -96,8 +120,8 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
         }),
 
         TypeExpr::IndexedAccess { object, index } => {
-            let obj = lower_type_expr(arena, object);
-            let idx = lower_type_expr(arena, index);
+            let obj = lower_type_expr_in_scope(arena, object, scope_canonical_id);
+            let idx = lower_type_expr_in_scope(arena, index, scope_canonical_id);
             arena.indexed_access(obj, idx)
         }
 
@@ -107,10 +131,10 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
             true_type,
             false_type,
         } => {
-            let check_id = lower_type_expr(arena, check);
-            let extends_id = lower_type_expr(arena, extends);
-            let true_id = lower_type_expr(arena, true_type);
-            let false_id = lower_type_expr(arena, false_type);
+            let check_id = lower_type_expr_in_scope(arena, check, scope_canonical_id);
+            let extends_id = lower_type_expr_in_scope(arena, extends, scope_canonical_id);
+            let true_id = lower_type_expr_in_scope(arena, true_type, scope_canonical_id);
+            let false_id = lower_type_expr_in_scope(arena, false_type, scope_canonical_id);
             // Distributive if the check type is a bare type parameter
             let distributive = matches!(check.as_ref(), TypeExpr::TypeParameter(_));
             arena.conditional(check_id, extends_id, true_id, false_id, distributive)
@@ -124,9 +148,11 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
             readonly,
             name_type,
         } => {
-            let src = lower_type_expr(arena, source);
-            let val = lower_type_expr(arena, value);
-            let nt = name_type.as_ref().map(|n| lower_type_expr(arena, n));
+            let src = lower_type_expr_in_scope(arena, source, scope_canonical_id);
+            let val = lower_type_expr_in_scope(arena, value, scope_canonical_id);
+            let nt = name_type
+                .as_ref()
+                .map(|n| lower_type_expr_in_scope(arena, n, scope_canonical_id));
             arena.mapped(
                 parameter.clone(),
                 src,
@@ -143,7 +169,7 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
         } => {
             let exprs: Vec<NodeId> = expressions
                 .iter()
-                .map(|e| lower_type_expr(arena, e))
+                .map(|e| lower_type_expr_in_scope(arena, e, scope_canonical_id))
                 .collect();
             arena.alloc(Node::TemplateLiteral {
                 quasis: quasis.clone(),
@@ -154,11 +180,11 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
         TypeExpr::Infer { name } => arena.alloc(Node::Infer { name: name.clone() }),
 
         TypeExpr::Rest(inner) => {
-            let id = lower_type_expr(arena, inner);
+            let id = lower_type_expr_in_scope(arena, inner, scope_canonical_id);
             arena.alloc(Node::Rest(id))
         }
 
-        TypeExpr::Parenthesized(inner) => lower_type_expr(arena, inner),
+        TypeExpr::Parenthesized(inner) => lower_type_expr_in_scope(arena, inner, scope_canonical_id),
 
         TypeExpr::RecursiveRef {
             name,
@@ -168,7 +194,7 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
             use super::arena::{ConditionalBranch, ConditionalFrameSnapshot};
             let args: Vec<NodeId> = type_arguments
                 .iter()
-                .map(|a| lower_type_expr(arena, a))
+                .map(|a| lower_type_expr_in_scope(arena, a, scope_canonical_id))
                 .collect();
             let ctx: Vec<ConditionalFrameSnapshot> = conditional_context
                 .iter()
@@ -182,8 +208,8 @@ pub fn lower_type_expr(arena: &mut QueryArena, expr: &TypeExpr) -> NodeId {
                         }
                     },
                     decided: f.decided,
-                    check: lower_type_expr(arena, &f.check),
-                    extends: lower_type_expr(arena, &f.extends),
+                    check: lower_type_expr_in_scope(arena, &f.check, scope_canonical_id),
+                    extends: lower_type_expr_in_scope(arena, &f.extends, scope_canonical_id),
                 })
                 .collect();
             arena.alloc(Node::RecursiveRef {
@@ -235,7 +261,7 @@ fn lower_mapped_modifier(m: MappedModifier) -> MappedModifierKind {
     }
 }
 
-fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr) -> NodeId {
+fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr, scope_canonical_id: Option<&str>) -> NodeId {
     let mut properties = Vec::new();
     let mut index_signatures = Vec::new();
     let mut call_signatures = Vec::new();
@@ -246,7 +272,7 @@ fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr) -> NodeId {
             ObjectMember::Property(prop) => {
                 properties.push(PropertyNode {
                     name: prop.name.clone(),
-                    ty: lower_type_expr(arena, &prop.ty),
+                    ty: lower_type_expr_in_scope(arena, &prop.ty, scope_canonical_id),
                     optional: prop.optional,
                     readonly: prop.readonly,
                     is_method: false,
@@ -254,13 +280,13 @@ fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr) -> NodeId {
             }
             ObjectMember::IndexSignature(idx) => {
                 index_signatures.push(IndexSignatureNode {
-                    key_type: lower_type_expr(arena, &idx.key_type),
-                    value_type: lower_type_expr(arena, &idx.value_type),
+                    key_type: lower_type_expr_in_scope(arena, &idx.key_type, scope_canonical_id),
+                    value_type: lower_type_expr_in_scope(arena, &idx.value_type, scope_canonical_id),
                     readonly: idx.readonly,
                 });
             }
             ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-                let sig = lower_call_signature(arena, func);
+                let sig = lower_call_signature(arena, func, scope_canonical_id);
                 if matches!(member, ObjectMember::ConstructSignature(_)) {
                     construct_signatures.push(sig);
                 } else {
@@ -270,7 +296,7 @@ fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr) -> NodeId {
             ObjectMember::Method(method) => {
                 properties.push(PropertyNode {
                     name: method.name.clone(),
-                    ty: lower_function(arena, &method.function),
+                    ty: lower_function(arena, &method.function, scope_canonical_id),
                     optional: method.optional,
                     readonly: false,
                     is_method: true,
@@ -287,13 +313,17 @@ fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr) -> NodeId {
     })
 }
 
-fn lower_call_signature(arena: &mut QueryArena, func: &FunctionExpr) -> CallSignatureNode {
+fn lower_call_signature(
+    arena: &mut QueryArena,
+    func: &FunctionExpr,
+    scope_canonical_id: Option<&str>,
+) -> CallSignatureNode {
     let params: Vec<ParamNode> = func
         .parameters
         .iter()
         .map(|p| ParamNode {
             name: p.name.clone(),
-            ty: lower_type_expr(arena, &p.ty),
+            ty: lower_type_expr_in_scope(arena, &p.ty, scope_canonical_id),
             optional: p.optional,
             rest: p.rest,
         })
@@ -301,12 +331,12 @@ fn lower_call_signature(arena: &mut QueryArena, func: &FunctionExpr) -> CallSign
     let ret = func
         .return_type
         .as_ref()
-        .map(|r| lower_type_expr(arena, r))
+        .map(|r| lower_type_expr_in_scope(arena, r, scope_canonical_id))
         .unwrap_or_else(|| arena.primitive(PrimitiveKind::Void));
     let type_params = func
         .type_parameters
         .iter()
-        .map(|tp| lower_type_param(arena, tp))
+        .map(|tp| lower_type_param(arena, tp, scope_canonical_id))
         .collect();
     CallSignatureNode {
         type_parameters: type_params,
@@ -315,18 +345,28 @@ fn lower_call_signature(arena: &mut QueryArena, func: &FunctionExpr) -> CallSign
     }
 }
 
-fn lower_function(arena: &mut QueryArena, func: &FunctionExpr) -> NodeId {
-    let sig = lower_call_signature(arena, func);
+fn lower_function(arena: &mut QueryArena, func: &FunctionExpr, scope_canonical_id: Option<&str>) -> NodeId {
+    let sig = lower_call_signature(arena, func, scope_canonical_id);
     arena.function(FunctionNode {
         signatures: vec![sig],
     })
 }
 
-fn lower_type_param(arena: &mut QueryArena, param: &TypeParam) -> TypeParamNode {
+fn lower_type_param(
+    arena: &mut QueryArena,
+    param: &TypeParam,
+    scope_canonical_id: Option<&str>,
+) -> TypeParamNode {
     TypeParamNode {
         name: param.name.clone(),
-        constraint: param.constraint.as_ref().map(|c| lower_type_expr(arena, c)),
-        default: param.default.as_ref().map(|d| lower_type_expr(arena, d)),
+        constraint: param
+            .constraint
+            .as_ref()
+            .map(|c| lower_type_expr_in_scope(arena, c, scope_canonical_id)),
+        default: param
+            .default
+            .as_ref()
+            .map(|d| lower_type_expr_in_scope(arena, d, scope_canonical_id)),
     }
 }
 
@@ -454,9 +494,11 @@ mod tests {
             Node::Ref {
                 name,
                 type_arguments,
+                scope_canonical_id,
             } => {
                 assert_eq!(name, "Partial");
                 assert_eq!(type_arguments.len(), 1);
+                assert_eq!(scope_canonical_id, &None);
             }
             _ => panic!("expected Ref node"),
         }

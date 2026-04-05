@@ -97,6 +97,7 @@ pub fn prepare_local_type_decl(
     prepared.cache_deps.local_closure_participants = symbol.local_deps.clone();
 
     prepared.build_member_index();
+    prepared.classify_wrapper_shape();
     Some(prepared)
 }
 
