@@ -493,6 +493,85 @@ impl VerterHost {
     pub(crate) fn resolver_store_view(&self) -> HostStoreView {
         HostStoreView::from_host(self)
     }
+
+    pub(crate) fn component_meta_audit_store_snapshot(
+        &self,
+        store_view: Option<&HostStoreView>,
+    ) -> crate::component_meta_audit::RustStoreAudit {
+        let imported_cache = self.imported_dependency_cache.lock();
+        let mut imported_dependency_entries = 0u32;
+        let mut imported_dependency_bytes = 0u64;
+        let mut prepared_type_decls = 0u32;
+        let mut prepared_value_decls = 0u32;
+
+        for (canonical_id, entry) in imported_cache.iter() {
+            imported_dependency_entries = imported_dependency_entries.saturating_add(1);
+            imported_dependency_bytes = imported_dependency_bytes.saturating_add(
+                imported_dependency_entry_bytes(canonical_id.as_str(), entry.as_ref()),
+            );
+            prepared_type_decls =
+                prepared_type_decls.saturating_add(entry.prepared_type_decls.len() as u32);
+            prepared_value_decls =
+                prepared_value_decls.saturating_add(entry.prepared_value_decls.len() as u32);
+        }
+
+        crate::component_meta_audit::RustStoreAudit {
+            store_view_hits: u32::from(store_view.is_some()),
+            store_view_misses: u32::from(store_view.is_none()),
+            structural_merges: 0,
+            imported_dependency_entries,
+            imported_dependency_bytes,
+            prepared_type_decls,
+            prepared_value_decls,
+        }
+    }
+
+    pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
+        let imported_cache = self.imported_dependency_cache.lock();
+        let host_cache_bytes = imported_cache
+            .iter()
+            .map(|(canonical_id, entry)| imported_dependency_entry_bytes(canonical_id, entry))
+            .sum();
+        drop(imported_cache);
+
+        let workspace = self.workspace();
+        let workspace_snapshot = workspace.resource_snapshot();
+        let workspace_bytes = workspace_snapshot.overlay_bytes + workspace_snapshot.snapshot_bytes;
+
+        (host_cache_bytes, workspace_bytes)
+    }
+}
+
+fn imported_dependency_entry_bytes(
+    canonical_id: &str,
+    entry: &crate::ImportedDependencyCacheEntry,
+) -> u64 {
+    let mut total = canonical_id.len() as u64
+        + entry.resolved_canonical_id.len() as u64
+        + entry.raw_source.len() as u64;
+    if let Some(eval_source) = entry.eval_source.as_ref() {
+        total = total.saturating_add(eval_source.len() as u64);
+    }
+    total = total.saturating_add(
+        entry
+            .dependency_resolutions
+            .iter()
+            .map(|(specifier, resolution)| {
+                let mut bytes = specifier.len() as u64;
+                if let Some(resolved) = resolution.resolved_canonical_id.as_ref() {
+                    bytes = bytes.saturating_add(resolved.len() as u64);
+                }
+                bytes.saturating_add(
+                    resolution
+                        .possible_canonical_ids
+                        .iter()
+                        .map(|candidate| candidate.len() as u64)
+                        .sum::<u64>(),
+                )
+            })
+            .sum::<u64>(),
+    );
+    total
 }
 
 #[cfg(test)]

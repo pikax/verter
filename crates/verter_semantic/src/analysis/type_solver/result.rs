@@ -181,6 +181,9 @@ pub struct SolverResult<T> {
     pub execution_status: ExecutionStatus,
     pub incomplete_reasons: Vec<IncompleteReason>,
     pub diagnostics: Vec<SolverDiagnostic>,
+    /// Total resolve steps consumed by this solve. Available in production
+    /// for audit/observability without requiring `RecordingAudit`.
+    pub steps: u64,
 }
 
 impl<T> SolverResult<T> {
@@ -192,6 +195,7 @@ impl<T> SolverResult<T> {
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
             diagnostics: Vec::new(),
+            steps: 0,
         }
     }
 
@@ -203,6 +207,7 @@ impl<T> SolverResult<T> {
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
             diagnostics: Vec::new(),
+            steps: 0,
         }
     }
 
@@ -214,6 +219,7 @@ impl<T> SolverResult<T> {
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: vec![reason],
             diagnostics: Vec::new(),
+            steps: 0,
         }
     }
 
@@ -225,6 +231,7 @@ impl<T> SolverResult<T> {
             execution_status: ExecutionStatus::HardStop,
             incomplete_reasons: vec![reason],
             diagnostics: Vec::new(),
+            steps: 0,
         }
     }
 
@@ -236,6 +243,7 @@ impl<T> SolverResult<T> {
             execution_status: self.execution_status,
             incomplete_reasons: self.incomplete_reasons,
             diagnostics: self.diagnostics,
+            steps: self.steps,
         }
     }
 

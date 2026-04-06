@@ -1286,6 +1286,9 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
             _ => TypeExpansionBackend::Verter,
         };
     }
+    if let Some(audit) = input.audit_enabled {
+        out.audit_enabled = audit;
+    }
     Ok(out)
 }
 

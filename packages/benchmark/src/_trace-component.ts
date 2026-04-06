@@ -5,15 +5,16 @@ import {
   readComponentSourceForTrace,
   resolveComponentFile,
 } from "./trace-component-resolver.js";
-import { raceWithTimeout } from "./query-timeout.js";
 import { loadVerterCompatModule } from "./verter-compat.js";
 
-const componentName = process.argv[2];
+const componentToken = process.argv[2];
 
-if (!componentName) {
-  console.error("Usage: tsx src/_trace-component.ts <ComponentName>");
+if (!componentToken) {
+  console.error("Usage: tsx src/_trace-component.ts <ComponentPathOrName>");
   process.exit(1);
 }
+
+const jsAuditEnabled = process.env.VERTER_JS_AUDIT === "1";
 
 function maybeGc(): void {
   (globalThis as typeof globalThis & { gc?: () => void }).gc?.();
@@ -30,7 +31,7 @@ const uiRoot = getDefaultUiRoot(import.meta.dirname);
 
 let file: string;
 try {
-  file = resolveComponentFile(componentName, { uiRoot }).replace(/\\/g, "/");
+  file = resolveComponentFile(componentToken, { uiRoot }).replace(/\\/g, "/");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`ERROR: ${message}`);
@@ -39,7 +40,7 @@ try {
 
 const source = readComponentSourceForTrace(file);
 maybeGc();
-const heapBeforeSetup = formatMemoryUsage();
+const heapBeforeSetup = jsAuditEnabled ? formatMemoryUsage() : null;
 const setupStart = performance.now();
 const compat = await loadVerterCompatModule();
 const checker = await compat.createCheckerByJson(
@@ -55,7 +56,7 @@ const checker = await compat.createCheckerByJson(
 );
 const setupMs = Math.round(performance.now() - setupStart);
 maybeGc();
-const heapAfterSetup = formatMemoryUsage();
+const heapAfterSetup = jsAuditEnabled ? formatMemoryUsage() : null;
 
 function roughSizeOfObject(obj: unknown): number {
   const seen = new WeakSet();
@@ -87,41 +88,37 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-const QUERY_TIMEOUT_MS = 14_000;
+// No in-process timeout — the parent process owns the hard timeout via SIGKILL.
+// This child runs the query directly and exits when done.
 
 try {
   checker.updateFile(file, source);
   maybeGc();
-  const heapBeforeQuery = formatMemoryUsage();
+  const heapBeforeQuery = jsAuditEnabled ? formatMemoryUsage() : null;
   const start = performance.now();
 
-  // Race the query against a timeout so we can still report partial info on hang
-  const meta = await raceWithTimeout(checker.getComponentMeta(file), QUERY_TIMEOUT_MS, null);
+  const meta = await checker.getComponentMeta(file);
 
   const durationMs = Math.round(performance.now() - start);
-  const timedOut = meta === null;
   maybeGc();
-  const heapAfterQuery = formatMemoryUsage();
-
-  if (timedOut) {
-    maybeGc();
-    const heapAfterTimeout = formatMemoryUsage();
-    console.log(
-      `TIMEOUT after ${durationMs}ms setup=${setupMs}ms setup ${heapBeforeSetup}->${heapAfterSetup} query ${heapBeforeQuery}->${heapAfterTimeout}`,
-    );
-    checker.close();
-    process.exit(1);
-  } else {
+  const heapAfterQuery = jsAuditEnabled ? formatMemoryUsage() : null;
+  const propsCount = meta?.props?.length ?? 0;
+  if (jsAuditEnabled) {
     const jsonPayload = JSON.stringify(meta);
     const payloadSize = formatBytes(jsonPayload.length);
     const memSize = formatBytes(roughSizeOfObject(meta));
-    const propsCount = meta?.props?.length ?? 0;
     console.log(
       `Done in ${durationMs}ms (${propsCount} props) payload=${payloadSize} mem=${memSize} setup=${setupMs}ms setup ${heapBeforeSetup}->${heapAfterSetup} query ${heapBeforeQuery}->${heapAfterQuery}`,
     );
+  } else {
+    console.log(`Done in ${durationMs}ms (${propsCount} props) setup=${setupMs}ms`);
   }
 } finally {
   checker.close();
   maybeGc();
-  console.log(`Closed ${formatMemoryUsage()}`);
+  if (jsAuditEnabled) {
+    console.log(`Closed ${formatMemoryUsage()}`);
+  } else {
+    console.log("Closed");
+  }
 }

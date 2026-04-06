@@ -17,6 +17,7 @@ export interface EngineKeyInput {
   configHash: string;
   nativeFlags: {
     analysisLevel: string;
+    auditEnabled?: boolean;
   };
   typeExpansionBackend?: string;
 }
@@ -43,9 +44,7 @@ function looksLikeWindowsPath(p: string): boolean {
 export function resolvePath(root: string, ...segments: string[]): string {
   const parts = [root, ...segments].filter((part) => part.length > 0);
   const hasWindowsPath = parts.some(looksLikeWindowsPath);
-  const resolved = hasWindowsPath
-    ? win32.resolve(...parts)
-    : posix.resolve(...parts);
+  const resolved = hasWindowsPath ? win32.resolve(...parts) : posix.resolve(...parts);
   return normalizePath(resolved);
 }
 
@@ -105,6 +104,7 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.tsconfigPath ? normalizePath(input.tsconfigPath) : "",
     input.configHash,
     input.nativeFlags.analysisLevel,
+    input.nativeFlags.auditEnabled ? "audit=1" : "audit=0",
     input.typeExpansionBackend ?? "verter",
   ];
   return parts.join("|");

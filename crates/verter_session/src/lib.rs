@@ -51,6 +51,7 @@
 
 mod cache;
 mod compile;
+pub mod component_meta_audit;
 pub mod component_meta_host;
 pub mod cross_file;
 mod deps;

@@ -190,6 +190,10 @@ pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     caches: SolverCaches,
     /// Trace accumulator: all external decls visited across all solves.
     visited_decls: Vec<ResolvedRootIdentity>,
+    /// Request-scoped aggregate of steps spent in uncached solves.
+    total_steps: u64,
+    /// Number of uncached solves performed by this engine.
+    solve_count: u32,
     #[allow(dead_code)]
     audit: A,
 }
@@ -221,6 +225,8 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             instantiation_cache: FxHashMap::default(),
             caches: SolverCaches::default(),
             visited_decls: Vec::new(),
+            total_steps: 0,
+            solve_count: 0,
             audit,
         }
     }
@@ -273,7 +279,10 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             execution_status: state.execution_status,
             incomplete_reasons: state.incomplete_reasons,
             diagnostics: state.diagnostics,
+            steps: state.steps,
         };
+        self.total_steps += result.steps;
+        self.solve_count += 1;
 
         self.op_cache.insert(
             top_level_key,
@@ -294,6 +303,16 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
     /// Number of memoized top-level entries in this request-scoped engine.
     pub fn cache_len(&self) -> usize {
         self.op_cache.len()
+    }
+
+    /// Total resolve steps spent in uncached solves for this request-scoped engine.
+    pub fn total_steps(&self) -> u64 {
+        self.total_steps
+    }
+
+    /// Number of uncached solves performed by this request-scoped engine.
+    pub fn solve_count(&self) -> u32 {
+        self.solve_count
     }
 
     /// Get the audit sink.
@@ -408,6 +427,30 @@ mod tests {
         // Primitives don't visit external decls
         assert!(trace.is_empty());
         assert!(engine.visited_decls().is_empty());
+    }
+
+    #[test]
+    fn engine_tracks_steps_only_for_uncached_solves() {
+        let host = NoopSolverHost;
+        let mut engine = TypeQueryEngine::new(&host);
+
+        let expr = TypeExpr::Primitive(PrimitiveName::String);
+        let first = engine.solve(&expr);
+        assert_eq!(engine.solve_count(), 1);
+        assert_eq!(engine.total_steps(), first.steps);
+
+        let second = engine.solve(&expr);
+        assert_eq!(
+            engine.solve_count(),
+            1,
+            "cached top-level solves should not increment solve_count",
+        );
+        assert_eq!(
+            engine.total_steps(),
+            first.steps,
+            "cached top-level solves should not increment total_steps",
+        );
+        assert_eq!(second.steps, first.steps);
     }
 
     /// Scaffolding helper used only by `engine_subject_interning`.

@@ -425,6 +425,7 @@ pub fn solve_type_with_audit(
         execution_status: state.execution_status,
         incomplete_reasons: state.incomplete_reasons,
         diagnostics: state.diagnostics,
+        steps: state.steps,
     };
 
     (result, audit)
@@ -460,6 +461,7 @@ fn solve_type_with_limits(
         execution_status: state.execution_status,
         incomplete_reasons: state.incomplete_reasons,
         diagnostics: state.diagnostics,
+        steps: state.steps,
     }
 }
 
@@ -977,6 +979,7 @@ fn collect_literal_string_keys(arena: &QueryArena, node: NodeId) -> Vec<String> 
     finite_literal_key_names(arena, node).unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_resolve_structural_ref_member(
     arena: &mut QueryArena,
     name: &str,

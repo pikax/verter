@@ -105,7 +105,10 @@ pub use resolver::{
 pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
 pub use snapshot_builder::{build_workspace_snapshot, membership_to_spec, SnapshotBuildResult};
-pub use traits::{EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess};
+pub use traits::{
+    EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess,
+    WorkspaceResourceSnapshot,
+};
 pub use types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
     ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,

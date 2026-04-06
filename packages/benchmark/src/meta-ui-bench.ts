@@ -15,7 +15,11 @@ import {
   type MetaUiScenario,
   type NormalizedMetaArtifact,
 } from "./meta-ui-core.js";
-import { aggregateRunFromRepeats, type MetaUiBenchmarkRun } from "./meta-ui-report.js";
+import {
+  aggregateRunFromRepeats,
+  type ComponentResultRow,
+  type MetaUiBenchmarkRun,
+} from "./meta-ui-report.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -41,6 +45,7 @@ interface MetaUiBenchArgs {
   repeats: number;
   warmupPasses: number;
   queryTimeoutMs: number;
+  jsAudit: boolean;
   components: string[];
   limit: number | null;
   expected: "vue-component-meta" | "none";
@@ -158,10 +163,10 @@ function logProgress(
   index: number,
   total: number,
   detail: string,
+  jsAudit: boolean,
 ): void {
-  logLine(
-    `${prefix} ${index}/${total} ${component.relativePath} ${detail} heap=${formatHeapUsageMb()}`,
-  );
+  const auditSuffix = jsAudit ? ` heap=${formatHeapUsageMb()}` : "";
+  logLine(`${prefix} ${index}/${total} ${component.relativePath} ${detail}${auditSuffix}`);
 }
 
 export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
@@ -179,6 +184,7 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     repeats: 1,
     warmupPasses: 1,
     queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS,
+    jsAudit: false,
     components: [],
     limit: null,
     expected: "vue-component-meta",
@@ -220,6 +226,10 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
         arg.slice("--query-timeout-ms=".length),
         "query-timeout-ms",
       );
+      continue;
+    }
+    if (arg === "--js-audit") {
+      args.jsAudit = true;
       continue;
     }
     if (arg.startsWith("--components=")) {
@@ -689,6 +699,7 @@ async function buildExpectedArtifacts(
         index + 1,
         total,
         `baseline-ready outcome=${outcome} latency=${latencyMs.toFixed(2)}ms`,
+        args.jsAudit,
       );
     } finally {
       await instance.dispose();
@@ -850,7 +861,7 @@ async function runSingleScenarioRepeat(
   let setupMs = 0;
   let warmupMs = 0;
   let steadyStateMs = 0;
-  const componentLatenciesMs: number[] = [];
+  const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
   const deviationTotals = {
     exactMatches: 0,
@@ -875,9 +886,15 @@ async function runSingleScenarioRepeat(
       }
 
       const result = await executeMeasuredQuery(instance, component);
-      componentLatenciesMs.push(result.latencyMs);
       steadyStateMs += result.latencyMs;
       outcomeCounts[result.outcome]++;
+      componentResults.push({
+        relativePath: component.relativePath,
+        componentName: componentNameFromPath(component.relativePath),
+        latencyMs: result.latencyMs,
+        outcome: result.outcome,
+        error: null,
+      });
       updateDeviationTotals(
         deviationTotals,
         expectedArtifacts.get(component.relativePath),
@@ -889,16 +906,25 @@ async function runSingleScenarioRepeat(
         componentIndex + 1,
         total,
         `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+        args.jsAudit,
       );
     } catch (error) {
       const outcome = classifyFailure(error);
       outcomeCounts[outcome]++;
+      componentResults.push({
+        relativePath: component.relativePath,
+        componentName: componentNameFromPath(component.relativePath),
+        latencyMs: null,
+        outcome,
+        error: error instanceof Error ? error.message : String(error),
+      });
       logProgress(
         `[repeat ${repeatIndex}]`,
         component,
         componentIndex + 1,
         total,
         `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+        args.jsAudit,
       );
     } finally {
       await instance.dispose();
@@ -906,6 +932,7 @@ async function runSingleScenarioRepeat(
     }
   }
 
+  const latencies = componentResults.filter((r) => r.latencyMs !== null).map((r) => r.latencyMs!);
   return {
     index: repeatIndex,
     orderStart: repeatIndex - 1,
@@ -913,12 +940,10 @@ async function runSingleScenarioRepeat(
     warmupMs,
     steadyStateMs,
     endToEndMs: setupMs + warmupMs + steadyStateMs,
-    componentLatenciesMs,
+    componentResults,
     outcomeCounts,
     deviationTotals,
-    stats: summarizeLatencySeries(
-      componentLatenciesMs.length > 0 ? componentLatenciesMs : [steadyStateMs],
-    ),
+    stats: summarizeLatencySeries(latencies.length > 0 ? latencies : [steadyStateMs]),
   };
 }
 
@@ -934,7 +959,7 @@ async function runRepoScenarioRepeat(
 ): Promise<MetaUiBenchmarkRun["repeats"][number]> {
   let setupMs = 0;
   let warmupMs = 0;
-  const componentLatenciesMs: number[] = [];
+  const componentResults: ComponentResultRow[] = [];
   const outcomeCounts = { success: 0, degraded: 0, query_error: 0, crash: 0 };
   const deviationTotals = {
     exactMatches: 0,
@@ -992,8 +1017,14 @@ async function runRepoScenarioRepeat(
         setupMs += performance.now() - singleSetupStartedAt;
         try {
           const result = await executeMeasuredQuery(singleInstance, component);
-          componentLatenciesMs.push(result.latencyMs);
           outcomeCounts[result.outcome]++;
+          componentResults.push({
+            relativePath: component.relativePath,
+            componentName: componentNameFromPath(component.relativePath),
+            latencyMs: result.latencyMs,
+            outcome: result.outcome,
+            error: null,
+          });
           updateDeviationTotals(
             deviationTotals,
             expectedArtifacts.get(component.relativePath),
@@ -1005,16 +1036,25 @@ async function runRepoScenarioRepeat(
             componentIndex + 1,
             total,
             `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+            args.jsAudit,
           );
         } catch (error) {
           const outcome = classifyFailure(error);
           outcomeCounts[outcome]++;
+          componentResults.push({
+            relativePath: component.relativePath,
+            componentName: componentNameFromPath(component.relativePath),
+            latencyMs: null,
+            outcome,
+            error: error instanceof Error ? error.message : String(error),
+          });
           logProgress(
             `[repeat ${repeatIndex}]`,
             component,
             componentIndex + 1,
             total,
             `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+            args.jsAudit,
           );
         } finally {
           await singleInstance.dispose();
@@ -1023,8 +1063,14 @@ async function runRepoScenarioRepeat(
       }
       try {
         const result = await executeMeasuredQuery(instance, component);
-        componentLatenciesMs.push(result.latencyMs);
         outcomeCounts[result.outcome]++;
+        componentResults.push({
+          relativePath: component.relativePath,
+          componentName: componentNameFromPath(component.relativePath),
+          latencyMs: result.latencyMs,
+          outcome: result.outcome,
+          error: null,
+        });
         updateDeviationTotals(
           deviationTotals,
           expectedArtifacts.get(component.relativePath),
@@ -1036,16 +1082,25 @@ async function runRepoScenarioRepeat(
           componentIndex + 1,
           total,
           `${scenario} outcome=${result.outcome} latency=${result.latencyMs.toFixed(2)}ms`,
+          args.jsAudit,
         );
       } catch (error) {
         const outcome = classifyFailure(error);
         outcomeCounts[outcome]++;
+        componentResults.push({
+          relativePath: component.relativePath,
+          componentName: componentNameFromPath(component.relativePath),
+          latencyMs: null,
+          outcome,
+          error: error instanceof Error ? error.message : String(error),
+        });
         logProgress(
           `[repeat ${repeatIndex}]`,
           component,
           componentIndex + 1,
           total,
           `${scenario} outcome=${outcome} error=${error instanceof Error ? error.message : String(error)}`,
+          args.jsAudit,
         );
         if (instance && !instance.isAvailable()) {
           await instance.dispose();
@@ -1063,11 +1118,16 @@ async function runRepoScenarioRepeat(
       warmupMs,
       steadyStateMs,
       endToEndMs: setupMs + warmupMs + steadyStateMs,
-      componentLatenciesMs,
+      componentResults,
       outcomeCounts,
       deviationTotals,
       stats: summarizeLatencySeries(
-        componentLatenciesMs.length > 0 ? componentLatenciesMs : [steadyStateMs],
+        (() => {
+          const latencies = componentResults
+            .filter((r) => r.latencyMs !== null)
+            .map((r) => r.latencyMs!);
+          return latencies.length > 0 ? latencies : [steadyStateMs];
+        })(),
       ),
     };
   } finally {
@@ -1198,4 +1258,9 @@ if (process.argv[1] && normalizePath(resolve(process.argv[1])) === normalizePath
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, "/");
+}
+
+function componentNameFromPath(filePath: string): string {
+  const base = filePath.replace(/\\/g, "/").split("/").pop() ?? filePath;
+  return base.replace(/\.vue$/, "");
 }

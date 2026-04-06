@@ -36,6 +36,11 @@ use std::time::Instant;
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
+fn next_component_meta_audit_request_id() -> u64 {
+    static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn trace_request_source(source: RequestSource) -> &'static str {
     match source {
         RequestSource::Cache => "cache",
@@ -51,12 +56,25 @@ fn trace_request_source(source: RequestSource) -> &'static str {
     }
 }
 
+fn request_source_performed_compute(source: RequestSource) -> bool {
+    matches!(
+        source,
+        RequestSource::Flight {
+            role: SingleflightRole::Leader,
+            ..
+        } | RequestSource::Fallback
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
     snapshot: FileAnalysisSnapshot,
     owner_eval_source: Option<String>,
     dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+    audit_capture_inputs_ms: f64,
+    audit_store_read_ms: f64,
+    audit_direct_import_proof_ms: f64,
 }
 
 impl ComponentMetaRequestHost for VerterHost {
@@ -90,6 +108,9 @@ impl ComponentMetaRequestHost for VerterHost {
         canonical: &str,
         view: &Self::View,
     ) -> Option<Self::CapturedInputs> {
+        let audit_enabled = self.config.audit_enabled;
+        let capture_started = audit_enabled.then(Instant::now);
+        let store_read_started = audit_enabled.then(Instant::now);
         let _trace = component_meta_trace_scope!(
             "capture_component_meta_inputs",
             format!("owner={} store_view=true", canonical),
@@ -108,6 +129,9 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         let (source, cached_parse, whole_hash) =
             self.current_eval_state_in_view(canonical, Some(view))?;
+        let store_read_ms = store_read_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         component_meta_trace_event!(
             "capture_component_meta_eval_state",
             format!(
@@ -119,8 +143,15 @@ impl ComponentMetaRequestHost for VerterHost {
         );
         let owner_eval_source =
             VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+        let direct_import_started = audit_enabled.then(Instant::now);
         let dep_resolutions =
             self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?;
+        let direct_import_proof_ms = direct_import_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let capture_inputs_ms = capture_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         component_meta_trace_event!(
             "capture_component_meta_inputs_result",
             format!(
@@ -135,6 +166,9 @@ impl ComponentMetaRequestHost for VerterHost {
             snapshot,
             owner_eval_source: Some(owner_eval_source),
             dep_resolutions,
+            audit_capture_inputs_ms: capture_inputs_ms,
+            audit_store_read_ms: store_read_ms,
+            audit_direct_import_proof_ms: direct_import_proof_ms,
         })
     }
 
@@ -202,6 +236,12 @@ pub type ResolvedJsdocTag = crate::resolver_core::ResolvedJsdocTag;
 /// `Expanded` mode carries materialized surfaces; `Type` mode carries
 /// identity/location only.
 #[derive(Debug, Clone)]
+pub struct ResolvedComponentMetaComputeAudit {
+    pub timings: crate::component_meta_audit::RustTimingAudit,
+    pub solver: crate::component_meta_audit::RustSolverAudit,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedComponentMetaState {
     /// The raw analysis snapshot (never mutated for enrichment).
     pub snapshot: FileAnalysisSnapshot,
@@ -220,6 +260,8 @@ pub struct ResolvedComponentMetaState {
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     /// Semantic fact versions consumed while producing this resolved state.
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    /// Non-semantic compute audit captured only when native audit is enabled.
+    pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
 }
 
 fn collect_expanded_slot_binding_param_types<'a>(
@@ -438,6 +480,18 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let audit = self.config.audit_enabled.then(|| {
+            let request_id = next_component_meta_audit_request_id();
+            let (host_cache_before_bytes, workspace_before_bytes) =
+                self.component_meta_audit_memory_bytes();
+            (
+                request_id,
+                crate::component_meta_audit::begin_request_audit(request_id),
+                crate::component_meta_audit::AuditBuilder::new(request_id, canonical.clone()),
+                host_cache_before_bytes,
+                workspace_before_bytes,
+            )
+        });
         let _trace = component_meta_trace_scope!(
             "resolve_component_meta",
             format!("owner={} mode={mode:?}", canonical),
@@ -516,6 +570,39 @@ impl VerterHost {
             );
         }
 
+        if let Some((
+            _request_id,
+            request_audit_guard,
+            mut audit_builder,
+            host_cache_before_bytes,
+            workspace_before_bytes,
+        )) = audit
+        {
+            audit_builder.record_store(self.component_meta_audit_store_snapshot(store_view));
+            let (host_cache_after_bytes, workspace_after_bytes) =
+                self.component_meta_audit_memory_bytes();
+            audit_builder.record_memory_snapshots(
+                host_cache_before_bytes,
+                host_cache_after_bytes,
+                workspace_before_bytes,
+                workspace_after_bytes,
+            );
+            if request_source_performed_compute(result.source) {
+                if let Some(compute_audit) = result
+                    .value
+                    .as_ref()
+                    .and_then(|resolved| resolved.compute_audit.as_ref())
+                {
+                    let mut timings = compute_audit.timings.clone();
+                    timings.imported_root_proof_ms =
+                        request_audit_guard.snapshot().imported_root_proof_ms;
+                    audit_builder.record_timings(timings);
+                    audit_builder.record_solver(compute_audit.solver.clone());
+                }
+            }
+            crate::component_meta_audit::emit_audit_trace(&audit_builder.finish());
+        }
+
         result.value
     }
 
@@ -553,6 +640,19 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
+        let audit_enabled = self.config.audit_enabled;
+        let mut audit_timings = if audit_enabled {
+            captured
+                .map(|captured| crate::component_meta_audit::RustTimingAudit {
+                    capture_inputs_ms: captured.audit_capture_inputs_ms,
+                    store_read_ms: captured.audit_store_read_ms,
+                    direct_import_proof_ms: captured.audit_direct_import_proof_ms,
+                    ..Default::default()
+                })
+                .unwrap_or_default()
+        } else {
+            crate::component_meta_audit::RustTimingAudit::default()
+        };
         let _trace = component_meta_trace_scope!(
             "compute_component_meta_state",
             format!(
@@ -594,6 +694,7 @@ impl VerterHost {
                 ),
             )),
         };
+        let parts_started = audit_enabled.then(Instant::now);
         let parts = crate::resolver_core::resolve_component_meta_parts(
             &resolver_host,
             canonical,
@@ -601,6 +702,9 @@ impl VerterHost {
             mode == ResolverMode::Expanded,
             captured,
         );
+        if let Some(started) = parts_started {
+            audit_timings.solver_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
         let mut parts = parts;
         if let Some(evaluated_types) = parts.evaluated_types.as_mut() {
             enrich_missing_slot_bindings(&parts.resolved_macros, evaluated_types);
@@ -636,12 +740,26 @@ impl VerterHost {
             &mut query_engine,
             &mut resolver_view,
         );
+        audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
+        let solver_audit = crate::component_meta_audit::RustSolverAudit {
+            total_resolve_steps: query_engine.total_steps(),
+            solve_count: query_engine.solve_count(),
+        };
+        let store_merge_started = audit_enabled.then(Instant::now);
         let final_store_view = self.resolver_store_view();
         parts.fact_versions = self.current_dependency_fact_versions_in_view(
             canonical,
             &parts.tracked_dependencies,
             Some(&final_store_view),
         );
+        if let Some(started) = store_merge_started {
+            audit_timings.store_merge_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        if audit_enabled {
+            audit_timings.imported_root_proof_ms =
+                crate::component_meta_audit::current_request_audit_snapshot()
+                    .imported_root_proof_ms;
+        }
         let append_elapsed = append_start.elapsed();
         let registry_after = parts.resolved_type_registry.len();
         if crate::host_manage::component_meta_debug_enabled() {
@@ -676,6 +794,10 @@ impl VerterHost {
             resolved_type_registry_meta: parts.resolved_type_registry_meta,
             evaluated_types: parts.evaluated_types,
             fact_versions: parts.fact_versions,
+            compute_audit: audit_enabled.then_some(ResolvedComponentMetaComputeAudit {
+                timings: audit_timings,
+                solver: solver_audit,
+            }),
         };
         Some(state)
     }
@@ -1003,9 +1125,11 @@ impl VerterHost {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
             };
-            let scope_canonical = (!meta.declaration.canonical_source.is_empty())
-                .then_some(meta.declaration.canonical_source.as_str())
-                .unwrap_or(owner_canonical);
+            let scope_canonical = if !meta.declaration.canonical_source.is_empty() {
+                meta.declaration.canonical_source.as_str()
+            } else {
+                owner_canonical
+            };
             if scope_canonical == owner_canonical {
                 continue;
             }

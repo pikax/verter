@@ -66,6 +66,14 @@ impl MemorySnapshot {
         self.entries.len()
     }
 
+    /// Approximate bytes retained by snapshot content and canonical IDs.
+    pub fn approx_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|(canonical_id, source)| canonical_id.len() as u64 + source.len() as u64)
+            .sum()
+    }
+
     /// Whether the snapshot is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -207,6 +215,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn content_generation(&self) -> u64 {
         self.engine.current_content_generation()
+    }
+
+    fn resource_snapshot(&self) -> crate::traits::WorkspaceResourceSnapshot {
+        self.engine.resource_snapshot()
     }
 
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {

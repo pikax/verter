@@ -195,6 +195,16 @@ impl EdgeStore {
             .unwrap_or_default()
     }
 
+    /// Number of files with edge-state entries.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Number of reverse-dependency buckets currently tracked.
+    pub fn reverse_dep_bucket_count(&self) -> usize {
+        self.reverse_deps.len()
+    }
+
     /// Check if a file has any exact resolutions set.
     pub fn has_exact_resolutions(&self, canonical_id: &str) -> bool {
         self.files

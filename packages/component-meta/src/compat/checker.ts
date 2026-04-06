@@ -1356,7 +1356,10 @@ export async function createChecker(
     configHash: stableSelectiveConfigHash(
       parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
     ),
-    nativeFlags: { analysisLevel: "full" },
+    nativeFlags: {
+      analysisLevel: "full",
+      auditEnabled: options?.logging?.audit ?? false,
+    },
     typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
@@ -1367,6 +1370,7 @@ export async function createChecker(
       devMode: false,
       analysisLevel: "full",
       typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+      auditEnabled: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,
@@ -1438,7 +1442,10 @@ export async function createCheckerByJson(
     root: runtimeNormalizePath(absRoot),
     configKind: "inline",
     configHash: stableSelectiveConfigHash(config),
-    nativeFlags: { analysisLevel: "full" },
+    nativeFlags: {
+      analysisLevel: "full",
+      auditEnabled: options?.logging?.audit ?? false,
+    },
     typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
@@ -1449,6 +1456,7 @@ export async function createCheckerByJson(
       devMode: false,
       analysisLevel: "full",
       typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
+      auditEnabled: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
       hostConfig,

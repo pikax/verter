@@ -105,6 +105,19 @@ describe("computeEngineKey", () => {
     };
     expect(computeEngineKey(base)).not.toBe(computeEngineKey(other));
   });
+
+  it("different audit flags produce different key", () => {
+    const withoutAudit = {
+      ...base,
+      nativeFlags: { ...base.nativeFlags, auditEnabled: false },
+    };
+    const withAudit = {
+      ...base,
+      nativeFlags: { ...base.nativeFlags, auditEnabled: true },
+    };
+
+    expect(computeEngineKey(withoutAudit)).not.toBe(computeEngineKey(withAudit));
+  });
 });
 
 describe("stableSelectiveConfigHash", () => {

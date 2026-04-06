@@ -96,6 +96,7 @@ pub fn project_member(
             execution_status: super::result::ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
             diagnostics: Vec::new(),
+            steps: 0,
         };
     }
 
@@ -344,6 +345,7 @@ pub fn project_surface(arena: &QueryArena, node: NodeId) -> SolverResult<Surface
                 execution_status: super::result::ExecutionStatus::Completed,
                 incomplete_reasons: Vec::new(),
                 diagnostics: Vec::new(),
+                steps: 0,
             }
         }
 

@@ -4322,11 +4322,12 @@ impl VerterHost {
         imported_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> (String, String) {
+        let audit_started = self.config.audit_enabled.then(Instant::now);
         let _trace = component_meta_trace_scope!(
             "resolve_imported_type_root",
             format!("canonical={} imported={}", dep_canonical, imported_name),
         );
-        if let Some(cached) =
+        let resolved = if let Some(cached) =
             self.clone_cached_imported_type_root(dep_canonical, imported_name, store_view)
         {
             component_meta_trace_event!(
@@ -4345,77 +4346,91 @@ impl VerterHost {
                     store_view.is_some()
                 ),
             );
-            return cached;
-        }
+            cached
+        } else {
+            let normalized_canonical = self
+                .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
+                .unwrap_or_else(|| dep_canonical.to_string());
 
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
-            .unwrap_or_else(|| dep_canonical.to_string());
-
-        let _ = self.ensure_shallow_imported_dependency_state_in_view(
-            normalized_canonical.as_str(),
-            store_view,
-        );
-        if let Some(cached) =
-            self.clone_cached_imported_type_root(dep_canonical, imported_name, store_view)
-        {
-            component_meta_trace_event!(
-                "resolve_imported_type_root_cache_hit",
-                format!(
-                    "canonical={} imported={} source=host_imported_dep",
-                    dep_canonical, imported_name
-                ),
-            );
-            component_meta_trace_event!(
-                "resolve_imported_type_root_result",
-                format!(
-                    "canonical={} imported={} normalized={} source=host_imported_dep target_canonical={} target_symbol={} store_view={}",
-                    dep_canonical,
-                    imported_name,
-                    normalized_canonical,
-                    cached.0,
-                    cached.1,
-                    store_view.is_some()
-                ),
-            );
-            return cached;
-        }
-
-        let (resolved, source_kind) = self
-            .resolve_named_type_export_target_in_view(
+            let _ = self.ensure_shallow_imported_dependency_state_in_view(
                 normalized_canonical.as_str(),
-                imported_name,
                 store_view,
-            )
-            .map(|(canonical, exported_name)| {
-                let canonical = self
-                    .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
-                    .unwrap_or(canonical);
-                ((canonical, exported_name), "named_export_target")
-            })
-            .unwrap_or_else(|| {
-                let canonical = self
-                    .resolve_eval_dependency_canonical_in_view(
+            );
+            if let Some(cached) =
+                self.clone_cached_imported_type_root(dep_canonical, imported_name, store_view)
+            {
+                component_meta_trace_event!(
+                    "resolve_imported_type_root_cache_hit",
+                    format!(
+                        "canonical={} imported={} source=host_imported_dep",
+                        dep_canonical, imported_name
+                    ),
+                );
+                component_meta_trace_event!(
+                    "resolve_imported_type_root_result",
+                    format!(
+                        "canonical={} imported={} normalized={} source=host_imported_dep target_canonical={} target_symbol={} store_view={}",
+                        dep_canonical,
+                        imported_name,
+                        normalized_canonical,
+                        cached.0,
+                        cached.1,
+                        store_view.is_some()
+                    ),
+                );
+                cached
+            } else {
+                let (resolved, source_kind) = self
+                    .resolve_named_type_export_target_in_view(
                         normalized_canonical.as_str(),
+                        imported_name,
                         store_view,
                     )
-                    .unwrap_or(normalized_canonical.clone());
-                ((canonical, imported_name.to_string()), "fallback_self")
-            });
-        self.cache_imported_type_root(dep_canonical, imported_name, resolved.clone(), store_view);
-        component_meta_trace_event!(
-            "resolve_imported_type_root_result",
-            format!(
-                "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view={}",
-                dep_canonical,
-                imported_name,
-                normalized_canonical,
-                source_kind,
-                resolved.0,
-                resolved.1,
-                store_view.is_some()
-            ),
-        );
+                    .map(|(canonical, exported_name)| {
+                        let canonical = self
+                            .resolve_eval_dependency_canonical_in_view(
+                                canonical.as_str(),
+                                store_view,
+                            )
+                            .unwrap_or(canonical);
+                        ((canonical, exported_name), "named_export_target")
+                    })
+                    .unwrap_or_else(|| {
+                        let canonical = self
+                            .resolve_eval_dependency_canonical_in_view(
+                                normalized_canonical.as_str(),
+                                store_view,
+                            )
+                            .unwrap_or(normalized_canonical.clone());
+                        ((canonical, imported_name.to_string()), "fallback_self")
+                    });
+                self.cache_imported_type_root(
+                    dep_canonical,
+                    imported_name,
+                    resolved.clone(),
+                    store_view,
+                );
+                component_meta_trace_event!(
+                    "resolve_imported_type_root_result",
+                    format!(
+                        "canonical={} imported={} normalized={} source={} target_canonical={} target_symbol={} store_view={}",
+                        dep_canonical,
+                        imported_name,
+                        normalized_canonical,
+                        source_kind,
+                        resolved.0,
+                        resolved.1,
+                        store_view.is_some()
+                    ),
+                );
+                resolved
+            }
+        };
+        if let Some(started) = audit_started {
+            crate::component_meta_audit::record_imported_root_proof_ms(
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         resolved
     }
 

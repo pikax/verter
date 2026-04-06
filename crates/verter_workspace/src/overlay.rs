@@ -47,6 +47,14 @@ impl OverlayStore {
         self.entries.len()
     }
 
+    /// Approximate bytes retained by overlay content and canonical IDs.
+    pub fn approx_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|(canonical_id, source)| canonical_id.len() as u64 + source.len() as u64)
+            .sum()
+    }
+
     /// Whether there are no active overlays.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

@@ -2364,3 +2364,61 @@ export default defineComponent({
     expect(noDocProp!.description).toBe("");
   });
 });
+
+describe("MetaCheckerOptions logging.audit plumbing", () => {
+  it("accepts logging.audit option without error", async () => {
+    // This test verifies the TS types accept the logging option and it
+    // plumbs through to native config creation without throwing.
+    // The actual native audit behavior is tested in Rust.
+    const projectRoot = resolve(process.env.TEMP ?? "/tmp", `audit-plumb-test-${Date.now()}`);
+    mkdirSync(projectRoot, { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { strict: true } }),
+    );
+    writeFileSync(
+      resolve(projectRoot, "Test.vue"),
+      "<script setup lang='ts'>\ndefineProps<{ x: string }>()\n</script>\n<template><div/></template>",
+    );
+
+    // With audit: false (default behavior)
+    const checkerOff = await createCheckerByJson(
+      projectRoot,
+      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
+      { typeExpansionBackend: "verter", runtimeMode: "dedicated", logging: { audit: false } },
+    );
+    expect(checkerOff).toBeDefined();
+    checkerOff.close();
+
+    // With audit: true
+    const checkerOn = await createCheckerByJson(
+      projectRoot,
+      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
+      { typeExpansionBackend: "verter", runtimeMode: "dedicated", logging: { audit: true } },
+    );
+    expect(checkerOn).toBeDefined();
+    checkerOn.close();
+  });
+
+  it("defaults logging to undefined when not specified", async () => {
+    const projectRoot = resolve(process.env.TEMP ?? "/tmp", `audit-default-test-${Date.now()}`);
+    mkdirSync(projectRoot, { recursive: true });
+    writeFileSync(
+      resolve(projectRoot, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { strict: true } }),
+    );
+    writeFileSync(
+      resolve(projectRoot, "Test.vue"),
+      "<script setup lang='ts'>\ndefineProps<{ x: string }>()\n</script>\n<template><div/></template>",
+    );
+
+    // No logging option at all
+    const checker = await createCheckerByJson(
+      projectRoot,
+      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
+      { typeExpansionBackend: "verter", runtimeMode: "dedicated" },
+    );
+    expect(checker).toBeDefined();
+    checker.close();
+  });
+});

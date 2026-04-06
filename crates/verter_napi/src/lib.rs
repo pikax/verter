@@ -192,6 +192,9 @@ pub struct NapiHostConfig {
     pub analysisLevel: Option<String>,
     /// Type expansion backend: `"verter"` (default), `"tsserver"`, or `"tsgo"`.
     pub typeExpansionBackend: Option<String>,
+    /// Enable Rust-first native audit for component-meta requests.
+    /// When true, timing/memory/store data is captured per request.
+    pub auditEnabled: Option<bool>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -204,6 +207,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
             type_expansion_backend: n.typeExpansionBackend,
+            audit_enabled: n.auditEnabled,
         }
     }
 }

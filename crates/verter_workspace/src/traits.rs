@@ -5,6 +5,19 @@ use crate::types::{
     ProjectOwnership, ResolutionContext, ResolveResult,
 };
 
+/// Lightweight resource snapshot for first-class Rust audit.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceResourceSnapshot {
+    pub overlay_entries: usize,
+    pub overlay_bytes: u64,
+    pub snapshot_entries: usize,
+    pub snapshot_bytes: u64,
+    pub edge_file_count: usize,
+    pub reverse_dep_bucket_count: usize,
+    pub package_manifest_count: usize,
+    pub published_project_count: usize,
+}
+
 /// Single workspace trait — sole authority for file access and resolution.
 ///
 /// All workspace I/O (reads, writes, walks, resolution) goes through this
@@ -114,6 +127,11 @@ pub trait WorkspaceAccess: Send + Sync {
 
     /// Reset VFS provenance counters.
     fn reset_vfs_provenance(&self) {}
+
+    /// Point-in-time resource snapshot for native audit.
+    fn resource_snapshot(&self) -> WorkspaceResourceSnapshot {
+        WorkspaceResourceSnapshot::default()
+    }
 
     /// Compute the preferred alias-based import specifier for a target file.
     ///

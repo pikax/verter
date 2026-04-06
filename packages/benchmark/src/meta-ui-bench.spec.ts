@@ -77,6 +77,18 @@ describe("parseMetaUiBenchArgs", () => {
 
     expect(args.queryTimeoutMs).toBe(250);
   });
+
+  it("keeps JS audit off by default", () => {
+    const args = parseMetaUiBenchArgs([]);
+
+    expect(args.jsAudit).toBe(false);
+  });
+
+  it("supports enabling JS audit explicitly", () => {
+    const args = parseMetaUiBenchArgs(["--js-audit"]);
+
+    expect(args.jsAudit).toBe(true);
+  });
 });
 
 describe("tryLoadExpectedArtifacts", () => {

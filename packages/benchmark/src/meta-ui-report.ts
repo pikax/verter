@@ -2,6 +2,7 @@ import {
   summarizeLatencySeries,
   VOLAR_PARITY_EXCLUDED_COLLECTIONS,
   type MetaUiBackend,
+  type MetaUiOutcomeBucket,
   type MetaUiScenario,
   type NumericSummary,
 } from "./meta-ui-core.js";
@@ -17,6 +18,14 @@ export interface MetaUiBenchmarkRunVersion {
   nodeVersion: string;
 }
 
+export interface ComponentResultRow {
+  relativePath: string;
+  componentName: string;
+  latencyMs: number | null;
+  outcome: MetaUiOutcomeBucket;
+  error: string | null;
+}
+
 export interface MetaUiBenchmarkRunRepeat {
   index: number;
   orderStart: number;
@@ -24,7 +33,7 @@ export interface MetaUiBenchmarkRunRepeat {
   warmupMs: number;
   steadyStateMs: number;
   endToEndMs: number;
-  componentLatenciesMs: number[];
+  componentResults: ComponentResultRow[];
   outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
   deviationTotals: {
     exactMatches: number;
@@ -202,6 +211,40 @@ export function buildMetaUiMarkdownReport(report: MetaUiAggregateReport): string
     }
 
     lines.push("");
+
+    // Top Outliers section — show top 10 slowest components per backend
+    const outlierEntries: Array<{
+      backend: MetaUiBackend;
+      rows: ComponentResultRow[];
+    }> = [];
+    for (const backend of backendNames.sort()) {
+      const entry = backends[backend];
+      if (!entry) continue;
+      const allResults = entry.run.repeats.flatMap((r) => r.componentResults);
+      if (allResults.length === 0) continue;
+      const sorted = [...allResults]
+        .filter((r) => r.latencyMs !== null)
+        .sort((a, b) => (b.latencyMs ?? 0) - (a.latencyMs ?? 0))
+        .slice(0, 10);
+      if (sorted.length > 0) {
+        outlierEntries.push({ backend, rows: sorted });
+      }
+    }
+
+    if (outlierEntries.length > 0) {
+      lines.push(`#### Top Outliers (${scenario})`);
+      lines.push("");
+      for (const { backend, rows } of outlierEntries) {
+        lines.push(`**${backend}**`);
+        lines.push("");
+        lines.push("| Component | Latency | Outcome |");
+        lines.push("|---|---:|---|");
+        for (const row of rows) {
+          lines.push(`| ${row.componentName} | ${formatMs(row.latencyMs ?? 0)} | ${row.outcome} |`);
+        }
+        lines.push("");
+      }
+    }
   }
 
   return lines.join("\n");

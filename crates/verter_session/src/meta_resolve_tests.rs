@@ -17,6 +17,10 @@ fn make_project() -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
+fn make_project_with_config(config: HostConfig) -> Arc<MetaProject> {
+    MetaProject::new(VerterHost::new_standalone(config))
+}
+
 fn provenance(project: &MetaProject) -> crate::types::MetaProvenanceSnapshot {
     project.host().provenance().snapshot()
 }
@@ -4079,6 +4083,113 @@ fn resolve_component_meta_returns_none_for_missing_file() {
     );
 }
 
+#[test]
+fn resolve_component_meta_populates_compute_audit_when_enabled() {
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        ..HostConfig::default()
+    });
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Props = { foo: string; bar?: number }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("resolve_component_meta should return a state");
+    let audit = state
+        .compute_audit
+        .expect("audit-enabled requests should populate compute audit");
+
+    assert!(
+        audit.solver.solve_count > 0,
+        "audit-enabled requests should record at least one solve"
+    );
+    assert!(
+        audit.solver.total_resolve_steps > 0,
+        "audit-enabled requests should record resolve steps"
+    );
+    assert!(
+        audit.timings.solver_ms >= 0.0 && audit.timings.materialize_ms >= 0.0,
+        "audit timings should be present on the native request path",
+    );
+    assert_eq!(
+        audit.timings.imported_root_proof_ms, 0.0,
+        "local-only requests should not report imported-root proof time",
+    );
+}
+
+#[test]
+fn resolve_component_meta_leaves_compute_audit_empty_when_disabled() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Props = { foo: string }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("resolve_component_meta should return a state");
+
+    assert!(
+        state.compute_audit.is_none(),
+        "audit-disabled requests must stay on the cold no-audit path",
+    );
+}
+
+#[test]
+fn resolve_component_meta_records_imported_root_proof_time_when_imports_are_followed() {
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        audit_enabled: true,
+        ..HostConfig::default()
+    });
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export type SharedProps = Partial<{ foo: string; bar?: number }>",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { SharedProps } from './types'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .expect("resolve_component_meta should return a state");
+    let audit = state
+        .compute_audit
+        .expect("audit-enabled requests should populate compute audit");
+
+    assert!(
+        audit.timings.imported_root_proof_ms > 0.0,
+        "imported type requests should accumulate imported-root proof time",
+    );
+}
+
 // ===========================================================================
 // Edge case: class with ECMAScript #private fields
 // ===========================================================================
@@ -4142,7 +4253,7 @@ fn component_meta_query_engine_caches_by_scope_and_name() {
     project
         .upsert_base(
             "/src/types.ts",
-            "export interface SharedType { a: string; b: number }",
+            "export type SharedType = Partial<{ a: string; b: number }>",
         )
         .unwrap();
     project
@@ -4186,16 +4297,25 @@ defineProps<SharedType>()
         1,
         "should have exactly one cached entry (not two)"
     );
+    assert_eq!(
+        query_engine.solve_count(),
+        1,
+        "cached scoped solves should not increment solve_count",
+    );
+    assert!(
+        query_engine.total_steps() > 0,
+        "scoped solve summary should retain solver steps for native audit",
+    );
 }
 
 #[test]
 fn component_meta_query_engine_different_scopes_do_not_alias() {
     let project = make_project();
     project
-        .upsert_base("/src/a.ts", "export type Foo = string")
+        .upsert_base("/src/a.ts", "export type Foo = Partial<{ value: string }>")
         .unwrap();
     project
-        .upsert_base("/src/b.ts", "export type Foo = number")
+        .upsert_base("/src/b.ts", "export type Foo = Partial<{ value: number }>")
         .unwrap();
     project
         .upsert_base(
@@ -4240,6 +4360,11 @@ defineProps<{ a: FooA; b: FooB }>()
         query_engine.scoped_cache_len(),
         2,
         "two different scopes should produce two cache entries"
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        2,
+        "distinct scopes should each contribute one uncached solve",
     );
 }
 

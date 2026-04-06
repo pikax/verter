@@ -192,7 +192,29 @@ pub fn resolved_macro_to_expansion_via_solver(
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
 ) {
+    use verter_semantic::analysis::type_solver::audit::{NoopAudit, RecordingAudit};
+    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
     use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
+
+    enum SolverEngine<'a> {
+        Noop(TypeQueryEngine<'a, NoopAudit>),
+        Recording(TypeQueryEngine<'a, RecordingAudit>),
+    }
+
+    impl<'a> SolverEngine<'a> {
+        fn solve_with_trace(
+            &mut self,
+            expr: &TypeExpr,
+        ) -> (
+            verter_semantic::analysis::type_solver::result::SolverResult<TypeExpr>,
+            Vec<ResolvedRootIdentity>,
+        ) {
+            match self {
+                Self::Noop(engine) => engine.solve_with_trace(expr),
+                Self::Recording(engine) => engine.solve_with_trace(expr),
+            }
+        }
+    }
 
     let solver_host = if macro_meta.declaration.canonical_source.is_empty() {
         crate::resolver_core::SessionSolverHost::new(host, store_view)
@@ -203,7 +225,11 @@ pub fn resolved_macro_to_expansion_via_solver(
             macro_meta.declaration.canonical_source.as_str(),
         )
     };
-    let mut engine = TypeQueryEngine::new(&solver_host);
+    let mut engine = if host.config.audit_enabled {
+        SolverEngine::Recording(TypeQueryEngine::new_with_recording(&solver_host))
+    } else {
+        SolverEngine::Noop(TypeQueryEngine::new(&solver_host))
+    };
     let mut all_visited = Vec::new();
 
     let mut members = Vec::new();
@@ -438,6 +464,26 @@ mod tests {
         let host = crate::VerterHost::new_standalone(Default::default());
         let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
         assert_eq!(result.completeness, ExpansionCompleteness::LowerBound);
+    }
+
+    #[test]
+    fn solver_expansion_supports_audit_enabled_host() {
+        let macro_meta = make_resolved_macro();
+        let host = crate::VerterHost::new_standalone(crate::HostConfig {
+            audit_enabled: true,
+            ..Default::default()
+        });
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+
+        assert_eq!(result.completeness, ExpansionCompleteness::Exact);
+        assert_eq!(result.members.len(), 2);
+        assert!(
+            result
+                .members
+                .iter()
+                .all(|member| !matches!(member.type_expr, TypeExpr::Unknown { .. })),
+            "audit-enabled hosts should still resolve primitive type text through the solver",
+        );
     }
 
     #[test]

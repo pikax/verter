@@ -35,6 +35,8 @@ pub struct FfiHostConfig {
     pub analysis_level: Option<String>,
     /// Type expansion backend: `"verter"` (default), `"tsserver"`, or `"tsgo"`.
     pub type_expansion_backend: Option<String>,
+    /// Enable Rust-first native audit for component-meta requests.
+    pub audit_enabled: Option<bool>,
 }
 
 /// Per-compilation variant options.

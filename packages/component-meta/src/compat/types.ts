@@ -90,4 +90,12 @@ export interface MetaCheckerOptions {
    * `dedicated` creates an isolated runtime for one checker/session instance.
    */
   runtimeMode?: "shared" | "dedicated";
+  /**
+   * Logging/audit settings. When `audit` is true, the native runtime captures
+   * per-request timing, memory, and solver cost data as structured
+   * `RustAuditRecord` artifacts. Default: false (zero overhead).
+   */
+  logging?: {
+    audit?: boolean;
+  };
 }

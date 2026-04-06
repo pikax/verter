@@ -23,9 +23,17 @@ describe("loadGeneratedComponentRegistry", () => {
 
 describe("resolveComponentFile", () => {
   it("accepts benchmark-relative vue paths directly", () => {
-    const file = resolveComponentFile("src/runtime/components/prose/callout/Caution.vue", { uiRoot });
+    const file = resolveComponentFile("src/runtime/components/prose/callout/Caution.vue", {
+      uiRoot,
+    });
 
     expect(file.replace(/\\/g, "/")).toContain("/src/runtime/components/prose/callout/Caution.vue");
+  });
+
+  it("preserves an exact relative vue path even when the basename is duplicated elsewhere", () => {
+    const file = resolveComponentFile("src/runtime/components/prose/Card.vue", { uiRoot });
+
+    expect(file.replace(/\\/g, "/")).toContain("/src/runtime/components/prose/Card.vue");
   });
 
   it("accepts absolute vue paths directly", () => {

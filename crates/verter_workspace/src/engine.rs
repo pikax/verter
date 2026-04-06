@@ -12,6 +12,7 @@ use crate::overlay::OverlayStore;
 use crate::package_index::PackageIndex;
 use crate::project_graph::ProjectGraph;
 use crate::published_state::PublishedRoot;
+use crate::traits::WorkspaceResourceSnapshot;
 use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
 
@@ -110,6 +111,28 @@ impl Engine {
     /// `ownership_ready` to distinguish bootstrap from real snapshots.
     pub(crate) fn load_published(&self) -> Option<Arc<PublishedRoot>> {
         self.published_state.load_full()
+    }
+
+    pub(crate) fn resource_snapshot(&self) -> WorkspaceResourceSnapshot {
+        let overlay = self.overlay.read();
+        let snapshot = self.snapshot.read();
+        let edges = self.edges.read();
+        let package_index = self.package_index.read();
+        let published = self.load_published();
+
+        WorkspaceResourceSnapshot {
+            overlay_entries: overlay.len(),
+            overlay_bytes: overlay.approx_bytes(),
+            snapshot_entries: snapshot.len(),
+            snapshot_bytes: snapshot.approx_bytes(),
+            edge_file_count: edges.file_count(),
+            reverse_dep_bucket_count: edges.reverse_dep_bucket_count(),
+            package_manifest_count: package_index.len(),
+            published_project_count: published
+                .as_ref()
+                .map(|root| root.snapshot.projects.len())
+                .unwrap_or(0),
+        }
     }
 
     /// Build and publish a snapshot from the current project graph.

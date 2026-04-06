@@ -44,7 +44,22 @@ function makeRun(overrides: Partial<MetaUiBenchmarkRun>): MetaUiBenchmarkRun {
         warmupMs: 0,
         steadyStateMs: 20,
         endToEndMs: 30,
-        componentLatenciesMs: [9, 11],
+        componentResults: [
+          {
+            relativePath: "src/a.vue",
+            componentName: "A",
+            latencyMs: 9,
+            outcome: "success" as const,
+            error: null,
+          },
+          {
+            relativePath: "src/b.vue",
+            componentName: "B",
+            latencyMs: 11,
+            outcome: "success" as const,
+            error: null,
+          },
+        ],
         outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
         deviationTotals: {
           exactMatches: 2,
@@ -106,6 +121,183 @@ describe("buildMetaUiAggregateReport", () => {
     expect(report.kind).toBe("meta-ui-benchmark-report");
     expect(report.scenarios.single_cold.backends.verter.relativeToBaseline).toBe(0.5);
     expect(report.scenarios.single_cold.backends["vue-component-meta"].relativeToVerter).toBe(2);
+  });
+});
+
+describe("componentResults in repeat", () => {
+  it("derives stats from componentResults when present", () => {
+    const run = makeRun({
+      repeats: [
+        {
+          index: 1,
+          orderStart: 0,
+          setupMs: 10,
+          warmupMs: 0,
+          steadyStateMs: 20,
+          endToEndMs: 30,
+          componentResults: [
+            {
+              relativePath: "src/runtime/components/Fast.vue",
+              componentName: "Fast",
+              latencyMs: 9,
+              outcome: "success" as const,
+              error: null,
+            },
+            {
+              relativePath: "src/runtime/components/Slow.vue",
+              componentName: "Slow",
+              latencyMs: 11,
+              outcome: "success" as const,
+              error: null,
+            },
+          ],
+          outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+          deviationTotals: {
+            exactMatches: 2,
+            totalMissing: 0,
+            totalExtra: 0,
+            totalFieldMismatches: 0,
+          },
+          stats: { min: 9, max: 11, p50: 10, p95: 11, p99: 11, mean: 10, stddev: 1 },
+        },
+      ],
+    });
+
+    expect(run.repeats[0].componentResults).toBeDefined();
+    expect(run.repeats[0].componentResults).toHaveLength(2);
+    expect(run.repeats[0].componentResults[0].componentName).toBe("Fast");
+    expect(run.repeats[0].componentResults[1].componentName).toBe("Slow");
+  });
+
+  it("includes error field for failed components", () => {
+    const run = makeRun({
+      repeats: [
+        {
+          index: 1,
+          orderStart: 0,
+          setupMs: 10,
+          warmupMs: 0,
+          steadyStateMs: 0,
+          endToEndMs: 10,
+          componentResults: [
+            {
+              relativePath: "src/runtime/components/Crash.vue",
+              componentName: "Crash",
+              latencyMs: null,
+              outcome: "crash" as const,
+              error: "worker exited unexpectedly",
+            },
+          ],
+          outcomeCounts: { success: 0, degraded: 0, query_error: 0, crash: 1 },
+          deviationTotals: {
+            exactMatches: 0,
+            totalMissing: 0,
+            totalExtra: 0,
+            totalFieldMismatches: 0,
+          },
+          stats: { min: 0, max: 0, p50: 0, p95: 0, p99: 0, mean: 0, stddev: 0 },
+        },
+      ],
+    });
+
+    expect(run.repeats[0].componentResults[0].error).toBe("worker exited unexpectedly");
+    expect(run.repeats[0].componentResults[0].latencyMs).toBeNull();
+  });
+});
+
+describe("buildMetaUiMarkdownReport top outliers", () => {
+  it("includes a Top Outliers section when componentResults are present", () => {
+    const report = buildMetaUiAggregateReport([
+      makeRun({
+        config: {
+          backend: "verter",
+          scenario: "repo_first_pass",
+          repeats: 1,
+          warmupPasses: 0,
+          runtimeMode: "dedicated",
+        },
+        repeats: [
+          {
+            index: 1,
+            orderStart: 0,
+            setupMs: 10,
+            warmupMs: 0,
+            steadyStateMs: 200,
+            endToEndMs: 210,
+            componentResults: [
+              {
+                relativePath: "src/runtime/components/Fast.vue",
+                componentName: "Fast",
+                latencyMs: 50,
+                outcome: "success" as const,
+                error: null,
+              },
+              {
+                relativePath: "src/runtime/components/Slow.vue",
+                componentName: "Slow",
+                latencyMs: 150,
+                outcome: "success" as const,
+                error: null,
+              },
+            ],
+            outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+            deviationTotals: {
+              exactMatches: 2,
+              totalMissing: 0,
+              totalExtra: 0,
+              totalFieldMismatches: 0,
+            },
+            stats: { min: 50, max: 150, p50: 100, p95: 150, p99: 150, mean: 100, stddev: 50 },
+          },
+        ],
+      }),
+    ]);
+
+    const markdown = buildMetaUiMarkdownReport(report);
+
+    expect(markdown).toContain("Top Outliers");
+    expect(markdown).toContain("Slow");
+    expect(markdown).toContain("150.00ms");
+    // Slow should appear before Fast (sorted by latency desc)
+    const slowIndex = markdown.indexOf("Slow");
+    const fastIndex = markdown.indexOf("Fast");
+    expect(slowIndex).toBeLessThan(fastIndex);
+  });
+
+  it("does not include Top Outliers section when componentResults are empty", () => {
+    const report = buildMetaUiAggregateReport([
+      makeRun({
+        config: {
+          backend: "verter",
+          scenario: "single_cold",
+          repeats: 5,
+          warmupPasses: 1,
+          runtimeMode: "dedicated",
+        },
+        repeats: [
+          {
+            index: 1,
+            orderStart: 0,
+            setupMs: 10,
+            warmupMs: 0,
+            steadyStateMs: 20,
+            endToEndMs: 30,
+            componentResults: [],
+            outcomeCounts: { success: 0, degraded: 0, query_error: 0, crash: 0 },
+            deviationTotals: {
+              exactMatches: 0,
+              totalMissing: 0,
+              totalExtra: 0,
+              totalFieldMismatches: 0,
+            },
+            stats: { min: 20, max: 20, p50: 20, p95: 20, p99: 20, mean: 20, stddev: 0 },
+          },
+        ],
+      }),
+    ]);
+
+    const markdown = buildMetaUiMarkdownReport(report);
+    expect(markdown).not.toContain("Top Outliers");
   });
 });
 

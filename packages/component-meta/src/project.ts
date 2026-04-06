@@ -186,13 +186,13 @@ export class ComponentMetaSession {
       return undefined;
     }
 
-    const getResolvedComponentMeta = (this._session as {
-      getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
-    }).getResolvedComponentMeta;
+    const getResolvedComponentMeta = (
+      this._session as {
+        getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
+      }
+    ).getResolvedComponentMeta;
     if (typeof getResolvedComponentMeta !== "function") {
-      throw new Error(
-        "Resolved component-meta query is unavailable on the active native session",
-      );
+      throw new Error("Resolved component-meta query is unavailable on the active native session");
     }
 
     const nativeMeta = getResolvedComponentMeta.call(this._session, abs);
@@ -255,7 +255,10 @@ function hashTsconfigConfig(tsconfigPath: string): string {
   }
 }
 
-function buildEngineKeyInput(options: ComponentMetaSessionConfig): EngineKeyInput {
+function buildEngineKeyInput(
+  options: ComponentMetaSessionConfig,
+  checkerOptions?: MetaCheckerOptions,
+): EngineKeyInput {
   const root = resolvePath(options.root);
   const tsconfigPath = options.tsconfig ? resolvePath(options.tsconfig) : undefined;
 
@@ -267,7 +270,10 @@ function buildEngineKeyInput(options: ComponentMetaSessionConfig): EngineKeyInpu
     configHash: options.config
       ? stableSelectiveConfigHash(options.config)
       : hashTsconfigConfig(resolvePath(options.tsconfig)),
-    nativeFlags: { analysisLevel: "full" },
+    nativeFlags: {
+      analysisLevel: "full",
+      auditEnabled: checkerOptions?.logging?.audit ?? false,
+    },
     typeExpansionBackend: options.typeExpansionBackend ?? "verter",
   };
 }
@@ -285,13 +291,14 @@ async function openComponentMetaSessionInternal(
   const parsedConfig = options.tsconfig
     ? await parseTsconfig(resolvePath(options.tsconfig), workspace)
     : null;
-  const input = buildEngineKeyInput(options);
+  const input = buildEngineKeyInput(options, checkerOptions);
 
   const bootstrap: BootstrapFn = async () => {
     const config = {
       devMode: false,
       analysisLevel: "full",
       typeExpansionBackend: options.typeExpansionBackend ?? "verter",
+      auditEnabled: checkerOptions?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
 
@@ -341,8 +348,11 @@ export async function openComponentMetaSession(
   return openComponentMetaSessionInternal(normalizedConfig, checkerOptions);
 }
 
-export function evictComponentMetaSession(options: ComponentMetaSessionConfig): void {
-  const key = computeEngineKey(buildEngineKeyInput(options));
+export function evictComponentMetaSession(
+  options: ComponentMetaSessionConfig,
+  checkerOptions?: MetaCheckerOptions,
+): void {
+  const key = computeEngineKey(buildEngineKeyInput(options, checkerOptions));
   getMetaRuntime().evictEngine(key);
 }
 

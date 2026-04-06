@@ -35,6 +35,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
+    scoped_total_steps: u64,
+    scoped_solve_count: u32,
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -48,6 +50,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             scoped_cache: FxHashMap::default(),
+            scoped_total_steps: 0,
+            scoped_solve_count: 0,
         }
     }
 
@@ -61,6 +65,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine,
             scoped_cache: FxHashMap::default(),
+            scoped_total_steps: 0,
+            scoped_solve_count: 0,
         }
     }
 
@@ -136,6 +142,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let type_ref = TypeExpr::named(requested_name);
         let mut scoped_engine = TypeQueryEngine::new(&solver_host);
         let (result, _trace) = scoped_engine.solve_with_trace(&type_ref);
+        self.scoped_total_steps += result.steps;
+        self.scoped_solve_count += 1;
         let filtered = filter_identity_ref(&result, requested_name);
         self.scoped_cache.insert(key, ScopedSolveEntry { result });
         filtered
@@ -143,6 +151,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn scoped_cache_len(&self) -> usize {
         self.scoped_cache.len()
+    }
+
+    pub fn total_steps(&self) -> u64 {
+        self.owner_engine.total_steps() + self.scoped_total_steps
+    }
+
+    pub fn solve_count(&self) -> u32 {
+        self.owner_engine.solve_count() + self.scoped_solve_count
     }
 }
 

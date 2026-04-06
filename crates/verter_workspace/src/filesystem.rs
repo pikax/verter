@@ -587,6 +587,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         FilesystemWorkspace::reset_vfs_provenance(self);
     }
 
+    fn resource_snapshot(&self) -> crate::traits::WorkspaceResourceSnapshot {
+        self.engine.resource_snapshot()
+    }
+
     fn preferred_specifier(&self, importer_id: &str, target_id: &str) -> Option<String> {
         self.engine
             .preferred_specifier(self, importer_id, target_id)
