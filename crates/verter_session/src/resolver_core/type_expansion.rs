@@ -1,10 +1,7 @@
 //! Semantic type expansion contract.
 //!
 //! Defines the [`TypeExpander`] trait and associated request/result types.
-//! Three backends implement this trait:
-//! - `VerterTypeExpander` — native OXC-based resolution (this crate)
-//! - `TsserverTypeExpander` — tsserver-backed expansion (this crate, consumes `verter_type_runtime`)
-//! - `TsgoTypeExpander` — TSGO-backed expansion (this crate, consumes `verter_type_runtime`)
+//! The native Verter host implements this trait.
 //!
 //! # Request Invariant
 //!
@@ -14,8 +11,6 @@
 //! # Coordinate System
 //!
 //! The source-of-truth coordinate system is always Verter's SFC-absolute spans.
-//! Backend sessions (tsserver/TSGO) operate on generated artifacts with explicit
-//! span mappings — the translation is handled by the artifact layer.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -29,7 +24,6 @@ use verter_span::Span;
 
 /// Controls what the generated artifact includes and how expansion behaves.
 ///
-/// Backend selection is per session/project config.
 /// Profile selection is per request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExpansionProfile {
@@ -38,22 +32,6 @@ pub enum ExpansionProfile {
     ComponentMeta,
     /// Full IDE-oriented generated artifact (existing LSP path).
     Lsp,
-}
-
-// ---------------------------------------------------------------------------
-// Backend Selection
-// ---------------------------------------------------------------------------
-
-/// Which backend handles type expansion for this session/project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum TypeExpansionBackend {
-    /// Native OXC-based resolver (current Verter behavior).
-    #[default]
-    Verter,
-    /// TypeScript >=5.9 via tsserver IPC.
-    Tsserver,
-    /// TSGO via LSP JSON-RPC.
-    Tsgo,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,8 +105,6 @@ pub enum TypeExpansionError {
     MappingFailed,
     /// The backend returned no expansion result for this span.
     NoExpansionResult,
-    /// The selected backend does not support this query.
-    UnsupportedByBackend,
     /// The backend process failed.
     BackendFailure(BackendFailureKind),
 }
@@ -140,7 +116,6 @@ impl std::fmt::Display for TypeExpansionError {
             Self::InvalidRequest => write!(f, "invalid expansion request"),
             Self::MappingFailed => write!(f, "SFC-to-generated span mapping failed"),
             Self::NoExpansionResult => write!(f, "no expansion result from backend"),
-            Self::UnsupportedByBackend => write!(f, "unsupported by selected backend"),
             Self::BackendFailure(kind) => write!(f, "backend failure: {kind:?}"),
         }
     }
@@ -171,9 +146,7 @@ pub type ExpanderFuture<'a, T> =
 
 /// Core trait: expand a type at an SFC-absolute span to its resolved structural form.
 ///
-/// All three backends (Verter, tsserver, TSGO) implement this natively async.
-/// The Verter path keeps core semantic work synchronous where appropriate,
-/// with the async boundary at host/source-loading and real I/O edges.
+/// The native host path exposes this as async to keep host/source-loading edges uniform.
 pub trait TypeExpander: Send + Sync {
     /// Expand the type at the given SFC span.
     fn expand_type<'a>(
@@ -193,14 +166,6 @@ mod tests {
     #[test]
     fn expansion_profile_component_meta_and_lsp_are_distinct() {
         assert_ne!(ExpansionProfile::ComponentMeta, ExpansionProfile::Lsp);
-    }
-
-    #[test]
-    fn backend_default_is_verter() {
-        assert_eq!(
-            TypeExpansionBackend::default(),
-            TypeExpansionBackend::Verter
-        );
     }
 
     #[test]

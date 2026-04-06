@@ -526,6 +526,7 @@ impl MetaSession {
     }
 
     /// Session ID.
+    #[cfg(test)]
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -635,26 +636,6 @@ impl MetaSession {
         self.check_alive()?;
         self.with_overlay_target_context(canonical_or_alias, |host| {
             host.evaluate_types(canonical_or_alias)
-        })
-    }
-
-    pub(crate) fn resolve_component_meta_state_with_view(
-        &self,
-        canonical_or_alias: &str,
-        mode: crate::ResolverMode,
-    ) -> Result<
-        Option<(
-            String,
-            crate::meta_resolve::ResolvedComponentMetaState,
-            crate::resolver_store::HostStoreView,
-        )>,
-        MetaError,
-    > {
-        self.check_alive()?;
-        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
-            let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-            host.resolve_component_meta_in_view(canonical.as_str(), mode, store_view)
-                .map(|resolved| (canonical, resolved, store_view.clone()))
         })
     }
 

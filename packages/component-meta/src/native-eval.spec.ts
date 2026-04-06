@@ -26,13 +26,7 @@ async function settleNativeProject(): Promise<void> {
 
 async function createRuntimeChecker(name = "native-eval") {
   const projectRoot = mkdtempSync(resolve(process.env.TEMP ?? tmpdir(), `${name}-`));
-  return trackChecker(
-    await createCheckerByJson(
-      projectRoot,
-      {},
-      { runtimeMode: "dedicated", typeExpansionBackend: "verter" },
-    ),
-  );
+  return trackChecker(await createCheckerByJson(projectRoot, {}, { runtimeMode: "dedicated" }));
 }
 
 // =============================================================================
@@ -419,7 +413,6 @@ defineProps<{
         {},
         {
           runtimeMode: "dedicated",
-          typeExpansionBackend: "verter",
         },
       ),
     );

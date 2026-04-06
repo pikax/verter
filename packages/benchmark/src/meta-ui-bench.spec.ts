@@ -249,7 +249,6 @@ describe("verter repeated benchmark queries", () => {
           forceUseTs: true,
           schema: { literalBooleanSchema: true },
           runtimeMode: "dedicated",
-          typeExpansionBackend: "verter",
         },
       );
 

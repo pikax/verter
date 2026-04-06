@@ -63,6 +63,10 @@ pub struct SolveState {
     pub exactness: SolverExactness,
     pub execution_status: ExecutionStatus,
     pub incomplete_reasons: Vec<IncompleteReason>,
+    /// Declaration scope for the current solve. Used to partition bare-name
+    /// root_identity cache entries so that `("", name)` results from one
+    /// scope do not poison another scope in a shared engine.
+    pub scope_canonical_id: String,
     /// Stack of active type declaration contexts. When resolving a prepared
     /// type declaration body, the declaration is pushed onto this stack so
     /// bare name refs can be resolved through the declaration's
@@ -170,6 +174,15 @@ impl SolveState {
         instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
         relation_caches: SolverCaches,
     ) -> Self {
+        Self::with_caches_and_scope(limits, instantiation_cache, relation_caches, String::new())
+    }
+
+    pub fn with_caches_and_scope(
+        limits: SolveLimits,
+        instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
+        relation_caches: SolverCaches,
+        scope_canonical_id: String,
+    ) -> Self {
         Self {
             depth: 0,
             steps: 0,
@@ -178,6 +191,7 @@ impl SolveState {
             exactness: SolverExactness::ExactConcrete,
             execution_status: ExecutionStatus::Completed,
             incomplete_reasons: Vec::new(),
+            scope_canonical_id,
             type_decl_context_stack: Vec::new(),
             value_decl_context_stack: Vec::new(),
             visited_external_decls: Vec::new(),
@@ -1277,7 +1291,11 @@ fn try_expand_pick_omit_structurally(
         return None;
     }
 
-    let props = collect_structural_property_descriptors(arena, object, host, state, subst)?;
+    // For Pick, pass the selected keys so intersection branches that cannot
+    // contribute any of the picked keys are never resolved.
+    let required = if is_pick { Some(&key_set) } else { None };
+    let props =
+        collect_structural_property_descriptors_inner(arena, object, host, state, subst, required)?;
     let mut properties = Vec::new();
 
     for prop in props {
@@ -1315,6 +1333,22 @@ fn collect_structural_property_descriptors(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> Option<Vec<StructuralPropertyDescriptor>> {
+    collect_structural_property_descriptors_inner(arena, node, host, state, subst, None)
+}
+
+/// Like [`collect_structural_property_descriptors`] but accepts an optional
+/// set of required keys.  When provided, intersection branches are skipped
+/// once every required key has already been collected from earlier branches.
+/// This avoids resolving external refs that cannot contribute to the result
+/// (e.g. `Pick<{a:string} & ExternalNoise, "a">` never needs `ExternalNoise`).
+fn collect_structural_property_descriptors_inner(
+    arena: &mut QueryArena,
+    node: NodeId,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+    required_keys: Option<&std::collections::BTreeSet<String>>,
+) -> Option<Vec<StructuralPropertyDescriptor>> {
     if node.is_unresolved() {
         return None;
     }
@@ -1335,15 +1369,43 @@ fn collect_structural_property_descriptors(
             let mut merged: rustc_hash::FxHashMap<String, StructuralPropertyDescriptor> =
                 rustc_hash::FxHashMap::default();
             for member in members {
-                let descriptors =
-                    collect_structural_property_descriptors(arena, member, host, state, subst)?;
-                for prop in descriptors {
-                    if let Some(existing) = merged.get_mut(&prop.name) {
-                        existing.optional &= prop.optional;
-                        existing.readonly |= prop.readonly;
-                        existing.is_method &= prop.is_method;
-                    } else {
-                        merged.insert(prop.name.clone(), prop);
+                // When required_keys is set, check if all requested keys
+                // are already present before resolving the next branch.
+                if let Some(keys) = required_keys {
+                    if keys.iter().all(|k| merged.contains_key(k)) {
+                        break;
+                    }
+                }
+                let descriptors = collect_structural_property_descriptors_inner(
+                    arena,
+                    member,
+                    host,
+                    state,
+                    subst,
+                    required_keys,
+                );
+                match descriptors {
+                    Some(descs) => {
+                        for prop in descs {
+                            if let Some(existing) = merged.get_mut(&prop.name) {
+                                existing.optional &= prop.optional;
+                                existing.readonly |= prop.readonly;
+                                existing.is_method &= prop.is_method;
+                            } else {
+                                merged.insert(prop.name.clone(), prop);
+                            }
+                        }
+                    }
+                    None => {
+                        // Branch could not be resolved.  If we already have
+                        // all required keys we can safely skip it; otherwise
+                        // propagate the failure.
+                        if let Some(keys) = required_keys {
+                            if keys.iter().all(|k| merged.contains_key(k)) {
+                                continue;
+                            }
+                        }
+                        return None;
                     }
                 }
             }
@@ -1363,6 +1425,7 @@ fn collect_structural_property_descriptors(
             host,
             state,
             subst,
+            required_keys,
         ),
         Node::RecursiveRef {
             symbol_name,
@@ -1376,6 +1439,7 @@ fn collect_structural_property_descriptors(
             host,
             state,
             subst,
+            required_keys,
         ),
         _ => None,
     }
@@ -1389,17 +1453,19 @@ fn collect_structural_ref_properties(
     host: &dyn TypeSolverHost,
     state: &mut SolveState,
     subst: &SubstitutionEnv,
+    required_keys: Option<&std::collections::BTreeSet<String>>,
 ) -> Option<Vec<StructuralPropertyDescriptor>> {
     if let Some(builtin) = BuiltinUtility::from_name(name) {
         if builtin.is_compiler_intrinsic() || host.utility_source(name) != UtilitySource::Shadowed {
             match builtin {
                 BuiltinUtility::Partial => {
-                    let mut props = collect_structural_property_descriptors(
+                    let mut props = collect_structural_property_descriptors_inner(
                         arena,
                         *type_arguments.first()?,
                         host,
                         state,
                         subst,
+                        required_keys,
                     )?;
                     for prop in &mut props {
                         prop.optional = true;
@@ -1407,12 +1473,13 @@ fn collect_structural_ref_properties(
                     return Some(props);
                 }
                 BuiltinUtility::Required => {
-                    let mut props = collect_structural_property_descriptors(
+                    let mut props = collect_structural_property_descriptors_inner(
                         arena,
                         *type_arguments.first()?,
                         host,
                         state,
                         subst,
+                        required_keys,
                     )?;
                     for prop in &mut props {
                         prop.optional = false;
@@ -1420,12 +1487,13 @@ fn collect_structural_ref_properties(
                     return Some(props);
                 }
                 BuiltinUtility::Readonly => {
-                    let mut props = collect_structural_property_descriptors(
+                    let mut props = collect_structural_property_descriptors_inner(
                         arena,
                         *type_arguments.first()?,
                         host,
                         state,
                         subst,
+                        required_keys,
                     )?;
                     for prop in &mut props {
                         prop.readonly = true;
@@ -1433,13 +1501,6 @@ fn collect_structural_ref_properties(
                     return Some(props);
                 }
                 BuiltinUtility::Pick | BuiltinUtility::Omit => {
-                    let mut props = collect_structural_property_descriptors(
-                        arena,
-                        *type_arguments.first()?,
-                        host,
-                        state,
-                        subst,
-                    )?;
                     let key_set: std::collections::BTreeSet<String> =
                         collect_literal_string_keys(arena, *type_arguments.get(1)?)
                             .into_iter()
@@ -1447,6 +1508,21 @@ fn collect_structural_ref_properties(
                     if key_set.is_empty() {
                         return None;
                     }
+                    // For Pick, pass the selected keys so intersection
+                    // branches that cannot contribute are never resolved.
+                    let required = if builtin == BuiltinUtility::Pick {
+                        Some(&key_set)
+                    } else {
+                        None
+                    };
+                    let mut props = collect_structural_property_descriptors_inner(
+                        arena,
+                        *type_arguments.first()?,
+                        host,
+                        state,
+                        subst,
+                        required,
+                    )?;
                     props.retain(|prop| {
                         let contains = key_set.contains(&prop.name);
                         if builtin == BuiltinUtility::Pick {
@@ -1469,11 +1545,24 @@ fn collect_structural_ref_properties(
         let source = *type_arguments.get(usize::from(source_index))?;
         match shape.kind {
             PreparedWrapperKind::Identity => {
-                return collect_structural_property_descriptors(arena, source, host, state, subst);
+                return collect_structural_property_descriptors_inner(
+                    arena,
+                    source,
+                    host,
+                    state,
+                    subst,
+                    required_keys,
+                );
             }
             PreparedWrapperKind::PureOverlay => {
-                let mut props =
-                    collect_structural_property_descriptors(arena, source, host, state, subst)?;
+                let mut props = collect_structural_property_descriptors_inner(
+                    arena,
+                    source,
+                    host,
+                    state,
+                    subst,
+                    required_keys,
+                )?;
                 if let Some(optional) = shape.modifiers.optional {
                     for prop in &mut props {
                         prop.optional = optional;
@@ -1486,23 +1575,30 @@ fn collect_structural_ref_properties(
                 }
                 return Some(props);
             }
-            PreparedWrapperKind::KeyFilter => {
-                let mut props =
-                    collect_structural_property_descriptors(arena, source, host, state, subst)?;
-                match &shape.key_filter {
-                    PreparedKeyFilterShape::IncludeLiteral(keys) => {
-                        let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
-                        props.retain(|prop| key_set.contains(&prop.name));
-                        return Some(props);
-                    }
-                    PreparedKeyFilterShape::ExcludeLiteral(keys) => {
-                        let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
-                        props.retain(|prop| !key_set.contains(&prop.name));
-                        return Some(props);
-                    }
-                    _ => {}
+            PreparedWrapperKind::KeyFilter => match &shape.key_filter {
+                PreparedKeyFilterShape::IncludeLiteral(keys) => {
+                    let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
+                    let mut props = collect_structural_property_descriptors_inner(
+                        arena,
+                        source,
+                        host,
+                        state,
+                        subst,
+                        Some(&key_set),
+                    )?;
+                    props.retain(|prop| key_set.contains(&prop.name));
+                    return Some(props);
                 }
-            }
+                PreparedKeyFilterShape::ExcludeLiteral(keys) => {
+                    let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
+                    let mut props = collect_structural_property_descriptors_inner(
+                        arena, source, host, state, subst, None,
+                    )?;
+                    props.retain(|prop| !key_set.contains(&prop.name));
+                    return Some(props);
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -1523,20 +1619,35 @@ fn collect_structural_ref_properties(
         })
         .collect();
 
-    let resolved_args: Vec<NodeId> = type_arguments
-        .iter()
-        .map(|&arg| resolve_node(arena, arg, host, state, subst))
-        .collect();
-    let resolved_body = resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
-    if !matches!(
-        arena.get(resolved_body),
-        Node::Applied { .. } | Node::RecursiveRef { .. }
-    ) {
-        if let Some(props) =
-            collect_structural_property_descriptors(arena, resolved_body, host, state, subst)
-        {
-            for prop in props {
-                merged.entry(prop.name.clone()).or_insert(prop);
+    // When required_keys is set and the member_index already covers every
+    // requested key, skip the expensive resolve_prepared_ref which would
+    // resolve the full declaration body (including unrelated external refs).
+    let all_required_covered = required_keys
+        .map(|keys| keys.iter().all(|k| merged.contains_key(k)))
+        .unwrap_or(false);
+
+    if !all_required_covered {
+        let resolved_args: Vec<NodeId> = type_arguments
+            .iter()
+            .map(|&arg| resolve_node(arena, arg, host, state, subst))
+            .collect();
+        let resolved_body =
+            resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
+        if !matches!(
+            arena.get(resolved_body),
+            Node::Applied { .. } | Node::RecursiveRef { .. }
+        ) {
+            if let Some(props) = collect_structural_property_descriptors_inner(
+                arena,
+                resolved_body,
+                host,
+                state,
+                subst,
+                required_keys,
+            ) {
+                for prop in props {
+                    merged.entry(prop.name.clone()).or_insert(prop);
+                }
             }
         }
     }
@@ -1916,16 +2027,24 @@ fn resolve_root_identity_cached(
     canonical_id: &str,
     symbol_name: &str,
 ) -> Option<ResolvedRootIdentity> {
+    // For bare-name lookups (empty canonical_id), use the solve scope as the
+    // cache key to prevent cross-scope poisoning in a shared engine.
+    let cache_key_id = if canonical_id.is_empty() && !state.scope_canonical_id.is_empty() {
+        state.scope_canonical_id.as_str()
+    } else {
+        canonical_id
+    };
+
     if let Some(cached) = state
         .relation_caches
-        .get_root_identity(canonical_id, symbol_name)
+        .get_root_identity(cache_key_id, symbol_name)
     {
         return cached;
     }
 
     let resolved = host.root_identity(canonical_id, symbol_name);
     state.relation_caches.set_root_identity(
-        canonical_id.to_string(),
+        cache_key_id.to_string(),
         symbol_name.to_string(),
         resolved.clone(),
     );

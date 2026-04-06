@@ -197,8 +197,8 @@ pub fn resolved_macro_to_expansion_via_solver(
     use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
 
     enum SolverEngine<'a> {
-        Noop(TypeQueryEngine<'a, NoopAudit>),
-        Recording(TypeQueryEngine<'a, RecordingAudit>),
+        Noop(Box<TypeQueryEngine<'a, NoopAudit>>),
+        Recording(Box<TypeQueryEngine<'a, RecordingAudit>>),
     }
 
     impl<'a> SolverEngine<'a> {
@@ -226,9 +226,9 @@ pub fn resolved_macro_to_expansion_via_solver(
         )
     };
     let mut engine = if host.config.audit_enabled {
-        SolverEngine::Recording(TypeQueryEngine::new_with_recording(&solver_host))
+        SolverEngine::Recording(Box::new(TypeQueryEngine::new_with_recording(&solver_host)))
     } else {
-        SolverEngine::Noop(TypeQueryEngine::new(&solver_host))
+        SolverEngine::Noop(Box::new(TypeQueryEngine::new(&solver_host)))
     };
     let mut all_visited = Vec::new();
 

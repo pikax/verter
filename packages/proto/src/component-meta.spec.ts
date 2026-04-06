@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { ComponentMetaPayloadSchema, createTestComponentMetaPayload } from "./component-meta.js";
 import {
+  ComponentMetaBodySchema,
   MacroExpansionDiagnosticEntrySchema,
   ExpansionExactness,
   ExpansionExecutionStatus,
@@ -36,26 +37,27 @@ describe("ComponentMetaPayloadSchema", () => {
   it("round-trips MacroExpansionDiagnosticEntry and is backward-compatible without it", () => {
     // With macroExpansionDiagnostics present
     const base = createTestComponentMetaPayload();
+    const bodyWithDiags = create(ComponentMetaBodySchema, {
+      ...base.body,
+      macroExpansionDiagnostics: [
+        create(MacroExpansionDiagnosticEntrySchema, {
+          macroKindId: 1,
+          macroIndex: 0,
+          exactness: ExpansionExactness.EXACT_CONCRETE,
+          executionStatus: ExpansionExecutionStatus.COMPLETED,
+          diagnostics: [
+            {
+              reason: ExpansionStopReason.BUDGET_EXCEEDED,
+              contextId: 1,
+              propertyNameId: 0,
+            },
+          ],
+        }),
+      ],
+    });
     const withDiags = create(ComponentMetaPayloadSchema, {
       ...base,
-      body: {
-        ...base.body,
-        macroExpansionDiagnostics: [
-          create(MacroExpansionDiagnosticEntrySchema, {
-            macroKindId: 1,
-            macroIndex: 0,
-            exactness: ExpansionExactness.EXACT_CONCRETE,
-            executionStatus: ExpansionExecutionStatus.COMPLETED,
-            diagnostics: [
-              {
-                reason: ExpansionStopReason.BUDGET_EXCEEDED,
-                contextId: 1,
-                propertyNameId: 0,
-              },
-            ],
-          }),
-        ],
-      },
+      body: bodyWithDiags,
     });
     const bytesWithDiags = toBinary(ComponentMetaPayloadSchema, withDiags);
     const decodedWithDiags = fromBinary(ComponentMetaPayloadSchema, bytesWithDiags);

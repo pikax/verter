@@ -29,7 +29,7 @@ const tsxLoaderPath = pathToFileURL(require.resolve("tsx")).href;
 
 const JSON_MODE = process.argv.includes("--json");
 
-const SUPPORTED_BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter", "tsserver", "tsgo"];
+const SUPPORTED_BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter"];
 const SUPPORTED_SCENARIOS: MetaUiScenario[] = [
   "single_cold",
   "single_warm",

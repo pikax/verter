@@ -175,7 +175,7 @@ export {
   evictComponentMetaSession,
   shutdownMetaRuntime,
 } from "./project.js";
-export type { ComponentMetaSessionConfig, TypeExpansionBackend } from "./project.js";
+export type { ComponentMetaSessionConfig } from "./project.js";
 
 // Semantic pipeline types (from verter_protocol via @verter/language-shared)
 export type {

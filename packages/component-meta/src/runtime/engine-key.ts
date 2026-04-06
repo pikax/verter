@@ -19,7 +19,6 @@ export interface EngineKeyInput {
     analysisLevel: string;
     auditEnabled?: boolean;
   };
-  typeExpansionBackend?: string;
 }
 
 /**
@@ -105,7 +104,6 @@ export function computeEngineKey(input: EngineKeyInput): string {
     input.configHash,
     input.nativeFlags.analysisLevel,
     input.nativeFlags.auditEnabled ? "audit=1" : "audit=0",
-    input.typeExpansionBackend ?? "verter",
   ];
   return parts.join("|");
 }

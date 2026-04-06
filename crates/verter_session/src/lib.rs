@@ -83,9 +83,7 @@ pub use verter_compiler::VERTER_TYPES_STANDALONE_DTS;
 
 // Re-export CompileTarget so downstream crates (LSP, MCP, FFI) can use it
 // without adding verter_compiler as a direct dependency.
-pub use crate::resolver_core::{
-    query_artifact, type_expansion, type_expansion_host, type_text_parser,
-};
+pub use crate::resolver_core::{type_expansion, type_expansion_host, type_text_parser};
 pub use verter_compiler::compile::CompileTarget;
 
 use std::collections::BTreeSet;
@@ -498,7 +496,7 @@ impl VerterHost {
         let analysis = self.scheduler_script_analysis(canonical_id);
         #[cfg(not(feature = "scheduler"))]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
-            let files = self.files.read();
+            let files = read_lock(&self.files);
             files.get(canonical_id).map(|f| f.script_analysis.clone())
         };
         let surface = analysis.map(|a| verter_semantic::extract::extract_component_surface(&a));
@@ -544,7 +542,7 @@ impl VerterHost {
         let analysis = self.scheduler_script_analysis(canonical_id);
         #[cfg(not(feature = "scheduler"))]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
-            let files = self.files.read();
+            let files = read_lock(&self.files);
             files.get(canonical_id).map(|f| f.script_analysis.clone())
         };
 
@@ -589,7 +587,7 @@ impl VerterHost {
                 let analysis: Option<
                     verter_semantic::analysis::ScriptAnalysisSnapshot,
                 > = {
-                    let files = self.files.read();
+                    let files = read_lock(&self.files);
                     files.get(canonical_id).map(|f| f.script_analysis.clone())
                 };
                 let graph = analysis
@@ -610,7 +608,7 @@ impl VerterHost {
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
             #[cfg(not(feature = "scheduler"))]
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = {
-                let files = self.files.read();
+                let files = read_lock(&self.files);
                 files
                     .get(canonical_id)
                     .and_then(|f| f.template_analysis.as_ref())

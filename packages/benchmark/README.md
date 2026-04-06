@@ -132,7 +132,7 @@ pnpm --filter @verter/benchmark bench:meta:ui -- \
 Supported flags:
 
 - `--ui-root=<path>` - override the prepared `nuxt-ui` checkout
-- `--backends=<csv>` - any of `vue-component-meta,verter,tsserver,tsgo`
+- `--backends=<csv>` - any of `vue-component-meta,verter`
 - `--scenarios=<csv>` - any of `single_cold,single_warm,repo_first_pass,repo_warm_second_pass`
 - `--repeats=<n>` - repeat count per backend/scenario
 - `--warmup-passes=<n>` - untimed warmup passes before warm scenarios

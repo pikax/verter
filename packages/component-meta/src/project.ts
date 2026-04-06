@@ -43,22 +43,18 @@ import type {
   ProjectSession,
 } from "./runtime/index.js";
 
-export type TypeExpansionBackend = "verter" | "tsserver" | "tsgo";
-
 export type ComponentMetaSessionConfig =
   | {
       root: string;
       tsconfig: string;
       config?: never;
       backend?: "napi" | "wasm";
-      typeExpansionBackend?: TypeExpansionBackend;
     }
   | {
       root: string;
       config: Record<string, unknown>;
       tsconfig?: never;
       backend?: "napi" | "wasm";
-      typeExpansionBackend?: TypeExpansionBackend;
     };
 
 export class ComponentMetaSession {
@@ -274,7 +270,6 @@ function buildEngineKeyInput(
       analysisLevel: "full",
       auditEnabled: checkerOptions?.logging?.audit ?? false,
     },
-    typeExpansionBackend: options.typeExpansionBackend ?? "verter",
   };
 }
 
@@ -297,7 +292,6 @@ async function openComponentMetaSessionInternal(
     const config = {
       devMode: false,
       analysisLevel: "full",
-      typeExpansionBackend: options.typeExpansionBackend ?? "verter",
       auditEnabled: checkerOptions?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
@@ -323,29 +317,13 @@ async function openComponentMetaSessionInternal(
 }
 
 /**
- * Open a component-meta session with explicit backend selection.
- *
- * This is the preferred API over `openMetaProject()`. It supports
- * `typeExpansionBackend` for choosing between Verter, tsserver, or TSGO.
+ * Open a component-meta session.
  */
 export async function openComponentMetaSession(
   config: ComponentMetaSessionConfig,
   checkerOptions?: MetaCheckerOptions,
 ): Promise<ComponentMetaSession> {
-  const normalizedConfig: ComponentMetaSessionConfig = config.tsconfig
-    ? {
-        root: config.root,
-        tsconfig: config.tsconfig,
-        backend: config.backend,
-        typeExpansionBackend: config.typeExpansionBackend,
-      }
-    : {
-        root: config.root,
-        config: config.config ?? {},
-        backend: config.backend,
-        typeExpansionBackend: config.typeExpansionBackend,
-      };
-  return openComponentMetaSessionInternal(normalizedConfig, checkerOptions);
+  return openComponentMetaSessionInternal(config, checkerOptions);
 }
 
 export function evictComponentMetaSession(

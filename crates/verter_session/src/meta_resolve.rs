@@ -1121,6 +1121,18 @@ impl VerterHost {
             ));
         }
 
+        // NOTE(architecture-debt): This enrichment loop uses standalone
+        // `solve_type()` calls (via `materialize_component_meta_member_surface_expr`)
+        // instead of routing through the shared request-scoped `TypeQueryEngine`.
+        // Rationale: the materialization function is a recursive tree walker that
+        // calls `solve_type()` at multiple nesting levels. Threading
+        // `&mut TypeQueryEngine` through the 5+ function recursive chain would
+        // require mutable borrow propagation across all materialization helpers.
+        // Each entry here is a unique imported type_expr so op_cache reuse is
+        // low. The primary scoped-solve path (ComponentMetaQueryEngine.solve_scoped)
+        // already uses the shared engine for the high-frequency bare-name lookups.
+        // TODO: Route through shared engine when materialization helpers are
+        // refactored to accept a shared solver boundary.
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;

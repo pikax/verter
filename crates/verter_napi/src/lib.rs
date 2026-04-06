@@ -190,8 +190,6 @@ pub struct NapiHostConfig {
     pub maxProfilesPerFile: Option<u32>,
     pub resolveExtensions: Option<Vec<String>>,
     pub analysisLevel: Option<String>,
-    /// Type expansion backend: `"verter"` (default), `"tsserver"`, or `"tsgo"`.
-    pub typeExpansionBackend: Option<String>,
     /// Enable Rust-first native audit for component-meta requests.
     /// When true, timing/memory/store data is captured per request.
     pub auditEnabled: Option<bool>,
@@ -206,7 +204,6 @@ impl From<NapiHostConfig> for FfiHostConfig {
             max_profiles_per_file: n.maxProfilesPerFile,
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
-            type_expansion_backend: n.typeExpansionBackend,
             audit_enabled: n.auditEnabled,
         }
     }
@@ -1079,11 +1076,6 @@ impl NapiWorkspace {
     /// Get the underlying workspace as a trait object.
     pub(crate) fn workspace(&self) -> std::sync::Arc<dyn verter_workspace::WorkspaceAccess> {
         std::sync::Arc::clone(&self.inner) as std::sync::Arc<dyn verter_workspace::WorkspaceAccess>
-    }
-
-    /// Get the filesystem workspace roots for runtime-backed integrations.
-    pub(crate) fn roots(&self) -> Vec<String> {
-        self.inner.options().roots.clone()
     }
 }
 

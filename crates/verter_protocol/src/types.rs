@@ -33,8 +33,6 @@ pub struct FfiHostConfig {
     pub max_profiles_per_file: Option<u32>,
     pub resolve_extensions: Option<Vec<String>>,
     pub analysis_level: Option<String>,
-    /// Type expansion backend: `"verter"` (default), `"tsserver"`, or `"tsgo"`.
-    pub type_expansion_backend: Option<String>,
     /// Enable Rust-first native audit for component-meta requests.
     pub audit_enabled: Option<bool>,
 }

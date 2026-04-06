@@ -51,7 +51,6 @@ const checker = await compat.createCheckerByJson(
   {
     forceUseTs: true,
     runtimeMode: "dedicated",
-    typeExpansionBackend: "verter",
   },
 );
 const setupMs = Math.round(performance.now() - setupStart);

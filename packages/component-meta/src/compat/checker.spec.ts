@@ -942,44 +942,6 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
-  it("createCheckerByJson uses separate pooled engines for different type expansion backends", async () => {
-    shutdownMetaRuntime();
-    const runtime = getMetaRuntime();
-    const projectRoot = resolve(
-      process.env.TEMP ?? "/tmp",
-      `checker-pool-backend-${nextProjectRootId++}`,
-    );
-
-    const checkerA = await createCheckerByJson(
-      projectRoot,
-      {
-        include: ["src/A.vue"],
-        compilerOptions: { baseUrl: "." },
-      },
-      {
-        typeExpansionBackend: "verter",
-      },
-    );
-    const checkerB = await createCheckerByJson(
-      projectRoot,
-      {
-        include: ["src/B.vue"],
-        compilerOptions: { baseUrl: "." },
-      },
-      {
-        typeExpansionBackend: "tsgo",
-      },
-    );
-
-    expect(runtime.engineCount).toBe(2);
-    expect(runtime.diagnostics.enginesCreated).toBe(2);
-    expect(runtime.diagnostics.enginesReused).toBe(0);
-
-    checkerA.close();
-    checkerB.close();
-    shutdownMetaRuntime();
-  });
-
   it("createCheckerByJson uses pooled runtime leases instead of dedicated engines", async () => {
     shutdownMetaRuntime();
     const runtime = getMetaRuntime();
@@ -1060,7 +1022,6 @@ describe("ComponentMetaChecker", () => {
       {},
       {
         runtimeMode: "dedicated",
-        typeExpansionBackend: "verter",
       },
     );
 
@@ -1387,7 +1348,7 @@ defineEmits<{
     const checker = new ComponentMetaChecker(
       {} as any,
       "/project",
-      { typeExpansionBackend: "tsgo" },
+      {},
       {
         engine: { state: "active" as const },
         upsert() {},
@@ -2382,20 +2343,20 @@ describe("MetaCheckerOptions logging.audit plumbing", () => {
     );
 
     // With audit: false (default behavior)
-    const checkerOff = await createCheckerByJson(
-      projectRoot,
-      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
-      { typeExpansionBackend: "verter", runtimeMode: "dedicated", logging: { audit: false } },
-    );
+    const checkerOff = await createCheckerByJson(projectRoot, {
+      include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))],
+      runtimeMode: "dedicated",
+      logging: { audit: false },
+    });
     expect(checkerOff).toBeDefined();
     checkerOff.close();
 
     // With audit: true
-    const checkerOn = await createCheckerByJson(
-      projectRoot,
-      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
-      { typeExpansionBackend: "verter", runtimeMode: "dedicated", logging: { audit: true } },
-    );
+    const checkerOn = await createCheckerByJson(projectRoot, {
+      include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))],
+      runtimeMode: "dedicated",
+      logging: { audit: true },
+    });
     expect(checkerOn).toBeDefined();
     checkerOn.close();
   });
@@ -2413,11 +2374,10 @@ describe("MetaCheckerOptions logging.audit plumbing", () => {
     );
 
     // No logging option at all
-    const checker = await createCheckerByJson(
-      projectRoot,
-      { include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))] },
-      { typeExpansionBackend: "verter", runtimeMode: "dedicated" },
-    );
+    const checker = await createCheckerByJson(projectRoot, {
+      include: [runtimeNormalizePath(resolve(projectRoot, "Test.vue"))],
+      runtimeMode: "dedicated",
+    });
     expect(checker).toBeDefined();
     checker.close();
   });

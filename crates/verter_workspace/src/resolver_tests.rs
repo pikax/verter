@@ -2395,3 +2395,203 @@ fn tsconfig_path_to_package_dir_respects_type_import_context() {
         "TypeImport through tsconfig paths should honor declaration/package types instead of probing runtime index.cjs",
     );
 }
+
+// ── Ancestor Walk Boundary Tests ──
+
+#[test]
+fn ancestor_dirs_stops_at_workspace_root_boundary() {
+    let dirs = ancestor_dirs("/workspace/packages/app/src/file.ts", Some("/workspace"));
+    assert!(
+        dirs.contains(&"/workspace/packages/app/src".to_string()),
+        "should include directories within workspace"
+    );
+    assert!(
+        dirs.contains(&"/workspace/packages/app".to_string()),
+        "should include parent directories within workspace"
+    );
+    assert!(
+        dirs.contains(&"/workspace".to_string()),
+        "should include the workspace root itself"
+    );
+    assert!(
+        !dirs.iter().any(|d| d == "/"),
+        "must NOT traverse above workspace root to filesystem root"
+    );
+}
+
+#[test]
+fn ancestor_dirs_from_dir_stops_at_workspace_root_boundary() {
+    let dirs = ancestor_dirs_from_dir("/workspace/packages/app/src", Some("/workspace"));
+    assert!(
+        dirs.contains(&"/workspace/packages/app/src".to_string()),
+        "should include the start directory itself"
+    );
+    assert!(
+        dirs.contains(&"/workspace".to_string()),
+        "should include the workspace root"
+    );
+    assert!(
+        !dirs.iter().any(|d| d == "/"),
+        "must NOT traverse above workspace root"
+    );
+}
+
+#[test]
+fn ancestor_dirs_unbounded_traverses_all_ancestors() {
+    // Without a boundary, ancestor_dirs walks up to the empty-string termination
+    // (parent_dir("/workspace") returns "" which terminates the loop).
+    let dirs = ancestor_dirs("/a/b/c/d/file.ts", None);
+    assert_eq!(
+        dirs,
+        vec![
+            "/a/b/c/d".to_string(),
+            "/a/b/c".to_string(),
+            "/a/b".to_string(),
+            "/a".to_string(),
+        ],
+        "unbounded traversal should visit all ancestor directories"
+    );
+}
+
+#[test]
+fn ancestor_dirs_from_dir_unbounded_traverses_all_ancestors() {
+    let dirs = ancestor_dirs_from_dir("/a/b/c", None);
+    assert_eq!(
+        dirs,
+        vec!["/a/b/c".to_string(), "/a/b".to_string(), "/a".to_string(),],
+        "unbounded traversal should visit start dir and all ancestors"
+    );
+}
+
+#[test]
+fn owned_resolution_stops_node_modules_walk_at_workspace_root() {
+    // Monorepo: workspace_root=/workspace, project_root=/workspace/packages/app
+    // package lives in /workspace/node_modules (hoisted), NOT /workspace/packages/app/node_modules
+    let mut configured = project(
+        "/workspace/packages/app",
+        "/workspace",
+        Some("/workspace/packages/app/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    configured.compiler_options = IdeProjectCompilerOptions::default();
+
+    let resolver = ProjectResolver::new(vec![configured]);
+
+    let mut reader = CountingReader::with_files(&[]);
+    reader.add_file(
+        "/workspace/node_modules/lodash/package.json",
+        r#"{ "name": "lodash", "main": "lodash.js", "types": "lodash.d.ts" }"#,
+    );
+    reader.add_file(
+        "/workspace/node_modules/lodash/lodash.d.ts",
+        "export function get(): void;",
+    );
+
+    // Resolution should find hoisted package under workspace_root/node_modules
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/packages/app/src/main.ts".to_string(),
+            specifier: "lodash".to_string(),
+            kind: ResolveRequestKind::TypeImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        result.is_some(),
+        "should resolve hoisted package from workspace_root/node_modules"
+    );
+    assert_eq!(
+        result.unwrap().source_id,
+        "/workspace/node_modules/lodash/lodash.d.ts",
+    );
+
+    // Verify no probes above workspace_root
+    assert_eq!(
+        reader.read_file_calls_for("/package.json"),
+        0,
+        "must NOT probe /package.json above workspace_root"
+    );
+    assert_eq!(
+        reader.read_file_calls_for("/node_modules/lodash/package.json"),
+        0,
+        "must NOT probe /node_modules/ above workspace_root"
+    );
+}
+
+#[test]
+fn package_imports_obey_workspace_root_boundary() {
+    let mut configured = project(
+        "/workspace/packages/app",
+        "/workspace",
+        Some("/workspace/packages/app/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    configured.compiler_options = IdeProjectCompilerOptions::default();
+
+    let resolver = ProjectResolver::new(vec![configured]);
+
+    let mut reader = CountingReader::with_files(&[]);
+    reader.add_file(
+        "/workspace/packages/app/package.json",
+        r##"{ "name": "@myapp/app", "imports": { "#utils": "./src/utils/index.ts" } }"##,
+    );
+    reader.add_file(
+        "/workspace/packages/app/src/utils/index.ts",
+        "export function util() {}",
+    );
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/workspace/packages/app/src/main.ts".to_string(),
+            specifier: "#utils".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        result.is_some(),
+        "should resolve #imports from owning package.json"
+    );
+
+    // Verify no probes above workspace_root
+    assert_eq!(
+        reader.read_file_calls_for("/package.json"),
+        0,
+        "must NOT probe /package.json above workspace_root for #imports"
+    );
+}
+
+#[test]
+fn unowned_resolution_remains_unbounded() {
+    // When no project owner exists, resolution should not be bounded
+    let resolver = ProjectResolver::new(vec![]);
+
+    let mut reader = CountingReader::with_files(&[]);
+    reader.add_file(
+        "/deep/nested/project/node_modules/foo/package.json",
+        r#"{ "name": "foo", "main": "index.js" }"#,
+    );
+    reader.add_file(
+        "/deep/nested/project/node_modules/foo/index.js",
+        "module.exports = {}",
+    );
+
+    let result = resolver.resolve_with_reader(
+        &reader,
+        &ResolveRequest {
+            importer_id: "/deep/nested/project/src/file.ts".to_string(),
+            specifier: "foo".to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::CodegenBlocker,
+        },
+    );
+
+    assert!(
+        result.is_some(),
+        "unowned resolution should still find packages (unbounded walk)"
+    );
+}

@@ -17,7 +17,6 @@ mod fallthrough_request;
 pub mod fallthrough_resolver;
 mod imported_type_alias;
 pub mod prepared_decl;
-pub mod query_artifact;
 pub mod resolver_runtime;
 mod runtime_values;
 pub mod shallow_file_state;
@@ -26,8 +25,6 @@ mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;
-pub mod type_expansion_tsgo;
-pub mod type_expansion_tsserver;
 pub mod type_expansion_verter;
 pub mod type_text_parser;
 

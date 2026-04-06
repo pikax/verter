@@ -1,8 +1,14 @@
 //! Declaration-aware component-meta query engine.
 //!
-//! Provides query-local memoization for component-meta solves by
-//! `(scope_canonical_id, symbol_name)`, while delegating actual solving to the
-//! request-scoped `TypeQueryEngine`.
+//! `ComponentMetaQueryEngine` wraps a single request-scoped `TypeQueryEngine`
+//! that is shared across owner solves and all declaration-scoped solves in one
+//! `get_component_meta()` request. Declaration-scoped solves use
+//! `TypeQueryEngine::solve_scoped()` to reuse the shared arena, caches, and
+//! root_identity memoization while resolving through a file-scoped host.
+//!
+//! The `scoped_cache` provides query-local memoization by
+//! `(scope_canonical_id, symbol_name)` to avoid re-solving the same imported
+//! type reference within one request.
 
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_expr::TypeExpr;
@@ -27,16 +33,17 @@ struct ScopedSolveEntry {
 
 /// Query-local component-meta solve engine.
 ///
-/// The owner engine is shared across macro expansion and later registry
-/// materialization. Imported registry entries additionally memoize by
-/// declaration scope so the same textual reference does not alias across files.
+/// The owner engine is the single request-scoped mutable solver owner.
+/// Declaration-scoped solves reuse the same engine via `solve_scoped()`,
+/// sharing arena nodes, caches, and root_identity memoization across all
+/// scoped queries in one request. Imported registry entries additionally
+/// memoize by declaration scope so the same textual reference does not
+/// alias across files.
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
-    scoped_total_steps: u64,
-    scoped_solve_count: u32,
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -50,8 +57,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             scoped_cache: FxHashMap::default(),
-            scoped_total_steps: 0,
-            scoped_solve_count: 0,
         }
     }
 
@@ -65,8 +70,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine,
             scoped_cache: FxHashMap::default(),
-            scoped_total_steps: 0,
-            scoped_solve_count: 0,
         }
     }
 
@@ -140,10 +143,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             scope_canonical_id,
         );
         let type_ref = TypeExpr::named(requested_name);
-        let mut scoped_engine = TypeQueryEngine::new(&solver_host);
-        let (result, _trace) = scoped_engine.solve_with_trace(&type_ref);
-        self.scoped_total_steps += result.steps;
-        self.scoped_solve_count += 1;
+        let (result, _trace) =
+            self.owner_engine
+                .solve_scoped(&solver_host, scope_canonical_id, &type_ref);
+        // Steps and solve_count are tracked by the shared owner_engine.
         let filtered = filter_identity_ref(&result, requested_name);
         self.scoped_cache.insert(key, ScopedSolveEntry { result });
         filtered
@@ -154,11 +157,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     pub fn total_steps(&self) -> u64 {
-        self.owner_engine.total_steps() + self.scoped_total_steps
+        self.owner_engine.total_steps()
     }
 
     pub fn solve_count(&self) -> u32 {
-        self.owner_engine.solve_count() + self.scoped_solve_count
+        self.owner_engine.solve_count()
     }
 }
 

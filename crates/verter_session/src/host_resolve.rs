@@ -1767,8 +1767,18 @@ impl VerterHost {
                 .unwrap_or(canonical);
             (canonical, exported_name)
         });
-        let graph_result = self
-            .resolve_named_export_in_view(
+        // Only fall back to the graph resolver when the frontier didn't
+        // produce a definitive result (None) or when it resolved back to
+        // the barrel itself (same canonical).  Calling resolve_named_export_in_view
+        // unconditionally would trigger full snapshot materialization which
+        // violates the shallow-state contract.
+        let needs_graph_fallback = match frontier_result {
+            None => true,
+            Some(ref fr) if fr.0 == normalized_canonical => true,
+            _ => false,
+        };
+        let graph_result = if needs_graph_fallback {
+            self.resolve_named_export_in_view(
                 normalized_canonical.as_str(),
                 requested_name,
                 Some(true),
@@ -1782,7 +1792,10 @@ impl VerterHost {
                     .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
                     .unwrap_or(canonical);
                 (canonical, resolved.source_name)
-            });
+            })
+        } else {
+            None
+        };
         let result = match (frontier_result, graph_result) {
             (Some(frontier), Some(graph))
                 if frontier.0 == normalized_canonical && frontier != graph =>

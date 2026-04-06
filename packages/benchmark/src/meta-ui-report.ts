@@ -112,7 +112,7 @@ const SCENARIOS: MetaUiScenario[] = [
   "repo_warm_second_pass",
 ];
 
-const BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter", "tsserver", "tsgo"];
+const BACKENDS: MetaUiBackend[] = ["vue-component-meta", "verter"];
 
 export function buildMetaUiAggregateReport(runs: MetaUiBenchmarkRun[]): MetaUiAggregateReport {
   if (runs.length === 0) {

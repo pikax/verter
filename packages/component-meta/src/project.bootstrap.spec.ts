@@ -18,4 +18,14 @@ describe("openComponentMetaSession bootstrap source", () => {
     expect(source).not.toContain("configureProjectHtmlIntrinsics");
     expect(engineSource).not.toContain("setHtmlIntrinsicsCatalog");
   });
+
+  it("does not reintroduce the removed component-meta backend selector", () => {
+    const projectSource = readFileSync(resolve(here, "project.ts"), "utf8");
+    const checkerSource = readFileSync(resolve(here, "compat", "checker.ts"), "utf8");
+    const indexSource = readFileSync(resolve(here, "index.ts"), "utf8");
+
+    expect(projectSource).not.toContain("typeExpansionBackend");
+    expect(checkerSource).not.toContain("typeExpansionBackend");
+    expect(indexSource).not.toContain("TypeExpansionBackend");
+  });
 });

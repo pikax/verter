@@ -661,6 +661,7 @@ Consumers (LSP, build, linter) query snapshots + ProjectIndex
 | `crates/verter_session/src/resolver_core/shallow_file_state.rs`                                | ShallowFileState, ExportTarget, ResolutionBudgets, local_closure()     |
 | `crates/verter_session/src/resolver_core/external_type_frontier.rs`                            | ExternalTypeFrontier, FrontierHost trait, BFS cross-file type deepen   |
 | `crates/verter_session/src/resolver_core/solver_host.rs`                                       | SessionSolverHost (bridges host caches to solver for cross-file types) |
+| `crates/verter_session/src/resolver_core/component_meta_query_engine.rs`                       | ComponentMetaQueryEngine: request-scoped shared engine + scoped cache  |
 | `crates/verter_session/src/resolver_core/type_expansion_verter.rs`                             | resolved_macro_to_expansion_via_solver (component-meta integration)    |
 | `crates/verter_session/src/resolver_core/imported_eval_collect.rs`                             | ImportedEvalResolver trait (single flattened trait for imported eval)   |
 | `crates/verter_session/src/host_resolve.rs`                                                    | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |

@@ -5619,10 +5619,10 @@ export interface ChipProps {
         "leaf imported prop aliases should remain present without resolving the companion body, got {:?}",
         resolved.props
     );
-    assert_eq!(
+    assert!(
+        ws.read_count("/src/Avatar.vue") <= 1,
+        "frontier-ordered barrel BFS should skip unmatched siblings when the target is found earlier (got {} reads)",
         ws.read_count("/src/Avatar.vue"),
-        1,
-        "flat barrel BFS may touch earlier siblings once while searching for IconProps, but it must not deepen into the leaf companion body",
     );
     assert_eq!(
         ws.read_count("/src/Chip.vue"),

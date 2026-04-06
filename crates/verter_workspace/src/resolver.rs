@@ -414,17 +414,19 @@ impl ProjectResolver {
             return Some((resolved, ResolutionKind::Relative));
         }
 
-        // #imports
+        // #imports (unowned — unbounded walk)
         if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, ctx) {
+            if let Some(resolved) =
+                resolve_package_imports(reader, importer_id, specifier, ctx, None)
+            {
                 return Some((resolved, ResolutionKind::PackageImports));
             }
             return None;
         }
 
-        // node_modules
+        // node_modules (unowned — unbounded walk)
         if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package(reader, importer_id, specifier, ctx)
+            resolve_node_modules_package(reader, importer_id, specifier, ctx, None)
         {
             return Some((resolved, resolution_kind));
         }
@@ -482,16 +484,28 @@ impl ProjectResolver {
             return Some((resolved, ResolutionKind::ProjectReference));
         }
 
+        // #imports (owned — bounded by workspace_root)
         if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports(reader, importer_id, specifier, ctx) {
+            if let Some(resolved) = resolve_package_imports(
+                reader,
+                importer_id,
+                specifier,
+                ctx,
+                Some(&importer_owner.workspace_root),
+            ) {
                 return Some((resolved, ResolutionKind::PackageImports));
             }
             return None;
         }
 
-        if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package(reader, importer_id, specifier, ctx)
-        {
+        // node_modules (owned — bounded by workspace_root)
+        if let Some((resolved, resolution_kind)) = resolve_node_modules_package(
+            reader,
+            importer_id,
+            specifier,
+            ctx,
+            Some(&importer_owner.workspace_root),
+        ) {
             return Some((resolved, resolution_kind));
         }
 
@@ -541,18 +555,28 @@ impl ProjectResolver {
             return Some((resolved, ResolutionKind::ProjectReference));
         }
 
+        // #imports (project-scoped — bounded by workspace_root)
         if specifier.starts_with('#') {
-            if let Some(resolved) =
-                resolve_package_imports_from_dir(reader, &project.root, specifier, ctx)
-            {
+            if let Some(resolved) = resolve_package_imports_from_dir(
+                reader,
+                &project.root,
+                specifier,
+                ctx,
+                Some(&project.workspace_root),
+            ) {
                 return Some((resolved, ResolutionKind::PackageImports));
             }
             return None;
         }
 
-        if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package_from_dir(reader, &project.root, specifier, ctx)
-        {
+        // node_modules (project-scoped — bounded by workspace_root)
+        if let Some((resolved, resolution_kind)) = resolve_node_modules_package_from_dir(
+            reader,
+            &project.root,
+            specifier,
+            ctx,
+            Some(&project.workspace_root),
+        ) {
             return Some((resolved, resolution_kind));
         }
 
@@ -1139,8 +1163,9 @@ fn resolve_package_imports(
     importer_id: &str,
     specifier: &str,
     ctx: ResolutionContext,
+    boundary: Option<&str>,
 ) -> Option<String> {
-    for directory in ancestor_dirs(importer_id) {
+    for directory in ancestor_dirs(importer_id, boundary) {
         let Some(package_json) =
             reader.read_package_manifest(&join_paths(&directory, "package.json"))
         else {
@@ -1171,8 +1196,9 @@ fn resolve_package_imports_from_dir(
     start_dir: &str,
     specifier: &str,
     ctx: ResolutionContext,
+    boundary: Option<&str>,
 ) -> Option<String> {
-    for directory in ancestor_dirs_from_dir(start_dir) {
+    for directory in ancestor_dirs_from_dir(start_dir, boundary) {
         let Some(package_json) =
             reader.read_package_manifest(&join_paths(&directory, "package.json"))
         else {
@@ -1203,8 +1229,14 @@ fn resolve_node_modules_package(
     importer_id: &str,
     specifier: &str,
     ctx: ResolutionContext,
+    boundary: Option<&str>,
 ) -> Option<(String, ResolutionKind)> {
-    resolve_node_modules_package_from_dirs(reader, ancestor_dirs(importer_id), specifier, ctx)
+    resolve_node_modules_package_from_dirs(
+        reader,
+        ancestor_dirs(importer_id, boundary),
+        specifier,
+        ctx,
+    )
 }
 
 fn resolve_node_modules_package_from_dir(
@@ -1212,10 +1244,11 @@ fn resolve_node_modules_package_from_dir(
     start_dir: &str,
     specifier: &str,
     ctx: ResolutionContext,
+    boundary: Option<&str>,
 ) -> Option<(String, ResolutionKind)> {
     resolve_node_modules_package_from_dirs(
         reader,
-        ancestor_dirs_from_dir(start_dir),
+        ancestor_dirs_from_dir(start_dir, boundary),
         specifier,
         ctx,
     )
@@ -1444,11 +1477,17 @@ fn split_package_specifier(specifier: &str) -> Option<(String, &str)> {
     Some((package_name, subpath))
 }
 
-fn ancestor_dirs(path: &str) -> Vec<String> {
+fn ancestor_dirs(path: &str, boundary: Option<&str>) -> Vec<String> {
+    let boundary_norm = boundary.map(normalize_canonical_id);
     let mut result = Vec::new();
     let mut current = parent_dir(path);
     while !current.is_empty() {
         result.push(current.clone());
+        if let Some(ref b) = boundary_norm {
+            if current == *b {
+                break;
+            }
+        }
         let next = parent_dir(&current);
         if next == current {
             break;
@@ -1458,11 +1497,17 @@ fn ancestor_dirs(path: &str) -> Vec<String> {
     result
 }
 
-fn ancestor_dirs_from_dir(path: &str) -> Vec<String> {
+fn ancestor_dirs_from_dir(path: &str, boundary: Option<&str>) -> Vec<String> {
+    let boundary_norm = boundary.map(normalize_canonical_id);
     let mut result = Vec::new();
     let mut current = normalize_canonical_id(path);
     while !current.is_empty() {
         result.push(current.clone());
+        if let Some(ref b) = boundary_norm {
+            if current == *b {
+                break;
+            }
+        }
         let next = parent_dir(&current);
         if next == current {
             break;

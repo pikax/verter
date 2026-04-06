@@ -103,7 +103,6 @@ async function createChecker(
     forceUseTs: true,
     schema: { literalBooleanSchema: true },
     runtimeMode: "dedicated",
-    typeExpansionBackend: backend === "verter" ? "verter" : backend,
   });
 }
 

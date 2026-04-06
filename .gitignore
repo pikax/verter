@@ -63,3 +63,6 @@ cargo_errors.txt
 cargo_test_errors.txt
 benchmark-results.json
 *.bak
+
+
+tmp/

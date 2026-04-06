@@ -278,7 +278,6 @@ pub(crate) struct ComponentMetaTraceLine<'a> {
 
 thread_local! {
     static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
-    static COMPONENT_META_TRACE_ENABLED_OVERRIDE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -310,25 +309,6 @@ thread_local! {
     > = RefCell::new(rustc_hash::FxHashMap::default());
 }
 
-pub(crate) fn current_component_meta_trace_cursor(
-) -> Option<crate::component_meta_host::ComponentMetaTraceCursor> {
-    COMPONENT_META_TRACE_STACK.with(|stack| {
-        let stack = stack.borrow();
-        let current = stack.last().copied()?;
-        let caller_id = stack
-            .len()
-            .checked_sub(2)
-            .and_then(|index| stack.get(index).copied())
-            .map(|ctx| ctx.span_id);
-        Some(crate::component_meta_host::ComponentMetaTraceCursor {
-            request_id: current.trace_id,
-            span_id: current.span_id,
-            caller_id,
-            depth: stack.len().saturating_sub(1),
-        })
-    })
-}
-
 fn component_meta_trace_output_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -340,25 +320,8 @@ fn component_meta_trace_next_span_id() -> u64 {
 }
 
 pub(crate) fn component_meta_trace_enabled() -> bool {
-    let override_enabled = COMPONENT_META_TRACE_ENABLED_OVERRIDE.with(|value| *value.borrow());
-    if let Some(enabled) = override_enabled {
-        return enabled;
-    }
     std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
         || std::env::var_os("VERTER_META_TRACE").is_some()
-}
-
-#[cfg(test)]
-pub(crate) fn with_component_meta_trace_enabled_for_test<T>(
-    enabled: bool,
-    f: impl FnOnce() -> T,
-) -> T {
-    COMPONENT_META_TRACE_ENABLED_OVERRIDE.with(|value| {
-        let previous = value.replace(Some(enabled));
-        let result = f();
-        value.replace(previous);
-        result
-    })
 }
 
 fn component_meta_trace_output_path() -> Option<std::path::PathBuf> {
@@ -2211,15 +2174,29 @@ impl VerterHost {
             }
         };
 
-        let dependency_resolutions = current
-            .as_ref()
-            .map(|entry| entry.dependency_resolutions.clone())
-            .filter(|resolutions| !resolutions.is_empty())
-            .or_else(|| {
-                store_view.and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-            })
-            .or_else(|| self.dependency_resolutions_for_eval_in_view(canonical_id, store_view))
-            .unwrap_or_default();
+        // Export-only shallow state must resolve only re-export specifiers.
+        // Resolving ordinary imports here would trigger imported-file reads
+        // and snapshot materialization that the shallow export contract forbids.
+        let reexport_specifiers: rustc_hash::FxHashSet<&str> = export_signatures
+            .iter()
+            .filter_map(|sig| sig.reexport_source.as_deref())
+            .collect();
+        let dependency_resolutions = if reexport_specifiers.is_empty() {
+            rustc_hash::FxHashMap::default()
+        } else {
+            let full = current
+                .as_ref()
+                .map(|entry| entry.dependency_resolutions.clone())
+                .filter(|resolutions| !resolutions.is_empty())
+                .or_else(|| {
+                    store_view.and_then(|view| view.dependency_resolutions(canonical_id).cloned())
+                })
+                .or_else(|| self.dependency_resolutions_for_eval_in_view(canonical_id, store_view))
+                .unwrap_or_default();
+            full.into_iter()
+                .filter(|(specifier, _)| reexport_specifiers.contains(specifier.as_str()))
+                .collect()
+        };
 
         Some(self.cache_imported_dependency_shallow_state(
             canonical_id,
@@ -2276,34 +2253,12 @@ impl VerterHost {
             || canonical_id.ends_with(".d.mts")
             || canonical_id.ends_with(".d.cts");
 
-        let (script_analysis, export_signatures, dependency_resolutions) = if let Some(entry) =
-            current.as_ref()
-        {
-            (
-                entry.script_analysis.clone(),
-                entry.export_signatures.clone(),
-                if entry.dependency_resolutions.is_empty() {
-                    if use_shallow_decl_routes {
-                        self.dependency_resolutions_from_external_type_analysis_in_view(
-                            canonical_id,
-                            external_type_analysis.as_ref(),
-                            store_view,
-                        )
-                    } else {
-                        self.dependency_resolutions_for_eval_in_view(canonical_id, store_view)
-                            .unwrap_or_default()
-                    }
-                } else {
-                    entry.dependency_resolutions.clone()
-                },
-            )
-        } else {
-            (
-                None,
-                None,
-                store_view
-                    .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-                    .unwrap_or_else(|| {
+        let (script_analysis, export_signatures, dependency_resolutions) =
+            if let Some(entry) = current.as_ref() {
+                (
+                    entry.script_analysis.clone(),
+                    entry.export_signatures.clone(),
+                    if entry.dependency_resolutions.is_empty() {
                         if use_shallow_decl_routes {
                             self.dependency_resolutions_from_external_type_analysis_in_view(
                                 canonical_id,
@@ -2311,12 +2266,36 @@ impl VerterHost {
                                 store_view,
                             )
                         } else {
-                            self.dependency_resolutions_for_eval_in_view(canonical_id, store_view)
-                                .unwrap_or_default()
+                            // Shallow path: defer dependency resolution until a
+                            // symbol route explicitly requests it. Eagerly resolving
+                            // here would trigger imported-file reads and snapshot
+                            // materialization that the shallow contract forbids.
+                            rustc_hash::FxHashMap::default()
                         }
-                    }),
-            )
-        };
+                    } else {
+                        entry.dependency_resolutions.clone()
+                    },
+                )
+            } else {
+                (
+                    None,
+                    None,
+                    store_view
+                        .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
+                        .unwrap_or_else(|| {
+                            if use_shallow_decl_routes {
+                                self.dependency_resolutions_from_external_type_analysis_in_view(
+                                    canonical_id,
+                                    external_type_analysis.as_ref(),
+                                    store_view,
+                                )
+                            } else {
+                                // Shallow path: defer dependency resolution.
+                                rustc_hash::FxHashMap::default()
+                            }
+                        }),
+                )
+            };
 
         Some(self.cache_imported_dependency_shallow_state(
             canonical_id,
@@ -2752,6 +2731,13 @@ impl VerterHost {
         )
     }
 
+    // NOTE(architecture-debt): Uses standalone `solve_type()` instead of a
+    // shared request-scoped `TypeQueryEngine`. This is a VerterHost method
+    // reachable from LSP, MCP, and component-meta paths — threading a
+    // request-scoped engine would require adding engine parameters to host
+    // methods shared across all consumers. The intrinsic shape expressions
+    // are unique per HTML tag so op_cache reuse is low.
+    // TODO: Route through shared engine when host methods gain a query context.
     fn expand_project_intrinsic_shape_for_expr_in_view(
         &self,
         entry: &crate::ImportedDependencyCacheEntry,
@@ -4475,8 +4461,42 @@ impl VerterHost {
                     }
                     _ => false,
                 };
+                let mut prepared_rebuilt = false;
                 if replace_shallow_state {
+                    // Rebuild prepared decls when the old entry already had a
+                    // shallow_file_state (meaning an upgrade, not initial seeding).
+                    // Initial seeding (old shallow_file_state was None) keeps
+                    // prepared decls empty to honour the lazy contract.
+                    let needs_prepared_rebuild = cached_entry.shallow_file_state.is_some();
                     cached_entry.shallow_file_state = entry.shallow_file_state.clone();
+                    if needs_prepared_rebuild {
+                        if let Some(ref new_state) = entry.shallow_file_state {
+                            if !new_state.symbols.is_empty() || !new_state.value_symbols.is_empty()
+                            {
+                                let dep_edges = dep_edges_from_resolutions(
+                                    &cached_entry.dependency_resolutions,
+                                );
+                                let dep_edges_ref = if dep_edges.is_empty() {
+                                    None
+                                } else {
+                                    Some(&dep_edges)
+                                };
+                                cached_entry.prepared_type_decls =
+                                    crate::resolver_core::build_prepared_type_decl_cache(
+                                        canonical_id,
+                                        new_state,
+                                        dep_edges_ref,
+                                    );
+                                cached_entry.prepared_value_decls =
+                                    crate::resolver_core::build_prepared_value_decl_cache(
+                                        canonical_id,
+                                        new_state,
+                                        dep_edges_ref,
+                                    );
+                                prepared_rebuilt = true;
+                            }
+                        }
+                    }
                 }
                 if cached_entry.snapshot.is_none() && entry.snapshot.is_some() {
                     cached_entry.snapshot = entry.snapshot.clone();
@@ -4550,15 +4570,19 @@ impl VerterHost {
                         .entry(name.clone())
                         .or_insert_with(|| declaration.clone());
                 }
-                for (name, prepared) in &entry.prepared_type_decls {
-                    cached_entry
-                        .prepared_type_decls
-                        .insert(name.clone(), Arc::clone(prepared));
-                }
-                for (name, prepared) in &entry.prepared_value_decls {
-                    cached_entry
-                        .prepared_value_decls
-                        .insert(name.clone(), Arc::clone(prepared));
+                if !prepared_rebuilt {
+                    // Merge incoming prepared decls when they were NOT
+                    // already rebuilt from the new shallow state above.
+                    for (name, prepared) in &entry.prepared_type_decls {
+                        cached_entry
+                            .prepared_type_decls
+                            .insert(name.clone(), Arc::clone(prepared));
+                    }
+                    for (name, prepared) in &entry.prepared_value_decls {
+                        cached_entry
+                            .prepared_value_decls
+                            .insert(name.clone(), Arc::clone(prepared));
+                    }
                 }
                 return Arc::clone(cached);
             }
@@ -4711,46 +4735,12 @@ impl VerterHost {
                 ),
             )
         });
-        let dep_edges_ref = if dep_edges.is_empty() {
-            None
-        } else {
-            Some(&dep_edges)
-        };
-        let can_prepare_from_shallow = shallow_file_state.as_ref().is_some_and(|state| {
-            state.import_targets.is_empty()
-                || state.import_targets.values().all(|target| {
-                    !target.canonical_id.is_empty()
-                        || dep_edges.contains_key(&target.source_specifier)
-                })
-        });
-        let prepared_type_decls = if can_prepare_from_shallow {
-            shallow_file_state
-                .as_ref()
-                .map(|state| {
-                    crate::resolver_core::build_prepared_type_decl_cache(
-                        canonical_id,
-                        state,
-                        dep_edges_ref,
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
-        let prepared_value_decls = if can_prepare_from_shallow {
-            shallow_file_state
-                .as_ref()
-                .map(|state| {
-                    crate::resolver_core::build_prepared_value_decl_cache(
-                        canonical_id,
-                        state,
-                        dep_edges_ref,
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
+        // Shallow state defers prepared declaration materialization until
+        // a specific symbol is looked up via prepared_type_decl_in_view() /
+        // prepared_value_decl_in_view(). Starting empty ensures we don't
+        // eagerly traverse imported dependency graphs at shallow-seed time.
+        let prepared_type_decls = rustc_hash::FxHashMap::default();
+        let prepared_value_decls = rustc_hash::FxHashMap::default();
         self.cache_imported_dependency(
             canonical_id,
             crate::ImportedDependencyCacheEntry {
@@ -5204,6 +5194,14 @@ impl VerterHost {
             || canonical_id.ends_with(".d.mts")
             || canonical_id.ends_with(".d.cts");
 
+        // Per-request memo for resolver helper calls. Avoids duplicate
+        // resolution when the same specifier appears in both imports and
+        // re-export signatures. Keyed by (specifier, kind, is_fallback).
+        let mut resolve_memo: rustc_hash::FxHashMap<
+            (String, verter_workspace::ResolveRequestKind, bool),
+            Option<String>,
+        > = rustc_hash::FxHashMap::default();
+
         let mut upsert_resolution =
             |specifier: &str,
              kind: verter_workspace::ResolveRequestKind,
@@ -5212,6 +5210,7 @@ impl VerterHost {
                 let existing_target = existing
                     .as_ref()
                     .and_then(Self::eval_dependency_resolution_target);
+                let primary_memo_key = (specifier.to_string(), kind, false);
                 let resolved: Option<String> = match kind {
                     // Type routes must prefer the shallow declaration target even when the
                     // current snapshot/store view still carries a stale JS companion route.
@@ -5220,37 +5219,53 @@ impl VerterHost {
                             .as_deref()
                             .is_none_or(runtime_like_dependency_target);
                         if should_upgrade_snapshot_target {
-                            self.resolve_type_dependency_canonical_shallow_in_view(
-                                canonical_id,
-                                specifier,
-                                store_view,
-                            )
-                            .or(existing_target)
+                            resolve_memo
+                                .entry(primary_memo_key)
+                                .or_insert_with(|| {
+                                    self.resolve_type_dependency_canonical_shallow_in_view(
+                                        canonical_id,
+                                        specifier,
+                                        store_view,
+                                    )
+                                })
+                                .clone()
+                                .or(existing_target)
                         } else {
                             existing_target
                         }
                     }
                     _ => existing_target.or_else(|| {
-                        self.resolve_loaded_dependency_canonical_in_view(
-                            canonical_id,
-                            specifier,
-                            kind,
-                            store_view,
-                        )
+                        resolve_memo
+                            .entry(primary_memo_key)
+                            .or_insert_with(|| {
+                                self.resolve_loaded_dependency_canonical_in_view(
+                                    canonical_id,
+                                    specifier,
+                                    kind,
+                                    store_view,
+                                )
+                            })
+                            .clone()
                     }),
                 }
                 .or_else(|| {
                     if !prefer_live_fallback {
                         return None;
                     }
-                    match kind {
-                        verter_workspace::ResolveRequestKind::TypeImport => {
-                            self.resolve_type_dependency_canonical(canonical_id, specifier)
-                        }
-                        _ => {
-                            self.resolve_loaded_dependency_canonical(canonical_id, specifier, kind)
-                        }
-                    }
+                    let fallback_key = (specifier.to_string(), kind, true);
+                    resolve_memo
+                        .entry(fallback_key)
+                        .or_insert_with(|| match kind {
+                            verter_workspace::ResolveRequestKind::TypeImport => {
+                                self.resolve_type_dependency_canonical(canonical_id, specifier)
+                            }
+                            _ => self.resolve_loaded_dependency_canonical(
+                                canonical_id,
+                                specifier,
+                                kind,
+                            ),
+                        })
+                        .clone()
                 });
 
                 let entry = resolutions.entry(specifier.to_string()).or_insert_with(|| {
@@ -6618,6 +6633,12 @@ impl VerterHost {
                 if reexported_package_utility {
                     (prepared.body.clone(), true)
                 } else {
+                    // NOTE(architecture-debt): Standalone solve_type() — same
+                    // rationale as expand_project_intrinsic_shape_for_expr_in_view.
+                    // This is a VerterHost method shared across consumers; threading
+                    // a request-scoped engine here would require cross-module changes.
+                    // Only fires for re-exported builtin utility aliases from
+                    // node_modules, which is a low-frequency path.
                     let solver_host =
                         crate::resolver_core::SessionSolverHost::with_declaration_scope(
                             self,

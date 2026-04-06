@@ -134,8 +134,6 @@ pub struct HostConfig {
     /// When enabled, the host may specialize child root targets from
     /// statically resolvable call-site prop types.
     pub generic_root_propagation: bool,
-    /// Type expansion backend: which backend resolves macro type parameters.
-    pub type_expansion_backend: crate::resolver_core::type_expansion::TypeExpansionBackend,
     /// Enable the Rust-first native audit surface for component-meta requests.
     /// When true, timing/memory/store snapshots are captured and emitted as
     /// structured `RustAuditRecord` data. Default: false (zero overhead).
@@ -180,8 +178,6 @@ impl Default for HostConfig {
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
             generic_root_propagation: false,
-            type_expansion_backend:
-                crate::resolver_core::type_expansion::TypeExpansionBackend::Verter,
             audit_enabled: false,
         }
     }

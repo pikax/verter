@@ -1277,15 +1277,6 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
             return Err(FfiConversionError::InvalidAnalysisLevel(level));
         };
     }
-    if let Some(backend) = input.type_expansion_backend {
-        use verter_session::type_expansion::TypeExpansionBackend;
-        out.type_expansion_backend = match backend.to_lowercase().as_str() {
-            "verter" => TypeExpansionBackend::Verter,
-            "tsserver" => TypeExpansionBackend::Tsserver,
-            "tsgo" => TypeExpansionBackend::Tsgo,
-            _ => TypeExpansionBackend::Verter,
-        };
-    }
     if let Some(audit) = input.audit_enabled {
         out.audit_enabled = audit;
     }
@@ -2364,7 +2355,6 @@ mod tests {
             max_profiles_per_file: Some(4),
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
-            type_expansion_backend: Some("tsgo".to_string()),
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);
@@ -2376,19 +2366,6 @@ mod tests {
         assert_eq!(result.max_profiles_per_file, 4);
         assert_eq!(result.resolve_extensions, vec![".vue", ".ts"]);
         assert_eq!(result.analysis_level, host::AnalysisLevel::Essential);
-    }
-
-    #[test]
-    fn config_auto_backend_defaults_to_verter() {
-        let config = FfiHostConfig {
-            type_expansion_backend: Some("auto".to_string()),
-            ..Default::default()
-        };
-        let result = ffi_config_to_host(config).unwrap();
-        assert_eq!(
-            result.type_expansion_backend,
-            verter_session::type_expansion::TypeExpansionBackend::Verter
-        );
     }
 
     #[test]

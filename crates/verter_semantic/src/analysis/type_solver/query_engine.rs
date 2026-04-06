@@ -295,6 +295,72 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         (result, visited)
     }
 
+    /// Solve using a different (scoped) host while sharing engine state.
+    ///
+    /// The `scope_canonical_id` partitions the op-cache key and the bare-name
+    /// root_identity cache so results from one declaration scope do not alias
+    /// with results from another scope in the same request-scoped engine.
+    pub fn solve_scoped(
+        &mut self,
+        scoped_host: &dyn TypeSolverHost,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        let top_level_key = OpKey::TopLevel {
+            expr_hash: hash_expr(expr),
+            scope_canonical_id: scope_canonical_id.to_string(),
+        };
+        if let Some(cached) = self.op_cache.get(&top_level_key) {
+            self.audit.op_cache_hit("TopLevel_scoped");
+            self.visited_decls
+                .extend(cached.visited_decls.iter().cloned());
+            return (cached.result.clone(), cached.visited_decls.clone());
+        }
+        self.audit.op_cache_miss("TopLevel_scoped");
+
+        let mut state = SolveState::with_caches_and_scope(
+            SolveLimits::default(),
+            std::mem::take(&mut self.instantiation_cache),
+            std::mem::take(&mut self.caches),
+            scope_canonical_id.to_string(),
+        );
+        let root = lower_type_expr(&mut self.arena, expr);
+        let resolved = resolve_node(
+            &mut self.arena,
+            root,
+            scoped_host,
+            &mut state,
+            &SubstitutionEnv::new(),
+        );
+        let result_expr = project_to_type_expr(&self.arena, resolved);
+
+        let visited = std::mem::take(&mut state.visited_external_decls);
+        self.visited_decls.extend(visited.iter().cloned());
+        self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
+        self.caches = std::mem::take(&mut state.relation_caches);
+
+        let result = SolverResult {
+            value: result_expr,
+            exactness: state.exactness,
+            execution_status: state.execution_status,
+            incomplete_reasons: state.incomplete_reasons,
+            diagnostics: state.diagnostics,
+            steps: state.steps,
+        };
+        self.total_steps += result.steps;
+        self.solve_count += 1;
+
+        self.op_cache.insert(
+            top_level_key,
+            OpResult {
+                result: result.clone(),
+                visited_decls: visited.clone(),
+            },
+        );
+
+        (result, visited)
+    }
+
     /// Get accumulated visited decls across all solves.
     pub fn visited_decls(&self) -> &[ResolvedRootIdentity] {
         &self.visited_decls
@@ -465,5 +531,188 @@ mod tests {
             self.subject_keys.push(key);
             id
         }
+    }
+
+    // -- Scoped solve tests --
+
+    use crate::analysis::type_eval::TypeDeclKind;
+    use crate::analysis::type_solver::host::{ResolvedRootIdentity, TypeSolverHost, UtilitySource};
+    use crate::analysis::type_solver::prepared::{PreparedTypeDecl, PreparedValueDecl};
+    use std::sync::Arc;
+
+    /// Test host that resolves `root_identity("", name)` only for names in
+    /// its `known_bare_names` set. Used to test scope-aware resolution.
+    struct ScopedTestHost {
+        known_bare_names: std::collections::HashSet<String>,
+        decls: rustc_hash::FxHashMap<String, Arc<PreparedTypeDecl>>,
+    }
+
+    impl ScopedTestHost {
+        fn with_names(names: &[&str]) -> Self {
+            let mut known = std::collections::HashSet::new();
+            let mut decls = rustc_hash::FxHashMap::default();
+            for name in names {
+                known.insert(name.to_string());
+                let prepared = PreparedTypeDecl::new(
+                    ResolvedRootIdentity::new("test_scope", *name),
+                    TypeDeclKind::Alias,
+                    TypeExpr::Primitive(PrimitiveName::String),
+                );
+                decls.insert(name.to_string(), Arc::new(prepared));
+            }
+            Self {
+                known_bare_names: known,
+                decls,
+            }
+        }
+    }
+
+    impl TypeSolverHost for ScopedTestHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            self.decls.get(&root_identity.symbol_name).cloned()
+        }
+        fn resolve_prepared_value_decl(
+            &self,
+            _: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+        fn utility_source(&self, _: &str) -> UtilitySource {
+            UtilitySource::Unknown
+        }
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            if canonical_id.is_empty() && self.known_bare_names.contains(symbol_name) {
+                Some(ResolvedRootIdentity::new("test_scope", symbol_name))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn solve_scoped_shares_engine_state() {
+        // Two scoped solves in the same engine share caches/arena.
+        let host = NoopSolverHost;
+        let scoped_host = ScopedTestHost::with_names(&["MyType"]);
+        let mut engine = TypeQueryEngine::new(&host);
+
+        let expr = TypeExpr::named("MyType");
+        let (r1, _) = engine.solve_scoped(&scoped_host, "scope_a", &expr);
+        let steps1 = engine.total_steps();
+        assert_eq!(engine.solve_count(), 1, "first scoped solve should count");
+
+        // Same scope + same expr should hit op_cache
+        let (r2, _) = engine.solve_scoped(&scoped_host, "scope_a", &expr);
+        assert_eq!(
+            engine.solve_count(),
+            1,
+            "second scoped solve with same scope should hit cache"
+        );
+        assert_eq!(
+            engine.total_steps(),
+            steps1,
+            "cached scoped solve should not add steps"
+        );
+        assert_eq!(r1.value, r2.value, "cached result must match");
+    }
+
+    #[test]
+    fn solve_scoped_different_scope_does_not_alias() {
+        // Solving the same expr in two different scopes should not alias
+        // through the op_cache (different scope_canonical_id in key).
+        let host = NoopSolverHost;
+        let scope_a = ScopedTestHost::with_names(&["Foo"]);
+        let scope_b = ScopedTestHost::with_names(&[]); // Foo NOT known
+
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::named("Foo");
+
+        // Scope A resolves Foo
+        let (ra, _) = engine.solve_scoped(&scope_a, "scope_a", &expr);
+        assert!(
+            matches!(ra.value, TypeExpr::Primitive(PrimitiveName::String)),
+            "scope_a should resolve Foo to String"
+        );
+
+        // Scope B does NOT resolve Foo — must not reuse scope_a result
+        let (rb, _) = engine.solve_scoped(&scope_b, "scope_b", &expr);
+        assert!(
+            !matches!(rb.value, TypeExpr::Primitive(PrimitiveName::String)),
+            "scope_b must NOT inherit scope_a's resolution of Foo"
+        );
+    }
+
+    #[test]
+    fn solve_scoped_bare_name_miss_does_not_poison_other_scopes() {
+        // A bare-name miss in scope A should not prevent scope B from
+        // resolving the same name.
+        let host = NoopSolverHost;
+        let scope_missing = ScopedTestHost::with_names(&[]);
+        let scope_has_it = ScopedTestHost::with_names(&["Promise"]);
+
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::named("Promise");
+
+        // First: miss in scope that doesn't have Promise
+        let (r_miss, _) = engine.solve_scoped(&scope_missing, "scope_missing", &expr);
+        assert!(
+            !matches!(r_miss.value, TypeExpr::Primitive(PrimitiveName::String)),
+            "scope without Promise should not resolve it"
+        );
+
+        // Second: scope that has Promise should still resolve it
+        let (r_hit, _) = engine.solve_scoped(&scope_has_it, "scope_has_it", &expr);
+        assert!(
+            matches!(r_hit.value, TypeExpr::Primitive(PrimitiveName::String)),
+            "scope with Promise must resolve it even after a miss in another scope"
+        );
+    }
+
+    #[test]
+    fn solve_scoped_explicit_canonical_deduplicates() {
+        // Explicit canonical lookups (non-empty canonical_id) should deduplicate
+        // safely across scoped queries in one shared engine.
+        let host = NoopSolverHost;
+        let mut engine = TypeQueryEngine::new(&host);
+
+        let expr = TypeExpr::Primitive(PrimitiveName::Number);
+
+        let (r1, _) = engine.solve_scoped(&host, "scope_a", &expr);
+        let (r2, _) = engine.solve_scoped(&host, "scope_b", &expr);
+
+        // Same primitive expression should produce same result regardless of scope
+        assert!(matches!(
+            r1.value,
+            TypeExpr::Primitive(PrimitiveName::Number)
+        ),);
+        assert!(matches!(
+            r2.value,
+            TypeExpr::Primitive(PrimitiveName::Number)
+        ),);
+    }
+
+    #[test]
+    fn engine_state_does_not_leak_across_requests() {
+        // Two separate engines should not share state.
+        let host = NoopSolverHost;
+        let mut engine1 = TypeQueryEngine::new(&host);
+        let engine2 = TypeQueryEngine::new(&host);
+
+        let expr = TypeExpr::Primitive(PrimitiveName::String);
+        engine1.solve(&expr);
+
+        assert_eq!(engine1.solve_count(), 1);
+        assert_eq!(
+            engine2.solve_count(),
+            0,
+            "separate engine must have independent state"
+        );
     }
 }

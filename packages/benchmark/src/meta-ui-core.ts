@@ -1,4 +1,4 @@
-export type MetaUiBackend = "vue-component-meta" | "verter" | "tsserver" | "tsgo";
+export type MetaUiBackend = "vue-component-meta" | "verter";
 
 export type MetaUiScenario =
   | "single_cold"

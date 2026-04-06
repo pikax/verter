@@ -1625,12 +1625,17 @@ fn expand_macro_types_impl(
                         if let Some(env) = debug_env.as_deref_mut() {
                             env.preserve_canonical_vue_vnode_slot_returns = true;
                         }
-                        let solved = engine.solve(lowered);
+                        let mut solved = engine.solve(lowered);
                         if let (Some(previous), Some(env)) =
                             (previous_slot_return_mode, debug_env.as_deref_mut())
                         {
                             env.preserve_canonical_vue_vnode_slot_returns = previous;
                         }
+                        // The solver keeps function signatures shallow (only
+                        // substitutions, no ref resolution). For defineSlots we
+                        // need refs inside slot function return types (e.g.
+                        // Array<VNode>) fully expanded, so deep-resolve them.
+                        solved.value = deep_resolve_slot_function_refs(&solved.value, engine);
                         let shape_result = solver_to_object_shape_result(solved);
                         log_expand_stage(
                             stage_log,
@@ -1757,6 +1762,103 @@ fn expand_macro_types_impl(
 
 fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+}
+
+/// Deep-resolve remaining `Ref` nodes inside function signatures of a solved
+/// slot object.  The solver intentionally keeps function parameter and return
+/// types shallow (substitutions only, no ref expansion).  For `defineSlots`
+/// results we need refs like `VNode` fully resolved to their object bodies.
+fn deep_resolve_slot_function_refs(
+    expr: &TypeExpr,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+) -> TypeExpr {
+    if let TypeExpr::Object(obj) = expr {
+        let properties: Vec<_> = obj
+            .properties
+            .iter()
+            .map(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(p) => {
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: p.name.clone(),
+                            ty: resolve_type_refs_deep(&p.ty, engine),
+                            optional: p.optional,
+                            readonly: p.readonly,
+                        },
+                    )
+                }
+                crate::analysis::type_expr::ObjectMember::Method(m) => {
+                    crate::analysis::type_expr::ObjectMember::Method(
+                        crate::analysis::type_expr::MethodSignature {
+                            name: m.name.clone(),
+                            function: resolve_fn_refs_deep(&m.function, engine),
+                            optional: m.optional,
+                        },
+                    )
+                }
+                other => other.clone(),
+            })
+            .collect();
+        TypeExpr::Object(std::sync::Arc::new(
+            crate::analysis::type_expr::ObjectExpr { properties },
+        ))
+    } else {
+        expr.clone()
+    }
+}
+
+fn resolve_type_refs_deep(
+    expr: &TypeExpr,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+) -> TypeExpr {
+    match expr {
+        TypeExpr::Ref { .. } => engine.solve(expr).value,
+        TypeExpr::Function(func) => {
+            TypeExpr::Function(std::sync::Arc::new(resolve_fn_refs_deep(func, engine)))
+        }
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: std::sync::Arc::new(resolve_type_refs_deep(element, engine)),
+            readonly: *readonly,
+        },
+        TypeExpr::Union(variants) => {
+            let resolved: Vec<TypeExpr> = variants
+                .iter()
+                .map(|v| resolve_type_refs_deep(v, engine))
+                .collect();
+            TypeExpr::Union(std::sync::Arc::from(resolved))
+        }
+        TypeExpr::Intersection(parts) => {
+            let resolved: Vec<TypeExpr> = parts
+                .iter()
+                .map(|p| resolve_type_refs_deep(p, engine))
+                .collect();
+            TypeExpr::Intersection(std::sync::Arc::from(resolved))
+        }
+        _ => expr.clone(),
+    }
+}
+
+fn resolve_fn_refs_deep(
+    func: &crate::analysis::type_expr::FunctionExpr,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+) -> crate::analysis::type_expr::FunctionExpr {
+    crate::analysis::type_expr::FunctionExpr {
+        parameters: func
+            .parameters
+            .iter()
+            .map(|p| crate::analysis::type_expr::FunctionParam {
+                name: p.name.clone(),
+                ty: resolve_type_refs_deep(&p.ty, engine),
+                optional: p.optional,
+                rest: p.rest,
+            })
+            .collect(),
+        return_type: func
+            .return_type
+            .as_ref()
+            .map(|rt| std::sync::Arc::new(resolve_type_refs_deep(rt, engine))),
+        type_parameters: func.type_parameters.clone(),
+    }
 }
 
 #[derive(Default)]

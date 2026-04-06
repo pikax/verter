@@ -186,8 +186,10 @@ async function runComponent(componentRelPath, componentToken, config) {
 
   const startMs = performance.now();
 
+  const nodeExe = process.platform === "win32" ? `"${process.execPath}"` : process.execPath;
+
   const child = spawn(
-    process.execPath,
+    nodeExe,
     ["--expose-gc", "--import", tsxLoaderPath, traceComponentPath, componentToken],
     {
       cwd: repoRoot,

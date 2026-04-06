@@ -1064,19 +1064,10 @@ export class ComponentMetaChecker {
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     if (this._session) {
-      let nativeMeta =
+      const nativeMeta =
         typeof this._session.getDeclaredComponentMeta === "function"
           ? this._session.getDeclaredComponentMeta(absPath)
           : this._session.getComponentMeta(absPath);
-      if (nativeMeta && this.shouldRetryFullNativeMeta()) {
-        const retriedMeta = this._session.getComponentMeta(absPath);
-        if (
-          retriedMeta &&
-          nativeMetaSurfaceScore(retriedMeta) > nativeMetaSurfaceScore(nativeMeta)
-        ) {
-          nativeMeta = retriedMeta;
-        }
-      }
       if (!nativeMeta) {
         return {
           type: 0,
@@ -1309,26 +1300,6 @@ export class ComponentMetaChecker {
       throw new Error("ComponentMetaChecker is closed.");
     }
   }
-
-  private shouldRetryFullNativeMeta(): boolean {
-    switch (this.options.typeExpansionBackend ?? "verter") {
-      // Only TypeScript-backed modes intentionally re-ask for the richer
-      // full native surface. Verter stays on the native declared query.
-      case "tsserver":
-        return true;
-      default:
-        return false;
-    }
-  }
-}
-
-function nativeMetaSurfaceScore(meta: any): number {
-  return (
-    (Array.isArray(meta?.props) ? meta.props.length : 0) * 1000 +
-    (Array.isArray(meta?.slots) ? meta.slots.length : 0) * 100 +
-    (Array.isArray(meta?.events) ? meta.events.length : 0) * 10 +
-    (Array.isArray(meta?.exposed) ? meta.exposed.length : 0)
-  );
 }
 
 /**
@@ -1360,7 +1331,6 @@ export async function createChecker(
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
     },
-    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
   const ownsRuntime = options?.runtimeMode === "dedicated";
@@ -1369,7 +1339,6 @@ export async function createChecker(
     const hostConfig = {
       devMode: false,
       analysisLevel: "full",
-      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
       auditEnabled: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
@@ -1446,7 +1415,6 @@ export async function createCheckerByJson(
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
     },
-    typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
   };
   const runtime = options?.runtimeMode === "dedicated" ? createMetaRuntime() : getMetaRuntime();
   const ownsRuntime = options?.runtimeMode === "dedicated";
@@ -1455,7 +1423,6 @@ export async function createCheckerByJson(
     const hostConfig = {
       devMode: false,
       analysisLevel: "full",
-      typeExpansionBackend: options?.typeExpansionBackend ?? "verter",
       auditEnabled: options?.logging?.audit ?? false,
     };
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(
