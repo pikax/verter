@@ -7,15 +7,25 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 ## Shared Sources
 
 - `CLAUDE.md`
-  - Canonical high-level reference for architecture, repository structure, critical invariants, build commands, testing rules, and commit conventions.
+  - Canonical high-level reference for architecture principles, critical invariants, build commands, testing rules, agent implementation rules, and commit conventions.
+- `.claude/skills/type-resolution/SKILL.md`
+  - Type solver, ShallowFileState, ExternalTypeFrontier, canonical cache rules, macro traversal, prepared declarations.
+- `.claude/skills/component-meta/SKILL.md`
+  - Component-meta native/compat boundary, fallthrough/root inheritance, resolver rules, cache-owned hydration.
+- `.claude/skills/compiler-codegen/SKILL.md`
+  - Rust compiler pipeline, template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing, CompileTarget.
+- `.claude/skills/host-session/SKILL.md`
+  - TypeProvider (TSGO/tsserver), workspace management, async scheduler, SyncCoordinator, ownership lifecycle.
 - `.claude/skills/architecture/SKILL.md`
-  - Module map, package responsibilities, plugin system, LSP structure, and key file locations.
+  - High-level module map, TS packages, plugin system, CSS analysis, MCP server, static analysis types.
 - `.claude/skills/position-encoding/SKILL.md`
   - Span types, encoding conversions, and path normalization details.
 - `.claude/skills/build-and-profiling/SKILL.md`
   - Build order, rebuild strategy, profiling workflow, and MCP server setup.
 - `.claude/skills/testing/SKILL.md`
-  - Rust and TypeScript test patterns, sourcemap checks, and VS Code extension testing guidance.
+  - Rust and TypeScript test patterns, TDD workflow, sourcemap checks, and general test execution hygiene.
+- `.claude/skills/e2e-vscode-testing.md`
+  - VS Code extension E2E fixtures, helpers API, warm-session rules, and adding new extension/LSP tests.
 - `.claude/skills/rust-performance/SKILL.md`
   - Rust optimization guidance, allocation patterns, and `CodeTransform` usage notes.
 - `docs/`
@@ -32,70 +42,23 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 ## Working Rules
 
 - Follow TDD for code changes: write failing tests first, implement the minimum fix, rerun tests, then refactor.
-- Update documentation when public behavior, module paths, or APIs change.
+- Update the **owning** documentation when public behavior, module paths, or APIs change. Update the relevant skill, not CLAUDE.md, unless summaries or pointers change.
 - Use conventional commits: `<type>(<scope>): <description>`.
 - Load only the specific reference material needed for the task instead of bulk-reading every file.
-- Follow the shared build philosophy below for type work and any host-backed architecture changes.
-- For `component-meta` native/compat boundaries, treat `CLAUDE.md`'s `Component-Meta Native Vs Compat (CRITICAL)` section as the canonical rule set. In particular: Rust is the semantic authority, `component-meta` makes one async native request per query, JS adapts the returned payload but does not become a second resolver/expander, and native should send the smallest semantically complete payload it can.
-- For `component-meta` type work, use cached lookup/eval state only. Do not add AST/source-walk fallback to recover or expand types after the cache-owning pass.
-- For `component-meta` registry publication, stay shallow and demand-driven: load only the symbols required by the current query, and expand only when a cached lookup result is actually needed.
-- For `component-meta` cross-file resolution, deepen in one place only: follow the active declaration route for the requested symbol/query and do not branch into unrelated sibling symbols/files.
-- For `component-meta` companion/type-target selection, keep canonicalization shallow too: choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to pick the target file.
-- For `component-meta` metadata or fallthrough projection, reuse the already-resolved state and the captured store/session view. Do not bounce back out to a fresh top-level snapshot/query when a resolved query is already in hand.
-- For `component-meta` imported-type hydration, treat the imported dependency cache as the only source of file state after shallow seeding. Resolver paths must not call raw snapshot/source builders to recover missing imported data; if the cache does not own the needed snapshot/env yet, stay shallow and stop.
-- For `component-meta` imported-eval collection, keep one strategy only: lazy/BFS over the active symbol route. Do not add eager collector modes, source-text fallback parsing, or alternate collection branches that widen traversal.
-
-## Shared Build Philosophy
-
-Follow the same end-state philosophy as `binary-exploring-lamport.md`.
-
-Core rules carried forward:
-
-1. Read, parse, shallow-process, and cache each canonical file once per content hash through one shared host path.
-2. Store the full shallow symbol inventory up front, then process only the requested items on demand.
-3. Same-file closure stays local to the owning file.
-4. Cross-file deepening happens in one place only, one import level at a time.
-5. The builder/solver reads only from cached lookup state; it does not reopen file loading or routing.
-6. The entire design is demand-driven and query-scoped.
-7. The final implementation lands as one clean cutover, not as a merged dual-path transition.
-8. Component-meta, LSP, MCP, and other host-backed consumers must share the same file-ready/read/parse/shallow-process lifecycle.
-
-If a change conflicts with these rules, prefer changing ownership, deleting the legacy path, or breaking an internal interface over preserving a second resolver/load path.
-
-## Shallow File Processing Core Invariant
-
-The shallow file process is a core architectural invariant and must be preserved.
-
-When a canonical file is processed, the host stores its shallow symbol inventory once. That inventory is the authoritative index later stages query.
-
-At minimum, the shallow state must classify and retain:
-
-- imports
-- exports and reexports
-- type declarations
-- interfaces
-- enums
-- classes
-- variables/constants
-- functions/method signatures
-- `typeof`-relevant value declarations
-- local symbol dependency edges
-- cross-file dependency edges
-
-Design rule:
-
-- processing a file means collecting and indexing its symbols, not eagerly evaluating them
-- later stages look up the indexed items they need and only process those items on demand
-- no stage should need to rescan the raw file to rediscover symbols that shallow processing already captured
-
-Performance consequence:
-
-- very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
+- Follow the build philosophy and shallow file processing invariant defined in `CLAUDE.md`.
+- For component-meta work, follow the rules in `/component-meta` skill.
+- For type resolution work, follow the rules in `/type-resolution` skill.
 
 ## Task Routing
 
-- Architecture or ownership questions: start with `CLAUDE.md`, then `.claude/skills/architecture/SKILL.md`.
-- Span, offset, URI, or source map work: load `.claude/skills/position-encoding/SKILL.md` before editing.
-- Build, release, profiling, or MCP work: load `.claude/skills/build-and-profiling/SKILL.md`.
-- Test design or verification planning: load `.claude/skills/testing/SKILL.md`.
-- Rust hot paths or allocation-sensitive work: load `.claude/skills/rust-performance/SKILL.md`.
+- Architecture principles or ownership questions: start with `CLAUDE.md`.
+- Type resolution, solver, cross-file types, macro traversal: load `/type-resolution`.
+- Component-meta, fallthrough, compat layer: load `/component-meta`.
+- Compiler, codegen, template, style, CodeTransform: load `/compiler-codegen`.
+- LSP host, TypeProvider, workspace, scheduler: load `/host-session`.
+- Module map, TS packages, plugin system, CSS analysis: load `/architecture`.
+- Span, offset, URI, or source map work: load `/position-encoding`.
+- Build, release, profiling, or MCP work: load `/build-and-profiling`.
+- Test design or verification planning: load `/testing`.
+- VS Code extension or LSP E2E verification: load `/e2e-vscode-testing`.
+- Rust hot paths or allocation-sensitive work: load `/rust-performance`.

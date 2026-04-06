@@ -6,6 +6,8 @@ The project is a hybrid Rust + TypeScript monorepo: Rust crates handle template 
 
 ## Architecture
 
+Detailed module reference, key files, and implementation specifics are available in domain skills: `/type-resolution`, `/component-meta`, `/compiler-codegen`, `/host-session`, `/architecture`.
+
 ### Shared Optimized Codebase (CRITICAL)
 
 Verter is one shared optimized codebase, not separate semantic implementations per consumer.
@@ -69,287 +71,43 @@ Performance consequence:
 
 - very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
 
-### Macro Type Traversal Rule (CRITICAL)
-
-When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph.
-
-- There is one shared cross-file type resolver for host-backed component-meta and analysis work. Do not add consumer-specific resolver forks.
-- That resolver has exactly two modes:
-  - `Type`: resolve the requested symbol identity and canonical source location only. Do not expand the shape.
-  - `Expanded`: resolve the same symbol through the same traversal, then materialize the expanded shape / expanded text.
-- Component-meta uses the shared resolver in `Expanded` mode for every macro-facing surface. This includes all script-setup macros and all Options API surfaces that contribute metadata, such as props, data, computed, emits, slots, and expose-like members.
-- Do not walk unrelated imports from the same file.
-- Do not treat plain imports as implicit exports.
-- Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.
-- Parsing a `.ts`/`.js`/declaration file for type resolution must cache discovered symbol name → canonical location mappings.
-- Re-exported names and barrel hops must also be cached once discovered. If traversal follows `export * from './foo'`, cache that result so later lookups do not rescan the same barrel chain.
-
-If a file imports 20 modules but the requested macro type only references `AvatarProps` and `IconProps`, external resolution must only traverse those reachable dependencies.
-
-**TS-first resolution priority:** TypeScript types always take priority over JavaScript files when resolving ambiguous dependency candidates. Verter is a type-strict compiler that relies on TS typing for correctness. JS files should only be used as a last resort when no TS type definition is available. When `DependencyResolution.possible_canonical_ids` contains multiple candidates, use `effective_target()` which selects the single highest-priority candidate: `.d.ts` > `.d.cts` > `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`. Do not try remaining candidates if the selected one lacks the needed type — treat as not found.
-
-**Owned resolution is bounded by `workspace_root`:** For owned and project-scoped resolution, `node_modules` and package `#imports` ancestor walks stop at `IdeProjectConfig.workspace_root`. In monorepos, `workspace_root` may be above `project_root` to reach hoisted `node_modules`. In compat `createCheckerByJson()`, `workspace_root == project_root`. Unowned resolution (no owning project) remains unbounded. The boundary is passed via `ancestor_dirs(path, Some(&workspace_root))` and `ancestor_dirs_from_dir(start_dir, Some(&workspace_root))` in `verter_workspace::resolver`.
-
 ### Canonical Dependency Cache Rule (CRITICAL)
 
-Host-backed type/import resolution must treat the canonical file ID as the cache identity. The cache contract is:
+Host-backed type/import resolution must treat the canonical file ID as the cache identity. Load and parse each dependency at most once per canonical ID per workspace content generation. Cache the parsed state, eval env, symbol/export tables, and prepared declarations together. Later lookups hit cached maps — never rewalk the AST. VFS is the authority for file-change invalidation. Concurrent cold requests to the same file must collapse onto one materialization path. Architectural changes land as one clean cutover with no dual-path shims.
 
-- Load a dependency source at most once per canonical ID per workspace content generation. Parse it immediately and cache the raw source, parsed/OXC snapshot, and any reusable eval/build state right away.
-- When the host materializes an imported dependency on a cold miss, derive the AST-backed bundle from that single parse and cache it together: file snapshot, eval env, external-type analysis, symbol/export lookup tables, and any other reusable per-file analysis. Do not let later resolver stages trigger a second parse of the same canonical file just to build another artifact.
-- Host-owned imported-file caches are long-lived for the lifetime of the `VerterHost`. Distinct queries on the same host must keep reusing the same cached canonical file state until that file's content hash or workspace generation changes.
-- Cache named declarations from that parsed file by name, not just exported entrypoints. Internal named types/interfaces/aliases still matter because exported declarations in the same file may depend on them later.
-- Treat named-node discovery as local symbol lookup. Once a file is parsed for a given canonical ID/version, future lookups should hit cached symbol/export maps instead of walking the full AST again to rediscover names.
-- Treat AST ownership as single-pass work. For a given canonical ID/version, the resolver should do at most one full top-level AST walk to discover named symbols/exports, then cache those lookup entries and leave deeper expansion lazy per symbol. Do not rewalk the full file to rediscover the same symbol on later requests.
-- Imported-file analysis should expose one shallow symbol graph keyed by `(canonical_id, symbol_name)`. That graph is the authoritative source for local symbol kind/span, local import targets, direct reexports, and local export aliases. Resolver stages must consume that graph instead of maintaining parallel rediscovery paths.
-- Resolve the requested import from the cached parsed file first. If the requested name is not present, only then BFS through explicit barrel/re-export hops. Do not rescan the same file graph on the second request.
-- Keep expansion lazy. We do not need to eagerly resolve every transitive type in a file up front. Preserve named references so later requests can expand them from cache when needed.
-- Collected imported aliases stay shallow but must already be root-normalized. Store the defining file's canonical ID plus the final exported symbol name; do not keep unresolved barrel routes once the root is known, and do not eagerly materialize a prepared declaration during collection.
-- Builder-owned shallow imported aliases should treat their stored canonical ID as the defining-file root. They may consult cached barrel/export state only when a canonical root is still unknown. Cache the prepared alias on the defining canonical file and hydrate from that file's host cache or base eval env. Do not synthesize barrel-local prepared aliases for symbols that resolve to another file.
-- Whole-file hashes are for long-lived update handling and cache validation, not for repeated warm reads. Compute/store the hash once for the current source version, then reuse it until the VFS reports a newer content generation / file version.
-- VFS is the authority for file-change invalidation. When a canonical file’s version/hash changes, host caches derived from that canonical ID must be discarded together across source snapshots, parsed state, eval envs, and resolved-type/import caches.
-- Invalidation must stay selective. If `/src/type.ts` changes, invalidate caches owned by `/src/type.ts` and downstream final expansion/query results that depend on it, but do not force reparsing or reshallowing unchanged owner files that merely import it. Those owner files should stay warm on their own-file caches and only re-resolve against the refreshed imported dependency state.
-- A changed imported dependency may be reparsed once for its new hash, even if several owners or several later queries need it. That single refreshed canonical file state must then be shared across all of those requests.
-- Concurrent cold requests that reach the same canonical imported file must collapse onto one host-owned materialization path. `Promise.all([MetaA, MetaB, MetaC])` is not allowed to produce three separate read/parse/shallow passes for the same `type.ts`.
-- Prepared declarations are also host-owned warm artifacts. Once `(canonical_id, symbol_name, whole_hash)` has been prepared, later lookups from other owners and from later distinct queries on the same host must reuse that prepared declaration until invalidation.
-- Reuse the current host-owned route/barrel cache path. Today that means `ImportTypeRouteEntry` on the importer side plus `BarrelResolutionState` on the imported-file side; do not add a second route-cache subsystem for the same work without explicit proof it is needed.
-- Route discovery must stay lazy and demand-driven. First-hit discovery may follow barrel/reexport hops only until the requested symbol is found (or proven absent under the current negative-cache policy). Do not require a full scan of all barrel exports on every first hit.
-- Warm same-owner lookups should reuse the existing valid importer-local route entry rather than replaying the full barrel chain.
-- Cross-owner reuse in the current architecture should come primarily from shared imported-file state, shared barrel/export surfaces, and prepared declarations. Do not assume canonical cross-owner route-fact backfill exists unless a later change explicitly adds it.
-- Stable negative route answers in the current architecture are gated by `BarrelResolutionState.fully_resolved` plus tracked dependency/store-view freshness. If richer persisted completeness states are ever needed, add them as an explicit follow-up rather than treating them as an existing invariant.
-- If in-flight dedup is needed for concurrent cold route work, model that separately from the persisted barrel state. Do not overload `fully_resolved` to mean "currently being built".
-- Do not use `Arc` next-hop chains as the primary barrel cache shape if a future route-cache redesign is introduced.
-- Route caches and prepared-declaration caches must invalidate independently. If a leaf file body changes but its export surface stays the same, the route fact may remain valid while prepared declarations and downstream final results refresh.
-- On file update, eagerly recompute the changed file's own parse/shallow/export surface once. That write-path cost is acceptable and keeps later reads fast.
-- Do not eagerly rewrite every upstream barrel/route fact on every changed-file update. After the changed file's fresh shallow/export snapshot is available, let upstream route facts validate lazily against tracked route participants/generations on demand.
-- Prefer comparing old vs new shallow/export surface for the changed file. If the export surface is unchanged, keep route generations stable and refresh only body/prepared-declaration/final-result layers. If the export surface changed, bump the route/export-surface generation so affected warm route facts become stale and lazily rebuild on next access.
-- Route invalidation is not file-hash-only. tsconfig path changes, vite alias changes, workspace graph changes, package target changes, and barrel export-surface changes must invalidate affected route facts even if the owner file text did not change.
-- Negative route/cache misses may be cached only against a concrete snapshot (hash/generation/store-view context). Cancelled or interrupted results must never be promoted to warm reusable cache entries.
-- One query must resolve against one coherent host/store snapshot. Resolver stages must not mix captured stale owner routes with newer live dependency routes within a single query flow.
-- Legacy fallback paths that reparse or rewalk imported dependency files on warm requests should be removed, not preserved behind alternative code paths. Default behavior must go through the cache-aware host/VFS path.
-- Architectural cache/resolver changes must land as one clean cutover. Do not leave temporary shims, compatibility wrappers, feature flags, or duplicated old/new paths behind. Delete the superseded path in the same change, or upgrade the surviving path to first-class shared ownership with the same invariants and tests.
-- Imported dependency loading, type-resolution source materialization, and dependency canonical resolution should be host-owned single entry points. Do not add request-local cache layers or alternative parser/import paths on top of the host cache for the same work.
-- Imported type root/declaration resolution and prepared imported-type alias caching should also be host-owned single entry points keyed by canonical ID plus current file version/hash. Do not rebuild the same imported symbol route or prepared alias body per request when the host cache already has it.
+See `/type-resolution` skill for the full rule set (invalidation semantics, route caches, prepared declarations, cross-owner reuse, negative caching, and the concrete performance contract).
 
-Concrete performance contract:
+### Macro Type Traversal Rule (CRITICAL)
 
-- If `MetaA`, `MetaB`, and `MetaC` all depend on `type.ts`, the first query batch may process each owner file once and `type.ts` once.
-- If a later batch requests `MetaB` and `MetaC` again with no file changes, that later batch must reuse the warm cached state for both the owner files and `type.ts`.
-- If `type.ts` changes between batches, `MetaB` and `MetaC` may keep their own-file caches, while `type.ts` is processed exactly once for the new hash and then shared by both later requests.
+When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph. There is one shared cross-file type resolver with two modes: `Type` (identity only) and `Expanded` (materialize shape). Do not walk unrelated imports. Do not treat plain imports as implicit exports. Cache discovered symbol mappings and barrel hops.
 
-### Shallow Type State and Frontier Engine
+**TS-first resolution priority:** TypeScript types always take priority over JavaScript files. Use `effective_target()` which selects: `.d.ts` > `.d.cts` > `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`.
 
-Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.) is converging on two shared primitives in `verter_session::resolver_core`:
+**Owned resolution is bounded by `workspace_root`:** `node_modules` and package `#imports` ancestor walks stop at `IdeProjectConfig.workspace_root`.
 
-**ShallowTypeFileState** (`shallow_type_state.rs`) is the authoritative shallow symbol/export surface for one imported type file. Keyed by `(canonical_id, whole_hash)`. Contains:
-- `exports` map (exported name -> `ExportTarget`: Local or Reexport)
-- `wildcard_reexports` (`export * from` sources, in declaration order)
-- `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
-- `import_locals` / `import_targets` (import classification for closure)
-
-Populated once through the shared host ensure-path and cached on `ImportedDependencyCacheEntry.shallow_type_state`. Invalidated when the file's whole-hash changes.
-
-**ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
-1. Seed with initial `(canonical_id, exported_name)` pairs
-2. For each pending symbol: load `ShallowTypeFileState` via `FrontierHost` trait, route the export (direct > alias > wildcard in declared order), run local closure
-3. Collect `ExternalSymbolRef` entries from unresolved external deps into the next level
-4. Dedup on `(canonical_id, exported_name)` across the entire request via `seen` set
-5. Repeat until frontier is empty or budget is exceeded
-
-**Local closure** (`ShallowTypeFileState::local_closure()`) resolves same-file transitive deps iteratively. Uses a visited set for cycle handling (revisited nodes are silently skipped). Never crosses import boundaries -- external deps become `ExternalSymbolRef` for the frontier.
-
-**Budget contract** -- three domains with high ceilings (safety rails, not normal control flow):
-- `local_closure_steps`: 500 (same-file symbols per closure)
-- `frontier_symbol_visits`: 2000 (cross-file `(canonical_id, exported_name)` pairs)
-- `builder_expansion_steps`: 5000 (symbolic expansion steps)
-
-When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
-
-**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through compile_cache deps, imported_dependency_cache deps, then workspace fallback. Route discovery now runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
-
-**Key files:**
-
-| File | Purpose |
-| --- | --- |
-| `crates/verter_session/src/resolver_core/shallow_type_state.rs` | ShallowTypeFileState, ExportTarget, ShallowTypeSymbol, ExternalSymbolRef, ResolutionBudgets, local_closure() |
-| `crates/verter_session/src/resolver_core/external_type_frontier.rs` | ExternalTypeFrontier, FrontierHost trait, PendingExternalSymbol, ResolvedSymbol, RouteKind |
-| `crates/verter_session/src/host_resolve.rs` | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |
-| `crates/verter_session/src/frontier_tests.rs` | 26 behavioral invariant tests (diamond dedup, barrel ordering, cycle termination, budget enforcement, etc.) |
-
-### Package Dependency Graph
-
-```
-verter-vscode (VS Code extension)
-├── verter-lsp (Rust LSP binary, stdio)
-│   ├── verter_session (file host + compilation)
-│   │   └── verter_scheduler (async per-file staging, feature-gated)
-│   ├── verter_scheduler (priority queue, completion handles)
-│   ├── verter_diagnostics (lint rules + DiagnosticSet)
-│   ├── verter_actions (quick fixes + refactoring)
-│   └── TypeProvider (optional: TSGO or tsserver, for TS type checking)
-├── @verter/language-shared (custom protocol types)
-├── @verter/typescript-plugin (.vue import resolution, NAPI-backed)
-└── @verter/unplugin (bundler plugin)
-    └── @verter/native
-
-verter-mcp (MCP server binary, stdio + HTTP)
-├── verter_session (file host + compilation)
-├── verter_semantic (static analysis snapshots)
-├── verter_diagnostics (lint rules + DiagnosticSet)
-└── verter_actions (quick fixes + refactoring)
-
-@verter/playground (Netlify-hosted)
-└── @verter/wasm (Rust template compiler, wasm-bindgen)
-
-@verter/component-meta (metadata extraction)
-├── @verter/native (NAPI host, Node.js)
-└── @verter/wasm (WASM host, browser, optional)
-```
-
-### Repository Structure
-
-```
-crates/
-  verter_parser/     # SFC parser: tokenization, template AST, shared types/utilities
-  verter_compiler/   # SFC compiler: codegen (VDOM/Vapor/IDE), CodeTransform, source maps, style processing
-  verter_semantic/   # Semantic authority: analysis, query engine, component surfaces, binding analysis, reactivity provenance, 7 analyzers
-  verter_session/    # Top-level session API: composes workspace, parser, compiler, semantic, scheduler, resolver
-  verter_workspace/  # Workspace layer: file access, import resolution, project ownership, tsconfig/vite config
-  verter_scheduler/  # Async per-file scheduler: Source→Analysis→Artifact stages, priority queue, blocker registry
-  verter_protocol/   # Single schema owner: protobuf transport + canonical DTOs for NAPI/WASM/LSP/MCP
-  verter_diagnostics/ # Vue SFC diagnostic engine: ~186 lint rules, rule trait, visitor, DiagnosticSet
-  verter_actions/    # Code actions engine: quick fixes, refactoring
-  verter_lsp/        # Rust LSP server binary (stdio, launched by VS Code extension)
-  verter_ffi/        # FFI boundary types: re-exports from verter_protocol, conversion functions
-  verter_bench/      # Benchmarks and comparison examples (Rust)
-  verter_mcp/        # MCP server binary: analysis, diagnostics, scoring for AI agents
-  verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
-  verter_wasm/       # WASM bindings (wasm-bindgen cdylib)
-packages/
-  core/              # @verter/core - SFC parser & TSX transformer
-  types/             # @verter/types - TypeScript utility types
-  native/            # @verter/native - Native binding loader + platform packages
-  wasm/              # @verter/wasm - WASM binding wrapper
-  unplugin/          # @verter/unplugin - Universal bundler plugin
-  language-shared/   # @verter/language-shared - Shared LSP protocol types
-  typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
-  oxc-bindings/      # @verter/oxc-bindings - OXC parser binary helper
-  component-meta/    # @verter/component-meta - Component metadata extraction + Type IR + adapters
-  playground/        # @verter/playground - Online playground (private, Netlify-hosted)
-  vue-vscode/        # verter-vscode - VS Code extension
-  example/           # Example project
-scripts/
-  check-versions.mjs # Version check + publish order for CI
-```
-
-### Async File Scheduler (`verter_scheduler`)
-
-The scheduler provides per-file async staging with priority queuing. Files progress independently through **Source → Analysis → Artifact** stages. Cross-file blocking (macro type deps, external `src`) is declarative — the scheduler manages wakeups.
-
-**Key types** (`crates/verter_scheduler/src/`):
-
-- `FileNode` (`node.rs`) — per-file: ArcSwap snapshots, AtomicU64 generation, pending requests
-- `Scheduler` (`scheduler.rs`) — DashMap of FileNodes, JobIndex, SubmissionInbox, driver thread
-- `CompletionHandle<T>` (`job.rs`) — request-scoped, resolves to Ready/Failed/Superseded/Shutdown
-- `StageExecutor` (`executor.rs`) — trait for plugging host parse/analysis/compile logic
-- `Priority` (`stage.rs`) — 4 tiers: Critical > Interactive > Background > Maintenance
-- `EdgeManager` (`edges.rs`) — ReverseIndex + BlockerRegistry (both DashMap-sharded)
-- `OverlayMap` (`overlay.rs`) — concurrent editor buffer storage (DashMap)
-- `SourceLoader` (`source_loader.rs`) — MemorySourceLoader (tests/WASM) + DiskSourceLoader (native)
-- `IoPool` (`pool.rs`) — bounded I/O thread pool, separate from rayon CPU pool
-
-**Snapshot model**: All stage outputs are immutable `Arc`-wrapped. Replacement is atomic via ArcSwap. Generation fencing ensures coherence: `source.gen == analysis.gen == artifact.gen == node.gen`. Stale snapshots (gen mismatch) return `None` from `current_*()` methods.
-
-**Host integration** (feature-gated `scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `upsert()`, the host populates both the legacy `files: Shared<FxHashMap>` and the scheduler in parallel. The `HostStageExecutor` calls real `parse_vue_snapshot`/`parse_non_sfc_snapshot` for the Source stage. Host-specific data is stored in snapshots via the `SnapshotData` trait (opaque `Arc<dyn Any>`), avoiding circular dependencies between scheduler and host.
-
-**LSP integration**: `scheduler_integration.rs` maps LSP operations to priority tiers (Critical for hover/completion, Interactive for did_open/change, Background for workspace scan). `compile_blockers.rs` is deprecated — the scheduler's blocker model replaces imperative hydration.
+See `/type-resolution` skill for the full traversal rules and resolver mode details.
 
 ### Two Template Codegen Paths (CRITICAL)
 
-The Rust compiler has **two separate template codegen paths**. Modifying one does NOT affect the other:
+The Rust compiler has two separate template codegen paths. Modifying one does NOT affect the other: **VDOM/Vapor** (`template/code_gen/vdom/`) for runtime render functions, and **IDE** (`ide/template/`) for valid JSX/TSX used by LSP/TSGO type checking. The LSP uses the IDE path via `CompileTarget::IDE`.
 
-| Path           | Module                    | Purpose                                     | Output                           |
-| -------------- | ------------------------- | ------------------------------------------- | -------------------------------- |
-| **VDOM/Vapor** | `template/code_gen/vdom/` | Runtime render functions for bundler output | `_createElementVNode(...)` calls |
-| **IDE**        | `ide/template/`           | Valid JSX/TSX for LSP/TSGO type checking    | `<div prop={expr}>` JSX elements |
-
-The **LSP uses the IDE path** via `host.ensure_compiled()` with `CompileTarget::IDE`. TSGO type-checks this output. Changes to VDOM codegen do NOT affect LSP hover/completions. The IDE codegen auto-detects the script language: TS SFCs produce `.tsx` (TypeScript + JSX), while JS SFCs (no `lang` or `lang="js"`) produce `.jsx` (JavaScript + JSDoc annotations).
-
-### Strict Slot Children Type Checking (Experimental)
-
-When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree. These enforce that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).
-
-**Generated pattern** (inside the block scope, after JSX):
-
-```tsx
-___VERTER___strictRenderSlot({} as NonNullable<ReturnType<typeof ___VERTER___Comp{offset}>['$slots']['{slot}']>, [TabItem, {} as HTMLElementTagNameMap["input"], "" as string]);
-```
-
-**Child type references**: Component → constructor name, HTML element → `HTMLElementTagNameMap["tag"]`, text/interpolation → `"" as string`. Each child is a sourcemapped `InsertedMapped` chunk pointing to its template position.
-
-**Skipped cases**: self-closing components (no children), `is_jsx` mode, `<component :is>` (deferred), whitespace-only text, comments.
-
-**Key files**: `ide/template/mod.rs` (`StrictSlotEntry`, `collect_strict_slot_children`, `emit_strict_slot_checks`), `ide/script.rs` (ambient `strictRenderSlot` type declarations).
+See `/compiler-codegen` skill for full codegen pipeline, backends, and CompileTarget details.
 
 ### Fallthrough / Root Inheritance (CRITICAL)
 
 The shared Rust pipeline owns all fallthrough and root inheritance semantics. `verter_semantic::analysis` extracts root reachability facts only. `verter_session` owns the single inheritance resolver, recursion, conditional branch composition, generic propagation, caching, and final metadata projection.
 
-**Public contract** (on `ComponentMetaAnalysis` / `FfiComponentMeta` / `ComponentMeta`):
+Key rules: `inheritAttrs: false` → no inherited surface. Single native root → intrinsic attrs minus declared props/events. Single component root → recursive propagation. Conditional branches → exact union. Cycles → unresolved branches. `class`/`style` are never consumed.
 
-- `props` / `events` — declared component surface only (unchanged)
-- `acceptedProps` / `acceptedEvents` — computed call-site acceptance surface (declared + inherited)
-- `acceptedSurfaceCompleteness` — `Exact` or `LowerBound` (if any branch is partial/unresolved)
-- `rootReachability` — structural root classification before inheritance resolution
-- `fallthroughSurface` — branch-structured inherited surface after host resolution
-
-**Semantic rules**:
-
-- `inheritAttrs: false` → no inherited surface
-- Unconditional multi-root (fragment) → no inherited surface
-- Root `v-for` → no inherited surface
-- Single native root → intrinsic attrs/listeners minus declared props/events minus consumed root bindings
-- Single component root → recursive propagation through the child's full public surface
-- Conditional single-root branches → exact union of branch surfaces
-- Cycles → terminate safely as unresolved branches, no invented members
-- Unsupported roots (`<component :is>`, `<slot>`, Vue built-ins) → unresolved branches
-- `class` and `style` are never consumed (Vue always merges them)
-- `@click` and `:onClick` normalize to the same canonical listener name (`click`)
-- Declared props/events always take precedence over inherited names
-
-**Authority chain**: analysis extracts `RootReachability` → host resolves `FallthroughResolution` → `get_component_meta()` populates `accepted_*` and `fallthrough_surface` → FFI maps to JSON → TS consumes.
-
-**Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
-
-**Key files**: `verter_semantic/src/analysis/component_meta.rs` (types + root extraction), `verter_semantic/src/analysis/html_intrinsics.rs` (native intrinsic catalog), `verter_session/src/host_manage.rs` (resolver + cache), `verter_protocol/src/types.rs` + `verter_ffi/src/convert.rs` (schema + adapter conversion), `packages/component-meta/src/types.ts` (TS types).
+See `/component-meta` skill for the full semantic rules, public contract, authority chain, and key files.
 
 ### Component-Meta Native Vs Compat (CRITICAL)
 
-The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
+The native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
-- Fix missing or incorrect metadata in the shared/native owner layer first. Compat should only remap representation when the native payload is already correct enough.
-- Rust is the component-meta semantic authority. Resolution, declaration routing, recursion handling, graph construction, payload shaping, and the full Verter API response belong on the native side.
-- `@verter/component-meta` must issue one async native request per query and receive the full Verter API response needed for that query. Do not introduce JS/native follow-up calls to progressively resolve missing types, missing graph nodes, or deferred declarations.
-- The only intentional off-spec difference versus `vue-component-meta` is that Verter's native boundary is async instead of sync. Apart from that boundary difference, compat should behave like a projection over one completed native response, not a coordinator of extra native work.
-- Rust should send the smallest semantically complete payload possible. Prefer compact symbolic graph structure, shared arenas/tables, and explicit recursion nodes over oversized expanded trees, raw-text-only fallbacks, or `unknown` when a graph-backed representation is possible.
-- JS may decode, reconstruct recursive descriptors, memoize shared graph nodes, and adapt the native response into compat output, but that work must stay mechanical. JS may transform structure, but it must not recover meaning that native code failed to provide.
-- Do not let JS become a second resolver, a second expander, or a second semantic authority. Compat must not reinterpret unresolved symbols, invent fallback semantics, or silently repair native payload gaps.
-- Do not weaken native TypeScript meaning to imitate Volar formatting. Example: keep native `boolean` as `boolean`; any `true | false` expansion belongs only in compat-specific display/schema logic if we choose to support it.
-- Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` → the concrete color union is acceptable; blanket ref flattening is not.
-- Compat `exposed` parity should be derived from a shared cached public-instance surface (for example a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
-- Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
-- Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_session::resolver_core`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
-- Component-meta registry publication must stay shallow. Publish only the symbols demanded by the current query path, and do not eagerly materialize unrelated owner/package helpers just to populate the registry.
-- Component-meta companion/file-target selection must stay shallow too. Choosing between runtime and declaration companions may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to decide the target file.
-- Imported component-meta hydration must stay cache-owned too. Once shallow imported dependency state exists, later alias/registry/fallthrough resolver stages must read only from that cache-owned state and must not jump back to raw snapshot/source builders for imported files.
-- Component-meta resolvers must deepen in exactly one place per requested symbol/query path. Do not let a file-level helper widen into sibling symbols/files that are not on the active declaration route.
-- Component-meta metadata/fallthrough projection must stay query-scoped. Reuse the resolved state plus captured `HostStoreView`/session view; do not re-enter a fresh top-level meta/fallthrough query when a resolved query already exists.
-- Imported symbol collection for component-meta must stay single-path and lazy. Do not introduce eager collection modes or reparsing fallbacks from stored source text; selected imported symbols must be hydrated through the host-owned cache and resolved via the solver only.
-- Resolver, solver, recursion tracking, and graph interning should share one stable semantic identity model: defining symbol identity plus type arguments and any relevant conditional context. Do not let cache keys drift by layer.
-- Component-meta output must be deterministic for a coherent snapshot/query. The same inputs should produce the same graph identities, metadata shape, and compat-visible meaning.
-- If native code truly cannot represent part of a type, encode that explicitly as a structured unsupported/HardStop-style result with diagnostics/provenance sidecars. Do not silently degrade a representable type to raw text or `unknown`.
-- The native response contract must remain explicit and versioned. If the component-meta payload shape changes, do it as a deliberate schema/API cutover rather than compat-side drift.
-- Host-owned resolver artifacts, graph artifacts, and encoded payload caches must share one invalidation story. Do not add a second ownership path for the same component-meta query state.
-- Raw graph cycles reaching JS without explicit recursion nodes are native bugs, not a normal compat fallback path.
+Core rules: Fix metadata in the native layer first. Rust owns resolution, declaration routing, and graph construction. One async native request per query. JS may transform structure but must not recover meaning. JS must not become a second resolver or expander. Cache-owned type recovery only — no AST/source fallbacks.
+
+See `/component-meta` skill for the full policy, resolver rules, and cache contracts.
 
 ### CodeTransform Is the Single Source of Truth (CRITICAL)
 
@@ -360,225 +118,6 @@ Post-hoc string manipulation breaks sourcemap accuracy: the `CodeTransform` gene
 **Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position — the chunk list and source map stay consistent.
 
 **Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects the pre-replace byte offsets.
-
-### Native Type Solver (`type_solver`)
-
-`verter_semantic::analysis::type_solver` is the sole authority for all type expansion. It handles `defineProps<T>()`, `defineEmits<T>()`, component-meta type resolution, and cross-file generic instantiation.
-
-**Architecture — two separate structs to avoid cloning:**
-
-- `QueryArena` — append-only immutable node store. Nodes are interned as `NodeId` (u32). Once allocated, nodes are never mutated.
-- `SolverCaches` — mutable memoization tables (relation, instantiation, keyspace, member). Separate from arena so the relation engine can hold `&QueryArena` and `&mut SolverCaches` simultaneously.
-
-**Pipeline:** `TypeExpr → lower → QueryArena → resolve_node → project_to_type_expr → TypeExpr`
-
-**Host boundary:** `TypeSolverHost` trait (in `type_solver::host`) is the seam between `verter_session` (file readiness, frontier, caches) and the solver (arena, relations, projections). The solver never reopens route discovery — it only accepts resolved root identities. Two implementations exist: `SessionSolverHost` in `resolver_core/solver_host.rs` (production, bridges host caches) and `EvalEnvSolverHost` in `type_solver/host.rs` (standalone, wraps an `EvalEnv`'s type_symbols for local-only resolution without a session).
-
-**Request-scoped engine ownership:** `TypeQueryEngine` is the single request-scoped mutable solver owner for component-meta queries. One engine is created per `get_component_meta()` request and shared across all solves in that request. Declaration-scoped solves reuse the shared engine via `TypeQueryEngine::solve_scoped()` — they share the arena, instantiation cache, and solver caches while using a different `TypeSolverHost` (scoped to the declaration file). The `solve_scoped` method partitions the op-cache key and bare-name root_identity cache by `scope_canonical_id` so results from one declaration scope do not alias with results from another scope. Do not construct fresh `TypeQueryEngine` instances for declaration-scoped solves.
-
-**Scope-aware bare-name caching:** The `SolverCaches.root_identity` cache uses `(canonical_id, symbol_name)` as its key. For bare-name lookups (empty `canonical_id`), `resolve_root_identity_cached()` in `solve.rs` substitutes the `SolveState.scope_canonical_id` as the cache key. This prevents cross-scope poisoning: a bare-name miss in scope A does not prevent scope B from resolving the same name.
-
-**Ambient/global environment (deferred):** Names like `Function`, `Promise`, `ThisType`, and DOM globals currently fall through as unresolved bare-name misses. The long-term target is explicit ambient/global declaration support as a first-class input to the host/engine boundary, modeled from the project's TypeScript configuration (`compilerOptions.lib`). This is deferred correctness work, not a speculative enhancement — it remains a required follow-up in the same architectural track as the shared-engine cutover.
-
-**Declaration context propagation:** `PreparedTypeDecl` and `PreparedValueDecl` carry a `name_resolution: FxHashMap<String, ResolvedRootIdentity>` field that maps bare names appearing in their bodies to resolved root identities. Built at preparation time from the defining file's local and import scope (local deps → same-file identity, external deps → resolved canonical_id via dep_edges). The solver's `SolveState` maintains `type_decl_context_stack` and `value_decl_context_stack`. When `resolve_prepared_ref` enters a declaration body, it pushes the prepared decl onto the stack. The `resolve_name_in_context` helper checks only the INNERMOST context (topmost stack entry) — bare names in an imported type body resolve in that declaration's defining file scope, not in parent scopes.
-
-**Barrel re-export following:** `prepared_type_decl_in_view` and `prepared_value_decl_in_view` follow barrel re-exports when a symbol is not found in the target file's local prepared decl cache. For named re-exports (`export { Foo } from './bar'`), the source specifier is resolved and the lookup continues in the target file. For wildcard re-exports (`export * from './bar'`), all wildcard sources are tried in declaration order with depth-limited recursion (max 20 hops).
-
-**Namespace import resolution:** `SessionSolverHost::root_identity` handles dotted names (`Ns.Member`) by splitting on the first dot, resolving the prefix through import bindings, and looking up the member in the resolved file's prepared decl cache.
-
-**Exactness model:** `ExactConcrete | ExactSymbolic | Incomplete` — replaces old `Exact | LowerBound | OpaqueFallback`. Execution status (`Completed | Cancelled | HardStop`) is tracked separately from semantic exactness.
-
-**Operators implemented:** keyof, indexed access, conditionals (with distributive distribution + infer binding collection), mapped types (with key remapping via `as` clause), template literals (iterative cartesian expansion with 10k guard), typeof, all 20 built-in utilities (Partial, Required, Readonly, Pick, Omit, Record, Extract, Exclude, NonNullable, ReturnType, Parameters, ConstructorParameters, InstanceType, Awaited, Uppercase, Lowercase, Capitalize, Uncapitalize, NoInfer).
-
-**Key files:**
-
-| File | Purpose |
-| --- | --- |
-| `crates/verter_semantic/src/analysis/type_solver/mod.rs` | Module root, re-exports |
-| `crates/verter_semantic/src/analysis/type_solver/arena.rs` | QueryArena (node store) + SolverCaches (memo tables) |
-| `crates/verter_semantic/src/analysis/type_solver/solve.rs` | Top-level `solve_type()` entry, `resolve_node`, operator resolution |
-| `crates/verter_semantic/src/analysis/type_solver/relate.rs` | Tri-state relation engine (zero-clone, reads via `&QueryArena`) |
-| `crates/verter_semantic/src/analysis/type_solver/host.rs` | `TypeSolverHost` trait, `ResolvedRootIdentity`, `EvalEnvSolverHost` |
-| `crates/verter_semantic/src/analysis/type_solver/lower.rs` | `TypeExpr → NodeId` lowering |
-| `crates/verter_semantic/src/analysis/type_solver/prepared.rs` | `PreparedTypeDecl`, `PreparedValueDecl` |
-| `crates/verter_semantic/src/analysis/type_solver/builtin.rs` | 20 built-in utility implementations |
-| `crates/verter_semantic/src/analysis/type_solver/project.rs` | member/keyspace/surface projections |
-| `crates/verter_semantic/src/analysis/type_solver/recursion.rs` | Tarjan SCC + RecursionTracker |
-| `crates/verter_session/src/resolver_core/solver_host.rs` | `SessionSolverHost` (bridges host caches to solver) |
-| `crates/verter_session/src/resolver_core/type_expansion_verter.rs` | `resolved_macro_to_expansion_via_solver()` (component-meta integration) |
-
-**Cutover status:** The solver is the sole type expansion authority. The legacy evaluator body (`EvalLookup`, `evaluate_with_lookup()`, `ImportedEvalLookup`, `ImportedDeclEvalResolver`, `ExpansionBudget`, budget retry logic) and the legacy `ImportedEval*` trait hierarchy (`ImportedEvalInputs`, `ImportedEvalResolver`, `OwnerEvalEnvAssembler`, walker-based import pre-loading) have been fully deleted. `type_eval.rs` now contains only symbol table types (`TypeDeclInfo`, `EvalEnv`, `TypeExpr`, etc.) and a convenience `evaluate()` function that delegates to `solve_type()` via `EvalEnvSolverHost`. The `type_expand/` module retains only `expand_macro_types()`, `expand_object_shape()`, and `expand_normalized_expr()` -- all of which take `&dyn TypeSolverHost` instead of the deleted budget/lookup parameters.
-
-### Type Evaluation Symbol Tables (`type_eval`)
-
-`verter_semantic::analysis::type_eval` contains the shared type-representation types and symbol tables used by the solver and analysis layers. The legacy evaluator body has been deleted -- all evaluation now goes through `type_solver`.
-
-- `TypeExpr` — recursive Arc-backed type representation (`Arc<TypeExpr>`, `Arc<[TypeExpr]>`, `Arc<ObjectExpr>`, `Arc<FunctionExpr>`). Clones stay shallow.
-- `EvalEnv` — per-file symbol table: `type_bindings` (generic params), `type_symbols` (named declarations). Stores `Arc<TypeExpr>` so generic instantiation does not re-copy subtrees.
-- `TypeDeclInfo` — declaration metadata (body, type params, span).
-- `evaluate()` — convenience wrapper that delegates to `solve_type()` via `EvalEnvSolverHost`. No longer contains evaluation logic itself.
-
-### IDE Script Error Recovery
-
-When OXC encounters parse errors during typing (e.g., `count.` mid-expression), the IDE script codegen (`ide/script.rs`) uses a **truncate-and-reparse** strategy instead of falling back to degraded file-scope output:
-
-1. Find the earliest error offset from OXC diagnostics.
-2. Truncate source at the last newline before that offset — the "clean prefix".
-3. Re-parse only the clean prefix (which succeeds since the broken code is removed).
-4. Use the clean prefix AST for normal codegen (import hoisting, binding extraction, macro processing). The broken tail passes through unchanged in the CodeTransform.
-
-A lightweight token scanner (`ide/script_recover.rs`) recovers macro binding names from the broken tail so template bindings still resolve. This means typing `count.` at the end of a script preserves hover, completions, and go-to-definition for all declarations above the cursor.
-
-**Fallback**: When the clean prefix is empty (error on first line) or the clean prefix itself fails to parse, the system falls back to file-scope error recovery mode (`process_tsx_script_setup_error_mode`).
-
-### TypeProvider Architecture
-
-The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends are supported:
-
-| Backend      | Binary             | Protocol                                   | Use Case                             |
-| ------------ | ------------------ | ------------------------------------------ | ------------------------------------ |
-| **TSGO**     | `tsgo` (Go binary) | LSP over stdio (Content-Length + JSON-RPC) | Fast, native TS checking (preview)   |
-| **tsserver** | `node tsserver.js` | Newline-delimited JSON over stdio          | Workspace TS version, plugin support |
-
-**Provider selection** (`--type-provider` CLI arg / `verter.typeProvider` VS Code setting):
-
-- `auto` (default): if TS 5.x/6.x installed, uses tsserver; otherwise tries TSGO
-- `tsgo`: TSGO only
-- `tsserver`: tsserver only
-- `off`: no type provider (verter-only mode)
-
-Only one provider runs at a time. Both use the `TypeProvider` trait (`tsgo/traits.rs`) with 14+ methods (hover, completions, diagnostics, definition, references, rename, etc.). Both are wrapped in a `ResilientTypeProvider` that detects crashes, auto-restarts (max 3 with exponential backoff), and replays the file cache.
-
-**tsserver kind mapping**: `parse_tsserver_completion()` in `tsserver/ipc.rs` maps tsserver's `ScriptElementKind` strings to LSP `CompletionItemKind`. This mapping MUST match VS Code's `MyCompletionItem.convertKind()` exactly. Test coverage: `test_parse_tsserver_completion_kinds_match_vscode`. Sync with VS Code source when updating TypeScript dependencies.
-
-**Key modules** (`crates/verter_lsp/src/`):
-
-- `tsgo/` — TSGO integration (LSP client, resilient wrapper, project sync)
-- `tsserver/mod.rs` — `find_tsserver()`, `find_node()`, `detect_ts_major_version()`
-- `tsserver/ipc.rs` — `TsserverTypeProvider`, newline-delimited JSON transport, position conversion
-- `tsserver/resilient.rs` — `ResilientTsserverProvider` (crash detection + auto-restart)
-- `workspace_scanner.rs` — Async background workspace scanner with priority-based file loading
-
-**Background file sync**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task that compiles ALL workspace `.vue` files to TSX and syncs them to the type provider asynchronously. For TSGO, both `.vue.tsx` (IDE artifact) and `.vue.ts` (public API) are synced; cross-file imports resolve through `.vue.ts` (via `rewrite_vue_imports_for_tsgo`). This ensures imports of non-open `.vue` files resolve to actual component types rather than the wildcard `declare module '*.vue'` fallback.
-
-**Barrel-import eager sync** (TSGO): When a Vue file imports components through a barrel (non-Vue re-export file like `components/index.ts`), the LSP eagerly syncs the barrel and its Vue dependencies to TSGO during `did_open` and `resync_aliased_imports_for_open_files`. The process: (1) discover barrels from `TemplateComponentUsage.import_source` resolving to non-Vue files, (2) scan barrel's `module_references` for `.vue` specifiers, (3) sync Vue dependencies first, (4) sync barrel file. Without this, TSGO only receives barrels from the background scanner, which may not complete before hover/completion requests.
-
-**Freeze prevention** (fast typing): Three layers prevent tokio runtime starvation during rapid typing:
-
-1. **SyncCoordinator** (`sync_coordinator.rs`): Single long-lived task replaces spawn-per-keystroke debounce. Uses mpsc channel + 300ms deadline map to guarantee exactly one sync per file after typing stops. After syncing, computes and publishes merged (Verter lint + TS type) diagnostics via push. Holds shared `Arc<VerterHost>`, `ProjectSync`, `TypeProvider`, `cached_verter_diags`, and `PositionEncodingKind`.
-2. **Push diagnostics only**: The LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). During typing, no new diagnostics are published — VS Code automatically adjusts existing push diagnostic positions as the document changes. The SyncCoordinator publishes fresh merged diagnostics after 300ms of silence.
-3. **Hang detection** (`tsgo/ipc.rs`): `LspTransport` tracks `consecutive_failures` (AtomicU32). After 3 consecutive request timeouts, fires `crash_notify` to trigger `ResilientTypeProvider`'s existing restart machinery. Notifications use `try_send()` (non-blocking) to prevent channel backpressure.
-
-**Heartbeat watchdog**: The server sends `$/verter/heartbeat` every 5s from `initialized()`. The VS Code extension monitors heartbeats — if none arrive for 30s, it auto-restarts the server. This is the last-resort safety net for runtime starvation.
-
-**Async workspace scanning**: During `initialized()`, the LSP spawns a `WorkspaceScanner` background task instead of scanning synchronously. The scanner walks the filesystem, compiles `.vue` files to TSX, and syncs them to the type provider in priority order:
-
-1. **Tier 0**: Files opened in the editor (signaled by `did_open`)
-2. **Tier 1**: Project source files covered by `tsconfig.json` — siblings of open files first, then expanding outward
-3. **Tier 2**: Remaining `.vue` files not covered by any tsconfig
-
-TSGO sync is throttled (yield every 10 files) to prevent flooding. The scanner receives priority signals from `did_open` to dynamically re-order its queue. This makes `initialized()` return in <1s instead of blocking for the full scan duration.
-
-**Key module**: `crates/verter_lsp/src/workspace_scanner.rs` — `WorkspaceScannerHandle`, `spawn_workspace_scanner()`, priority sorting, throttled sync loop.
-
-### Ownership Lifecycle & Bootstrap Sync
-
-The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snapshot carries an `ownership_ready: bool` flag:
-
-- **Bootstrap** (`ownership_ready: false`): `Engine::new()` eagerly publishes an empty snapshot so basic relative resolution works immediately. Ownership queries return no results. Provider path transforms (`provider_id_for_source`, `provider_ide_id_for_source`) are pure — they work without ownership.
-- **Ready** (`ownership_ready: true`): After `background_init` builds the full project graph, a real snapshot is published. Ownership queries are now authoritative.
-
-**Provider sync state uses typed ownership** (`ProviderOwnerBinding`):
-
-- `Provisional` — file synced before ownership is known (bootstrap).
-- `Owned(String)` — file bound to a real project (tsconfig path or root).
-
-**Readiness-gated sync rules**:
-
-- `ensure_current_file_synced()`: During bootstrap, provisional sync is allowed. With a ready snapshot, only files with a project owner are synced — unowned files are queued in `pending_snapshot_provider_sync` for later drain.
-- `sync_imported_vue_api_lightweight()`: Same rule — provisional sync only during bootstrap.
-- `SyncCoordinator::sync_file()`: Always queues files with no owner for retry. Uses `ownership_ready` for log level (warn vs info).
-
-**Key files**: `crates/verter_workspace/src/published_state.rs` (`PublishedRoot`, `ownership_ready`), `crates/verter_lsp/src/provider_sync.rs` (`ProviderOwnerBinding`, `ProviderSyncState`), `crates/verter_lsp/src/server.rs` (`PublishedResolverSnapshot`, `ensure_current_file_synced`).
-
-### Multi-Root Workspace & Per-Project Configuration
-
-In monorepo / multi-root VS Code workspaces, different packages have different `tsconfig.json` paths aliases, `.verterrc.json` lint rules, and `vite.config` resolve aliases. The LSP stores all workspace folders (`workspace_roots: Mutex<Vec<String>>`) and builds a `ProjectRegistry` that groups per-project configuration.
-
-**Key types** (`crates/verter_lsp/src/config.rs`):
-
-- `ProjectConfig` — per-project: root path, `ResolvedLintConfig`, `Linter` instance, optional `vite_config_path` and `vite_config_deps`
-- `ProjectRegistry` — sorted by root length (longest prefix first), provides `find_project()`, `find_project_root()`, `linter_for()`
-- `RegistryBuildResult` — returned from `from_workspace_roots()`, contains `registry` + `trust_required` list
-
-**Import resolution** (single VFS authority): All LSP import resolution goes through `WorkspaceAccess::resolve_import()` via the VFS `FilesystemWorkspace`. The workspace is created in `initialize()` with an empty project graph (enabling relative/node_modules resolution immediately), then `background_init` populates the full project graph via `set_project_graph()` for alias resolution. The host's internal `project_resolver` (set via `set_internal_resolver()`) is used only for compilation — never for LSP resolution. `preferred_specifier()` provides reverse-alias lookup for auto-imports.
-
-**Tsconfig/vite config discovery** delegates to `verter_workspace::config` — all tsconfig parsing, membership, references, and `raw_paths_json` live in VFS. Fallback projects (no tsconfig) get Vite aliases via two-tier analysis in `vite_config.rs`:
-
-1. **Static analysis** (OXC): Parses `vite.config.{ts,js,mjs,cjs,mts,cts}` without executing code. Handles object/array alias forms, `defineConfig()`, template literals, `path.resolve()`, `new URL()`, `fileURLToPath()`. Returns `Complex` for configs using env vars, dynamic imports, or non-allowlisted packages.
-2. **Trusted execution** (opt-in): For complex configs, spawns Node.js with `loadConfigFromFile` if the file is in `verter.viteConfig.trustedFiles`. Includes env sanitization, 10s timeout, and last-known-good caching.
-
-The server sends `$/verter/viteConfigTrustRequired` notifications for complex configs not yet trusted, and the extension shows a trust prompt. Config file changes (detected via file watcher) trigger a full registry rebuild.
-
-**Type provider integration**: TSGO receives `workspace/didChangeWorkspaceFolders` notifications. tsserver uses per-file `projectRootPath` from the project registry. Both resilient wrappers store workspace folders for restart replay.
-
-**Lock ordering** (prevents deadlocks): `workspace_roots` (async) → `project_registry` (sync read) → release → `fallback_linter` (sync read). Never acquire `fallback_linter` while holding `project_registry`.
-
-### Style Preprocessing in Bundler Mode
-
-Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
-
-**Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
-
-1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
-2. `load()` returns raw style source (e.g., SCSS with `$variables`) from `styleBlockCache`.
-3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
-4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
-5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. This runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
-
-**Non-Vite mode** (preprocessor fallback):
-Style preprocessing goes through `preprocessBlock()` → `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
-
-**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`. This is stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
-
-**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/host_upsert.rs` (`apply_style_overrides` — lang update, non-Vite only), `crates/verter_session/src/id.rs` (`render_ids` — URL generation).
-
-### Cached Directive Fields on ElementNode
-
-The parser extracts structural directives from `el.props` via `prop.take()` and caches them as dedicated fields on `ElementNode` (`ast/types.rs`):
-
-| Field         | Directive                     | In `el.props`? | Notes                                            |
-| ------------- | ----------------------------- | -------------- | ------------------------------------------------ |
-| `v_condition` | `v-if`, `v-else-if`, `v-else` | **No** (taken) | Contains `ElementNodeCondition` with kind + prop |
-| `v_for`       | `v-for`                       | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_slot`      | `v-slot`, `#name`             | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_once`      | `v-once`                      | **No** (taken) | Contains the full `NodeProp`                     |
-| `v_ref`       | `ref`, `:ref`                 | **No** (taken) | Contains the full `NodeProp`                     |
-
-**Consequence**: Code iterating `el.props` will **never see** these directives. Both codegen paths must handle them explicitly. The IDE module removes `v-if/v-for/v-slot/v-once` attributes (they become JSX wrappers/removals) and converts `ref` to JSX expression syntax (`ref={"name"}`).
-
-### Position Encoding (CRITICAL rules)
-
-See `/position-encoding` skill for full span type reference, encoding tables, and path normalization details.
-
-**Encoding source of truth**: The position encoding MUST come from the client capabilities negotiated during `initialize()`. The server stores it in `Arc<parking_lot::RwLock<PositionEncodingKind>>` shared with the SyncCoordinator. Default is UTF-16 (per LSP spec) until negotiated. **Rust-internal code uses UTF-8 byte offsets**; **LSP boundary code converts to negotiated encoding**; **JS/VS Code uses UTF-16**.
-
-**Line/Column Base Rules** (off-by-one bugs):
-
-- **PositionResolver is 1-based** — subtract 1 for source maps and LSP
-- **Source maps, LSP, VS Code are all 0-based**
-- **OXC/verter spans are byte offsets** — no line/column conversion needed
-
-**Serialization rule**: All data crossing serde/MCP/LSP/FFI boundaries MUST use `Span` (SFC-absolute). `RelativeSpan`/`PartialGeneratedSpan`/`GeneratedSpan` do not implement Serialize.
-
-### Path Normalization (CRITICAL rules)
-
-See `/position-encoding` skill for canonical ID format and boundary tables.
-
-1. **Receive → normalize immediately** (`canonicalize_id()` or `uri_to_canonical_id_from_str()`)
-2. **Store only canonical IDs** in all maps and caches
-3. **Denormalize at exit boundaries** (file:// URIs or OS paths)
-4. **Never compare raw paths** — always compare canonical IDs
 
 ## Build
 
@@ -625,125 +164,92 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 
 ### End-of-change Checks
 
-Run these after making changes:
+Run these after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
+cargo test --workspace --verbose 2>&1 | tee /tmp/test-output.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
 
+For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
+
 ### Documentation Updates
 
-After adding, changing, or removing features, check and update relevant documentation:
+After adding, changing, or removing features, update the **owning** documentation:
 
-- **`CLAUDE.md`** — Architecture tables, module paths, key file references
-- **`docs/`** — API docs, guide pages, contributing guides (`docs/contributing/rust-setup.md`, etc.)
-- **`.claude/skills/`** — Skill files referencing affected modules or APIs
+- **Domain skills** (`.claude/skills/`) — update the skill that owns the affected module or API
+- **`CLAUDE.md`** — update only if summaries or skill pointers change
+- **`AGENTS.md`** — update if skill routing or shared sources change
+- **`docs/`** — API docs, guide pages, contributing guides
 - **Inline doc comments** — Public API rustdoc (`///`) and JSDoc (`/** */`) on changed signatures
 
 Skip this for purely internal refactors that don't change any public behavior, module paths, or APIs.
 
 ### Testing Requirements
 
-**MANDATORY RULE — TDD (Test-Driven Development) must be followed for EVERY code change. This is non-negotiable. All agents, subagents, and automated workflows MUST comply. Skipping TDD is never acceptable, regardless of task size or urgency.**
+**MANDATORY: TDD must be followed for EVERY code change. Non-negotiable.**
 
-**TDD workflow (strict order — no exceptions):**
+1. Write failing tests FIRST — verify they fail before implementing
+2. Implement minimum code to pass
+3. Run tests, verify green
+4. Refactor while keeping tests green
 
-1. **Write failing tests FIRST** — before writing ANY implementation code, write one or more tests that demonstrate the expected behavior. Run the tests and **verify they fail**. Do not proceed to step 2 until you have confirmed test failure.
-2. **Implement the minimum code** to make the failing tests pass. Do not write implementation code before tests exist.
-3. **Run the tests again** and verify they pass.
-4. **Refactor** if needed while keeping tests green.
+Coverage: new features need tests, bug fixes need regression tests, refactors must keep existing tests passing.
 
-**Violation examples (DO NOT do these):**
+**Always include negative assertions**: verify both what SHOULD and should NOT be present. Codegen tests must check removed syntax is absent. Type tests must include `@ts-expect-error` guards against `any`/`never`.
 
-- Writing implementation code and then adding tests after the fact
-- Writing tests and implementation simultaneously without verifying the tests fail first
-- Skipping tests for "small" or "trivial" changes
-- Delegating implementation to a subagent without requiring TDD compliance
+**Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
 
-Coverage expectations:
-
-- New features: Add tests covering the new functionality
-- Bug fixes: Add tests that would have caught the bug
-- Refactoring: Ensure existing tests pass and add tests for edge cases discovered
-- Behavioral changes: Add tests verifying the new behavior
-
-Tests serve as documentation of expected behavior and prevent regressions.
-
-**IMPORTANT — Always include negative assertions**:
-
-Every test must verify both what SHOULD be present AND what should NOT be present. A test that only checks for expected output can pass even when the output contains invalid/broken content alongside the expected content.
-
-```rust
-// GOOD: Both positive and negative assertions
-let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
-assert!(result.contains("if(show)"), "should have IIFE if-block condition");  // positive
-assert!(!result.contains("v-if"), "v-if attribute must be removed from JSX"); // negative
-
-// BAD: Only positive assertion — passes even if v-if="show" leaks into output
-let result = gen_tsx_template(r#"<template><div v-if="show">hello</div></template>"#);
-assert!(result.contains("if(show)"), "should have IIFE if-block condition"); // not enough!
-```
-
-For codegen tests: always verify that removed/transformed Vue syntax does NOT appear in output. For type tests: always include both positive assertions and `@ts-expect-error` negative assertions to guard against `any`/`never`.
-
-**IMPORTANT — Rust test file organization**:
-
-When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a sibling `*_tests.rs` file:
-
-```rust
-// In foo.rs — replace the inline mod tests block with:
-#[cfg(test)]
-#[path = "foo_tests.rs"]
-mod foo_tests;
-```
-
-For `mod.rs` files, use the simpler form (loads `tests.rs` from the same directory):
-
-```rust
-#[cfg(test)]
-mod tests;
-```
-
-The extracted file contains the module contents directly (no wrapping `mod tests { }`), starting with `use super::*;`.
-
-See `/testing` skill for full TS/Rust test patterns, sourcemap testing, E2E best practices, and server cleanup.
+See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
 ### VS Code Extension Testing (MANDATORY)
 
-Changes to the VS Code extension (`packages/vue-vscode/`) or the LSP server (`crates/verter_lsp/`) MUST be verified with automated tests, NOT manual testing. LSP changes directly affect extension behavior — hover, completions, diagnostics, etc. Two test tiers exist:
+Changes to the VS Code extension or the LSP server MUST be verified with automated tests, NOT manual testing. Unit tests (Vitest) for pure logic, E2E tests (Mocha) for LSP integration features.
 
-**Unit tests** (Vitest, `*.spec.ts` co-located in `src/`):
+See `/testing` and `/e2e-vscode-testing` skills for commands, fixture design, and helpers API.
 
-- For pure logic: utility functions, response parsing, restart logic, CSS scanning
-- Run: `pnpm vitest --run packages/vue-vscode/src/path/to/file.spec.ts`
+## Agent Implementation Rules
 
-**E2E tests** (Mocha + @vscode/test-cli, `e2e/suite/*.test.ts`):
+### Planning
 
-- For LSP integration: completions, hover, diagnostics, go-to-definition, rename, decorations
-- Single fixture/provider: `E2E_FIXTURE=single-project E2E_TYPE_PROVIDER=tsserver pnpm --filter verter-vscode test:e2e`
-- Full matrix from the repo root: `pnpm run test:e2e`
-- CI runs the same fixture matrix across both `tsserver` and `tsgo`
-- See `.claude/skills/e2e-vscode-testing.md` for fixture design, helpers API, and adding new tests
+Prefer architecturally correct, long-term solutions over easy or quick implementations. Evaluate approaches by correctness and durability, not by implementation speed.
 
-**When to use which:**
+Plans must include these sections:
+1. **Context** — why this change is being made
+2. **Changes** — specific files to modify with concrete modifications
+3. **Legacy Deletions** — explicit list of files, functions, code paths, and feature flags to remove
+4. **Verification** — full workspace test commands and expected outcomes
 
-- New extension utility/parser logic → unit test
-- New/changed LSP feature (hover, completion, diagnostics, definition, rename, decorations) → E2E test
-- `verter_lsp` changes (new handler, changed response format, sync behavior) → E2E test
-- Both if the change spans utility logic + LSP behavior
+Without explicit legacy deletion lists, agents skip deletions and leave dual paths alive.
 
-**Never acceptable:** "Test manually by opening VS Code" as the sole verification step in a plan.
+### Execution
+
+Execute plans fully in one pass without intermediate checkpoints unless explicitly requested. Do not stop mid-plan to ask for confirmation on steps already approved in the plan.
+
+### Self-Review
+
+After completing a plan, review the full implementation before declaring done:
+- Verify all plan steps were executed
+- Check for missed edge cases or incomplete migrations
+- Run the full workspace test suite (see End-of-change Checks above)
+
+### Legacy Code Deletion
+
+When replacing a feature or refactoring a system, delete the superseded code in the same change. Do not add shims, double branches, compatibility wrappers, or feature flags to preserve old behavior alongside new behavior. If unsure whether specific files or code paths should be preserved, ask the user explicitly rather than silently keeping them.
+
+### Fix Quality
+
+When encountering issues during implementation:
+- If the correct fix aligns with the architecture → implement it properly
+- If the fix would be a workaround, patch, or shim → do NOT apply it. Instead: add a `TODO(follow-up)` comment explaining the proper fix needed, note it in the feedback file, and continue with the plan
+- Never apply a dirty fix that contradicts architectural rules just to make tests pass
+- A clean TODO with a follow-up plan is always better than a quick patch that accumulates debt
 
 ### Agent Feedback Capture
 
-During work sessions, agents encounter issues, discover improvement opportunities, and gain insights that may be lost when context is compacted. To preserve these observations, agents MUST continuously log feedback to a per-conversation file.
-
-**Setup** (at session start, when making code changes):
-
-- Create a feedback file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md` where `short-id` is a 6-character identifier (e.g., from the plan name or timestamp)
-- The `.claude/feedback/` directory is gitignored — these files are for human review only
+During work sessions, agents MUST continuously log feedback to a per-conversation file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md`. The `.claude/feedback/` directory is gitignored.
 
 **What to log** — append entries whenever encountering something noteworthy:
 
@@ -752,21 +258,9 @@ During work sessions, agents encounter issues, discover improvement opportunitie
 - `[debt]` — things that work but could be better
 - `[docs]` — missing or outdated documentation discovered
 
-**Format**:
+**Format**: `- [{category}] \`{file_path}\` — Brief description`
 
-```markdown
-## {date}
-
-- [{category}] `{file_path}:{line}` — Brief description of the observation
-- [{category}] `{file_path}` — Another observation
-```
-
-**Rules**:
-
-- Append continuously as you work — do not wait for context compaction
-- When delegating to subagents, pass the feedback file path in the prompt and instruct them to append their observations
-- This is best-effort — do not let feedback capture slow down actual work
-- One feedback file per conversation session
+When delegating to subagents, pass the feedback file path and instruct them to append observations. One feedback file per conversation session.
 
 ## Dependencies Policy
 
@@ -826,11 +320,16 @@ See [docs/contributing/ci-cd.md](docs/contributing/ci-cd.md) for detailed CI/CD 
 
 Detailed reference material is available as on-demand skills (loaded automatically when relevant):
 
-| Skill                  | Use When                                                                                                 |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/architecture`        | Working on any specific module, need key files, type tables, LSP features, plugin system, analysis types |
-| `/position-encoding`   | Working with spans, positions, coordinate conversions, path normalization details                        |
-| `/build-and-profiling` | Debugging build order, rebuild sequences, profiling, MCP server setup                                    |
-| `/testing`             | Writing tests, test patterns, sourcemap testing, E2E workflow, server cleanup                            |
-| `/wsl-e2e-testing`     | Running E2E tests in WSL to reproduce Linux/CI failures, fixture matrix, acceptance criteria             |
-| `/rust-performance`    | Optimizing Rust code, allocation patterns, batch operations, CodeTransform API                           |
+| Skill                  | Use When                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `/type-resolution`     | Type solver, cross-file types, ShallowFileState, frontier engine, cache rules, macro traversal   |
+| `/component-meta`      | Component metadata extraction, native/compat boundary, fallthrough, root inheritance             |
+| `/compiler-codegen`    | Template codegen (VDOM/IDE), CodeTransform, cached directives, strict slots, style preprocessing |
+| `/host-session`        | TypeProvider (TSGO/tsserver), workspace management, async scheduler, LSP host integration        |
+| `/architecture`        | High-level module map, TS packages, plugin system, CSS analysis, MCP server, analysis types      |
+| `/position-encoding`   | Span types, position encoding, coordinate conversions, path normalization                        |
+| `/build-and-profiling` | Build order, rebuild sequences, profiling, MCP server setup                                      |
+| `/testing`             | Test patterns, TDD workflow, sourcemap testing, server cleanup                                   |
+| `/e2e-vscode-testing`  | VS Code E2E test fixtures, helpers API, adding new tests                                         |
+| `/wsl-e2e-testing`     | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
+| `/rust-performance`    | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |

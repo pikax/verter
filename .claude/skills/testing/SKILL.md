@@ -1,9 +1,11 @@
 ---
 name: testing
-description: "Testing patterns, TDD workflow, TypeScript and Rust test conventions, sourcemap testing, E2E best practices, server cleanup for Verter"
+description: "Testing patterns, TDD workflow, TypeScript and Rust test conventions, sourcemap testing, and test execution hygiene for Verter"
 ---
 
 # Testing Patterns & Conventions
+
+For VS Code extension E2E fixtures, helpers API, and warm-session rules, see `/e2e-vscode-testing`.
 
 ## Server Cleanup
 
@@ -107,33 +109,17 @@ The extracted file contains the module contents directly — `use super::*;`, he
 
 1. Write failing tests first
 2. Implement the minimum code to pass
-3. Run `cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings && cargo fmt --all`
-4. Run `cargo test --package verter_compiler --lib`
+3. Run the relevant tests and verify they pass
+4. Refactor while keeping tests green
 
-### Arena-Based Template AST
+### End-of-change Checks
 
-The parser builds a flat `Vec<AstNode>` arena with O(1) navigation:
+After the TDD loop, run the full verification pass:
 
-```rust
-pub struct TemplateAst {
-    nodes: Vec<AstNode>,        // flat arena
-    root: RootNodeTemplate,
-}
-
-pub struct AstNode {
-    kind: AstNodeKind,          // Element | Text | Comment | Interpolation
-    parent: Option<NodeId>,     // O(1) parent lookup
-    index_in_parent: usize,     // O(1) sibling lookup
-}
-```
-
-`ElementNode` pre-computes metadata during parsing to avoid re-scanning in codegen:
-
-- `tag_type`: Element / Component / SlotOutlet / Template
-- `prop_flag`: Bitset of prop characteristics (has class, style, spread, etc.)
-- `children_flag`: Bitset of children characteristics (has text, elements, v-if, etc.)
-- `children_mode`: Enum for codegen branching (Empty, TextOnly, SingleElement, Mixed, etc.)
-- Cached directives: `v_condition`, `v_for`, `v_slot`, `v_once`, `v_ref`
+1. `cargo test --workspace --verbose` (always workspace-wide, never just the modified crate)
+2. `cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings`
+3. `cargo fmt --all`
+4. `pnpm test` for TypeScript changes
 
 ### Test Validation Pattern
 
@@ -146,60 +132,6 @@ let tpl = result.template.unwrap();
 let parsed = oxc_parser::Parser::new(&alloc, &tpl.code, source_type).parse();
 assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl.code);
 ```
-
-### Adding a New TS Plugin
-
-1. Create plugin file in `packages/core/src/v5/process/script/plugins/`
-2. Implement `ScriptPlugin` interface using `definePlugin`
-3. Register in `packages/core/src/v5/process/script/plugins/index.ts`
-4. Add tests
-
-### Frontier Engine Tests (`crates/verter_session/src/frontier_tests.rs`)
-
-26 behavioral invariant tests for `ExternalTypeFrontier` and `ShallowTypeFileState`. Uses `MockHost` (in-memory `FrontierHost` impl) for isolated testing. Covers: diamond dedup, barrel ordering (declared-order wildcard precedence), same-file local closure, cycle termination, warm cache reuse, budget enforcement, export routing (direct > alias > wildcard), and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.
-
-### Component-Meta Chronic Hang Sweep
-
-Use the repository-owned `nuxt-ui` benchmark path when touching `component-meta` expansion, imported-type traversal, or runtime-value collection hot paths.
-
-Quick smoke test:
-
-```bash
-cargo build --package verter_napi
-cp target/debug/verter_napi.dll packages/native/dist/verter-native.win32-x64-msvc.node
-cd packages/benchmark
-node --expose-gc --import tsx -e "
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
-import { loadVerterCompatModule } from './src/verter-compat.js';
-const uiRoot = resolve('../../.integration-tests/repos/nuxt-ui');
-const file = resolve(uiRoot, 'src/runtime/components/ContextMenuContent.vue').replace(/\\\\/g, '/');
-const compat = await loadVerterCompatModule();
-const checker = await compat.createCheckerByJson(uiRoot.replace(/\\\\/g, '/'), {
-  compilerOptions: { strict: true, jsx: 'preserve' },
-}, { forceUseTs: true, runtimeMode: 'dedicated', typeExpansionBackend: 'verter' });
-checker.updateFile(file, readFileSync(file.replace(/\\//g, '\\\\'), 'utf-8'));
-const t0 = performance.now();
-const meta = await checker.getComponentMeta(file);
-console.log(Math.round(performance.now() - t0) + 'ms', meta?.props?.length + ' props');
-checker.close();
-"
-```
-
-Full sweep:
-
-```bash
-cd packages/benchmark
-for comp in ContextMenuContent DatePicker Dialog DrawerContent HoverCard \
-  HoverCardContent Menubar MenubarContent NavigationMenuContent PopoverContent \
-  SelectContent Sheet SheetContent SlideoverContent StepperContent TabsContent \
-  Toast TooltipContent; do
-  echo -n "$comp: "
-  node --expose-gc --import tsx src/_trace-component.ts "$comp"
-done
-```
-
-`src/_trace-component.ts` resolves benchmark component tokens to the owning Vue file, including content-style aliases such as `DrawerContent -> Drawer.vue` and `Dialog -> Modal.vue`. The acceptance target is no hangs and sub-10s completion per component.
 
 ### Testing Strategy
 

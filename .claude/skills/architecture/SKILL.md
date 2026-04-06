@@ -1,9 +1,11 @@
 ---
 name: architecture
-description: "Verter codebase architecture: Rust compiler modules, TypeScript packages, plugin system, LSP features, CSS analysis, MCP server, analysis types, key files index"
+description: "Verter codebase architecture: high-level module map, TypeScript packages, plugin system, CSS analysis, MCP server, static analysis types"
 ---
 
 # Verter Architecture Reference
+
+For domain-specific detail, see: `/type-resolution`, `/component-meta`, `/compiler-codegen`, `/host-session`.
 
 ## Shared Substrate Principle
 
@@ -29,6 +31,13 @@ When a bug or slowdown shows up in one product surface, prefer fixing it in the 
 | **`verter-vscode`**             | VS Code extension. Launches Rust `verter-lsp` binary over stdio, bundles TS plugin, handles extension activation                                                                   | `src/extension.ts` |
 | **`@verter/unplugin`**          | Universal bundler plugin (Vite, Rollup, webpack, esbuild, rspack, Rolldown, Farm). Compiles `.vue` files via `@verter/native`. Supports `preCompile` for build-start cache warming | `src/index.ts`     |
 | **`@verter/oxc-bindings`**      | Helper for downloading platform-specific OXC parser binaries                                                                                                                       | `src/index.ts`     |
+
+### Adding a New TS Plugin
+
+1. Create plugin file in `packages/core/src/v5/process/script/plugins/`
+2. Implement `ScriptPlugin` interface using `definePlugin`
+3. Register in `packages/core/src/v5/process/script/plugins/index.ts`
+4. Add tests
 
 ## Unplugin Configuration (`packages/unplugin/`)
 
@@ -124,97 +133,6 @@ export const MyPlugin = definePlugin({
 - `ParsedBlockScript`, `ParsedBlockTemplate` - Block-specific parsed data
 - `ScriptItem`, `ScriptTypes` - Categorized script AST items
 
-## Language Server Architecture (`crates/verter_lsp/src/`)
-
-The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Code over stdio.
-
-```
-main.rs (stdio transport + CLI args + provider selection)
-    ↓
-server.rs (LSP message loop, request dispatch)
-    ↓
-documents/       → Document tracking and synchronization
-features/        → LSP feature handlers (see table below)
-analysis/        → Static analysis integration
-css/             → CSS-specific language features
-tsgo/            → TSGO type provider integration (LSP protocol)
-tsserver/        → tsserver type provider integration (JSON protocol)
-capabilities.rs  → Server capability registration
-config.rs        → Server configuration, ProjectConfig, ProjectRegistry, vite alias discovery
-workspace_scanner.rs → Async priority-based workspace file scanner
-sync_coordinator.rs  → Debounced type provider sync during typing
-```
-
-### Per-Project Configuration (`config.rs`)
-
-`ProjectRegistry` groups per-project config for multi-root workspaces. Each `ProjectConfig` has: root path, `TsConfigPathResolver`, `ResolvedLintConfig`, `Linter` instance, and optional `vite_config_path`/`vite_config_deps`. Tsconfig-backed projects use only tsconfig paths; fallback projects get Vite aliases via OXC static analysis (`vite_config.rs`) or trusted Node.js execution.
-
-### TypeProvider Trait (`tsgo/traits.rs`)
-
-Both TSGO and tsserver implement the `TypeProvider` trait (14+ methods: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown). The trait is object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
-
-### TSGO Module (`tsgo/`)
-
-| File              | Purpose                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------------- |
-| `ipc.rs`          | LSP client: Content-Length framing, JSON-RPC request/response correlation                      |
-| `traits.rs`       | `TypeProvider` trait definition + `TypeProviderError`                                          |
-| `protocol.rs`     | Response types: `CompletionResult`, `HoverInfo`, `TypeDiagnostic`, etc.                        |
-| `resilient.rs`    | `ResilientTypeProvider`: crash detection via `Notify`, auto-restart (max 3), file cache replay |
-| `project_sync.rs` | `ProjectSync`: batches `open_tsx`/`sync_tsx`/`close_tsx` calls to the provider                 |
-| `merge.rs`        | Merges TSGO diagnostics/completions with verter's own results                                  |
-| `mock.rs`         | Mock provider for integration tests                                                            |
-
-### tsserver Module (`tsserver/`)
-
-| File           | Purpose                                                                                                                                           |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mod.rs`       | `find_tsserver()` (tsdk → workspace → global), `find_node()`, `detect_ts_major_version()`                                                         |
-| `ipc.rs`       | `TsserverTypeProvider`: newline-delimited JSON transport, position conversion (byte offset ↔ 1-based line/offset), all 14+ `TypeProvider` methods |
-| `resilient.rs` | `ResilientTsserverProvider`: same crash/restart pattern as TSGO resilient wrapper                                                                 |
-
-### Provider Selection (`main.rs`)
-
-CLI arg `--type-provider=auto|tsgo|tsserver|off` (from VS Code `verter.typeProvider` setting):
-
-- **auto**: detect TS version in node_modules — TS 5.x/6.x → tsserver + recommend TSGO; else try TSGO
-- **tsgo/tsserver**: explicit, no fallback
-- **off**: verter-only mode
-
-Only one provider runs at a time. Provider PID is sent to the extension via `$/verter/typeProviderStarted` notification for orphan cleanup.
-
-**LSP features** (`features/`):
-
-| Module               | LSP Method                          | Description                                                              |
-| -------------------- | ----------------------------------- | ------------------------------------------------------------------------ |
-| `completion`         | `textDocument/completion`           | Auto-completions (components, props, CSS classes)                        |
-| `definition`         | `textDocument/definition`           | Go-to-definition: bindings, imports, CSS ↔ template, DOM query selectors |
-| `hover`              | `textDocument/hover`                | Hover info: types, CSS rules on elements, elements on selectors          |
-| `diagnostics`        | `textDocument/publishDiagnostics`   | Script/template diagnostics                                              |
-| `css_diagnostics`    | (custom)                            | Unused scoped CSS hints, cross-file cascade detection                    |
-| `inlay_hints`        | `textDocument/inlayHint`            | DOM query → matched element, `useTemplateRef` → matched ref              |
-| `folding_range`      | `textDocument/foldingRange`         | SFC block + template element folding                                     |
-| `linked_editing`     | `textDocument/linkedEditingRange`   | Rename matching open/close HTML tags                                     |
-| `rename`             | `textDocument/rename`               | Symbol renaming                                                          |
-| `references`         | `textDocument/references`           | Find all references                                                      |
-| `document_symbol`    | `textDocument/documentSymbol`       | Document outline                                                         |
-| `document_highlight` | `textDocument/documentHighlight`    | Highlight same symbols                                                   |
-| `code_lens`          | `textDocument/codeLens`             | Code lens annotations                                                    |
-| `color_info`         | `textDocument/documentColor`        | CSS color picker                                                         |
-| `formatting`         | `textDocument/formatting`           | Document formatting                                                      |
-| `organize_imports`   | `source.organizeImports`            | Import organization                                                      |
-| `extract_component`  | (code action)                       | Extract selection to new component                                       |
-| `call_hierarchy`     | `textDocument/prepareCallHierarchy` | Call hierarchy navigation                                                |
-| `workspace_symbol`   | `workspace/symbol`                  | Project-wide symbol search                                               |
-| `document_link`      | `textDocument/documentLink`         | Clickable links in source                                                |
-| `document_drop_edit` | `textDocument/onDropEdit`           | Drag-and-drop editing                                                    |
-
-### LSP Feature Flow
-
-```
-Request (stdio) → server.rs → Find document in host cache → Feature handler → Response (stdio)
-```
-
 ## CSS Analysis & Selector Matching (`crates/verter_semantic/src/analysis/`)
 
 CSS analysis uses a lightweight byte-level scanner (no external CSS parser dependency). The scanner extracts selectors, classes, IDs, custom properties, and at-rules from `<style>` blocks.
@@ -261,224 +179,9 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 
 **Position encoding for CSS spans**: `CssAnalysis` spans (classes, IDs, selectors) are **SFC-absolute byte offsets**. The CSS scanner produces content-relative offsets internally, then `CssAnalysis::make_spans_absolute(content_offset)` is called at the host level (after optional SCSS remap) to convert all spans to SFC-absolute. Consumers use spans directly without adding any offset. `StyleBlockAnalysis.content_offset` is retained for documentation and slice operations.
 
-## Rust Compiler Architecture (`crates/verter_compiler/src/`)
-
-The Rust compiler uses an AST-based pipeline. The `compile()` orchestrator drives a linear 5-phase pipeline:
-
-```
-Vue SFC Source
-    ↓
-[Tokenizer]  byte-level SFC tokenization (tokenizer/byte.rs)
-    ↓
-[Parser]     builds arena-based template AST + extracts script/style blocks (parser/)
-    ↓
-[Style]      v-bind() scan + CSS processing (style/ + css/)
-    ↓
-[Script]     macro expansion, binding extraction, component wrapper (script/)
-    ↓
-[Template]   render function codegen — VDOM or Vapor backends (template/)
-    ↓
-[Compile]    orchestrates the above, applies CodeTransform, emits output (compile.rs)
-```
-
-**Module overview:**
-
-```
-compile.rs                # Pipeline orchestrator, options, result types
-tokenizer/
-├── byte.rs               # Zero-copy byte-level SFC tokenizer (production)
-├── helpers.rs            # Tokenizer utility functions
-└── types.rs              # Event, QuoteType
-parser/
-├── mod.rs                # Syntax state machine (tokenizer events → AST)
-└── types.rs              # RootNodeScript, RootNodeStyle, RootNodeTemplate
-ast/
-├── mod.rs                # TemplateAst (flat arena with O(1) navigation)
-├── builder.rs            # TemplateAstBuilder (incremental AST construction)
-└── types.rs              # AstNode, ElementNode, NodeId, pre-computed flags
-script/
-├── mod.rs                # generate_script() entry point
-├── process.rs            # Script setup processing, companion script merging
-├── macros.rs             # defineProps/Emits/Model/Slots/Expose/Options
-└── css_vars.rs           # _useCssVars() injection for v-bind() in styles
-template/
-├── oxc/                  # OXC expression parsing for template bindings
-│   ├── mod.rs            # parse_template_expressions()
-│   └── types.rs          # OxcParsedAst, OxcParsedElement, OxcParsedExpression
-└── code_gen/             # Render function codegen
-    ├── mod.rs            # generate_template() entry point
-    ├── walker.rs         # DFS tree walker (shared by all backends)
-    ├── types.rs          # TemplateCodeGen trait, CodeGenOutput
-    ├── binding.rs        # BindingResolver (_ctx./$setup. prefix resolution)
-    ├── shared/           # Shared codegen helpers
-    ├── vdom/             # VDOM render function output (_createElementVNode, etc.)
-    └── vapor/            # Vapor mode output (_template, _renderEffect, etc.)
-ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type checking)
-├── mod.rs                # generate_ide_template() — Vue template → valid JSX; IdeScriptOptions, IdeTemplateOptions
-├── script.rs             # generate_ide_script() — script block → TS or JS+JSDoc wrapper
-├── condition.rs          # v-if/v-else-if/v-else condition chain codegen
-└── template/
-    ├── mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
-    ├── directives.rs     # v-if → ternary, v-for → .map(), v-show → style
-    └── props.rs          # :prop → prop={}, @event → onEvent={}, v-bind spread
-style/
-├── mod.rs                # generate_style() entry point
-└── v_bind.rs             # v-bind() scanning in CSS
-css/
-├── mod.rs                # process_style() — CSS pipeline entry point
-├── prepass.rs            # Vue syntax → valid CSS markers (v-bind, :deep, :slotted)
-├── scoped.rs             # Scoped CSS: insert [data-v-xxx] selectors
-├── modules.rs            # CSS Modules: hash class names
-├── walk.rs               # String-level CSS selector walking
-└── types.rs              # ProcessStyleOptions, ProcessStyleResult
-code_transform/
-├── code_transform.rs     # Chunk-based deferred mutation engine (MagicString equivalent)
-├── chunk.rs              # Chunk types (Original, Overwritten, Inserted, InsertedMapped)
-└── source_map.rs         # Source map generation from chunk positions
-utils/
-├── oxc/                  # OXC parser utilities
-│   ├── bindings/         # Expression binding extraction
-│   └── vue/              # Vue-specific OXC helpers (macros, type resolution, v-for, v-slot)
-└── vue/                  # Vue runtime helpers (tag detection, patch flags)
-```
-
-### Arena-Based Template AST
-
-The parser builds a flat `Vec<AstNode>` arena with O(1) navigation:
-
-```rust
-pub struct TemplateAst {
-    nodes: Vec<AstNode>,        // flat arena
-    root: RootNodeTemplate,
-}
-
-pub struct AstNode {
-    kind: AstNodeKind,          // Element | Text | Comment | Interpolation
-    parent: Option<NodeId>,     // O(1) parent lookup
-    index_in_parent: usize,     // O(1) sibling lookup
-}
-```
-
-`ElementNode` pre-computes metadata during parsing to avoid re-scanning in codegen:
-
-- `tag_type`: Element / Component / SlotOutlet / Template
-- `prop_flag`: Bitset of prop characteristics (has class, style, spread, etc.)
-- `children_flag`: Bitset of children characteristics (has text, elements, v-if, etc.)
-- `children_mode`: Enum for codegen branching (Empty, TextOnly, SingleElement, Mixed, etc.)
-- Cached directives: `v_condition`, `v_for`, `v_slot`, `v_once`, `v_ref`
-
-### CodeTransform (Deferred Mutations)
-
-All codegen phases use `CodeTransform` — a chunk-based deferred mutation engine:
-
-```rust
-let mut ct = CodeTransform::new(input, &allocator);
-ct.overwrite(start, end, replacement);  // deferred
-ct.prepend_left(pos, content);          // deferred
-let output = ct.build_string();         // single-pass concatenation
-```
-
-Key features:
-
-- `cursor_hint`: Accelerates forward-progressing access patterns to amortized O(1)
-- `output_delta`: Incremental length tracking avoids full scan
-- Pre-allocated chunk capacity: `source_len / 13` (empirically tuned)
-
-### Binding Metadata Flow
-
-1. `script/process.rs` parses `<script setup>` → walks AST → classifies bindings as `BindingType` (SetupConst, SetupRef, Props, etc.)
-2. Bindings passed to `template/code_gen/` via `generate_template()` parameter
-3. `BindingResolver` determines correct accessor prefix (`_ctx.`, `$setup.`, `__props.`) and suffix (`.value` for refs)
-4. Binding patches accumulated in `CodeGenOutput`, batch-applied to `CodeTransform`
-
-### Template Codegen Backends
-
-Three backends implement the `TemplateCodeGen` trait, called by `walker::walk_template()` in DFS order:
-
-- **VDOM** (`vdom/`): In-place source overwrites producing `_createElementVNode()` calls
-- **Vapor** (`vapor/`): Replaces entire template block with direct DOM manipulation code
-
-### CSS Processing Pipeline
-
-```
-Style block content
-    ↓ style/v_bind.rs     — scan v-bind() expressions
-    ↓ css/prepass.rs       — replace Vue syntax with CSS markers
-    ↓ lightningcss         — parse + normalize CSS
-    ↓ css/modules.rs       — hash class names (CSS Modules)
-    ↓ css/scoped.rs        — insert [data-v-xxx] attribute selectors
-```
-
-### Cross-File Type Resolution
-
-External types for macros like `defineProps<ExternalType>()` are pre-resolved by the host:
-
-1. Host detects type dependencies from imports
-2. Host resolves types from its file store
-3. Host passes resolved types via `VerterCompileOptions::external_types`
-4. `script/process.rs` merges external types with companion `<script>` types
-
-The Rust compiler never does file I/O — all external resolution is the host's responsibility.
-
-**Shallow file state and frontier engine:** `ShallowFileState` (authoritative shallow symbol/export surface per imported file, keyed by `(canonical_id, whole_hash)`) and `ExternalTypeFrontier` (single BFS engine for cross-file type deepening, level-by-level with dedup and export routing) are the shared cross-file resolution primitives. Local closure runs same-file deps iteratively without crossing import boundaries. Three budget domains (local_closure=500, frontier=2000, builder=5000) act as safety rails with structured failure. The frontier backs shared shallow-state reuse, merge-root traversal, and final external-type body production via `SessionSolverHost` and the native type solver. See `resolver_core/shallow_file_state.rs`, `resolver_core/external_type_frontier.rs`, `resolver_core/solver_host.rs`, and `host_resolve.rs` (`HostFrontierAdapter`).
-
-**Type solver integration:** All type expansion (macro types, component-meta, imported type aliases) goes through the native `type_solver::solve::solve_type()` pipeline. The old lightweight evaluator (`evaluate_with_lookup`, `EvalLookup` trait, `evaluate_inner`) has been fully removed from `type_eval.rs`. That module now contains only symbol table types (`TypeDeclInfo`, `EvalEnv`, `ValueDeclInfo`, `FunctionSignature`, `EvalLimits`) and a convenience `evaluate()` function that delegates to the solver via `EvalEnvSolverHost`. Expansion functions (`expand_object_shape`, `expand_normalized_expr` in `type_expand/mod.rs`) take `&dyn TypeSolverHost` and delegate to `solve_type()`. The old `ExpansionBudget` type and budget-retry logic have been removed -- the solver uses its own `SolveLimits`.
-
-**Imported eval trait hierarchy:** The old 4-level trait hierarchy (`ImportedEvalSourceMerge` -> `ImportedEvalCollector` -> `ImportedEvalOwner` -> `ImportedEvalOwnerContext`) and the separate `ImportedEvalLookup` / `ImportedEvalLookupResolver` / `ImportedDeclEvalResolver` traits have been deleted. The hierarchy is now a single `ImportedEvalResolver: DeclarationMetadataResolver` trait in `resolver_core/imported_eval_collect.rs`, with `HostImportedEvalResolver` as the production implementation.
-
-**Resolver ownership rule:** host-backed component-meta and analysis must share one cross-file resolver. Do not build separate resolver logic for script-setup macros, Options API metadata, compat wrappers, or consumer-specific adapters.
-
-**Resolver modes:**
-
-- `Type` mode: resolve the requested symbol and its canonical source location only. This is for tracking identity and navigation, not shape expansion.
-- `Expanded` mode: use the same traversal and the same caches, then materialize the expanded shape / expanded text for metadata consumers.
-
-**Component-meta rule:** all metadata-producing macro and Options API surfaces must go through the shared resolver in `Expanded` mode. That includes props, emits, slots, data, computed, and expose-style members.
-
-**Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
-
-**Caching rule:** when parsing a `.ts` / `.js` / declaration file for type resolution, cache discovered symbol name → canonical location mappings. Cache direct re-exports, barrelled exports, and any discovered `export *` hops as well, because repeated wildcard-barrel scanning is expensive.
-
-**Component-meta cache rule:** when changing `verter_session`, `verter_session::resolver_core`, `verter_semantic`, or `packages/component-meta` type paths, use cached lookup/eval state as the only source of truth after the cache-owning pass. Do not rewalk AST/source as a fallback to recover or expand types.
-
-**Component-meta publication rule:** keep registry publication shallow and demand-driven. Publish and expand only the symbols required by the active metadata query; do not eagerly materialize unrelated owner-local or package-local helpers.
-
-**Component-meta target-selection rule:** keep runtime/declaration companion selection shallow. Canonicalization may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to choose a target file.
-
-**Component-meta imported-state rule:** after shallow imported dependency seeding, resolver stages must consume only the imported dependency cache for imported file snapshots/envs/analysis. Do not bounce from alias or registry hydration back into raw snapshot/source builders for imported files.
-
-**Component-meta deepening rule:** resolve one requested symbol/query path at a time. Do not let a file-level resolver widen into unrelated sibling symbols/files while chasing a single metadata request.
-
-**Component-meta projection rule:** when projecting metadata/fallthrough from an already-resolved query, reuse that resolved state plus the captured store/session view. Do not bounce back out to a fresh top-level fallthrough/meta query.
-
-**Component-meta collection rule:** imported-eval collection must stay lazy/BFS over the active symbol route. Do not add eager collector modes or source-text reparsing fallbacks in shared resolver code.
-
-## CompileTarget (Selective Pipeline)
-
-`CompileTarget` (bitflags in `verter_compiler::compile::types`) controls which compilation steps run:
-
-| Flag            | Controls                                             | Used By           |
-| --------------- | ---------------------------------------------------- | ----------------- |
-| `STYLE`         | Style codegen (CSS scoping, modules, v-bind)         | Bundler           |
-| `SCRIPT`        | Script codegen (macro expansion, binding extraction) | Bundler, Analysis |
-| `TEMPLATE`      | Template VDOM/Vapor render function codegen          | Bundler           |
-| `TSX`           | TSX template codegen for type checking               | LSP/IDE           |
-| `TSC`           | TSC declaration file generation                      | TSC               |
-| `TEMPLATE_DATA` | Template data extraction (binding occurrences)       | LSP, Analysis     |
-
-**Presets:**
-
-| Preset     | Flags                         | Consumer                    |
-| ---------- | ----------------------------- | --------------------------- |
-| `BUNDLER`  | `STYLE \| SCRIPT \| TEMPLATE` | `@verter/unplugin`, default |
-| `IDE`      | `TSX`                         | LSP, TSGO                   |
-| `ANALYSIS` | `SCRIPT \| TEMPLATE_DATA`     | MCP analysis                |
-
-**Key API**: `VerterHost::ensure_compiled(canonical_id, profile)` compiles with the given profile's target. Used by LSP and MCP to populate the cache. `get_virtual_file()` still exists for retrieving specific virtual file outputs.
-
 ## Analysis MCP Server (`verter_mcp`)
 
-The `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP. It provides 33 tools for AI agents.
+The `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP. It provides tools for AI agents.
 
 ### Key Architecture
 
@@ -612,73 +315,3 @@ verter_session (conversion layer)
     v
 Consumers (LSP, build, linter) query snapshots + ProjectIndex
 ```
-
-## Key Files
-
-| File                                                                                        | Purpose                                                                |
-| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `packages/core/src/v5/parser/parser.ts`                                                     | Main SFC parser entry                                                  |
-| `packages/core/src/v5/process/script/script.ts`                                             | Script processing orchestration                                        |
-| `packages/core/src/v5/process/script/types.ts`                                              | `definePlugin`, `ScriptContext`, `ScriptPlugin`                        |
-| `packages/core/src/v5/process/script/plugins/macros/macros.ts`                              | Vue macro transformations                                              |
-| `crates/verter_lsp/src/main.rs`                                                             | LSP binary entry point (stdio transport, CLI args, provider selection) |
-| `crates/verter_lsp/src/server.rs`                                                           | LSP message loop, request dispatch, feature routing                    |
-| `crates/verter_mcp/src/main.rs`                                                             | MCP binary entry point (stdio + HTTP transport)                        |
-| `crates/verter_mcp/src/server.rs`                                                           | MCP tool router: 33 tools for analysis, diagnostics, scoring           |
-| `crates/verter_mcp/src/tools/scoring.rs`                                                    | Quality/a11y scoring engine (0-100 composite scores)                   |
-| `packages/types/src/helpers/helpers.ts`                                                     | Core type utilities                                                    |
-| `crates/verter_compiler/src/compile.rs`                                                         | Pipeline orchestrator (tokenize → parse → style → script → template)   |
-| `crates/verter_compiler/src/parser/mod.rs`                                                      | SFC parser: tokenizer events → root nodes + template AST               |
-| `crates/verter_compiler/src/ast/types.rs`                                                       | AstNode, ElementNode, NodeId, PropFlags                                |
-| `crates/verter_compiler/src/script/macros.rs`                                                   | defineProps/Emits/Model/Slots/Expose/Options                           |
-| `crates/verter_compiler/src/script/process.rs`                                                  | Script setup processing, companion script merging                      |
-| `crates/verter_compiler/src/template/code_gen/mod.rs`                                           | Template codegen entry point                                           |
-| `crates/verter_compiler/src/template/code_gen/walker.rs`                                        | DFS tree walker (shared by VDOM/Vapor backends)                        |
-| `crates/verter_compiler/src/template/code_gen/binding.rs`                                       | BindingResolver (\_ctx./$setup. prefix resolution)                     |
-| `crates/verter_compiler/src/template/code_gen/vdom/`                                            | VDOM render function codegen                                           |
-| `crates/verter_compiler/src/template/code_gen/vapor/`                                           | Vapor mode codegen                                                     |
-| `crates/verter_compiler/src/ide/mod.rs`                                                         | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs)                |
-| `crates/verter_compiler/src/ide/script.rs`                                                      | IDE script codegen: TS annotations or JSDoc equivalents                |
-| `crates/verter_compiler/src/ide/template/mod.rs`                                                | IDE template codegen: Vue → JSX (used by LSP/TSGO)                     |
-| `crates/verter_compiler/src/ide/template/directives.rs`                                         | IDE: v-if → ternary, v-for → .map(), v-show → style                    |
-| `crates/verter_compiler/src/ide/template/props.rs`                                              | IDE: :prop → prop={}, @event → onEvent={}                              |
-| `crates/verter_compiler/src/ide/template/mod.rs` (`StrictSlotEntry`, `emit_strict_slot_checks`) | IDE: strict slot children type checking (`strictRenderSlot` calls)     |
-| `crates/verter_compiler/src/css/`                                                               | CSS preprocessing and style transformation                             |
-| `crates/verter_compiler/src/code_transform/code_transform.rs`                                   | Chunk-based deferred mutation engine                                   |
-| `crates/verter_semantic/src/lib.rs`                                                         | Semantic crate entry: queries, analysis, extractors                   |
-| `crates/verter_semantic/src/analysis/style.rs`                                              | CSS scanner, selector parser, specificity computation                  |
-| `crates/verter_semantic/src/analysis/selector_match.rs`                                     | Three-valued CSS selector matching against template elements           |
-| `crates/verter_semantic/src/analysis/template.rs`                                           | Template element analysis, component usage, dynamic class extraction   |
-| `crates/verter_scheduler/src/scheduler.rs`                                                  | Scheduler: DashMap of FileNodes, driver loop, stage dispatch           |
-| `crates/verter_scheduler/src/node.rs`                                                       | FileNode: ArcSwap snapshots, generation counter, pending requests      |
-| `crates/verter_scheduler/src/executor.rs`                                                   | StageExecutor trait: host plugs in parse/analysis/compile              |
-| `crates/verter_scheduler/src/edges.rs`                                                      | EdgeManager: ReverseIndex + BlockerRegistry (DashMap-sharded)          |
-| `crates/verter_scheduler/src/queue.rs`                                                      | JobIndex: priority queue with aging, dedup, cancel                     |
-| `crates/verter_semantic/src/analysis/type_eval.rs`                                           | Symbol tables (TypeDeclInfo, EvalEnv, ValueDeclInfo); evaluate() delegates to solver |
-| `crates/verter_semantic/src/analysis/type_solver/`                                           | Native type solver: arena, solve, relate, lower, project, builtin, host, recursion   |
-| `crates/verter_semantic/src/analysis/type_solver/host.rs`                                    | TypeSolverHost trait, EvalEnvSolverHost (standalone solver from EvalEnv)             |
-| `crates/verter_semantic/src/analysis/type_expand/mod.rs`                                     | expand_object_shape, expand_normalized_expr (delegate to solver)                     |
-| `crates/verter_session/src/resolver_core/shallow_file_state.rs`                                | ShallowFileState, ExportTarget, ResolutionBudgets, local_closure()     |
-| `crates/verter_session/src/resolver_core/external_type_frontier.rs`                            | ExternalTypeFrontier, FrontierHost trait, BFS cross-file type deepen   |
-| `crates/verter_session/src/resolver_core/solver_host.rs`                                       | SessionSolverHost (bridges host caches to solver for cross-file types) |
-| `crates/verter_session/src/resolver_core/component_meta_query_engine.rs`                       | ComponentMetaQueryEngine: request-scoped shared engine + scoped cache  |
-| `crates/verter_session/src/resolver_core/type_expansion_verter.rs`                             | resolved_macro_to_expansion_via_solver (component-meta integration)    |
-| `crates/verter_session/src/resolver_core/imported_eval_collect.rs`                             | ImportedEvalResolver trait (single flattened trait for imported eval)   |
-| `crates/verter_session/src/host_resolve.rs`                                                    | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |
-| `crates/verter_session/src/frontier_tests.rs`                                                  | 26 behavioral invariant tests for frontier engine                      |
-| `crates/verter_session/src/lib.rs`                                                             | Host entry: compile, cache, upsert, dependency tracking                |
-| `crates/verter_session/src/host_executor.rs`                                                   | HostStageExecutor: real parse pipeline for scheduler                   |
-| `crates/verter_session/src/scheduler_shim.rs`                                                  | SchedulerBackedWorkspace: migration shim                               |
-| `crates/verter_ffi/src/lib.rs`                                                              | Native/WASM adapter re-exporting protocol schema + conversion helpers   |
-| `packages/unplugin/src/index.ts`                                                            | Unplugin factory: `buildStart` (preCompile), `transform`, `load` hooks |
-| `packages/unplugin/src/core/types.ts`                                                       | `VerterPluginOptions`, `HmrStrategy`                                   |
-| `packages/unplugin/src/core/scanner.ts`                                                     | `scanVueFiles()` — async recursive directory walker for preCompile     |
-| `packages/unplugin/src/core/compiler.ts`                                                    | Host singleton, `generateComponentId`, `processStyle`                  |
-| `crates/verter_lsp/src/tsgo/traits.rs`                                                      | `TypeProvider` trait definition (14+ methods)                          |
-| `crates/verter_lsp/src/tsgo/ipc.rs`                                                         | TSGO LSP client: Content-Length framing, JSON-RPC                      |
-| `crates/verter_lsp/src/tsgo/resilient.rs`                                                   | `ResilientTypeProvider`: crash detection + auto-restart                |
-| `crates/verter_lsp/src/tsgo/project_sync.rs`                                                | `ProjectSync`: batches open/sync/close to type provider                |
-| `crates/verter_lsp/src/tsserver/mod.rs`                                                     | `find_tsserver()`, `find_node()`, `detect_ts_major_version()`          |
-| `crates/verter_lsp/src/tsserver/ipc.rs`                                                     | `TsserverTypeProvider`: JSON transport, position conversion            |
-| `crates/verter_lsp/src/tsserver/resilient.rs`                                               | `ResilientTsserverProvider`: crash detection + auto-restart            |
-| `crates/verter_lsp/src/scheduler_integration.rs`                                            | LSP scheduler helpers: priority mapping, submit/read                   |
