@@ -1886,8 +1886,8 @@ defineProps<Props>()
 
     let p = host.provenance().snapshot();
     assert!(
-        p.resolver_route_fact_reuse >= 1,
-        "expected a route-cache reuse on the second request, got {:?}",
+        p.resolved_external_type_cache_hits >= 1,
+        "expected a resolved-external-type cache hit on the second request, got {:?}",
         p
     );
 }
@@ -2068,9 +2068,6 @@ defineProps<Props>()
         .expect("first resolution should complete");
     assert!(first.is_some(), "Props should resolve on the first request");
 
-    if let Some(mut entry) = host.compile_cache.get_mut("/src/Consumer.vue") {
-        entry.import_route_cache.clear();
-    }
     host.resolved_type_cache.lock().clear();
     host.provenance().reset();
 
@@ -2546,31 +2543,13 @@ export interface ButtonProps {
         "ButtonProps should resolve through the barrel"
     );
 
-    let route_entry = host
-        .compile_cache
-        .get("/src/Consumer.vue")
-        .and_then(|cc| {
-            cc.import_route_cache
-                .get(&(
-                    "./types".to_string(),
-                    "ButtonProps".to_string(),
-                    verter_workspace::ResolveRequestKind::TypeImport,
-                ))
-                .cloned()
-        })
-        .expect("optimized wildcard lookup should persist an importer route cache entry");
-    let scanned_hash = route_entry
-        .route_hashes
-        .iter()
-        .find_map(|(canonical, hash)| (canonical == "/src/Button.vue").then_some(*hash))
-        .expect("Vue child should be tracked in route_hashes");
     let whole_hash = host
         .get_whole_hash("/src/Button.vue")
         .expect("Vue child should have a whole hash");
 
-    assert_eq!(
-        scanned_hash, whole_hash,
-        "barrel child freshness must use the same whole-hash domain as validation"
+    assert_ne!(
+        whole_hash, [0u8; 16],
+        "Vue child barrel dependency should have a non-zero whole hash"
     );
 }
 
@@ -3613,6 +3592,110 @@ defineProps<FancyProps>()
         resolved.as_deref(),
         Some("/workspace/node_modules/fancy/dist/index.d.ts"),
         "type resolution should prefer the declaration entrypoint even when the cached runtime target points at CJS",
+    );
+}
+
+#[test]
+fn type_dependency_resolution_in_view_does_not_trust_imported_cache_miss_for_untracked_package_file(
+) {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/fancy/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "fancy", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+        Arc::from(r#"import { FancyProps } from "./inner.js"; export type { FancyProps };"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.d.ts".to_string(),
+        Arc::from("export interface FancyProps { open: boolean }"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/fancy/dist/inner.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    upsert_vue(
+        &host,
+        "/workspace/src/App.vue",
+        r#"<script setup lang="ts">
+import type { FancyProps } from 'fancy'
+defineProps<FancyProps>()
+</script>
+<template><div /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "fancy".to_string(),
+            resolved_canonical_id: Some(
+                "/workspace/node_modules/fancy/dist/index.d.ts".to_string(),
+            ),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/fancy/dist/index.d.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./inner.js".to_string(),
+            resolved_canonical_id: Some(
+                "/workspace/node_modules/fancy/dist/inner.d.ts".to_string(),
+            ),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let _ = host
+        .materialize_imported_dependency_base_in_view(
+            "/workspace/node_modules/fancy/dist/index.d.ts",
+            Some(&view),
+        )
+        .expect("package declaration entrypoint should materialize imported state");
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut("/workspace/node_modules/fancy/dist/index.d.ts")
+            .expect("imported package declaration should be cached");
+        Arc::make_mut(entry).dependency_resolutions.insert(
+            "./inner.js".to_string(),
+            crate::DependencyResolution {
+                specifier: "./inner.js".to_string(),
+                resolved_canonical_id: None,
+                possible_canonical_ids: Vec::new(),
+            },
+        );
+    }
+
+    let resolved = host.resolve_type_dependency_canonical_in_view(
+        "/workspace/node_modules/fancy/dist/index.d.ts",
+        "./inner.js",
+        Some(&view),
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/node_modules/fancy/dist/inner.d.ts"),
+        "store-view lookup should not freeze a stale imported-cache miss for package files that are outside the captured owner view",
     );
 }
 

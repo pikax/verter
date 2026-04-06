@@ -1411,6 +1411,8 @@ defineProps<Props>()
         Some(crate::resolver_core::ExportTarget::Reexport {
             source_specifier,
             original_name,
+            canonical_id: _,
+            is_type: _,
         }) => {
             assert_eq!(source_specifier, "./inner");
             assert_eq!(original_name, "Props");
@@ -1424,7 +1426,10 @@ defineProps<Props>()
         "barrel should have wildcard reexports"
     );
     assert!(
-        state.wildcard_reexports.contains(&"./wildcard".to_string()),
+        state
+            .wildcard_reexports
+            .iter()
+            .any(|w| w.source_specifier == "./wildcard"),
         "wildcard source should be captured"
     );
 }

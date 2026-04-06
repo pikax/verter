@@ -26,18 +26,22 @@ use verter_semantic::analysis::Hash16;
 
 /// Authoritative shallow state for one imported file.
 ///
-/// Keyed by `(canonical_id, whole_hash)`.  Invalidated when the file's
+/// Keyed by `(canonical_id, whole_hash)`.  Invalidated when the file’s
 /// whole-hash changes.
+///
+/// All cross-file edges carry canonical target IDs resolved at construction
+/// time.  The frontier and other consumers never need to re-resolve raw
+/// specifiers during the hot path.
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
     /// Content hash of the source that produced this state.
     pub whole_hash: Hash16,
 
-    /// Named exports: exported name â†’ routing target.
+    /// Named exports: exported name → routing target.
     pub exports: FxHashMap<String, ExportTarget>,
 
-    /// `export * from` sources, in declaration order.
-    pub wildcard_reexports: Vec<String>,
+    /// `export * from` sources with canonical targets, in declaration order.
+    pub wildcard_reexports: Vec<WildcardReexport>,
 
     /// All locally-declared type symbols (exported or internal).
     pub symbols: FxHashMap<String, ShallowTypeSymbol>,
@@ -50,12 +54,32 @@ pub struct ShallowFileState {
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
 
-    /// Import specifier targets: local import name â†’ (source_specifier, imported_name).
-    pub import_targets: FxHashMap<String, (String, String)>,
+    /// Import specifier targets: local import name → canonical import target.
+    pub import_targets: FxHashMap<String, ImportTarget>,
 
     /// The underlying analyzed source (retained for methods that still need
     /// the full analysis surface during the transition).
     pub analysis: Arc<AnalyzedExternalTypeSource>,
+}
+
+/// A wildcard `export * from ‘...’` reexport with its resolved canonical target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WildcardReexport {
+    /// The raw source specifier (e.g., `./types`).
+    pub source_specifier: String,
+    /// The resolved canonical file ID of the target.
+    pub canonical_id: String,
+}
+
+/// An import target with both the raw specifier and resolved canonical ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportTarget {
+    /// The raw source specifier (e.g., `./types`).
+    pub source_specifier: String,
+    /// The original exported name in the source module.
+    pub imported_name: String,
+    /// The resolved canonical file ID of the target.
+    pub canonical_id: String,
 }
 
 /// Narrow type-resolution view over [`ShallowFileState`].
@@ -78,6 +102,11 @@ pub enum ExportTarget {
     Reexport {
         source_specifier: String,
         original_name: String,
+        /// The resolved canonical file ID of the target.
+        canonical_id: String,
+        /// Whether this is a type-only reexport (`export type { ... }`).
+        /// Used by the export graph to choose type vs. value resolution.
+        is_type: bool,
     },
 }
 
@@ -142,6 +171,9 @@ pub struct ExternalSymbolRef {
     pub source_specifier: String,
     /// The original exported name in the source module.
     pub imported_name: String,
+    /// The resolved canonical file ID of the target.
+    /// Empty string if unresolved (construction without host resolver).
+    pub canonical_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,11 +292,38 @@ pub struct LocalClosureResult {
 // Construction
 // ---------------------------------------------------------------------------
 
+/// Trait for resolving import specifiers to canonical file IDs during
+/// shallow state construction.
+pub trait ShallowImportResolver {
+    /// Resolve an import specifier from the file being analyzed to its
+    /// canonical file ID.  Returns `None` if the specifier cannot be resolved.
+    fn resolve_canonical(&self, specifier: &str) -> Option<String>;
+
+    /// Classify a direct reexport as type-only.  Returns `true` if the reexport
+    /// was declared with `export type { ... } from '...'`.
+    fn is_type_reexport(&self, _exported_name: &str, _specifier: &str) -> bool {
+        false
+    }
+}
+
+/// A no-op resolver that cannot resolve any specifiers.
+/// Used for test construction where canonical IDs are not needed.
+struct NullResolver;
+
+impl ShallowImportResolver for NullResolver {
+    fn resolve_canonical(&self, _specifier: &str) -> Option<String> {
+        None
+    }
+}
+
 impl ShallowFileState {
     /// Build from an existing `AnalyzedExternalTypeSource` and export-routing data.
     ///
     /// This is the primary construction path: the host ensures the file is loaded
     /// and analyzed, then builds the shallow state from that analysis.
+    ///
+    /// Uses a null resolver — canonical IDs on edges will be empty strings.
+    /// Production code should prefer `from_analysis_with_resolver`.
     pub fn from_analysis(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
@@ -273,13 +332,38 @@ impl ShallowFileState {
         Self::from_analysis_with_source(whole_hash, analysis, None, eval_env)
     }
 
+    /// Build from analysis with a resolver that canonicalizes all cross-file edges.
+    ///
+    /// This is the preferred production construction path.
+    pub fn from_analysis_with_resolver(
+        whole_hash: Hash16,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+        eval_source: Option<&str>,
+        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+        resolver: &dyn ShallowImportResolver,
+    ) -> Self {
+        Self::from_analysis_inner(whole_hash, analysis, eval_source, eval_env, resolver)
+    }
+
     /// Build from analysis with an optional source fallback that can populate
     /// symbol inventories when the caller does not already have an `EvalEnv`.
+    ///
+    /// Uses a null resolver — canonical IDs on edges will be empty strings.
     pub fn from_analysis_with_source(
         whole_hash: Hash16,
         analysis: Arc<AnalyzedExternalTypeSource>,
         eval_source: Option<&str>,
         eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+    ) -> Self {
+        Self::from_analysis_inner(whole_hash, analysis, eval_source, eval_env, &NullResolver)
+    }
+
+    fn from_analysis_inner(
+        whole_hash: Hash16,
+        analysis: Arc<AnalyzedExternalTypeSource>,
+        eval_source: Option<&str>,
+        eval_env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+        resolver: &dyn ShallowImportResolver,
     ) -> Self {
         let fallback_env =
             eval_source.map(verter_semantic::analysis::type_eval_build::parse_and_build_env);
@@ -287,18 +371,22 @@ impl ShallowFileState {
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
         let mut import_locals = FxHashSet::default();
-        let mut import_targets = FxHashMap::default();
+        let mut import_targets: FxHashMap<String, ImportTarget> = FxHashMap::default();
         let mut symbols: FxHashMap<String, ShallowTypeSymbol> = FxHashMap::default();
         let mut value_symbols: FxHashMap<String, ShallowValueSymbol> = FxHashMap::default();
 
         // Populate exports from the extracted bindings
         // Direct reexports
         for (exported_name, source, original) in analysis.direct_reexport_entries() {
+            let canonical_id = resolver.resolve_canonical(source).unwrap_or_default();
+            let is_type = resolver.is_type_reexport(exported_name, source);
             exports.insert(
                 exported_name.to_string(),
                 ExportTarget::Reexport {
                     source_specifier: source.to_string(),
                     original_name: original.to_string(),
+                    canonical_id,
+                    is_type,
                 },
             );
         }
@@ -329,15 +417,28 @@ impl ShallowFileState {
                 });
         }
 
-        // Wildcard reexport sources (in declaration order)
-        wildcard_reexports.extend(analysis.wildcard_reexport_sources().iter().cloned());
+        // Wildcard reexport sources (in declaration order) with canonical targets
+        for source in analysis.wildcard_reexport_sources() {
+            let canonical_id = resolver.resolve_canonical(source).unwrap_or_default();
+            wildcard_reexports.push(WildcardReexport {
+                source_specifier: source.clone(),
+                canonical_id,
+            });
+        }
 
         // Import locals and targets
         for binding in &analysis.extracted.bindings {
             import_locals.insert(binding.local_name.clone());
+            let canonical_id = resolver
+                .resolve_canonical(&binding.source)
+                .unwrap_or_default();
             import_targets.insert(
                 binding.local_name.clone(),
-                (binding.source.clone(), binding.imported_name.clone()),
+                ImportTarget {
+                    source_specifier: binding.source.clone(),
+                    imported_name: binding.imported_name.clone(),
+                    canonical_id,
+                },
             );
         }
 
@@ -495,7 +596,7 @@ impl ShallowFileState {
     }
 
     /// Get the import target for a local import name.
-    pub fn import_target(&self, local_name: &str) -> Option<&(String, String)> {
+    pub fn import_target(&self, local_name: &str) -> Option<&ImportTarget> {
         self.import_targets.get(local_name)
     }
 
@@ -548,12 +649,13 @@ impl ShallowFileState {
                     }
                 }
             } else if self.import_locals.contains(&current) {
-                // This is an import â€” classify as external
-                if let Some((source, imported)) = self.import_targets.get(&current) {
+                // This is an import — classify as external
+                if let Some(target) = self.import_targets.get(&current) {
                     let ext_ref = ExternalSymbolRef {
                         local_name: current.clone(),
-                        source_specifier: source.clone(),
-                        imported_name: imported.clone(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: target.canonical_id.clone(),
                     };
                     if !external_refs.iter().any(|e| {
                         e.source_specifier == ext_ref.source_specifier
@@ -562,7 +664,7 @@ impl ShallowFileState {
                         external_refs.push(ext_ref);
                     }
                 } else {
-                    // Import-local without a target â€” treat as missing
+                    // Import-local without a target — treat as missing
                     return LocalClosureResult {
                         status: LocalClosureStatus::MissingLocalSymbol { name: current },
                         local_symbols_used: local_used,
@@ -738,11 +840,12 @@ impl ShallowFileState {
                     }
                 }
             } else if self.import_locals.contains(&current) {
-                if let Some((source, imported)) = self.import_targets.get(&current) {
+                if let Some(target) = self.import_targets.get(&current) {
                     let ext_ref = ExternalSymbolRef {
                         local_name: current.clone(),
-                        source_specifier: source.clone(),
-                        imported_name: imported.clone(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: target.canonical_id.clone(),
                     };
                     if !external_refs.iter().any(|e| {
                         e.source_specifier == ext_ref.source_specifier
@@ -778,7 +881,7 @@ impl<'a> ShallowTypeView<'a> {
     }
 
     /// Wildcard `export *` sources in declaration order.
-    pub fn wildcard_reexports(self) -> &'a [String] {
+    pub fn wildcard_reexports(self) -> &'a [WildcardReexport] {
         &self.state.wildcard_reexports
     }
 
@@ -989,7 +1092,7 @@ fn classify_deps(
     analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
     sym: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbol,
     import_locals: &FxHashSet<String>,
-    import_targets: &FxHashMap<String, (String, String)>,
+    import_targets: &FxHashMap<String, ImportTarget>,
 ) -> (Vec<String>, Vec<ExternalSymbolRef>) {
     let mut local = analysis
         .local_symbol_dependency_names(symbol_name)
@@ -1007,21 +1110,22 @@ fn classify_deps(
     {
         let root_name = dep_name.split('.').next().unwrap_or(dep_name.as_str());
         if import_locals.contains(root_name) {
-            if let Some((source, imported)) = import_targets.get(root_name) {
+            if let Some(target) = import_targets.get(root_name) {
                 let imported_name = if root_name == dep_name {
-                    imported.clone()
+                    target.imported_name.clone()
                 } else if let Some(suffix) = dep_name.strip_prefix(root_name) {
-                    format!("{imported}{suffix}")
+                    format!("{}{suffix}", target.imported_name)
                 } else {
-                    imported.clone()
+                    target.imported_name.clone()
                 };
-                if !seen_external.insert((source.clone(), imported_name.clone())) {
+                if !seen_external.insert((target.source_specifier.clone(), imported_name.clone())) {
                     continue;
                 }
                 external.push(ExternalSymbolRef {
                     local_name: dep_name.clone(),
-                    source_specifier: source.clone(),
+                    source_specifier: target.source_specifier.clone(),
                     imported_name,
+                    canonical_id: target.canonical_id.clone(),
                 });
             }
         }
@@ -1039,19 +1143,20 @@ fn classify_deps(
 
 fn augment_with_typeof_import_deps(
     expr: &TypeExpr,
-    import_targets: &FxHashMap<String, (String, String)>,
+    import_targets: &FxHashMap<String, ImportTarget>,
     external: &mut Vec<ExternalSymbolRef>,
 ) {
     let mut roots = FxHashSet::default();
     collect_typeof_roots(expr, &mut roots);
     for root in roots {
-        let Some((source_specifier, imported_name)) = import_targets.get(root.as_str()) else {
+        let Some(target) = import_targets.get(root.as_str()) else {
             continue;
         };
         let dep = ExternalSymbolRef {
             local_name: root.clone(),
-            source_specifier: source_specifier.clone(),
-            imported_name: imported_name.clone(),
+            source_specifier: target.source_specifier.clone(),
+            imported_name: target.imported_name.clone(),
+            canonical_id: target.canonical_id.clone(),
         };
         if !external.contains(&dep) {
             external.push(dep);
@@ -1220,6 +1325,7 @@ mod tests {
             Some(ExportTarget::Reexport {
                 source_specifier,
                 original_name,
+                ..
             }) => {
                 assert_eq!(source_specifier, "./inner");
                 assert_eq!(original_name, "Foo");
@@ -1234,8 +1340,13 @@ mod tests {
             make_analysis("export * from './a'\nexport * from './b'\nexport * from './c'\n");
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
+        let specifiers: Vec<&str> = state
+            .wildcard_reexports
+            .iter()
+            .map(|w| w.source_specifier.as_str())
+            .collect();
         assert_eq!(
-            state.wildcard_reexports,
+            specifiers,
             vec!["./a", "./b", "./c"],
             "wildcard sources must be in declaration order"
         );
@@ -1335,7 +1446,10 @@ export * from './wildcard'
 
         // Wildcard sources should still be recorded
         assert!(
-            state.wildcard_reexports.contains(&"./wildcard".to_string()),
+            state
+                .wildcard_reexports
+                .iter()
+                .any(|w| w.source_specifier == "./wildcard"),
             "wildcard sources should be captured"
         );
     }
@@ -1352,16 +1466,14 @@ export interface Props extends Alpha { beta: B }
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, None);
 
         assert!(state.is_import_local("Alpha"));
-        assert_eq!(
-            state.import_target("Alpha"),
-            Some(&("./a".to_string(), "Alpha".to_string()))
-        );
+        let alpha_target = state.import_target("Alpha").unwrap();
+        assert_eq!(alpha_target.source_specifier, "./a");
+        assert_eq!(alpha_target.imported_name, "Alpha");
 
         assert!(state.is_import_local("B"));
-        assert_eq!(
-            state.import_target("B"),
-            Some(&("./b".to_string(), "Beta".to_string()))
-        );
+        let b_target = state.import_target("B").unwrap();
+        assert_eq!(b_target.source_specifier, "./b");
+        assert_eq!(b_target.imported_name, "Beta");
     }
 
     #[test]
@@ -1732,6 +1844,113 @@ export interface Props {
         let closure = state.route_closure("Props", &ExportedRoute::Member("color".into()), 500);
         assert!(closure.unresolved_external.is_empty());
         assert_eq!(closure.local_symbols_used, vec!["Props".to_string()]);
+    }
+
+    #[test]
+    fn canonical_edges_populated_by_resolver() {
+        use crate::resolver_core::ShallowImportResolver;
+
+        struct TestResolver;
+
+        impl ShallowImportResolver for TestResolver {
+            fn resolve_canonical(&self, specifier: &str) -> Option<String> {
+                match specifier {
+                    "./bar" => Some("/resolved/bar.ts".to_string()),
+                    "./types" => Some("/resolved/types.ts".to_string()),
+                    _ => None,
+                }
+            }
+        }
+
+        let source = r#"
+import type { Foo } from './bar'
+export { Foo } from './bar'
+export * from './types'
+export interface Props { child: Foo }
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis_with_resolver(
+            Hash16::default(),
+            analysis,
+            None,
+            Some(&env),
+            &TestResolver,
+        );
+
+        // Wildcard reexport should have the resolved canonical ID
+        assert_eq!(
+            state.wildcard_reexports.len(),
+            1,
+            "should have exactly one wildcard reexport"
+        );
+        assert_eq!(
+            state.wildcard_reexports[0].canonical_id, "/resolved/types.ts",
+            "wildcard reexport canonical ID should be resolved"
+        );
+        assert_eq!(
+            state.wildcard_reexports[0].source_specifier, "./types",
+            "wildcard reexport source specifier should be preserved"
+        );
+
+        // Reexport target should carry the resolved canonical ID
+        match state.export_target("Foo") {
+            Some(ExportTarget::Reexport {
+                canonical_id,
+                original_name,
+                source_specifier,
+                ..
+            }) => {
+                assert_eq!(
+                    canonical_id, "/resolved/bar.ts",
+                    "reexport canonical ID should be resolved"
+                );
+                assert_eq!(original_name, "Foo");
+                assert_eq!(source_specifier, "./bar");
+            }
+            other => panic!("expected Reexport for Foo, got {other:?}"),
+        }
+
+        // Import target should carry the resolved canonical ID
+        let foo_target = state
+            .import_target("Foo")
+            .expect("Foo import target should exist");
+        assert_eq!(
+            foo_target.canonical_id, "/resolved/bar.ts",
+            "import target canonical ID should be resolved"
+        );
+        assert_eq!(foo_target.source_specifier, "./bar");
+        assert_eq!(foo_target.imported_name, "Foo");
+
+        // External symbol refs on Props should carry the resolved canonical ID
+        let props_sym = state.symbol("Props").expect("Props symbol should exist");
+        let foo_ext = props_sym
+            .external_deps
+            .iter()
+            .find(|dep| dep.local_name == "Foo")
+            .expect("Props should have Foo as an external dep");
+        assert_eq!(
+            foo_ext.canonical_id, "/resolved/bar.ts",
+            "external symbol ref canonical ID should be resolved"
+        );
+        assert_eq!(foo_ext.imported_name, "Foo");
+        assert_eq!(foo_ext.source_specifier, "./bar");
+
+        // Negative: no unresolved canonical IDs (empty strings) on known specifiers
+        for wc in &state.wildcard_reexports {
+            assert!(
+                !wc.canonical_id.is_empty(),
+                "wildcard reexport canonical ID should not be empty"
+            );
+        }
+        for (name, target) in &state.import_targets {
+            if target.source_specifier == "./bar" || target.source_specifier == "./types" {
+                assert!(
+                    !target.canonical_id.is_empty(),
+                    "import target {name} canonical ID should not be empty"
+                );
+            }
+        }
     }
 
     #[test]

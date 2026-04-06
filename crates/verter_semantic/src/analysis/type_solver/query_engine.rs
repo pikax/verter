@@ -241,7 +241,8 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         };
         if let Some(cached) = self.op_cache.get(&top_level_key) {
             self.audit.op_cache_hit("TopLevel");
-            self.visited_decls.extend(cached.visited_decls.iter().cloned());
+            self.visited_decls
+                .extend(cached.visited_decls.iter().cloned());
             return (cached.result.clone(), cached.visited_decls.clone());
         }
         self.audit.op_cache_miss("TopLevel");

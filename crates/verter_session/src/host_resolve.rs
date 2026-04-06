@@ -261,26 +261,6 @@ impl VerterHost {
             }
         }
 
-        if let Some(resolution) = self
-            .clone_current_imported_dependency_entry(owner_canonical, store_view)
-            .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned())
-        {
-            component_meta_trace_event!(
-                "cached_dependency_resolution_in_view_result",
-                format!(
-                    "owner={} import={} source=imported_dependency_cache target={}",
-                    owner_canonical,
-                    import_source,
-                    Self::dependency_resolution_target(&resolution)
-                        .as_deref()
-                        .unwrap_or("<none>"),
-                ),
-            );
-            return Some(resolution);
-        }
-
-        self.current_eval_state_in_view(owner_canonical, store_view)?;
-
         #[cfg(feature = "scheduler")]
         {
             if let Some(resolution) = self
@@ -329,6 +309,26 @@ impl VerterHost {
             }
         }
 
+        if let Some(resolution) = self
+            .clone_current_imported_dependency_entry(owner_canonical, store_view)
+            .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned())
+        {
+            component_meta_trace_event!(
+                "cached_dependency_resolution_in_view_result",
+                format!(
+                    "owner={} import={} source=imported_dependency_cache target={}",
+                    owner_canonical,
+                    import_source,
+                    Self::dependency_resolution_target(&resolution)
+                        .as_deref()
+                        .unwrap_or("<none>"),
+                ),
+            );
+            return Some(resolution);
+        }
+
+        self.current_eval_state_in_view(owner_canonical, store_view)?;
+
         // TODO(component-meta): wildcard reexport sources from large barrels such as
         // `src/runtime/types/index.ts` still arrive here as shallow misses because
         // dependency_resolutions currently tracks imports, not `export *` routes.
@@ -360,6 +360,13 @@ impl VerterHost {
         resolution.resolved_canonical_id.is_none()
             && resolution.effective_target().is_none()
             && resolution.possible_canonical_ids.is_empty()
+    }
+
+    fn store_view_miss_is_authoritative(
+        owner_canonical: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> bool {
+        store_view.is_some_and(|view| view.tracks_whole_hash(owner_canonical))
     }
 
     fn runtime_like_dependency_target(path: &str) -> bool {
@@ -608,18 +615,10 @@ impl VerterHost {
             ) {
                 return Some(resolved);
             }
-            if store_view.is_some() && Self::dependency_resolution_is_known_miss(&existing) {
-                return None;
-            }
-        }
-
-        if import_source.starts_with('.') {
-            let direct = crate::id::resolve_external(owner_canonical, import_source);
-            if let Some(resolved) =
-                self.resolve_eval_dependency_canonical_in_view(direct.as_str(), store_view)
+            if Self::dependency_resolution_is_known_miss(&existing)
+                && Self::store_view_miss_is_authoritative(owner_canonical, store_view)
             {
-                self.cache_dependency_resolution_result(owner_canonical, import_source, &resolved);
-                return Some(resolved);
+                return None;
             }
         }
 
@@ -669,9 +668,11 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
         if let Some(view) = store_view {
-            if let Some(existing) =
-                self.cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
-            {
+            if let Some(existing) = self.cached_dependency_resolution_in_view(
+                owner_canonical,
+                import_source,
+                Some(view),
+            ) {
                 if let Some(resolved) = self.prefer_type_dependency_target_from_resolution_in_view(
                     owner_canonical,
                     import_source,
@@ -680,7 +681,9 @@ impl VerterHost {
                 ) {
                     return Some(resolved);
                 }
-                if Self::dependency_resolution_is_known_miss(&existing) {
+                if Self::dependency_resolution_is_known_miss(&existing)
+                    && Self::store_view_miss_is_authoritative(owner_canonical, Some(view))
+                {
                     return None;
                 }
             }
@@ -805,13 +808,17 @@ impl VerterHost {
         }
 
         if let Some(view) = store_view {
-            if let Some(existing) =
-                self.cached_dependency_resolution_in_view(owner_canonical, import_source, Some(view))
-            {
+            if let Some(existing) = self.cached_dependency_resolution_in_view(
+                owner_canonical,
+                import_source,
+                Some(view),
+            ) {
                 if let Some(resolved) = Self::dependency_resolution_target(&existing) {
                     return Some(resolved);
                 }
-                if Self::dependency_resolution_is_known_miss(&existing) {
+                if Self::dependency_resolution_is_known_miss(&existing)
+                    && Self::store_view_miss_is_authoritative(owner_canonical, Some(view))
+                {
                     return None;
                 }
             }
@@ -940,113 +947,42 @@ impl VerterHost {
             return Ok(cached.clone());
         }
 
-        let mut effective_target = None;
-        let mut frontier_for_materialization = None;
-        if use_host_cache && profile_hash.is_none() && store_view.is_none() {
-            if let Some(route_entry) =
-                self.lookup_import_type_route_cache(owner_canonical, import_source, type_name, kind)
+        let (frontier, target, had_route_cycle) = self.run_external_type_frontier_closure_in_view(
+            dep_canonical.as_str(),
+            type_name,
+            &mut requested_routes,
+            store_view,
+        )?;
+        let touched_ids = frontier.touched_canonical_ids();
+
+        for touched_id in touched_ids {
+            tracked_deps.insert(touched_id.clone());
+            resolution_deps.insert(touched_id);
+        }
+
+        let Some(target) = target else {
+            if self
+                .current_eval_state_in_view(dep_canonical.as_str(), store_view)
+                .is_none()
             {
-                self.provenance
-                    .resolver_route_fact_reuse
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                for dep in &route_entry.tracked_deps {
-                    tracked_deps.insert(dep.clone());
-                    resolution_deps.insert(dep.clone());
-                }
-
-                if let Some(target) = route_entry.target {
-                    if let Some(entry) = self.lookup_resolved_external_type_cache_in_view(
-                        target.final_canonical_id.as_str(),
-                        target.exported_name.as_str(),
-                        kind,
-                        store_view,
-                    ) {
-                        self.provenance
-                            .resolved_external_type_cache_hits
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        for dep in &entry.tracked_deps {
-                            tracked_deps.insert(dep.clone());
-                            resolution_deps.insert(dep.clone());
-                        }
-                        let resolved = entry.resolved.clone();
-                        cache.insert(cache_key.clone(), resolved.clone());
-                        cache.insert(
-                            (target.final_canonical_id, target.exported_name),
-                            resolved.clone(),
-                        );
-                        return Ok(resolved);
-                    }
-
-                    self.provenance
-                        .resolved_external_type_cache_misses
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    merge_frontier_requested_route(
-                        &mut requested_routes,
-                        target.final_canonical_id.clone(),
-                        target.exported_name.clone(),
-                        crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
-                    );
-                    effective_target = Some((target.final_canonical_id, target.exported_name));
+                return if required_root_dep {
+                    Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
                 } else {
-                    cache.insert(cache_key.clone(), None);
-                    return Ok(None);
-                }
-            }
-        }
-
-        if effective_target.is_none() {
-            let (frontier, target, had_route_cycle) = self
-                .run_external_type_frontier_closure_in_view(
-                    dep_canonical.as_str(),
-                    type_name,
-                    &mut requested_routes,
-                    store_view,
-                )?;
-            let touched_ids = frontier.touched_canonical_ids();
-
-            for touched_id in touched_ids {
-                tracked_deps.insert(touched_id.clone());
-                resolution_deps.insert(touched_id);
+                    Ok(None)
+                };
             }
 
-            let Some(target) = target else {
-                if self
-                    .current_eval_state_in_view(dep_canonical.as_str(), store_view)
-                    .is_none()
-                {
-                    return if required_root_dep {
-                        Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
-                    } else {
-                        Ok(None)
-                    };
-                }
+            if had_route_cycle {
+                self.provenance
+                    .resolver_cycle_detections
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
 
-                if had_route_cycle {
-                    self.provenance
-                        .resolver_cycle_detections
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+            cache.insert(cache_key.clone(), None);
+            return Ok(None);
+        };
 
-                cache.insert(cache_key.clone(), None);
-                if depth == 0 && use_host_cache && profile_hash.is_none() && store_view.is_none() {
-                    self.store_import_type_route_cache(
-                        owner_canonical,
-                        import_source,
-                        type_name,
-                        kind,
-                        None,
-                        resolution_deps,
-                    );
-                }
-                return Ok(None);
-            };
-            frontier_for_materialization = Some(frontier);
-            effective_target = Some(target);
-        }
-
-        let (effective_dep_canonical, effective_type_name) =
-            effective_target.expect("effective target should exist before body resolution");
+        let (effective_dep_canonical, effective_type_name) = target;
         tracked_deps.insert(effective_dep_canonical.clone());
         resolution_deps.insert(effective_dep_canonical.clone());
 
@@ -1098,54 +1034,27 @@ impl VerterHost {
             return Ok(None);
         }
 
-        let resolved = (|| {
-            let (frontier, touched_ids, final_target) =
-                if let Some(frontier) = frontier_for_materialization.take() {
-                    (
-                        frontier,
-                        rustc_hash::FxHashSet::default(),
-                        (effective_dep_canonical.clone(), effective_type_name.clone()),
-                    )
-                } else {
-                    let (frontier, target, _had_route_cycle) = self
-                        .run_external_type_frontier_closure_in_view(
-                            effective_dep_canonical.as_str(),
-                            effective_type_name.as_str(),
-                            &mut requested_routes,
-                            store_view,
-                        )?;
-                    let Some(target) = target else {
-                        return Ok(None);
-                    };
-                    let touched_ids = frontier.touched_canonical_ids();
-                    (frontier, touched_ids, target)
-                };
-
-            for touched_id in touched_ids {
-                tracked_deps.insert(touched_id.clone());
-                resolution_deps.insert(touched_id);
-            }
-
-            let (final_canonical, final_exported) = final_target;
-            Ok(self
-                .materialize_frontier_resolved_type_in_view(
-                    &frontier,
-                    &requested_routes,
-                    final_canonical.as_str(),
-                    final_exported.as_str(),
-                    tracked_deps,
-                    resolution_deps,
+        let resolved: Result<
+            Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+            crate::types::ExternalTypeResolveError,
+        > = Ok(self
+            .materialize_frontier_resolved_type_in_view(
+                &frontier,
+                &requested_routes,
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                tracked_deps,
+                resolution_deps,
+                store_view,
+            )
+            .or_else(|| {
+                self.resolve_external_type_from_cached_dependency_state_in_view(
+                    effective_dep_canonical.as_str(),
+                    effective_type_name.as_str(),
+                    &ResolvedExternalTypes::default(),
                     store_view,
                 )
-                .or_else(|| {
-                    self.resolve_external_type_from_cached_dependency_state_in_view(
-                        effective_dep_canonical.as_str(),
-                        effective_type_name.as_str(),
-                        &ResolvedExternalTypes::default(),
-                        store_view,
-                    )
-                }))
-        })();
+            }));
         visiting.remove(&final_target_key);
         let resolved = resolved?;
 
@@ -1165,22 +1074,6 @@ impl VerterHost {
             (effective_dep_canonical.clone(), effective_type_name.clone()),
             resolved.clone(),
         );
-
-        if depth == 0 && use_host_cache && profile_hash.is_none() && store_view.is_none() {
-            self.store_import_type_route_cache(
-                owner_canonical,
-                import_source,
-                type_name,
-                kind,
-                resolved
-                    .as_ref()
-                    .map(|_| crate::types::NormalizedTypeTarget {
-                        final_canonical_id: effective_dep_canonical.clone(),
-                        exported_name: effective_type_name.clone(),
-                    }),
-                resolution_deps,
-            );
-        }
 
         let tracked_before = tracked_deps.len();
         let resolution_before = resolution_deps.len();
@@ -1280,100 +1173,6 @@ impl VerterHost {
                 tracked_deps,
             },
         );
-    }
-
-    #[cfg(feature = "scheduler")]
-    fn lookup_import_type_route_cache(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<crate::types::ImportTypeRouteEntry> {
-        let route_key = (import_source.to_string(), type_name.to_string(), kind);
-        let route_entry = self
-            .compile_cache
-            .get(owner_canonical)
-            .and_then(|cc| cc.import_route_cache.get(&route_key).cloned())?;
-
-        let owner_hash = self.get_whole_hash(owner_canonical).unwrap_or_default();
-        let fresh = route_entry.owner_hash == owner_hash
-            && route_entry.route_hashes.iter().all(|(canonical, hash)| {
-                self.get_whole_hash(canonical).unwrap_or_default() == *hash
-            });
-        if !fresh {
-            return None;
-        }
-
-        let neg_fresh = route_entry
-            .negative_barrel_gen
-            .as_ref()
-            .map(|(barrel_canonical, generation)| {
-                self.compile_cache
-                    .get(barrel_canonical)
-                    .and_then(|cc| {
-                        cc.barrel_export_surface
-                            .as_ref()
-                            .map(|surface| surface.generation == *generation)
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(true);
-        if route_entry.target.is_none() && !neg_fresh {
-            return None;
-        }
-
-        Some(route_entry)
-    }
-
-    #[cfg(not(feature = "scheduler"))]
-    fn lookup_import_type_route_cache(
-        &self,
-        _owner_canonical: &str,
-        _import_source: &str,
-        _type_name: &str,
-        _kind: verter_workspace::ResolveRequestKind,
-    ) -> Option<crate::types::ImportTypeRouteEntry> {
-        None
-    }
-
-    fn store_import_type_route_cache(
-        &self,
-        owner_canonical: &str,
-        import_source: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        target: Option<crate::types::NormalizedTypeTarget>,
-        resolution_deps: &std::collections::BTreeSet<String>,
-    ) {
-        #[cfg(feature = "scheduler")]
-        {
-            let route_key = (import_source.to_string(), type_name.to_string(), kind);
-            let route_entry = crate::types::ImportTypeRouteEntry {
-                owner_hash: self.get_whole_hash(owner_canonical).unwrap_or_default(),
-                target,
-                tracked_deps: resolution_deps.iter().cloned().collect(),
-                route_hashes: resolution_deps
-                    .iter()
-                    .filter_map(|dep| self.get_whole_hash(dep).map(|hash| (dep.clone(), hash)))
-                    .collect(),
-                negative_barrel_gen: None,
-            };
-            if let Some(mut cc) = self.compile_cache.get_mut(owner_canonical) {
-                cc.import_route_cache.insert(route_key, route_entry);
-            }
-        }
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let _ = (
-                owner_canonical,
-                import_source,
-                type_name,
-                kind,
-                target,
-                resolution_deps,
-            );
-        }
     }
 
     fn resolve_external_type_target_via_frontier_in_view(
@@ -1955,19 +1754,45 @@ impl VerterHost {
             store_view,
         );
 
-        let (result, _, _) = self
+        let (frontier_result, _, _) = self
             .resolve_external_type_target_via_frontier_in_view(
                 normalized_canonical.as_str(),
                 requested_name,
                 store_view,
             )
             .ok()?;
-        let result = result.map(|(canonical, exported_name)| {
+        let frontier_result = frontier_result.map(|(canonical, exported_name)| {
             let canonical = self
                 .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
                 .unwrap_or(canonical);
             (canonical, exported_name)
-        })?;
+        });
+        let graph_result = self
+            .resolve_named_export_in_view(
+                normalized_canonical.as_str(),
+                requested_name,
+                Some(true),
+                store_view,
+            )
+            .map(|resolved| {
+                let canonical = resolved
+                    .source_canonical_id
+                    .unwrap_or_else(|| normalized_canonical.clone());
+                let canonical = self
+                    .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
+                    .unwrap_or(canonical);
+                (canonical, resolved.source_name)
+            });
+        let result = match (frontier_result, graph_result) {
+            (Some(frontier), Some(graph))
+                if frontier.0 == normalized_canonical && frontier != graph =>
+            {
+                graph
+            }
+            (Some(frontier), _) => frontier,
+            (None, Some(graph)) => graph,
+            (None, None) => return None,
+        };
         let _ =
             self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
         #[cfg(test)]

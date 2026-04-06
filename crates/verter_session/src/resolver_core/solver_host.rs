@@ -81,28 +81,25 @@ impl<'a> SessionSolverHost<'a> {
         if let Some(state) = host.shallow_file_state_in_view(declaration_canonical_id, store_view) {
             scope_type_names.extend(state.symbols.keys().cloned());
             scope_value_names.extend(state.value_symbols.keys().cloned());
-            for (local_name, (source_specifier, imported_name)) in state.import_targets.iter() {
-                let resolved_id = dependency_resolutions
-                    .get(source_specifier)
-                    .and_then(|resolution| {
-                        resolution
-                            .effective_target()
-                            .map(str::to_string)
-                            .or_else(|| resolution.resolved_canonical_id.clone())
-                    })
-                    .or_else(|| {
-                        host.resolve_type_dependency_canonical_shallow_in_view(
-                            declaration_canonical_id,
-                            source_specifier,
-                            store_view,
-                        )
-                    });
+            for (local_name, target) in state.import_targets.iter() {
+                let resolved_id = if target.canonical_id.is_empty() {
+                    dependency_resolutions
+                        .get(&target.source_specifier)
+                        .and_then(|resolution| {
+                            resolution
+                                .effective_target()
+                                .map(str::to_string)
+                                .or_else(|| resolution.resolved_canonical_id.clone())
+                        })
+                } else {
+                    Some(target.canonical_id.clone())
+                };
                 if let Some(resolved_id) = resolved_id {
                     import_bindings.insert(
                         local_name.clone(),
                         ImportBinding {
                             canonical_id: resolved_id,
-                            exported_name: imported_name.clone(),
+                            exported_name: target.imported_name.clone(),
                         },
                     );
                 }
@@ -172,12 +169,9 @@ impl<'a> SessionSolverHost<'a> {
     ) -> bool {
         entry.prepared_type_decls.contains_key(symbol_name)
             || entry.prepared_value_decls.contains_key(symbol_name)
-            || entry
-                .shallow_file_state
-                .as_ref()
-                .is_some_and(|state| {
-                    state.symbol(symbol_name).is_some() || state.value_symbol(symbol_name).is_some()
-                })
+            || entry.shallow_file_state.as_ref().is_some_and(|state| {
+                state.symbol(symbol_name).is_some() || state.value_symbol(symbol_name).is_some()
+            })
     }
 
     fn resolve_cached_import_binding(
@@ -187,17 +181,24 @@ impl<'a> SessionSolverHost<'a> {
     ) -> Option<ResolvedRootIdentity> {
         let entry = self.cached_imported_entry(canonical_id)?;
         let state = entry.shallow_file_state.as_ref()?;
-        let (source_specifier, imported_name) = state.import_target(local_name)?;
-        let resolved_id = entry
-            .dependency_resolutions
-            .get(source_specifier)
-            .and_then(|resolution| {
-                resolution
-                    .effective_target()
-                    .map(str::to_string)
-                    .or_else(|| resolution.resolved_canonical_id.clone())
-            })?;
-        Some(ResolvedRootIdentity::new(resolved_id, imported_name))
+        let target = state.import_target(local_name)?;
+        let resolved_id = if target.canonical_id.is_empty() {
+            entry
+                .dependency_resolutions
+                .get(&target.source_specifier)
+                .and_then(|resolution| {
+                    resolution
+                        .effective_target()
+                        .map(str::to_string)
+                        .or_else(|| resolution.resolved_canonical_id.clone())
+                })?
+        } else {
+            target.canonical_id.clone()
+        };
+        Some(ResolvedRootIdentity::new(
+            resolved_id,
+            &target.imported_name,
+        ))
     }
 
     fn resolve_cached_namespace_member(
@@ -217,9 +218,9 @@ impl<'a> SessionSolverHost<'a> {
 
         let target_state = target_entry.shallow_file_state.as_ref()?;
         match target_state.export_target(member) {
-            Some(crate::resolver_core::ExportTarget::Local { symbol_name }) => {
-                Some(ResolvedRootIdentity::new(&binding.canonical_id, symbol_name))
-            }
+            Some(crate::resolver_core::ExportTarget::Local { symbol_name }) => Some(
+                ResolvedRootIdentity::new(&binding.canonical_id, symbol_name),
+            ),
             _ => None,
         }
     }
@@ -872,9 +873,9 @@ export type FancyProps = Prettify<{ open: boolean }>
         );
 
         let solver_host = SessionSolverHost::new(&host, None);
-        let prettify = solver_host
-            .root_identity("/decl.d.ts", "Prettify")
-            .expect("explicit canonical lookups should resolve import bindings from cached shallow state");
+        let prettify = solver_host.root_identity("/decl.d.ts", "Prettify").expect(
+            "explicit canonical lookups should resolve import bindings from cached shallow state",
+        );
 
         assert_eq!(prettify.canonical_id, "/helper.d.ts");
         assert_eq!(prettify.symbol_name, "Prettify");
@@ -897,8 +898,11 @@ export type FancyProps = Prettify<{ open: boolean }>
             Arc::clone(&helper_analysis),
             Some(&helper_env),
         ));
-        let helper_prepared =
-            crate::resolver_core::build_prepared_type_decl_cache("/helper.d.ts", &helper_state, None);
+        let helper_prepared = crate::resolver_core::build_prepared_type_decl_cache(
+            "/helper.d.ts",
+            &helper_state,
+            None,
+        );
 
         host.imported_dependency_cache.lock().insert(
             "/helper.d.ts".into(),
@@ -962,7 +966,9 @@ export type FancyProps = Prettify<{ open: boolean }>
 
         let solver_host = SessionSolverHost::new(&host, None);
         assert!(
-            solver_host.root_identity("/decl.d.ts", "Prettify").is_none(),
+            solver_host
+                .root_identity("/decl.d.ts", "Prettify")
+                .is_none(),
             "canonical-scoped root lookups must stay cache-only and refuse uncached import routing",
         );
     }

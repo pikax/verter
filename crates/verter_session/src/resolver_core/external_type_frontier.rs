@@ -124,14 +124,24 @@ pub struct ExternalTypeFrontier {
 
 /// Trait for the host to provide file state to the frontier engine.
 ///
-/// The frontier engine never performs file I/O itself â€” all file state
-/// comes through this trait.
+/// The frontier engine never performs file I/O itself — all file state
+/// comes through this trait.  Cross-file edges are pre-canonicalized on
+/// the `ShallowFileState` when possible, so most traversal runs without
+/// calling `resolve_import_canonical`.  The fallback is only used for
+/// edges whose canonical ID could not be resolved at construction time.
 pub trait FrontierHost {
     /// Get or build the shallow type state for a canonical file.
     fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
-    /// Resolve an import specifier from a given file to its canonical ID.
-    fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String>;
+    /// Fallback: resolve an import specifier to its canonical ID.
+    ///
+    /// Only called for edges whose `canonical_id` was empty at construction
+    /// time (e.g., files loaded before their dependency graph was fully
+    /// materialized).  Production hosts should ensure shallow states are
+    /// built with a resolver so this is rarely hit.
+    fn resolve_import_canonical(&self, _from_canonical: &str, _specifier: &str) -> Option<String> {
+        None
+    }
 
     /// Route-only traversals stop once they reach the defining export target.
     /// They still follow alias and reexport edges, but they do not widen into
@@ -188,12 +198,15 @@ fn wildcard_source_hint_prefix_len(source: &str, exported_name: &str) -> usize {
 
 fn ordered_wildcard_sources<'a>(
     exported_name: &str,
-    wildcard_sources: &'a [String],
-) -> Vec<(usize, &'a String)> {
+    wildcard_sources: &'a [super::shallow_file_state::WildcardReexport],
+) -> Vec<(usize, &'a super::shallow_file_state::WildcardReexport)> {
     let mut ordered: Vec<_> = wildcard_sources.iter().enumerate().collect();
-    ordered.sort_by(|(left_index, left_source), (right_index, right_source)| {
-        wildcard_source_hint_prefix_len(right_source, exported_name)
-            .cmp(&wildcard_source_hint_prefix_len(left_source, exported_name))
+    ordered.sort_by(|(left_index, left_wc), (right_index, right_wc)| {
+        wildcard_source_hint_prefix_len(&right_wc.source_specifier, exported_name)
+            .cmp(&wildcard_source_hint_prefix_len(
+                &left_wc.source_specifier,
+                exported_name,
+            ))
             .then_with(|| left_index.cmp(right_index))
     });
     ordered
@@ -264,19 +277,27 @@ impl ExternalTypeFrontier {
 
             let resolved = self.resolve_one(host, &pending);
 
-            // Enqueue external refs from this symbol into next level
+            // Enqueue external refs from this symbol into next level.
+            // External refs carry pre-canonicalized target IDs when available.
+            // For edges that couldn't be canonicalized at construction time,
+            // fall back to the host's resolve_import_canonical.
             for ext_ref in &resolved.unresolved_external {
-                if let Some(target_canonical) =
+                let target_canonical = if !ext_ref.canonical_id.is_empty() {
+                    ext_ref.canonical_id.clone()
+                } else if let Some(resolved_id) =
                     host.resolve_import_canonical(&pending.canonical_id, &ext_ref.source_specifier)
                 {
-                    let next = PendingExternalSymbol {
-                        canonical_id: target_canonical.clone(),
-                        exported_name: ext_ref.imported_name.clone(),
-                    };
-                    let key = (next.canonical_id.clone(), next.exported_name.clone());
-                    if self.seen.insert(key) {
-                        self.next_level.push(next);
-                    }
+                    resolved_id
+                } else {
+                    continue;
+                };
+                let next = PendingExternalSymbol {
+                    canonical_id: target_canonical.clone(),
+                    exported_name: ext_ref.imported_name.clone(),
+                };
+                let key = (next.canonical_id.clone(), next.exported_name.clone());
+                if self.seen.insert(key) {
+                    self.next_level.push(next);
                 }
             }
 
@@ -290,8 +311,6 @@ impl ExternalTypeFrontier {
             );
         }
 
-        // Put current_level back (it was drained)
-        // current_level is already empty from drain, this is fine
         Ok(())
     }
 
@@ -320,87 +339,97 @@ impl ExternalTypeFrontier {
             return self.resolve_through_export(host, pending, &state, target);
         }
 
-        // Step 2: Try wildcard reexport routing
-        for (order, wildcard_source) in
+        // Step 2: Try wildcard reexport routing using pre-canonicalized edges.
+        // Fall back to host resolution for edges with empty canonical IDs.
+        for (order, wildcard) in
             ordered_wildcard_sources(&pending.exported_name, type_view.wildcard_reexports())
         {
-            if let Some(target_canonical) =
-                host.resolve_import_canonical(&pending.canonical_id, wildcard_source)
+            let target_canonical_owned;
+            let target_canonical = if !wildcard.canonical_id.is_empty() {
+                &wildcard.canonical_id
+            } else if let Some(resolved) =
+                host.resolve_import_canonical(&pending.canonical_id, &wildcard.source_specifier)
             {
-                // Check if already resolved from this chain
-                let key = (target_canonical.clone(), pending.exported_name.clone());
-                if let Some(existing) = self.resolved.get(&key) {
-                    if existing.status == ResolvedSymbolStatus::Resolved
-                        || existing.status == ResolvedSymbolStatus::ResolvedWithUnresolvedExternal
-                    {
-                        return ResolvedSymbol {
-                            canonical_id: pending.canonical_id.clone(),
-                            exported_name: pending.exported_name.clone(),
-                            status: existing.status.clone(),
-                            body: existing.body.clone(),
-                            type_parameters: existing.type_parameters.clone(),
-                            unresolved_external: existing.unresolved_external.clone(),
-                            route_provenance: Some(ResolvedRouteProvenance {
-                                kind: RouteKind::Wildcard {
-                                    barrel_canonical_id: pending.canonical_id.clone(),
-                                    source_order: order,
-                                },
-                                defining_canonical_id: target_canonical,
-                                defining_name: pending.exported_name.clone(),
-                            }),
-                        };
+                target_canonical_owned = resolved;
+                &target_canonical_owned
+            } else {
+                continue;
+            };
+
+            // Check if already resolved from this chain
+            let key = (target_canonical.clone(), pending.exported_name.clone());
+            if let Some(existing) = self.resolved.get(&key) {
+                if existing.status == ResolvedSymbolStatus::Resolved
+                    || existing.status == ResolvedSymbolStatus::ResolvedWithUnresolvedExternal
+                {
+                    return ResolvedSymbol {
+                        canonical_id: pending.canonical_id.clone(),
+                        exported_name: pending.exported_name.clone(),
+                        status: existing.status.clone(),
+                        body: existing.body.clone(),
+                        type_parameters: existing.type_parameters.clone(),
+                        unresolved_external: existing.unresolved_external.clone(),
+                        route_provenance: Some(ResolvedRouteProvenance {
+                            kind: RouteKind::Wildcard {
+                                barrel_canonical_id: pending.canonical_id.clone(),
+                                source_order: order,
+                            },
+                            defining_canonical_id: target_canonical.clone(),
+                            defining_name: pending.exported_name.clone(),
+                        }),
+                    };
+                }
+            }
+
+            // Try resolving in the wildcard target
+            if let Some(wc_state) = host.ensure_shallow_state(target_canonical) {
+                if wc_state
+                    .type_view()
+                    .export_target(&pending.exported_name)
+                    .is_some()
+                {
+                    // Found it — enqueue as next-level work from the target file
+                    let next = PendingExternalSymbol {
+                        canonical_id: target_canonical.clone(),
+                        exported_name: pending.exported_name.clone(),
+                    };
+                    let key = (next.canonical_id.clone(), next.exported_name.clone());
+                    if self.seen.insert(key) {
+                        self.next_level.push(next);
                     }
+
+                    return ResolvedSymbol {
+                        canonical_id: pending.canonical_id.clone(),
+                        exported_name: pending.exported_name.clone(),
+                        status: ResolvedSymbolStatus::ResolvedWithUnresolvedExternal,
+                        body: None,
+                        type_parameters: Vec::new(),
+                        unresolved_external: vec![ExternalSymbolRef {
+                            local_name: pending.exported_name.clone(),
+                            source_specifier: wildcard.source_specifier.clone(),
+                            imported_name: pending.exported_name.clone(),
+                            canonical_id: target_canonical.clone(),
+                        }],
+                        route_provenance: Some(ResolvedRouteProvenance {
+                            kind: RouteKind::Wildcard {
+                                barrel_canonical_id: pending.canonical_id.clone(),
+                                source_order: order,
+                            },
+                            defining_canonical_id: target_canonical.clone(),
+                            defining_name: pending.exported_name.clone(),
+                        }),
+                    };
                 }
 
-                // Try resolving in the wildcard target
-                if let Some(wc_state) = host.ensure_shallow_state(&target_canonical) {
-                    if wc_state
-                        .type_view()
-                        .export_target(&pending.exported_name)
-                        .is_some()
-                    {
-                        // Found it â€” enqueue as next-level work from the target file
-                        let next = PendingExternalSymbol {
-                            canonical_id: target_canonical.clone(),
-                            exported_name: pending.exported_name.clone(),
-                        };
-                        let key = (next.canonical_id.clone(), next.exported_name.clone());
-                        if self.seen.insert(key) {
-                            self.next_level.push(next);
-                        }
-
-                        return ResolvedSymbol {
-                            canonical_id: pending.canonical_id.clone(),
-                            exported_name: pending.exported_name.clone(),
-                            status: ResolvedSymbolStatus::ResolvedWithUnresolvedExternal,
-                            body: None,
-                            type_parameters: Vec::new(),
-                            unresolved_external: vec![ExternalSymbolRef {
-                                local_name: pending.exported_name.clone(),
-                                source_specifier: wildcard_source.clone(),
-                                imported_name: pending.exported_name.clone(),
-                            }],
-                            route_provenance: Some(ResolvedRouteProvenance {
-                                kind: RouteKind::Wildcard {
-                                    barrel_canonical_id: pending.canonical_id.clone(),
-                                    source_order: order,
-                                },
-                                defining_canonical_id: target_canonical,
-                                defining_name: pending.exported_name.clone(),
-                            }),
-                        };
-                    }
-
-                    // Check if the wildcard target itself has wildcards (recursive barrel)
-                    if wc_state.has_wildcard_reexports() {
-                        let next = PendingExternalSymbol {
-                            canonical_id: target_canonical,
-                            exported_name: pending.exported_name.clone(),
-                        };
-                        let key = (next.canonical_id.clone(), next.exported_name.clone());
-                        if self.seen.insert(key) {
-                            self.next_level.push(next);
-                        }
+                // Check if the wildcard target itself has wildcards (recursive barrel)
+                if wc_state.has_wildcard_reexports() {
+                    let next = PendingExternalSymbol {
+                        canonical_id: target_canonical.clone(),
+                        exported_name: pending.exported_name.clone(),
+                    };
+                    let key = (next.canonical_id.clone(), next.exported_name.clone());
+                    if self.seen.insert(key) {
+                        self.next_level.push(next);
                     }
                 }
             }
@@ -429,15 +458,19 @@ impl ExternalTypeFrontier {
         match target {
             ExportTarget::Local { symbol_name } => {
                 if state.is_import_local(symbol_name) {
-                    if let Some((source_specifier, imported_name)) =
-                        state.import_target(symbol_name)
-                    {
-                        if let Some(target_canonical) =
-                            host.resolve_import_canonical(&pending.canonical_id, source_specifier)
-                        {
+                    if let Some(import_target) = state.import_target(symbol_name) {
+                        let resolved_canonical = if !import_target.canonical_id.is_empty() {
+                            Some(import_target.canonical_id.clone())
+                        } else {
+                            host.resolve_import_canonical(
+                                &pending.canonical_id,
+                                &import_target.source_specifier,
+                            )
+                        };
+                        if let Some(ref target_canonical) = resolved_canonical {
                             let next = PendingExternalSymbol {
                                 canonical_id: target_canonical.clone(),
-                                exported_name: imported_name.clone(),
+                                exported_name: import_target.imported_name.clone(),
                             };
                             let key = (next.canonical_id.clone(), next.exported_name.clone());
                             if self.seen.insert(key) {
@@ -452,13 +485,14 @@ impl ExternalTypeFrontier {
                                 type_parameters: Vec::new(),
                                 unresolved_external: vec![ExternalSymbolRef {
                                     local_name: symbol_name.clone(),
-                                    source_specifier: source_specifier.clone(),
-                                    imported_name: imported_name.clone(),
+                                    source_specifier: import_target.source_specifier.clone(),
+                                    imported_name: import_target.imported_name.clone(),
+                                    canonical_id: target_canonical.clone(),
                                 }],
                                 route_provenance: Some(ResolvedRouteProvenance {
                                     kind: RouteKind::Alias,
-                                    defining_canonical_id: target_canonical,
-                                    defining_name: imported_name.clone(),
+                                    defining_canonical_id: target_canonical.clone(),
+                                    defining_name: import_target.imported_name.clone(),
                                 }),
                             };
                         }
@@ -537,13 +571,18 @@ impl ExternalTypeFrontier {
             ExportTarget::Reexport {
                 source_specifier,
                 original_name,
+                canonical_id: reexport_canonical,
+                ..
             } => {
-                // Follow the reexport â€” enqueue in next level
-                if let Some(target_canonical) =
+                // Follow the reexport using pre-canonicalized target, with fallback
+                let effective_canonical = if !reexport_canonical.is_empty() {
+                    Some(reexport_canonical.clone())
+                } else {
                     host.resolve_import_canonical(&pending.canonical_id, source_specifier)
-                {
+                };
+                if let Some(ref reexport_canonical) = effective_canonical {
                     let next = PendingExternalSymbol {
-                        canonical_id: target_canonical.clone(),
+                        canonical_id: reexport_canonical.clone(),
                         exported_name: original_name.clone(),
                     };
                     let key = (next.canonical_id.clone(), next.exported_name.clone());
@@ -561,10 +600,11 @@ impl ExternalTypeFrontier {
                             local_name: pending.exported_name.clone(),
                             source_specifier: source_specifier.clone(),
                             imported_name: original_name.clone(),
+                            canonical_id: reexport_canonical.clone(),
                         }],
                         route_provenance: Some(ResolvedRouteProvenance {
                             kind: RouteKind::Alias,
-                            defining_canonical_id: target_canonical,
+                            defining_canonical_id: reexport_canonical.clone(),
                             defining_name: original_name.clone(),
                         }),
                     }
@@ -636,19 +676,24 @@ impl ExternalTypeFrontier {
             };
         }
 
+        // Fall back to wildcard reexport edges using canonical IDs
         let state = host.ensure_shallow_state(&current.0)?;
-        for wildcard_source in state.type_view().wildcard_reexports() {
-            let Some(target_canonical) = host.resolve_import_canonical(&current.0, wildcard_source)
-            else {
+        for wildcard in state.type_view().wildcard_reexports() {
+            let wc_canonical = if !wildcard.canonical_id.is_empty() {
+                wildcard.canonical_id.clone()
+            } else if let Some(resolved) =
+                host.resolve_import_canonical(&current.0, &wildcard.source_specifier)
+            {
+                resolved
+            } else {
                 continue;
             };
 
-            if self.get_resolved(&target_canonical, &current.1).is_none() {
+            if self.get_resolved(&wc_canonical, &current.1).is_none() {
                 continue;
             }
 
-            if let Some(target) = self.final_target_from(host, &target_canonical, &current.1, seen)
-            {
+            if let Some(target) = self.final_target_from(host, &wc_canonical, &current.1, seen) {
                 return Some(target);
             }
         }
@@ -708,12 +753,12 @@ impl Default for ExternalTypeFrontier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolver_core::ShallowImportResolver;
     use verter_semantic::analysis::Hash16;
 
     /// Mock host for testing the frontier engine.
     struct MockHost {
         files: FxHashMap<String, Arc<ShallowFileState>>,
-        resolutions: FxHashMap<(String, String), String>,
         route_exports_only: bool,
     }
 
@@ -721,18 +766,12 @@ mod tests {
         fn new() -> Self {
             Self {
                 files: FxHashMap::default(),
-                resolutions: FxHashMap::default(),
                 route_exports_only: false,
             }
         }
 
         fn add_file(&mut self, canonical_id: &str, state: ShallowFileState) {
             self.files.insert(canonical_id.to_string(), Arc::new(state));
-        }
-
-        fn add_resolution(&mut self, from: &str, specifier: &str, to: &str) {
-            self.resolutions
-                .insert((from.to_string(), specifier.to_string()), to.to_string());
         }
     }
 
@@ -741,18 +780,29 @@ mod tests {
             self.files.get(canonical_id).cloned()
         }
 
-        fn resolve_import_canonical(
-            &self,
-            from_canonical: &str,
-            specifier: &str,
-        ) -> Option<String> {
-            self.resolutions
-                .get(&(from_canonical.to_string(), specifier.to_string()))
-                .cloned()
-        }
-
         fn route_exports_only(&self) -> bool {
             self.route_exports_only
+        }
+    }
+
+    /// Mock resolver that maps specifiers to canonical IDs during state construction.
+    struct MapResolver {
+        map: FxHashMap<String, String>,
+    }
+
+    impl MapResolver {
+        fn from_pairs(pairs: &[(&str, &str)]) -> Self {
+            let mut map = FxHashMap::default();
+            for &(spec, canonical) in pairs {
+                map.insert(spec.to_string(), canonical.to_string());
+            }
+            Self { map }
+        }
+    }
+
+    impl ShallowImportResolver for MapResolver {
+        fn resolve_canonical(&self, specifier: &str) -> Option<String> {
+            self.map.get(specifier).cloned()
         }
     }
 
@@ -769,6 +819,17 @@ mod tests {
 
     fn make_state(source: &str) -> ShallowFileState {
         ShallowFileState::from_analysis(Hash16::default(), make_analysis(source), None)
+    }
+
+    fn make_state_resolved(source: &str, resolutions: &[(&str, &str)]) -> ShallowFileState {
+        let resolver = MapResolver::from_pairs(resolutions);
+        ShallowFileState::from_analysis_with_resolver(
+            Hash16::default(),
+            make_analysis(source),
+            None,
+            None,
+            &resolver,
+        )
     }
 
     #[test]
@@ -804,13 +865,15 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/barrel.ts",
-            make_state(r#"export { Props } from "./inner""#),
+            make_state_resolved(
+                r#"export { Props } from "./inner""#,
+                &[("./inner", "/src/inner.ts")],
+            ),
         );
         host.add_file(
             "/src/inner.ts",
             make_state("export interface Props { label: string }"),
         );
-        host.add_resolution("/src/barrel.ts", "./inner", "/src/inner.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -838,12 +901,14 @@ mod tests {
     #[test]
     fn wildcard_barrel_resolves_through_export_star() {
         let mut host = MockHost::new();
-        host.add_file("/src/barrel.ts", make_state("export * from './inner'"));
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved("export * from './inner'", &[("./inner", "/src/inner.ts")]),
+        );
         host.add_file(
             "/src/inner.ts",
             make_state("export interface Props { label: string }"),
         );
-        host.add_resolution("/src/barrel.ts", "./inner", "/src/inner.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -939,10 +1004,14 @@ mod tests {
     fn cycle_does_not_reenter_seen_symbols() {
         let mut host = MockHost::new();
         // a.ts reexports from b.ts, b.ts reexports from a.ts
-        host.add_file("/src/a.ts", make_state(r#"export { B } from "./b""#));
-        host.add_file("/src/b.ts", make_state(r#"export { A } from "./a""#));
-        host.add_resolution("/src/a.ts", "./b", "/src/b.ts");
-        host.add_resolution("/src/b.ts", "./a", "/src/a.ts");
+        host.add_file(
+            "/src/a.ts",
+            make_state_resolved(r#"export { B } from "./b""#, &[("./b", "/src/b.ts")]),
+        );
+        host.add_file(
+            "/src/b.ts",
+            make_state_resolved(r#"export { A } from "./a""#, &[("./a", "/src/a.ts")]),
+        );
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -966,7 +1035,10 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/barrel.ts",
-            make_state("export * from './first'\nexport * from './second'\n"),
+            make_state_resolved(
+                "export * from './first'\nexport * from './second'\n",
+                &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
+            ),
         );
         host.add_file(
             "/src/first.ts",
@@ -976,8 +1048,6 @@ mod tests {
             "/src/second.ts",
             make_state("export interface Props { source: 'second' }"),
         );
-        host.add_resolution("/src/barrel.ts", "./first", "/src/first.ts");
-        host.add_resolution("/src/barrel.ts", "./second", "/src/second.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1007,14 +1077,18 @@ mod tests {
     fn recursive_barrel_chain_resolves() {
         let mut host = MockHost::new();
         // a -> export * from b -> export * from c -> defines Props
-        host.add_file("/src/a.ts", make_state("export * from './b'"));
-        host.add_file("/src/b.ts", make_state("export * from './c'"));
+        host.add_file(
+            "/src/a.ts",
+            make_state_resolved("export * from './b'", &[("./b", "/src/b.ts")]),
+        );
+        host.add_file(
+            "/src/b.ts",
+            make_state_resolved("export * from './c'", &[("./c", "/src/c.ts")]),
+        );
         host.add_file(
             "/src/c.ts",
             make_state("export interface Props { deep: boolean }"),
         );
-        host.add_resolution("/src/a.ts", "./b", "/src/b.ts");
-        host.add_resolution("/src/b.ts", "./c", "/src/c.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1036,15 +1110,19 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/root.ts",
-            make_state("export { Props as RootProps } from './barrel'"),
+            make_state_resolved(
+                "export { Props as RootProps } from './barrel'",
+                &[("./barrel", "/src/barrel.ts")],
+            ),
         );
-        host.add_file("/src/barrel.ts", make_state("export * from './inner'"));
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved("export * from './inner'", &[("./inner", "/src/inner.ts")]),
+        );
         host.add_file(
             "/src/inner.ts",
             make_state("export interface Props { label: string }"),
         );
-        host.add_resolution("/src/root.ts", "./barrel", "/src/barrel.ts");
-        host.add_resolution("/src/barrel.ts", "./inner", "/src/inner.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1070,13 +1148,15 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/types.ts",
-            make_state("import type { Dep } from './dep'\nexport interface Props { label: Dep }"),
+            make_state_resolved(
+                "import type { Dep } from './dep'\nexport interface Props { label: Dep }",
+                &[("./dep", "/src/dep.ts")],
+            ),
         );
         host.add_file(
             "/src/dep.ts",
             make_state("export interface Dep { value: string }"),
         );
-        host.add_resolution("/src/types.ts", "./dep", "/src/dep.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1100,14 +1180,18 @@ mod tests {
     #[test]
     fn final_target_for_follows_nested_wildcard_chain() {
         let mut host = MockHost::new();
-        host.add_file("/src/a.ts", make_state("export * from './b'"));
-        host.add_file("/src/b.ts", make_state("export * from './c'"));
+        host.add_file(
+            "/src/a.ts",
+            make_state_resolved("export * from './b'", &[("./b", "/src/b.ts")]),
+        );
+        host.add_file(
+            "/src/b.ts",
+            make_state_resolved("export * from './c'", &[("./c", "/src/c.ts")]),
+        );
         host.add_file(
             "/src/c.ts",
             make_state("export interface Props { deep: boolean }"),
         );
-        host.add_resolution("/src/a.ts", "./b", "/src/b.ts");
-        host.add_resolution("/src/b.ts", "./c", "/src/c.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1133,13 +1217,15 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/index.ts",
-            make_state("import { Foo as Bar } from './types'; export { Bar };"),
+            make_state_resolved(
+                "import { Foo as Bar } from './types'; export { Bar };",
+                &[("./types", "/src/types.ts")],
+            ),
         );
         host.add_file(
             "/src/types.ts",
             make_state("export interface Foo { value: string }"),
         );
-        host.add_resolution("/src/index.ts", "./types", "/src/types.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1165,13 +1251,15 @@ mod tests {
         let mut host = MockHost::new();
         host.add_file(
             "/src/index.ts",
-            make_state("import PropsDefault from './dep'; export { PropsDefault as Props };"),
+            make_state_resolved(
+                "import PropsDefault from './dep'; export { PropsDefault as Props };",
+                &[("./dep", "/src/dep.ts")],
+            ),
         );
         host.add_file(
             "/src/dep.ts",
             make_state("export default class Props { label!: string }"),
         );
-        host.add_resolution("/src/index.ts", "./dep", "/src/dep.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1198,20 +1286,22 @@ mod tests {
         host.route_exports_only = true;
         host.add_file(
             "/src/index.ts",
-            make_state("export { Props } from './types'"),
+            make_state_resolved(
+                "export { Props } from './types'",
+                &[("./types", "/src/types.ts")],
+            ),
         );
         host.add_file(
             "/src/types.ts",
-            make_state(
+            make_state_resolved(
                 "import type { Base } from './base'\nexport interface Props extends Base { label: string }",
+                &[("./base", "/src/base.ts")],
             ),
         );
         host.add_file(
             "/src/base.ts",
             make_state("export interface Base { id: string }"),
         );
-        host.add_resolution("/src/index.ts", "./types", "/src/types.ts");
-        host.add_resolution("/src/types.ts", "./base", "/src/base.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1229,6 +1319,72 @@ mod tests {
             frontier.get_resolved("/src/base.ts", "Base").is_none(),
             "route-only traversal should not widen into the defining symbol's dependency graph",
         );
+    }
+
+    #[test]
+    fn frontier_resolves_through_canonical_edges_without_host_callback() {
+        // The MockHost does NOT implement resolve_import_canonical (returns None).
+        // But the shallow states have canonical IDs pre-populated on their edges
+        // via the MapResolver at construction time. The frontier should resolve
+        // the entire chain without needing the fallback host callback.
+
+        let mut host = MockHost::new();
+
+        // barrel.ts: reexports Props from types.ts via a named reexport
+        // The canonical ID on the reexport edge is pre-resolved.
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved(
+                r#"export { Props } from './types'"#,
+                &[("./types", "/src/types.ts")],
+            ),
+        );
+
+        // types.ts: defines Props locally
+        let types_source = "export interface Props { label: string }";
+        let types_analysis = make_analysis(types_source);
+        let types_env =
+            verter_semantic::analysis::type_eval_build::parse_and_build_env(types_source);
+        let types_state =
+            ShallowFileState::from_analysis(Hash16::default(), types_analysis, Some(&types_env));
+        host.add_file("/src/types.ts", types_state);
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/barrel.ts".to_string(),
+            exported_name: "Props".to_string(),
+        }]);
+
+        frontier.run(&host).unwrap();
+
+        // The barrel entry should be resolved (as a reexport hop)
+        let barrel_resolved = frontier
+            .get_resolved("/src/barrel.ts", "Props")
+            .expect("barrel entry should be resolved");
+        assert_ne!(
+            barrel_resolved.status,
+            ResolvedSymbolStatus::RouteNotFound,
+            "barrel reexport should not be RouteNotFound when canonical edges are pre-populated"
+        );
+
+        // The types.ts entry should be resolved with the actual body
+        let types_resolved = frontier
+            .get_resolved("/src/types.ts", "Props")
+            .expect("types.ts entry should be resolved");
+        assert_eq!(
+            types_resolved.status,
+            ResolvedSymbolStatus::Resolved,
+            "types.ts Props should be fully resolved (local definition with eval env)"
+        );
+        assert!(
+            types_resolved.body.is_some(),
+            "resolved local symbol should have a body"
+        );
+
+        // Negative: the host's resolve_import_canonical was never called.
+        // Since MockHost does not override the default (returns None), if the
+        // frontier had needed it, the reexport would have been RouteNotFound.
+        // The fact that it resolved proves the canonical edges sufficed.
     }
 
     #[test]
@@ -1262,7 +1418,13 @@ mod tests {
         // barrel has both a direct reexport AND a wildcard that could provide Props
         host.add_file(
             "/src/barrel.ts",
-            make_state("export { Props } from './direct'\nexport * from './wildcard'\n"),
+            make_state_resolved(
+                "export { Props } from './direct'\nexport * from './wildcard'\n",
+                &[
+                    ("./direct", "/src/direct.ts"),
+                    ("./wildcard", "/src/wildcard.ts"),
+                ],
+            ),
         );
         host.add_file(
             "/src/direct.ts",
@@ -1272,8 +1434,6 @@ mod tests {
             "/src/wildcard.ts",
             make_state("export interface Props { from: 'wildcard' }"),
         );
-        host.add_resolution("/src/barrel.ts", "./direct", "/src/direct.ts");
-        host.add_resolution("/src/barrel.ts", "./wildcard", "/src/wildcard.ts");
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {

@@ -322,51 +322,8 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         named: rustc_hash::FxHashMap::default(),
         wildcard_edges: Vec::new(),
     });
-    entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
-        export_map: rustc_hash::FxHashMap::default(),
-        source_hash: [2; 16],
-        wildcard_sources: Vec::new(),
-        scanned_sources: rustc_hash::FxHashMap::default(),
-        tracked_deps: rustc_hash::FxHashSet::default(),
-        fully_resolved: true,
-        generation: 7,
-    });
-    entry.import_route_cache.insert(
-        (
-            "./inner".to_string(),
-            "Inner".to_string(),
-            verter_workspace::ResolveRequestKind::TypeImport,
-        ),
-        crate::types::ImportTypeRouteEntry {
-            owner_hash: project
-                .host()
-                .get_whole_hash("/index.ts")
-                .expect("owner hash should exist"),
-            target: Some(crate::types::NormalizedTypeTarget {
-                final_canonical_id: "/inner.ts".to_string(),
-                exported_name: "Inner".to_string(),
-            }),
-            tracked_deps: vec!["/inner.ts".to_string()],
-            route_hashes: vec![(
-                "/inner.ts".to_string(),
-                project
-                    .host()
-                    .get_whole_hash("/inner.ts")
-                    .expect("inner hash should exist"),
-            )],
-            negative_barrel_gen: None,
-        },
-    );
     drop(entry);
 
-    let route_hash = {
-        let entry = project
-            .host()
-            .compile_cache
-            .get("/index.ts")
-            .expect("compile cache entry should exist");
-        crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
-    };
     let exact_hash = {
         let entry = project
             .host()
@@ -384,22 +341,8 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         },
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
-            hash: route_hash,
-        },
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
-            hash: [2; 16],
-        },
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
             kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: exact_hash,
-        },
-        crate::resolver_core::FactVersionRef::BarrelGeneration {
-            canonical_id: "/index.ts".to_string(),
-            generation: 7,
         },
     ]));
 
@@ -576,32 +519,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         named: rustc_hash::FxHashMap::default(),
         wildcard_edges: Vec::new(),
     });
-    entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
-        export_map: rustc_hash::FxHashMap::default(),
-        source_hash: [4; 16],
-        wildcard_sources: Vec::new(),
-        scanned_sources: rustc_hash::FxHashMap::default(),
-        tracked_deps: rustc_hash::FxHashSet::default(),
-        fully_resolved: true,
-        generation: 11,
-    });
-    entry.import_route_cache.insert(
-        (
-            "./inner".to_string(),
-            "Inner".to_string(),
-            verter_workspace::ResolveRequestKind::TypeImport,
-        ),
-        crate::types::ImportTypeRouteEntry {
-            owner_hash: whole_hash,
-            target: Some(crate::types::NormalizedTypeTarget {
-                final_canonical_id: "/inner.ts".to_string(),
-                exported_name: "Inner".to_string(),
-            }),
-            tracked_deps: vec!["/inner.ts".to_string()],
-            route_hashes: vec![("/inner.ts".to_string(), [5; 16])],
-            negative_barrel_gen: None,
-        },
-    );
     drop(entry);
 
     let facts = project
@@ -624,27 +541,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
     assert!(
         facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
-            hash: {
-                let entry = project
-                    .host()
-                    .compile_cache
-                    .get("/index.ts")
-                    .expect("compile cache entry should exist");
-                crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
-            },
-        })
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
-            hash: [4; 16],
-        })
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
             kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: {
                 let entry = project
@@ -654,12 +550,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
                     .expect("compile cache entry should exist");
                 crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
             },
-        })
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::BarrelGeneration {
-            canonical_id: "/index.ts".to_string(),
-            generation: 11,
         })
     );
 }
@@ -693,32 +583,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
             named: rustc_hash::FxHashMap::default(),
             wildcard_edges: Vec::new(),
         });
-        entry.barrel_export_surface = Some(crate::types::BarrelResolutionState {
-            export_map: rustc_hash::FxHashMap::default(),
-            source_hash: [4; 16],
-            wildcard_sources: Vec::new(),
-            scanned_sources: rustc_hash::FxHashMap::default(),
-            tracked_deps: rustc_hash::FxHashSet::default(),
-            fully_resolved: true,
-            generation: 11,
-        });
-        entry.import_route_cache.insert(
-            (
-                "./inner".to_string(),
-                "Inner".to_string(),
-                verter_workspace::ResolveRequestKind::TypeImport,
-            ),
-            crate::types::ImportTypeRouteEntry {
-                owner_hash: whole_hash,
-                target: Some(crate::types::NormalizedTypeTarget {
-                    final_canonical_id: "/inner.ts".to_string(),
-                    exported_name: "Inner".to_string(),
-                }),
-                tracked_deps: vec!["/inner.ts".to_string()],
-                route_hashes: vec![("/inner.ts".to_string(), [5; 16])],
-                negative_barrel_gen: None,
-            },
-        );
     }
 
     let facts = project
@@ -742,29 +606,14 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     assert!(
         facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
+            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: {
                 let files = crate::shared::read_lock(&project.host().files);
                 let entry = files.get("/index.ts").expect("file entry should exist");
-                crate::resolver_store::hash_import_route_cache(&entry.import_route_cache)
+                crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
             },
         }),
-        "non-scheduler store views must track import-route facts"
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::BarrelSurface,
-            hash: [4; 16],
-        }),
-        "non-scheduler store views must track barrel-surface facts"
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::BarrelGeneration {
-            canonical_id: "/index.ts".to_string(),
-            generation: 11,
-        }),
-        "non-scheduler store views must track negative barrel invalidation generations"
+        "non-scheduler store views must track exact-resolution facts"
     );
 }
 

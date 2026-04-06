@@ -272,9 +272,7 @@ mod tests {
             cached_resolved_meta: FxHashMap::default(),
             cached_meta_payloads: FxHashMap::default(),
             cached_fallthrough: None,
-            barrel_export_surface: None,
             export_registry: None,
-            import_route_cache: FxHashMap::default(),
         };
         for i in 0..n_slots {
             entry.compile_slots.insert(

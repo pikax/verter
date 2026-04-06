@@ -12,7 +12,12 @@ fn resolve_import_target(
     owner_canonical_id: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     source_specifier: &str,
+    canonical_id: Option<&str>,
 ) -> String {
+    if let Some(canonical_id) = canonical_id.filter(|canonical_id| !canonical_id.is_empty()) {
+        return canonical_id.to_string();
+    }
+
     dep_edges
         .and_then(|edges| edges.get(source_specifier))
         .cloned()
@@ -60,7 +65,12 @@ pub fn prepare_local_type_decl(
         .external_deps
         .iter()
         .map(|dep| {
-            let resolved_id = resolve_import_target(canonical_id, dep_edges, &dep.source_specifier);
+            let resolved_id = resolve_import_target(
+                canonical_id,
+                dep_edges,
+                &dep.source_specifier,
+                Some(dep.canonical_id.as_str()),
+            );
             PreparedExternalDep {
                 canonical_id: resolved_id,
                 symbol_name: dep.imported_name.clone(),
@@ -83,11 +93,16 @@ pub fn prepare_local_type_decl(
         );
     }
     // External deps resolve through import bindings → canonical_id
-    for (local_name, (source, imported_name)) in state.import_targets.iter() {
-        let resolved_id = resolve_import_target(canonical_id, dep_edges, source);
+    for (local_name, target) in state.import_targets.iter() {
+        let resolved_id = resolve_import_target(
+            canonical_id,
+            dep_edges,
+            &target.source_specifier,
+            Some(target.canonical_id.as_str()),
+        );
         prepared.name_resolution.insert(
             local_name.clone(),
-            ResolvedRootIdentity::new(&resolved_id, imported_name),
+            ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
         );
     }
 
@@ -156,11 +171,16 @@ pub fn prepare_local_value_decl(
     // Build name_resolution for type annotations that reference
     // imported or local types in the defining file
     // Index all import targets as potential name resolution entries
-    for (local_name, (source, imported_name)) in state.import_targets.iter() {
-        let resolved_id = resolve_import_target(canonical_id, dep_edges, source);
+    for (local_name, target) in state.import_targets.iter() {
+        let resolved_id = resolve_import_target(
+            canonical_id,
+            dep_edges,
+            &target.source_specifier,
+            Some(target.canonical_id.as_str()),
+        );
         prepared.name_resolution.insert(
             local_name.clone(),
-            ResolvedRootIdentity::new(&resolved_id, imported_name),
+            ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
         );
     }
 

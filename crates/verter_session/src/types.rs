@@ -1203,13 +1203,8 @@ pub(crate) struct FileEntry {
     /// Cached fallthrough resolution keyed by semantic fact versions and
     /// generic-root-propagation behavior.
     pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
-    /// Barrel export surface cache for non-scheduler hosts.
-    pub(crate) barrel_export_surface: Option<BarrelResolutionState>,
     /// Per-file export registry for non-scheduler hosts.
     pub(crate) export_registry: Option<FileExportRegistry>,
-    /// Cached import type routes for this file as an owner/importer.
-    pub(crate) import_route_cache:
-        FxHashMap<(String, String, verter_workspace::ResolveRequestKind), ImportTypeRouteEntry>,
 }
 
 impl FileMeta {
@@ -1304,24 +1299,11 @@ pub(crate) struct CompileCacheEntry {
     /// but deps/aliases are preserved for old-state diffing during reload.
     pub(crate) evicted: bool,
 
-    // ── BarrelState: progressive export surface cache ──
-    /// Barrel export surface cache. Only populated for files with `export *` entries.
-    /// Progressively discovers what each wildcard source exports, so subsequent
-    /// type lookups through this barrel skip already-scanned sources.
-    pub(crate) barrel_export_surface: Option<BarrelResolutionState>,
-
     // ── ExportRegistry: structural export graph index ──
     /// Per-file export registry populated at analysis time from ExportSignature data.
     /// Used by type resolution to follow export chains without re-parsing.
     /// Does NOT store resolved type payloads — those stay in `resolved_type_cache`.
     pub(crate) export_registry: Option<FileExportRegistry>,
-
-    // ── ImportRouteCache: importer-oriented type route cache ──
-    /// Cached import type routes for this file as an owner/importer.
-    /// Key: (import_source, type_name, resolve_kind).
-    /// Automatically invalidated when this file's compile_cache entry is cleared.
-    pub(crate) import_route_cache:
-        FxHashMap<(String, String, verter_workspace::ResolveRequestKind), ImportTypeRouteEntry>,
 }
 
 /// Override-aware file state returned by `effective_file_state()`.
@@ -1410,38 +1392,6 @@ pub enum ExternalTypeResolveError {
 }
 
 /// Progressive barrel export resolution state.
-///
-/// Tracks the export surface of a barrel file (one with `export * from` entries)
-/// as it is progressively discovered. Each type lookup through the barrel extends
-/// the state until `fully_resolved` is true, at which point absent types can be
-/// reported immediately without rescanning.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) struct BarrelResolutionState {
-    /// Map: exported public name → (wildcard source specifier, canonical source ID).
-    /// The specifier is relative to the barrel file and is used for re-resolution
-    /// through `resolve_external_type_from_loaded_files`.
-    /// For `export { Foo as Bar }`, the key is `Bar` (the public name).
-    pub export_map: rustc_hash::FxHashMap<String, (String, String)>,
-    /// Source hash of the barrel file when this state was built.
-    pub source_hash: Hash16,
-    /// Direct wildcard source specifiers declared by the barrel itself.
-    #[allow(dead_code)]
-    pub wildcard_sources: Vec<String>,
-    /// Scanned wildcard graph nodes keyed by canonical ID for O(1) freshness
-    /// checks. Value is the file's whole-hash at scan time.
-    pub scanned_sources: rustc_hash::FxHashMap<String, Hash16>,
-    /// Canonical IDs discovered while scanning wildcard sources (de-duped).
-    /// Replayed into `tracked_deps` on cache hit so invalidation/eval stay correct.
-    pub tracked_deps: rustc_hash::FxHashSet<String>,
-    /// True only after every direct wildcard source, and every nested
-    /// `export *` hop reachable from them, has been scanned.
-    pub fully_resolved: bool,
-    /// Monotonically increasing counter, incremented on every rebuild.
-    /// Used by negative route entries to detect barrel-state changes cheaply.
-    pub generation: u64,
-}
-
 /// Named export entry — stored in the per-file export registry.
 ///
 /// Represents a single named export's structural routing information.
@@ -1479,39 +1429,6 @@ pub(crate) struct FileExportRegistry {
     pub wildcard_edges: Vec<String>,
 }
 
-/// Normalized target of an import type route.
-///
-/// Represents the final file and exported name that an importer-local type
-/// resolves to, regardless of the route shape (direct, re-export, barrel).
-#[derive(Debug, Clone)]
-pub(crate) struct NormalizedTypeTarget {
-    /// The canonical file that actually defines/exports the type.
-    pub final_canonical_id: String,
-    /// The exported name in the final file (may differ from importer-local name
-    /// due to aliases along the route).
-    pub exported_name: String,
-}
-
-/// Cached import type route entry stored on the owner file's `CompileCacheEntry`.
-///
-/// Represents the resolved route from an importer-local type name to the
-/// final defining file. Freshness is validated via `owner_hash` + `route_hashes`.
-#[derive(Debug, Clone)]
-pub(crate) struct ImportTypeRouteEntry {
-    /// Hash of the owner file when this route was computed.
-    pub owner_hash: Hash16,
-    /// The resolved target. `None` means the type was fully explored and absent.
-    pub target: Option<NormalizedTypeTarget>,
-    /// Canonical dependencies discovered while building the route.
-    /// Replayed into `tracked_deps` on cache hit.
-    pub tracked_deps: Vec<String>,
-    /// Every file whose content determined the route, with its hash at resolution time.
-    pub route_hashes: Vec<(String, Hash16)>,
-    /// For negative entries: the barrel canonical + generation when the negative
-    /// conclusion was reached. Stale whenever the barrel's generation changes.
-    pub negative_barrel_gen: Option<(String, u64)>,
-}
-
 /// Key for the host-level resolved external type cache.
 ///
 /// Includes the dependency's source hash to guarantee freshness — when a
@@ -1531,6 +1448,138 @@ pub(crate) struct ResolvedTypeCacheEntry {
     /// Canonical IDs traversed during resolution. Replayed into the caller's
     /// `tracked_deps` on cache hit so the eval path knows which sources to read.
     pub tracked_deps: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Provider-owned export route cache
+// ---------------------------------------------------------------------------
+
+/// Namespace for provider-owned export route lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteNamespace {
+    /// Type-space resolution (interfaces, type aliases, classes).
+    Type,
+    /// Value-space resolution (const, function, enum).
+    Value,
+}
+
+/// The result of resolving an exported name through a provider's route graph.
+#[derive(Debug, Clone)]
+pub enum RouteResult {
+    /// The symbol was found at the given defining location.
+    Found {
+        defining_canonical_id: String,
+        defining_name: String,
+    },
+    /// The symbol was proven absent through the full route graph.
+    NotFound,
+}
+
+/// Shared outcome of a provider export route lookup.
+///
+/// Multiple providers visited during path compression share the same
+/// `Arc<RouteOutcome>` to avoid duplicating the witness payload.
+#[derive(Debug, Clone)]
+pub struct RouteOutcome {
+    /// The resolution result (found or not found).
+    pub result: RouteResult,
+    /// Provider canonical IDs and their whole-hashes at resolution time.
+    /// Used for invalidation: if any touched provider's hash changes,
+    /// this route entry is stale.
+    pub touched_providers: Arc<[(String, Hash16)]>,
+}
+
+/// Provider-owned export route cache.
+///
+/// Keyed by `(exported_name, namespace)`.  Stored on the provider (exporter)
+/// file, not the importer.  Multiple importers asking the same question
+/// through the same barrel reuse the same cached answer.
+#[derive(Debug, Default)]
+pub struct ProviderRouteCache {
+    pub(crate) routes: parking_lot::RwLock<FxHashMap<(String, RouteNamespace), Arc<RouteOutcome>>>,
+}
+
+impl ProviderRouteCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up a cached route for the given exported name and namespace.
+    pub fn get(&self, name: &str, ns: RouteNamespace) -> Option<Arc<RouteOutcome>> {
+        self.routes.read().get(&(name.to_string(), ns)).cloned()
+    }
+
+    /// Insert a route outcome for the given exported name and namespace.
+    pub fn insert(&self, name: String, ns: RouteNamespace, outcome: Arc<RouteOutcome>) {
+        self.routes.write().insert((name, ns), outcome);
+    }
+
+    /// Check if a cached route is still valid against current whole-hashes.
+    pub fn get_if_valid(
+        &self,
+        name: &str,
+        ns: RouteNamespace,
+        current_hashes: &dyn Fn(&str) -> Option<Hash16>,
+    ) -> Option<Arc<RouteOutcome>> {
+        let routes = self.routes.read();
+        let outcome = routes.get(&(name.to_string(), ns))?;
+        // Validate that all touched providers still have the same hash
+        for (canonical_id, expected_hash) in outcome.touched_providers.iter() {
+            match current_hashes(canonical_id) {
+                Some(current) if current == *expected_hash => {}
+                _ => return None,
+            }
+        }
+        Some(outcome.clone())
+    }
+
+    /// Clear all cached routes.
+    pub fn clear(&self) {
+        self.routes.write().clear();
+    }
+}
+
+/// Shared provider route cache, keyed by provider canonical ID.
+///
+/// This is the single shared owner for all export route answers.
+/// Lives on `VerterHost` and is consulted by all host-backed consumers.
+#[derive(Debug, Default)]
+pub struct SharedProviderRouteStore {
+    pub(crate) providers: parking_lot::RwLock<FxHashMap<String, Arc<ProviderRouteCache>>>,
+}
+
+impl SharedProviderRouteStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get or create the route cache for a provider canonical ID.
+    pub fn get_or_create(&self, canonical_id: &str) -> Arc<ProviderRouteCache> {
+        {
+            let providers = self.providers.read();
+            if let Some(cache) = providers.get(canonical_id) {
+                return cache.clone();
+            }
+        }
+        let mut providers = self.providers.write();
+        providers
+            .entry(canonical_id.to_string())
+            .or_insert_with(|| Arc::new(ProviderRouteCache::new()))
+            .clone()
+    }
+
+    /// Invalidate a specific provider's route cache.
+    pub fn invalidate(&self, canonical_id: &str) {
+        let providers = self.providers.read();
+        if let Some(cache) = providers.get(canonical_id) {
+            cache.clear();
+        }
+    }
+
+    /// Clear all provider route caches.
+    pub fn clear_all(&self) {
+        self.providers.write().clear();
+    }
 }
 
 /// Cached host-owned component-meta resolved state.
@@ -1893,6 +1942,288 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Provider route cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_route_cache_stores_and_validates() {
+        use verter_semantic::analysis::Hash16;
+
+        let cache = ProviderRouteCache::new();
+        let hash_a: Hash16 = [1; 16];
+        let hash_b: Hash16 = [2; 16];
+
+        let outcome = Arc::new(RouteOutcome {
+            result: RouteResult::Found {
+                defining_canonical_id: "/src/types.ts".to_string(),
+                defining_name: "ButtonProps".to_string(),
+            },
+            touched_providers: Arc::from(vec![("/types.ts".to_string(), hash_a)]),
+        });
+
+        // Insert and verify basic get
+        cache.insert(
+            "ButtonProps".to_string(),
+            RouteNamespace::Type,
+            outcome.clone(),
+        );
+
+        let retrieved = cache
+            .get("ButtonProps", RouteNamespace::Type)
+            .expect("should find cached route");
+        match &retrieved.result {
+            RouteResult::Found {
+                defining_canonical_id,
+                defining_name,
+            } => {
+                assert_eq!(defining_canonical_id, "/src/types.ts");
+                assert_eq!(defining_name, "ButtonProps");
+            }
+            RouteResult::NotFound => panic!("expected Found, got NotFound"),
+        }
+
+        // get_if_valid returns the outcome when hashes match
+        let valid = cache.get_if_valid("ButtonProps", RouteNamespace::Type, &|canonical_id| {
+            if canonical_id == "/types.ts" {
+                Some(hash_a)
+            } else {
+                None
+            }
+        });
+        assert!(
+            valid.is_some(),
+            "get_if_valid should return the outcome when hashes match"
+        );
+
+        // get_if_valid returns None when hashes don't match
+        let stale = cache.get_if_valid("ButtonProps", RouteNamespace::Type, &|canonical_id| {
+            if canonical_id == "/types.ts" {
+                Some(hash_b) // different hash
+            } else {
+                None
+            }
+        });
+        assert!(
+            stale.is_none(),
+            "get_if_valid should return None when the touched provider hash changed"
+        );
+
+        // get_if_valid returns None when the provider is missing entirely
+        let missing =
+            cache.get_if_valid("ButtonProps", RouteNamespace::Type, &|_canonical_id| None);
+        assert!(
+            missing.is_none(),
+            "get_if_valid should return None when the provider file is not found"
+        );
+
+        // Negative: lookup for a name that was never inserted
+        assert!(
+            cache.get("NonExistent", RouteNamespace::Type).is_none(),
+            "lookup for unknown name should return None"
+        );
+
+        // Negative: lookup in the wrong namespace
+        assert!(
+            cache.get("ButtonProps", RouteNamespace::Value).is_none(),
+            "lookup in wrong namespace should return None"
+        );
+
+        // clear removes the cached route
+        cache.clear();
+        assert!(
+            cache.get("ButtonProps", RouteNamespace::Type).is_none(),
+            "clear should remove all cached routes"
+        );
+    }
+
+    #[test]
+    fn shared_provider_route_store_invalidate_and_path_compression() {
+        use verter_semantic::analysis::Hash16;
+
+        let store = SharedProviderRouteStore::new();
+        let hash_a: Hash16 = [1; 16];
+
+        let outcome = Arc::new(RouteOutcome {
+            result: RouteResult::Found {
+                defining_canonical_id: "/deep/types.ts".to_string(),
+                defining_name: "ButtonProps".to_string(),
+            },
+            touched_providers: Arc::from(vec![
+                ("/barrel.ts".to_string(), hash_a),
+                ("/deep/types.ts".to_string(), hash_a),
+            ]),
+        });
+
+        // Path compression: insert the same Arc<RouteOutcome> for multiple providers
+        let barrel_cache = store.get_or_create("/barrel.ts");
+        barrel_cache.insert(
+            "ButtonProps".to_string(),
+            RouteNamespace::Type,
+            outcome.clone(),
+        );
+
+        let deep_cache = store.get_or_create("/deep/types.ts");
+        deep_cache.insert(
+            "ButtonProps".to_string(),
+            RouteNamespace::Type,
+            outcome.clone(),
+        );
+
+        // Both providers share the same Arc
+        let from_barrel = barrel_cache
+            .get("ButtonProps", RouteNamespace::Type)
+            .unwrap();
+        let from_deep = deep_cache.get("ButtonProps", RouteNamespace::Type).unwrap();
+        assert!(
+            Arc::ptr_eq(&from_barrel, &from_deep),
+            "path-compressed routes should share the same Arc"
+        );
+
+        // Invalidate one provider
+        store.invalidate("/barrel.ts");
+        assert!(
+            barrel_cache
+                .get("ButtonProps", RouteNamespace::Type)
+                .is_none(),
+            "invalidated provider should have no cached routes"
+        );
+        // The other provider's cache should be unaffected
+        assert!(
+            deep_cache
+                .get("ButtonProps", RouteNamespace::Type)
+                .is_some(),
+            "non-invalidated provider should still have cached routes"
+        );
+
+        // get_or_create returns the same cache for the same canonical ID
+        let barrel_cache_2 = store.get_or_create("/barrel.ts");
+        assert!(
+            Arc::ptr_eq(&barrel_cache, &barrel_cache_2),
+            "get_or_create should return the same cache instance for the same canonical ID"
+        );
+
+        // clear_all removes everything
+        store.clear_all();
+        let fresh_cache = store.get_or_create("/barrel.ts");
+        assert!(
+            !Arc::ptr_eq(&barrel_cache, &fresh_cache),
+            "clear_all should create fresh cache instances"
+        );
+    }
+
+    #[test]
+    fn multi_importer_provider_route_reuse() {
+        use verter_semantic::analysis::Hash16;
+
+        let store = SharedProviderRouteStore::new();
+        let hash: Hash16 = [7; 16];
+
+        // Provider "types/index.ts" exports ButtonProps through a wildcard chain.
+        // Two importers (A and B) ask the same question.
+        let provider = store.get_or_create("/types/index.ts");
+
+        // First importer resolves the route (cold miss)
+        assert!(
+            provider.get("ButtonProps", RouteNamespace::Type).is_none(),
+            "cold lookup should miss"
+        );
+
+        // Simulate route discovery and store the result
+        let outcome = Arc::new(RouteOutcome {
+            result: RouteResult::Found {
+                defining_canonical_id: "/types/button.ts".to_string(),
+                defining_name: "ButtonProps".to_string(),
+            },
+            touched_providers: Arc::from(vec![
+                ("/types/index.ts".to_string(), hash),
+                ("/types/button.ts".to_string(), hash),
+            ]),
+        });
+        provider.insert(
+            "ButtonProps".to_string(),
+            RouteNamespace::Type,
+            outcome.clone(),
+        );
+
+        // Second importer hits the same provider — should reuse the cached route
+        let reused = provider
+            .get("ButtonProps", RouteNamespace::Type)
+            .expect("second importer should hit provider cache");
+        assert!(
+            Arc::ptr_eq(&reused, &outcome),
+            "both importers should share the same Arc<RouteOutcome>"
+        );
+
+        // Third importer validates freshness — still valid
+        let valid = provider.get_if_valid("ButtonProps", RouteNamespace::Type, &|id| {
+            if id == "/types/index.ts" || id == "/types/button.ts" {
+                Some(hash)
+            } else {
+                None
+            }
+        });
+        assert!(
+            valid.is_some(),
+            "route should still be valid with same hashes"
+        );
+    }
+
+    #[test]
+    fn negative_route_cached_and_reused() {
+        use verter_semantic::analysis::Hash16;
+
+        let store = SharedProviderRouteStore::new();
+        let hash: Hash16 = [3; 16];
+
+        let provider = store.get_or_create("/types/index.ts");
+
+        // Simulate negative route discovery (symbol not found)
+        let negative = Arc::new(RouteOutcome {
+            result: RouteResult::NotFound,
+            touched_providers: Arc::from(vec![
+                ("/types/index.ts".to_string(), hash),
+                ("/types/a.ts".to_string(), hash),
+                ("/types/b.ts".to_string(), hash),
+            ]),
+        });
+        provider.insert(
+            "NonExistent".to_string(),
+            RouteNamespace::Type,
+            negative.clone(),
+        );
+
+        // Second lookup reuses the negative answer
+        let cached_negative = provider
+            .get("NonExistent", RouteNamespace::Type)
+            .expect("negative answer should be cached");
+        assert!(
+            matches!(cached_negative.result, RouteResult::NotFound),
+            "cached negative should still be NotFound"
+        );
+        assert!(
+            Arc::ptr_eq(&cached_negative, &negative),
+            "negative answer should reuse same Arc"
+        );
+
+        // Negative is invalidated when a touched provider changes
+        let stale = provider.get_if_valid("NonExistent", RouteNamespace::Type, &|id| {
+            if id == "/types/b.ts" {
+                Some([99; 16]) // changed hash
+            } else {
+                Some(hash)
+            }
+        });
+        assert!(
+            stale.is_none(),
+            "negative route should become stale when a touched provider's hash changes"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SliceChanges tests
+    // -----------------------------------------------------------------------
 
     /// @ai-generated — SliceChanges::is_style_only unit tests
     #[test]

@@ -805,18 +805,16 @@ impl VerterHost {
             let source_hint = resolved_type_registry_meta
                 .get(index)
                 .map(|meta| meta.declaration.canonical_source.as_str());
-            if should_collect_component_meta_registry_nested_refs(owner_canonical, source_hint) {
-                let source_expr =
-                    resolver_view.owner_collection_expr(owner_canonical, entry.name.as_str());
-                collect_component_meta_registry_refs(
-                    source_expr.as_ref().unwrap_or(&entry.type_expr),
-                    &published_names,
-                    &mut queued_names,
-                    &mut referenced_names,
-                    source_hint,
-                    false,
-                );
-            }
+            let source_expr =
+                resolver_view.owner_collection_expr(owner_canonical, entry.name.as_str());
+            collect_component_meta_registry_refs(
+                source_expr.as_ref().unwrap_or(&entry.type_expr),
+                &published_names,
+                &mut queued_names,
+                &mut referenced_names,
+                source_hint,
+                false,
+            );
         }
 
         let mut _loop_iterations: usize = 0;
@@ -1000,6 +998,36 @@ impl VerterHost {
                 _loop_start.elapsed().as_secs_f64() * 1000.0,
             ));
         }
+
+        for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
+            let Some(meta) = resolved_type_registry_meta.get(index) else {
+                continue;
+            };
+            let scope_canonical = (!meta.declaration.canonical_source.is_empty())
+                .then_some(meta.declaration.canonical_source.as_str())
+                .unwrap_or(owner_canonical);
+            if scope_canonical == owner_canonical {
+                continue;
+            }
+            if !meta.declaration.resolved_name.is_empty()
+                && component_meta_registry_expr_references_name(
+                    &entry.type_expr,
+                    meta.declaration.resolved_name.as_str(),
+                )
+            {
+                continue;
+            }
+            let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+                self,
+                store_view,
+                scope_canonical,
+            );
+            entry.type_expr = materialize_component_meta_member_surface_expr(
+                &entry.type_expr,
+                &solver_host,
+                false,
+            );
+        }
     }
 
     /// Get a raw analysis snapshot without any enrichment.
@@ -1015,7 +1043,8 @@ impl VerterHost {
             "get_raw_analysis_snapshot",
             format!("owner={} store_view={}", canonical, store_view.is_some()),
         );
-        let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical, store_view);
+        let normalized_canonical =
+            self.normalized_analysis_canonical_in_view(canonical, store_view);
         let canonical = normalized_canonical.as_ref();
         // Eviction gate (scheduler path)
         #[cfg(feature = "scheduler")]
@@ -1031,9 +1060,8 @@ impl VerterHost {
         {
             let mut fallback_whole_hash = None;
             let mut fallback_source: Option<Arc<str>> = None;
-            let mut fallback_cached_parse: Option<
-                Arc<verter_compiler::parser::types::ParsedSfc>,
-            > = None;
+            let mut fallback_cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> =
+                None;
             let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
             {
                 let whole_hash = store_view
@@ -1498,7 +1526,6 @@ impl VerterHost {
         for kind in [
             crate::resolver_core::DerivedFactKind::ExportRegistry,
             crate::resolver_core::DerivedFactKind::Route,
-            crate::resolver_core::DerivedFactKind::BarrelSurface,
             crate::resolver_core::DerivedFactKind::ExactResolution,
         ] {
             if let Some(hash) = store_view
@@ -1516,18 +1543,8 @@ impl VerterHost {
             }
         }
 
-        if let Some(generation) = store_view
-            .and_then(|view| view.barrel_generation(canonical))
-            .or_else(|| self.current_barrel_generation(canonical))
-        {
-            let fact = crate::resolver_core::FactVersionRef::BarrelGeneration {
-                canonical_id: canonical.to_string(),
-                generation,
-            };
-            if seen.insert(fact.clone()) {
-                facts.push(fact);
-            }
-        }
+        // Legacy barrel generation facts removed — provider route cache
+        // invalidates via shallow module surface hashes.
     }
 
     fn current_derived_fact_hash_in_view(
@@ -1557,78 +1574,29 @@ impl VerterHost {
                         .map(|registry| registry.source_hash)
                 }
             }
-            crate::resolver_core::DerivedFactKind::BarrelSurface => {
-                #[cfg(feature = "scheduler")]
-                {
-                    self.compile_cache.get(canonical_id).and_then(|cc| {
-                        cc.barrel_export_surface
-                            .as_ref()
-                            .map(|surface| surface.source_hash)
-                    })
-                }
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    crate::shared::read_lock(&self.files)
-                        .get(canonical_id)
-                        .and_then(|entry| entry.barrel_export_surface.as_ref())
-                        .map(|surface| surface.source_hash)
-                }
-            }
             crate::resolver_core::DerivedFactKind::Route => {
-                #[cfg(feature = "scheduler")]
-                {
-                    self.compile_cache.get(canonical_id).and_then(|cc| {
-                        (!cc.import_route_cache.is_empty()).then(|| {
-                            crate::resolver_store::hash_import_route_cache(&cc.import_route_cache)
-                        })
-                    })
-                }
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    crate::shared::read_lock(&self.files)
-                        .get(canonical_id)
-                        .and_then(|entry| {
-                            (!entry.import_route_cache.is_empty()).then(|| {
-                                crate::resolver_store::hash_import_route_cache(
-                                    &entry.import_route_cache,
-                                )
-                            })
-                        })
-                }
+                // Import route cache has been removed; stub as inert.
+                let _ = canonical_id;
+                None
             }
             crate::resolver_core::DerivedFactKind::ExactResolution => {
                 if let Some(view) = store_view {
-                    return view.dependency_resolutions(canonical_id).and_then(|resolutions| {
-                        (!resolutions.is_empty())
-                            .then(|| crate::resolver_store::hash_dependency_resolutions(resolutions))
-                    });
+                    return view
+                        .dependency_resolutions(canonical_id)
+                        .and_then(|resolutions| {
+                            (!resolutions.is_empty()).then(|| {
+                                crate::resolver_store::hash_dependency_resolutions(resolutions)
+                            })
+                        });
                 }
 
                 self.dependency_resolutions_for_eval_in_view(canonical_id, None)
                     .and_then(|resolutions| {
-                        (!resolutions.is_empty())
-                            .then(|| crate::resolver_store::hash_dependency_resolutions(&resolutions))
+                        (!resolutions.is_empty()).then(|| {
+                            crate::resolver_store::hash_dependency_resolutions(&resolutions)
+                        })
                     })
             }
-        }
-    }
-
-    fn current_barrel_generation(&self, canonical_id: &str) -> Option<u64> {
-        #[cfg(feature = "scheduler")]
-        {
-            self.compile_cache.get(canonical_id).and_then(|cc| {
-                cc.barrel_export_surface
-                    .as_ref()
-                    .map(|surface| surface.generation)
-            })
-        }
-
-        #[cfg(not(feature = "scheduler"))]
-        {
-            crate::shared::read_lock(&self.files)
-                .get(canonical_id)
-                .and_then(|entry| entry.barrel_export_surface.as_ref())
-                .map(|surface| surface.generation)
         }
     }
 }
@@ -1857,6 +1825,340 @@ fn choose_preferred_component_meta_registry_candidate(
     }
 }
 
+fn solve_component_meta_member_surface_expr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    verter_semantic::analysis::type_solver::solve::solve_type(expr, solver_host).value
+}
+
+fn materialize_component_meta_member_surface_expr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+    nested_surface: bool,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let mut active = rustc_hash::FxHashSet::default();
+    materialize_component_meta_member_surface_expr_with_active_stack(
+        expr,
+        solver_host,
+        nested_surface,
+        &mut active,
+    )
+}
+
+fn materialize_component_meta_member_surface_expr_with_active_stack(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+    nested_surface: bool,
+    active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    if !active.insert(expr.clone()) {
+        return expr.clone();
+    }
+
+    if nested_surface {
+        let solved = solve_component_meta_member_surface_expr(expr, solver_host);
+        if solved != *expr {
+            let result = materialize_component_meta_member_surface_expr_with_active_stack(
+                &solved,
+                solver_host,
+                true,
+                active,
+            );
+            active.remove(expr);
+            return result;
+        }
+    }
+
+    let result = match expr {
+        TypeExpr::Function(function) => {
+            let mut function = function.as_ref().clone();
+            for param in &mut function.parameters {
+                param.ty = materialize_component_meta_member_surface_expr_with_active_stack(
+                    &param.ty,
+                    solver_host,
+                    true,
+                    active,
+                );
+            }
+            if let Some(return_type) = function.return_type.as_mut() {
+                let materialized = materialize_component_meta_member_surface_expr_with_active_stack(
+                    return_type,
+                    solver_host,
+                    true,
+                    active,
+                );
+                *return_type = Arc::new(materialized);
+            }
+            TypeExpr::Function(Arc::new(function))
+        }
+        TypeExpr::Object(object) => {
+            let mut object = object.as_ref().clone();
+            for member in &mut object.properties {
+                match member {
+                    ObjectMember::Property(property) => {
+                        if nested_surface
+                            || matches!(&property.ty, TypeExpr::Function(_) | TypeExpr::Object(_))
+                        {
+                            property.ty =
+                                materialize_component_meta_member_surface_expr_with_active_stack(
+                                    &property.ty,
+                                    solver_host,
+                                    true,
+                                    active,
+                                );
+                        }
+                    }
+                    ObjectMember::IndexSignature(signature) => {
+                        signature.key_type =
+                            materialize_component_meta_member_surface_expr_with_active_stack(
+                                &signature.key_type,
+                                solver_host,
+                                true,
+                                active,
+                            );
+                        signature.value_type =
+                            materialize_component_meta_member_surface_expr_with_active_stack(
+                                &signature.value_type,
+                                solver_host,
+                                true,
+                                active,
+                            );
+                    }
+                    ObjectMember::CallSignature(function)
+                    | ObjectMember::ConstructSignature(function) => {
+                        for param in &mut function.parameters {
+                            param.ty =
+                                materialize_component_meta_member_surface_expr_with_active_stack(
+                                    &param.ty,
+                                    solver_host,
+                                    true,
+                                    active,
+                                );
+                        }
+                        if let Some(return_type) = function.return_type.as_mut() {
+                            let materialized =
+                                materialize_component_meta_member_surface_expr_with_active_stack(
+                                    return_type,
+                                    solver_host,
+                                    true,
+                                    active,
+                                );
+                            *return_type = Arc::new(materialized);
+                        }
+                    }
+                    ObjectMember::Method(method) => {
+                        for param in &mut method.function.parameters {
+                            param.ty =
+                                materialize_component_meta_member_surface_expr_with_active_stack(
+                                    &param.ty,
+                                    solver_host,
+                                    true,
+                                    active,
+                                );
+                        }
+                        if let Some(return_type) = method.function.return_type.as_mut() {
+                            let materialized =
+                                materialize_component_meta_member_surface_expr_with_active_stack(
+                                    return_type,
+                                    solver_host,
+                                    true,
+                                    active,
+                                );
+                            *return_type = Arc::new(materialized);
+                        }
+                    }
+                }
+            }
+            TypeExpr::Object(Arc::new(object))
+        }
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    element,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+            readonly: *readonly,
+        },
+        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: Arc::from(
+                elements
+                    .iter()
+                    .map(
+                        |element| verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: materialize_component_meta_member_surface_expr_with_active_stack(
+                                &element.ty,
+                                solver_host,
+                                nested_surface,
+                                active,
+                            ),
+                            optional: element.optional,
+                            rest: element.rest,
+                        },
+                    )
+                    .collect::<Vec<_>>(),
+            ),
+            readonly: *readonly,
+        },
+        TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
+            types
+                .iter()
+                .map(|ty| {
+                    materialize_component_meta_member_surface_expr_with_active_stack(
+                        ty,
+                        solver_host,
+                        nested_surface,
+                        active,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )),
+        TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
+            types
+                .iter()
+                .map(|ty| {
+                    materialize_component_meta_member_surface_expr_with_active_stack(
+                        ty,
+                        solver_host,
+                        nested_surface,
+                        active,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )),
+        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
+            materialize_component_meta_member_surface_expr_with_active_stack(
+                inner,
+                solver_host,
+                nested_surface,
+                active,
+            ),
+        )),
+        TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
+            materialize_component_meta_member_surface_expr_with_active_stack(
+                inner,
+                solver_host,
+                nested_surface,
+                active,
+            ),
+        )),
+        TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
+            materialize_component_meta_member_surface_expr_with_active_stack(
+                inner,
+                solver_host,
+                nested_surface,
+                active,
+            ),
+        )),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => TypeExpr::Conditional {
+            check: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    check,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+            extends: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    extends,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+            true_type: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    true_type,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+            false_type: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    false_type,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+        },
+        TypeExpr::Mapped {
+            parameter,
+            source,
+            optional,
+            readonly,
+            name_type,
+            value,
+        } => TypeExpr::Mapped {
+            parameter: parameter.clone(),
+            source: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    source,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+            optional: *optional,
+            readonly: *readonly,
+            name_type: name_type.as_deref().map(|name_type| {
+                Arc::new(
+                    materialize_component_meta_member_surface_expr_with_active_stack(
+                        name_type,
+                        solver_host,
+                        nested_surface,
+                        active,
+                    ),
+                )
+            }),
+            value: Arc::new(
+                materialize_component_meta_member_surface_expr_with_active_stack(
+                    value,
+                    solver_host,
+                    nested_surface,
+                    active,
+                ),
+            ),
+        },
+        TypeExpr::TemplateLiteral {
+            quasis,
+            expressions,
+        } => TypeExpr::TemplateLiteral {
+            quasis: quasis.clone(),
+            expressions: Arc::from(
+                expressions
+                    .iter()
+                    .map(|expr| {
+                        materialize_component_meta_member_surface_expr_with_active_stack(
+                            expr,
+                            solver_host,
+                            nested_surface,
+                            active,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        },
+        _ => expr.clone(),
+    };
+
+    active.remove(expr);
+    result
+}
+
 fn component_meta_registry_has_non_object_top_level_surface(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
@@ -1878,6 +2180,117 @@ fn component_meta_registry_has_non_object_top_level_surface(
         | TypeExpr::Mapped { .. } => true,
         TypeExpr::Object(_) => false,
         _ => false,
+    }
+}
+
+fn component_meta_registry_expr_references_name(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    target_name: &str,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        }
+        | TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            ..
+        } => {
+            name.as_ref() == target_name
+                || type_arguments
+                    .iter()
+                    .any(|arg| component_meta_registry_expr_references_name(arg, target_name))
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::KeyOf(element) => {
+            component_meta_registry_expr_references_name(element, target_name)
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            component_meta_registry_expr_references_name(object, target_name)
+                || component_meta_registry_expr_references_name(index, target_name)
+        }
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| component_meta_registry_expr_references_name(&element.ty, target_name)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(|ty| component_meta_registry_expr_references_name(ty, target_name)),
+        TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+            ObjectMember::Property(property) => {
+                component_meta_registry_expr_references_name(&property.ty, target_name)
+            }
+            ObjectMember::IndexSignature(signature) => {
+                component_meta_registry_expr_references_name(&signature.key_type, target_name)
+                    || component_meta_registry_expr_references_name(
+                        &signature.value_type,
+                        target_name,
+                    )
+            }
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                function.parameters.iter().any(|param| {
+                    component_meta_registry_expr_references_name(&param.ty, target_name)
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    component_meta_registry_expr_references_name(return_type, target_name)
+                })
+            }
+            ObjectMember::Method(method) => {
+                method.function.parameters.iter().any(|param| {
+                    component_meta_registry_expr_references_name(&param.ty, target_name)
+                }) || method
+                    .function
+                    .return_type
+                    .as_deref()
+                    .is_some_and(|return_type| {
+                        component_meta_registry_expr_references_name(return_type, target_name)
+                    })
+            }
+        }),
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .any(|param| component_meta_registry_expr_references_name(&param.ty, target_name))
+                || function.return_type.as_deref().is_some_and(|return_type| {
+                    component_meta_registry_expr_references_name(return_type, target_name)
+                })
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            component_meta_registry_expr_references_name(check, target_name)
+                || component_meta_registry_expr_references_name(extends, target_name)
+                || component_meta_registry_expr_references_name(true_type, target_name)
+                || component_meta_registry_expr_references_name(false_type, target_name)
+        }
+        TypeExpr::Mapped {
+            source,
+            name_type,
+            value,
+            ..
+        } => {
+            component_meta_registry_expr_references_name(source, target_name)
+                || name_type.as_deref().is_some_and(|name_type| {
+                    component_meta_registry_expr_references_name(name_type, target_name)
+                })
+                || component_meta_registry_expr_references_name(value, target_name)
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|expr| component_meta_registry_expr_references_name(expr, target_name)),
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
     }
 }
 

@@ -4,8 +4,8 @@ use crate::resolver_core::{
 };
 use std::rc::Rc;
 use std::sync::Arc;
-use verter_semantic::analysis::Hash16;
 use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+use verter_semantic::analysis::Hash16;
 use verter_workspace::WorkspaceAccess;
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
@@ -1059,7 +1059,9 @@ export type FancyProps = Prettify<{ open: boolean }>
         "/workspace/node_modules/lib/dist/index.d.ts",
         vec![crate::types::DependencyResolution {
             specifier: "helper".to_string(),
-            resolved_canonical_id: Some("/workspace/node_modules/helper/dist/helper.js".to_string()),
+            resolved_canonical_id: Some(
+                "/workspace/node_modules/helper/dist/helper.js".to_string(),
+            ),
             possible_canonical_ids: vec![
                 "/workspace/node_modules/helper/dist/helper.js".to_string(),
                 "/workspace/node_modules/helper/dist/helper.d.ts".to_string(),
@@ -1160,7 +1162,9 @@ export type FancyProps = Prettify<{ open: boolean }>
         "/workspace/node_modules/lib/dist/index.d.ts",
         vec![crate::types::DependencyResolution {
             specifier: "helper".to_string(),
-            resolved_canonical_id: Some("/workspace/node_modules/helper/dist/helper.js".to_string()),
+            resolved_canonical_id: Some(
+                "/workspace/node_modules/helper/dist/helper.js".to_string(),
+            ),
             possible_canonical_ids: vec![
                 "/workspace/node_modules/helper/dist/helper.js".to_string(),
                 "/workspace/node_modules/helper/dist/helper.d.ts".to_string(),
@@ -1169,7 +1173,11 @@ export type FancyProps = Prettify<{ open: boolean }>
     );
 
     let prepared = host
-        .prepared_type_decl_in_view("/workspace/node_modules/lib/dist/index.d.ts", "FancyProps", None)
+        .prepared_type_decl_in_view(
+            "/workspace/node_modules/lib/dist/index.d.ts",
+            "FancyProps",
+            None,
+        )
         .expect("FancyProps should prepare from the imported declaration cache");
 
     assert_eq!(
@@ -1238,6 +1246,81 @@ export interface CheckboxProps {
 }
 
 #[test]
+fn imported_dependency_route_upgrades_replace_cached_known_miss_entries() {
+    let host = make_host();
+    let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
+    upsert_non_sfc(
+        &host,
+        canonical_id,
+        r#"import { FancyProps } from "./inner.js"
+export type { FancyProps }"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/lib/dist/inner.d.ts",
+        "export interface FancyProps { open: boolean }",
+    );
+
+    let _ = host
+        .ensure_shallow_imported_dependency_state_in_view(canonical_id, None)
+        .expect("declaration entrypoint should seed imported state");
+
+    {
+        let mut cache = host.imported_dependency_cache.lock();
+        let entry = cache
+            .get_mut(canonical_id)
+            .expect("imported cache entry should exist after shallow seeding");
+        Arc::make_mut(entry).dependency_resolutions.insert(
+            "./inner.js".to_string(),
+            crate::types::DependencyResolution {
+                specifier: "./inner.js".to_string(),
+                resolved_canonical_id: None,
+                possible_canonical_ids: Vec::new(),
+            },
+        );
+    }
+
+    host.set_import_dependencies(
+        canonical_id,
+        vec![exact_dependency(
+            "./inner.js",
+            "/workspace/node_modules/lib/dist/inner.d.ts",
+        )],
+    );
+
+    let resolved = host.resolve_imported_type_root_in_view(canonical_id, "FancyProps", None);
+    assert_eq!(
+        resolved,
+        (
+            "/workspace/node_modules/lib/dist/inner.d.ts".to_string(),
+            "FancyProps".to_string()
+        ),
+        "imported declaration entrypoints must upgrade stale miss routes to the exact declaration target",
+    );
+
+    let cached = host
+        .clone_current_imported_dependency_entry(canonical_id, None)
+        .expect("imported declaration entrypoint should stay cached after route resolution");
+    assert_eq!(
+        cached
+            .dependency_resolutions
+            .get("./inner.js")
+            .and_then(|resolution| resolution.effective_target()),
+        Some("/workspace/node_modules/lib/dist/inner.d.ts"),
+        "rebuilt imported cache entries must publish the upgraded declaration route",
+    );
+    assert_eq!(
+        cached
+            .shallow_file_state
+            .as_ref()
+            .and_then(|state| state.import_target("FancyProps"))
+            .map(|target| target.canonical_id.as_str()),
+        Some("/workspace/node_modules/lib/dist/inner.d.ts"),
+        "shallow import targets must be rebuilt with the upgraded declaration route",
+    );
+}
+
+#[test]
 fn prepared_type_decl_in_view_backfills_missing_local_symbol_when_cache_is_partial() {
     let host = make_host();
     let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
@@ -1250,14 +1333,11 @@ export type FancyProps = Local
     let state = host
         .shallow_file_state_in_view(canonical_id, None)
         .expect("shallow state should exist for declaration file");
-    let partial_prepared = crate::resolver_core::build_prepared_type_decl_cache(
-        canonical_id,
-        state.as_ref(),
-        None,
-    )
-    .into_iter()
-    .filter(|(name, _)| name == "FancyProps")
-    .collect();
+    let partial_prepared =
+        crate::resolver_core::build_prepared_type_decl_cache(canonical_id, state.as_ref(), None)
+            .into_iter()
+            .filter(|(name, _)| name == "FancyProps")
+            .collect();
 
     {
         let mut cache = host.imported_dependency_cache.lock();
@@ -1353,7 +1433,9 @@ export type FancyProps = Local
 
     let prepared = host
         .prepared_type_decl_in_view(canonical_id, "Local", None)
-        .expect("cached imported entries without eval_source should be upgraded before prepared lookup");
+        .expect(
+            "cached imported entries without eval_source should be upgraded before prepared lookup",
+        );
 
     assert_eq!(prepared.root_identity.symbol_name, "Local");
     assert!(
@@ -1715,7 +1797,8 @@ fn store_view_current_eval_state_does_not_seed_unloaded_imported_dependency_from
     ws.reset_reads();
 
     assert!(
-        host.current_eval_state_in_view(canonical_id, Some(&view)).is_none(),
+        host.current_eval_state_in_view(canonical_id, Some(&view))
+            .is_none(),
         "store-view current_eval_state should not seed imported dependency source from workspace",
     );
     assert_eq!(
@@ -5001,7 +5084,8 @@ fn resolve_eval_dependency_canonical_in_view_ignores_empty_candidate_without_rea
 }
 
 #[test]
-fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before_raw_extensionless_probe() {
+fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before_raw_extensionless_probe(
+) {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/runtime/types/html.ts",
@@ -5012,10 +5096,8 @@ fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before
 
     ws.reset_reads();
     ws.reset_exists();
-    let resolved = host.resolve_eval_dependency_canonical_in_view(
-        "/workspace/src/runtime/types/html",
-        None,
-    );
+    let resolved =
+        host.resolve_eval_dependency_canonical_in_view("/workspace/src/runtime/types/html", None);
 
     assert_eq!(
         resolved.as_deref(),
@@ -6553,6 +6635,131 @@ defineProps<Props>()
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn declaration_scoped_solver_applies_omit_to_barrel_imported_types_with_store_view() {
+    fn collect_object_property_names(
+        expr: &TypeExpr,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        match expr {
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    if let ObjectMember::Property(prop) = member {
+                        names.insert(prop.name.clone());
+                    }
+                }
+            }
+            TypeExpr::Intersection(members) | TypeExpr::Union(members) => {
+                for member in members.iter() {
+                    collect_object_property_names(member, names);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_object_property_names(inner, names),
+            _ => {}
+        }
+    }
+
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/types/index.ts", "export * from '../Button.vue'\n");
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  icon?: string
+}
+
+export interface ButtonProps extends IconProps {
+  label?: string
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+type Props = Omit<ButtonProps, 'color'> & {
+  status?: string
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./types", "/src/types/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types/index.ts",
+        vec![exact_dependency("../Button.vue", "/src/Button.vue")],
+    );
+
+    let view = host.resolver_store_view();
+    let prepared = host
+        .prepared_type_decl_in_view("/src/Button.vue", "ButtonProps", Some(&view))
+        .expect("ButtonProps prepared decl should materialize under the store view");
+    assert!(
+        prepared.name_resolution.contains_key("IconProps"),
+        "store-view prepared decl should keep same-file heritage bindings in name_resolution",
+    );
+    assert_eq!(
+        prepared
+            .name_resolution
+            .get("IconProps")
+            .map(|identity| identity.canonical_id.as_str()),
+        Some("/src/Button.vue"),
+        "store-view prepared decl should resolve same-file heritage names back to the defining file",
+    );
+    assert!(
+        format!("{:?}", prepared.body).contains("IconProps"),
+        "store-view prepared decl should retain interface heritage in the raw body",
+    );
+    assert!(
+        prepared.local_deps.iter().any(|dep| dep == "IconProps"),
+        "store-view prepared decl should retain same-file heritage in local_deps",
+    );
+    assert!(
+        host.prepared_type_decl_in_view("/src/Button.vue", "IconProps", Some(&view))
+            .is_some(),
+        "store-view prepared decl cache should also expose same-file support symbols",
+    );
+    let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        &host,
+        Some(&view),
+        "/src/App.vue",
+    );
+    let evaluated = verter_semantic::analysis::type_solver::solve::solve_type(
+        &TypeExpr::named("Props"),
+        &solver_host,
+    )
+    .value;
+    let mut prop_names = std::collections::BTreeSet::new();
+    collect_object_property_names(&evaluated, &mut prop_names);
+
+    assert_eq!(
+        prop_names,
+        std::collections::BTreeSet::from([
+            "icon".to_string(),
+            "label".to_string(),
+            "status".to_string(),
+        ]),
+        "store-view declaration-scoped solving should preserve inherited members after barrel routing",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn get_component_meta_reuses_barrel_routes_for_multiple_late_exports() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -7508,11 +7715,8 @@ export interface CheckboxGroupProps {
     );
 
     ws.reset_reads();
-    let resolved = host.resolve_named_type_export_target_in_view(
-        "/src/types.ts",
-        "CheckboxGroupProps",
-        None,
-    );
+    let resolved =
+        host.resolve_named_type_export_target_in_view("/src/types.ts", "CheckboxGroupProps", None);
 
     assert_eq!(
         resolved,

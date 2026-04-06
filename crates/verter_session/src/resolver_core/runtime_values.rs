@@ -639,4 +639,81 @@ mod tests {
             Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("primary")),
         );
     }
+
+    #[test]
+    fn resolved_canonical_id_on_import_skips_resolver_fallback() {
+        // When import.resolved_canonical_id is set (from canonical shallow
+        // import edges), the resolver's resolve_import_canonical_id must NOT
+        // be called.
+        let mut dep_env = EvalEnv::new();
+        dep_env.value_symbols.insert(
+            "defaults".to_string(),
+            ValueDeclInfo {
+                name: "defaults".to_string(),
+                declaration_id: 0,
+                kind: ValueDeclKind::Const,
+                type_annotation: Some(
+                    verter_semantic::analysis::type_expr::TypeExpr::string_literal("cached"),
+                ),
+                function_signature: None,
+                object_shape: None,
+            },
+        );
+
+        let imports = vec![AnalyzedImport {
+            source: "./dep".to_string(),
+            is_type_only: false,
+            // Pre-resolved canonical ID from shallow import edge
+            resolved_canonical_id: Some("/resolved/dep.ts".to_string()),
+            bindings: vec![AnalyzedImportBinding {
+                name: "defaults".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: Some("defaults".to_string()),
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+        }];
+
+        let mut resolver = TestResolver::default();
+        resolver
+            .dep_envs
+            .insert("/resolved/dep.ts".to_string(), Arc::new(dep_env));
+        // Add a WRONG target to the fallback — if the fallback fires,
+        // the value won't be found and the test will fail.
+        resolver.import_targets.insert(
+            ("/src/owner.ts".to_string(), "./dep".to_string()),
+            "/wrong/target.ts".to_string(),
+        );
+
+        let mut env = EvalEnv::new();
+        materialize_imported_runtime_values_into_env(
+            "/src/owner.ts",
+            &imports,
+            &FxHashSet::default(),
+            None,
+            &mut env,
+            &resolver,
+        );
+
+        // The value should be found via the pre-resolved canonical ID,
+        // NOT through the resolver fallback.
+        assert_eq!(
+            env.value_symbols
+                .get("defaults")
+                .and_then(|v| v.type_annotation.clone()),
+            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("cached")),
+            "runtime value materialization should use import.resolved_canonical_id, \
+             not fall back to resolver.resolve_import_canonical_id"
+        );
+
+        // The fallback resolver should NOT have been called for /resolved/dep.ts
+        let lookup_counts = resolver.lookup_counts.borrow();
+        assert!(
+            lookup_counts.get("/wrong/target.ts").is_none()
+                || *lookup_counts.get("/wrong/target.ts").unwrap() == 0,
+            "fallback resolver should not have been consulted when resolved_canonical_id is set"
+        );
+    }
 }

@@ -17,7 +17,6 @@ pub struct HostStoreView {
     dependency_resolutions:
         FxHashMap<String, FxHashMap<String, crate::types::DependencyResolution>>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
-    barrel_generations: FxHashMap<String, u64>,
 }
 
 impl Default for HostStoreView {
@@ -28,7 +27,6 @@ impl Default for HostStoreView {
             whole_hashes: FxHashMap::default(),
             dependency_resolutions: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
-            barrel_generations: FxHashMap::default(),
         }
     }
 }
@@ -95,28 +93,6 @@ impl HostStoreView {
                             registry.source_hash,
                         );
                     }
-
-                    if let Some(surface) = entry.barrel_export_surface.as_ref() {
-                        view.derived_hashes.insert(
-                            (
-                                canonical_id.clone(),
-                                crate::resolver_core::DerivedFactKind::BarrelSurface,
-                            ),
-                            surface.source_hash,
-                        );
-                        view.barrel_generations
-                            .insert(canonical_id.clone(), surface.generation);
-                    }
-
-                    if !entry.import_route_cache.is_empty() {
-                        view.derived_hashes.insert(
-                            (
-                                canonical_id.clone(),
-                                crate::resolver_core::DerivedFactKind::Route,
-                            ),
-                            hash_import_route_cache(&entry.import_route_cache),
-                        );
-                    }
                 }
 
                 view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
@@ -148,28 +124,6 @@ impl HostStoreView {
                             crate::resolver_core::DerivedFactKind::ExportRegistry,
                         ),
                         registry.source_hash,
-                    );
-                }
-
-                if let Some(surface) = entry.barrel_export_surface.as_ref() {
-                    view.derived_hashes.insert(
-                        (
-                            canonical_id.clone(),
-                            crate::resolver_core::DerivedFactKind::BarrelSurface,
-                        ),
-                        surface.source_hash,
-                    );
-                    view.barrel_generations
-                        .insert(canonical_id.clone(), surface.generation);
-                }
-
-                if !entry.import_route_cache.is_empty() {
-                    view.derived_hashes.insert(
-                        (
-                            canonical_id.clone(),
-                            crate::resolver_core::DerivedFactKind::Route,
-                        ),
-                        hash_import_route_cache(&entry.import_route_cache),
                     );
                 }
             }
@@ -287,10 +241,6 @@ impl HostStoreView {
             .copied()
     }
 
-    pub(crate) fn barrel_generation(&self, canonical_id: &str) -> Option<u64> {
-        self.barrel_generations.get(canonical_id).copied()
-    }
-
     pub(crate) fn dependency_resolution(
         &self,
         canonical_id: &str,
@@ -341,20 +291,6 @@ impl HostStoreView {
                     )),
                 }
             }
-            crate::resolver_core::FactVersionRef::BarrelGeneration {
-                canonical_id,
-                generation,
-            } => match self.barrel_generations.get(canonical_id) {
-                Some(current) if current == generation => None,
-                Some(current) => Some(format!(
-                    "BarrelGeneration mismatch canonical={} expected={} actual={}",
-                    canonical_id, generation, current
-                )),
-                None => Some(format!(
-                    "BarrelGeneration missing canonical={} expected={}",
-                    canonical_id, generation
-                )),
-            },
             crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
@@ -501,46 +437,6 @@ pub(crate) fn hash_dependency_resolutions(
     })
 }
 
-pub(crate) fn hash_import_route_cache(
-    route_cache: &FxHashMap<
-        (String, String, verter_workspace::ResolveRequestKind),
-        crate::types::ImportTypeRouteEntry,
-    >,
-) -> Hash16 {
-    let mut entries: Vec<_> = route_cache.iter().collect();
-    entries.sort_by(|a, b| {
-        a.0 .0
-            .cmp(&b.0 .0)
-            .then_with(|| a.0 .1.cmp(&b.0 .1))
-            .then_with(|| resolve_request_kind_rank(a.0 .2).cmp(&resolve_request_kind_rank(b.0 .2)))
-    });
-
-    hash16_from_sorted(|hasher| {
-        for ((import_source, type_name, kind), entry) in &entries {
-            1u8.hash(hasher);
-            import_source.hash(hasher);
-            type_name.hash(hasher);
-            resolve_request_kind_rank(*kind).hash(hasher);
-            entry.owner_hash.hash(hasher);
-            entry
-                .target
-                .as_ref()
-                .map(|target| &target.final_canonical_id)
-                .hash(hasher);
-            entry
-                .target
-                .as_ref()
-                .map(|target| &target.exported_name)
-                .hash(hasher);
-            entry.tracked_deps.hash(hasher);
-            let mut route_hashes = entry.route_hashes.clone();
-            route_hashes.sort_by(|a, b| a.0.cmp(&b.0));
-            route_hashes.hash(hasher);
-            entry.negative_barrel_gen.hash(hasher);
-        }
-    })
-}
-
 fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
     let mut left = rustc_hash::FxHasher::default();
     0u8.hash(&mut left);
@@ -556,15 +452,6 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
     out
 }
 
-fn resolve_request_kind_rank(kind: verter_workspace::ResolveRequestKind) -> u8 {
-    match kind {
-        verter_workspace::ResolveRequestKind::EsmImport => 0,
-        verter_workspace::ResolveRequestKind::TypeImport => 1,
-        verter_workspace::ResolveRequestKind::RequireCall => 2,
-        verter_workspace::ResolveRequestKind::SfcSrcAttr => 3,
-    }
-}
-
 impl crate::resolver_core::StoreView for HostStoreView {
     fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         self.compat_token
@@ -576,13 +463,6 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 .whole_hashes
                 .get(canonical_id)
                 .is_some_and(|current| current == hash),
-            crate::resolver_core::FactVersionRef::BarrelGeneration {
-                canonical_id,
-                generation,
-            } => self
-                .barrel_generations
-                .get(canonical_id)
-                .is_some_and(|current| current == generation),
             crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,

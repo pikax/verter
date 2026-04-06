@@ -4291,7 +4291,10 @@ defineProps<Local>()
         .as_ref()
         .expect("shared owner engine should still be available");
     let before = engine_cell.borrow().cache_len();
-    assert!(before > 0, "phase 1 should populate the shared owner engine");
+    assert!(
+        before > 0,
+        "phase 1 should populate the shared owner engine"
+    );
 
     let result =
         engine_cell

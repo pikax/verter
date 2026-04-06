@@ -84,9 +84,10 @@ pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
 };
 pub use shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureResult,
-    LocalClosureStatus, ResolutionBudgets, ResolutionCounters, ShallowFileState, ShallowTypeSymbol,
-    ShallowTypeView, ShallowValueSymbol,
+    BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, ImportTarget,
+    LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
+    ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
+    ShallowValueSymbol, WildcardReexport,
 };
 pub use solver_host::SessionSolverHost;
 pub use surface_projector::{
@@ -130,8 +131,8 @@ pub struct ResolveRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DerivedFactKind {
     ExportRegistry,
+    /// Provider-owned export route surface hash.
     Route,
-    BarrelSurface,
     ExactResolution,
     DirectSource,
 }
@@ -141,10 +142,6 @@ pub enum FactVersionRef {
     FileWholeHash {
         canonical_id: String,
         hash: ResolverHash16,
-    },
-    BarrelGeneration {
-        canonical_id: String,
-        generation: u64,
     },
     DerivedFactHash {
         canonical_id: String,
@@ -730,9 +727,9 @@ mod tests {
         cache.insert(
             "node".to_string(),
             42,
-            vec![FactVersionRef::BarrelGeneration {
+            vec![FactVersionRef::FileWholeHash {
                 canonical_id: "/src/index.ts".to_string(),
-                generation: 9,
+                hash: [99u8; 16],
             }],
         );
 

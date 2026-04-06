@@ -87,11 +87,7 @@ pub fn lower_type_expr_in_scope(
                 .iter()
                 .map(|a| lower_type_expr_in_scope(arena, a, scope_canonical_id))
                 .collect();
-            arena.scoped_type_ref(
-                name.as_ref(),
-                args,
-                scope_canonical_id.map(str::to_string),
-            )
+            arena.scoped_type_ref(name.as_ref(), args, scope_canonical_id.map(str::to_string))
         }
 
         TypeExpr::TypeParameter(param) => {
@@ -184,7 +180,9 @@ pub fn lower_type_expr_in_scope(
             arena.alloc(Node::Rest(id))
         }
 
-        TypeExpr::Parenthesized(inner) => lower_type_expr_in_scope(arena, inner, scope_canonical_id),
+        TypeExpr::Parenthesized(inner) => {
+            lower_type_expr_in_scope(arena, inner, scope_canonical_id)
+        }
 
         TypeExpr::RecursiveRef {
             name,
@@ -261,7 +259,11 @@ fn lower_mapped_modifier(m: MappedModifier) -> MappedModifierKind {
     }
 }
 
-fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr, scope_canonical_id: Option<&str>) -> NodeId {
+fn lower_object(
+    arena: &mut QueryArena,
+    obj: &ObjectExpr,
+    scope_canonical_id: Option<&str>,
+) -> NodeId {
     let mut properties = Vec::new();
     let mut index_signatures = Vec::new();
     let mut call_signatures = Vec::new();
@@ -281,7 +283,11 @@ fn lower_object(arena: &mut QueryArena, obj: &ObjectExpr, scope_canonical_id: Op
             ObjectMember::IndexSignature(idx) => {
                 index_signatures.push(IndexSignatureNode {
                     key_type: lower_type_expr_in_scope(arena, &idx.key_type, scope_canonical_id),
-                    value_type: lower_type_expr_in_scope(arena, &idx.value_type, scope_canonical_id),
+                    value_type: lower_type_expr_in_scope(
+                        arena,
+                        &idx.value_type,
+                        scope_canonical_id,
+                    ),
                     readonly: idx.readonly,
                 });
             }
@@ -345,7 +351,11 @@ fn lower_call_signature(
     }
 }
 
-fn lower_function(arena: &mut QueryArena, func: &FunctionExpr, scope_canonical_id: Option<&str>) -> NodeId {
+fn lower_function(
+    arena: &mut QueryArena,
+    func: &FunctionExpr,
+    scope_canonical_id: Option<&str>,
+) -> NodeId {
     let sig = lower_call_signature(arena, func, scope_canonical_id);
     arena.function(FunctionNode {
         signatures: vec![sig],

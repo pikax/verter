@@ -990,9 +990,7 @@ fn try_resolve_structural_ref_member(
     if let Some(builtin) = BuiltinUtility::from_name(name) {
         if builtin.is_compiler_intrinsic() || host.utility_source(name) != UtilitySource::Shadowed {
             match builtin {
-                BuiltinUtility::Partial
-                | BuiltinUtility::Required
-                | BuiltinUtility::Readonly => {
+                BuiltinUtility::Partial | BuiltinUtility::Required | BuiltinUtility::Readonly => {
                     let key = arena.string_literal(key_name);
                     return Some(resolve_indexed_access(
                         arena,
@@ -1004,12 +1002,10 @@ fn try_resolve_structural_ref_member(
                     ));
                 }
                 BuiltinUtility::Pick => {
-                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
-                        arena,
-                        *type_arguments.get(1)?,
-                    )
-                    .into_iter()
-                    .collect();
+                    let key_set: std::collections::BTreeSet<String> =
+                        collect_literal_string_keys(arena, *type_arguments.get(1)?)
+                            .into_iter()
+                            .collect();
                     if !key_set.contains(key_name) {
                         return Some(arena.primitive(PrimitiveKind::Undefined));
                     }
@@ -1024,12 +1020,10 @@ fn try_resolve_structural_ref_member(
                     ));
                 }
                 BuiltinUtility::Omit => {
-                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
-                        arena,
-                        *type_arguments.get(1)?,
-                    )
-                    .into_iter()
-                    .collect();
+                    let key_set: std::collections::BTreeSet<String> =
+                        collect_literal_string_keys(arena, *type_arguments.get(1)?)
+                            .into_iter()
+                            .collect();
                     if key_set.contains(key_name) {
                         return Some(arena.primitive(PrimitiveKind::Undefined));
                     }
@@ -1057,12 +1051,7 @@ fn try_resolve_structural_ref_member(
             PreparedWrapperKind::Identity | PreparedWrapperKind::PureOverlay => {
                 let key = arena.string_literal(key_name);
                 return Some(resolve_indexed_access(
-                    arena,
-                    source,
-                    key,
-                    host,
-                    state,
-                    subst,
+                    arena, source, key, host, state, subst,
                 ));
             }
             PreparedWrapperKind::KeyFilter => match &shape.key_filter {
@@ -1072,12 +1061,7 @@ fn try_resolve_structural_ref_member(
                     }
                     let key = arena.string_literal(key_name);
                     return Some(resolve_indexed_access(
-                        arena,
-                        source,
-                        key,
-                        host,
-                        state,
-                        subst,
+                        arena, source, key, host, state, subst,
                     ));
                 }
                 PreparedKeyFilterShape::ExcludeLiteral(keys) => {
@@ -1086,12 +1070,7 @@ fn try_resolve_structural_ref_member(
                     }
                     let key = arena.string_literal(key_name);
                     return Some(resolve_indexed_access(
-                        arena,
-                        source,
-                        key,
-                        host,
-                        state,
-                        subst,
+                        arena, source, key, host, state, subst,
                     ));
                 }
                 _ => {}
@@ -1100,7 +1079,42 @@ fn try_resolve_structural_ref_member(
         }
     }
 
-    None
+    if let Some(member) = prepared.member(key_name) {
+        let lowered = lower_type_expr_in_scope(
+            arena,
+            &member.ty,
+            Some(prepared.root_identity.canonical_id.as_str()),
+        );
+        if !prepared.name_resolution.is_empty() {
+            state.type_decl_context_stack.push(prepared);
+            let resolved = resolve_node(arena, lowered, host, state, subst);
+            state.type_decl_context_stack.pop();
+            return Some(resolved);
+        }
+        return Some(resolve_node(arena, lowered, host, state, subst));
+    }
+
+    let resolved_args: Vec<NodeId> = type_arguments
+        .iter()
+        .map(|&arg| resolve_node(arena, arg, host, state, subst))
+        .collect();
+    let resolved_body = resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
+    if matches!(
+        arena.get(resolved_body),
+        Node::Applied { .. } | Node::RecursiveRef { .. }
+    ) {
+        return None;
+    }
+
+    let key = arena.string_literal(key_name);
+    Some(resolve_indexed_access(
+        arena,
+        resolved_body,
+        key,
+        host,
+        state,
+        subst,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -1221,7 +1235,7 @@ fn try_expand_object_modifier_structurally(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> Option<NodeId> {
-    let props = collect_structural_property_descriptors(arena, object, host, state)?;
+    let props = collect_structural_property_descriptors(arena, object, host, state, subst)?;
     let mut properties = Vec::with_capacity(props.len());
 
     for prop in props {
@@ -1253,13 +1267,14 @@ fn try_expand_pick_omit_structurally(
     state: &mut SolveState,
     subst: &SubstitutionEnv,
 ) -> Option<NodeId> {
-    let key_set: std::collections::BTreeSet<String> =
-        collect_literal_string_keys(arena, keys).into_iter().collect();
+    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(arena, keys)
+        .into_iter()
+        .collect();
     if key_set.is_empty() {
         return None;
     }
 
-    let props = collect_structural_property_descriptors(arena, object, host, state)?;
+    let props = collect_structural_property_descriptors(arena, object, host, state, subst)?;
     let mut properties = Vec::new();
 
     for prop in props {
@@ -1291,10 +1306,11 @@ fn try_expand_pick_omit_structurally(
 }
 
 fn collect_structural_property_descriptors(
-    arena: &QueryArena,
+    arena: &mut QueryArena,
     node: NodeId,
     host: &dyn TypeSolverHost,
     state: &mut SolveState,
+    subst: &SubstitutionEnv,
 ) -> Option<Vec<StructuralPropertyDescriptor>> {
     if node.is_unresolved() {
         return None;
@@ -1317,7 +1333,7 @@ fn collect_structural_property_descriptors(
                 rustc_hash::FxHashMap::default();
             for member in members {
                 let descriptors =
-                    collect_structural_property_descriptors(arena, member, host, state)?;
+                    collect_structural_property_descriptors(arena, member, host, state, subst)?;
                 for prop in descriptors {
                     if let Some(existing) = merged.get_mut(&prop.name) {
                         existing.optional &= prop.optional;
@@ -1343,6 +1359,7 @@ fn collect_structural_property_descriptors(
             scope_canonical_id.as_deref(),
             host,
             state,
+            subst,
         ),
         Node::RecursiveRef {
             symbol_name,
@@ -1355,18 +1372,20 @@ fn collect_structural_property_descriptors(
             None,
             host,
             state,
+            subst,
         ),
         _ => None,
     }
 }
 
 fn collect_structural_ref_properties(
-    arena: &QueryArena,
+    arena: &mut QueryArena,
     name: &str,
     type_arguments: &[NodeId],
     scope_canonical_id: Option<&str>,
     host: &dyn TypeSolverHost,
     state: &mut SolveState,
+    subst: &SubstitutionEnv,
 ) -> Option<Vec<StructuralPropertyDescriptor>> {
     if let Some(builtin) = BuiltinUtility::from_name(name) {
         if builtin.is_compiler_intrinsic() || host.utility_source(name) != UtilitySource::Shadowed {
@@ -1377,6 +1396,7 @@ fn collect_structural_ref_properties(
                         *type_arguments.first()?,
                         host,
                         state,
+                        subst,
                     )?;
                     for prop in &mut props {
                         prop.optional = true;
@@ -1389,6 +1409,7 @@ fn collect_structural_ref_properties(
                         *type_arguments.first()?,
                         host,
                         state,
+                        subst,
                     )?;
                     for prop in &mut props {
                         prop.optional = false;
@@ -1401,6 +1422,7 @@ fn collect_structural_ref_properties(
                         *type_arguments.first()?,
                         host,
                         state,
+                        subst,
                     )?;
                     for prop in &mut props {
                         prop.readonly = true;
@@ -1413,13 +1435,12 @@ fn collect_structural_ref_properties(
                         *type_arguments.first()?,
                         host,
                         state,
+                        subst,
                     )?;
-                    let key_set: std::collections::BTreeSet<String> = collect_literal_string_keys(
-                        arena,
-                        *type_arguments.get(1)?,
-                    )
-                    .into_iter()
-                    .collect();
+                    let key_set: std::collections::BTreeSet<String> =
+                        collect_literal_string_keys(arena, *type_arguments.get(1)?)
+                            .into_iter()
+                            .collect();
                     if key_set.is_empty() {
                         return None;
                     }
@@ -1445,11 +1466,11 @@ fn collect_structural_ref_properties(
         let source = *type_arguments.get(usize::from(source_index))?;
         match shape.kind {
             PreparedWrapperKind::Identity => {
-                return collect_structural_property_descriptors(arena, source, host, state);
+                return collect_structural_property_descriptors(arena, source, host, state, subst);
             }
             PreparedWrapperKind::PureOverlay => {
                 let mut props =
-                    collect_structural_property_descriptors(arena, source, host, state)?;
+                    collect_structural_property_descriptors(arena, source, host, state, subst)?;
                 if let Some(optional) = shape.modifiers.optional {
                     for prop in &mut props {
                         prop.optional = optional;
@@ -1464,17 +1485,15 @@ fn collect_structural_ref_properties(
             }
             PreparedWrapperKind::KeyFilter => {
                 let mut props =
-                    collect_structural_property_descriptors(arena, source, host, state)?;
+                    collect_structural_property_descriptors(arena, source, host, state, subst)?;
                 match &shape.key_filter {
                     PreparedKeyFilterShape::IncludeLiteral(keys) => {
-                        let key_set: std::collections::BTreeSet<_> =
-                            keys.iter().cloned().collect();
+                        let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
                         props.retain(|prop| key_set.contains(&prop.name));
                         return Some(props);
                     }
                     PreparedKeyFilterShape::ExcludeLiteral(keys) => {
-                        let key_set: std::collections::BTreeSet<_> =
-                            keys.iter().cloned().collect();
+                        let key_set: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
                         props.retain(|prop| !key_set.contains(&prop.name));
                         return Some(props);
                     }
@@ -1485,20 +1504,45 @@ fn collect_structural_ref_properties(
         }
     }
 
-    if prepared.member_index.is_empty() {
+    let mut merged: rustc_hash::FxHashMap<String, StructuralPropertyDescriptor> = prepared
+        .member_index
+        .iter()
+        .map(|(name, member)| {
+            (
+                name.clone(),
+                StructuralPropertyDescriptor {
+                    name: name.clone(),
+                    optional: member.optional,
+                    readonly: member.readonly,
+                    is_method: member.is_method,
+                },
+            )
+        })
+        .collect();
+
+    let resolved_args: Vec<NodeId> = type_arguments
+        .iter()
+        .map(|&arg| resolve_node(arena, arg, host, state, subst))
+        .collect();
+    let resolved_body = resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
+    if !matches!(
+        arena.get(resolved_body),
+        Node::Applied { .. } | Node::RecursiveRef { .. }
+    ) {
+        if let Some(props) =
+            collect_structural_property_descriptors(arena, resolved_body, host, state, subst)
+        {
+            for prop in props {
+                merged.entry(prop.name.clone()).or_insert(prop);
+            }
+        }
+    }
+
+    if merged.is_empty() {
         return None;
     }
 
-    let mut props: Vec<_> = prepared
-        .member_index
-        .iter()
-        .map(|(name, member)| StructuralPropertyDescriptor {
-            name: name.clone(),
-            optional: member.optional,
-            readonly: member.readonly,
-            is_method: member.is_method,
-        })
-        .collect();
+    let mut props: Vec<_> = merged.into_values().collect();
     props.sort_by(|a, b| a.name.cmp(&b.name));
     Some(props)
 }
@@ -1890,10 +1934,7 @@ fn resolve_prepared_type_decl_cached(
     host: &dyn TypeSolverHost,
     root_identity: &ResolvedRootIdentity,
 ) -> Option<Arc<PreparedTypeDecl>> {
-    if let Some(cached) = state
-        .relation_caches
-        .get_prepared_type_decl(root_identity)
-    {
+    if let Some(cached) = state.relation_caches.get_prepared_type_decl(root_identity) {
         return cached;
     }
 
@@ -1909,10 +1950,7 @@ fn resolve_prepared_value_decl_cached(
     host: &dyn TypeSolverHost,
     root_identity: &ResolvedRootIdentity,
 ) -> Option<Arc<PreparedValueDecl>> {
-    if let Some(cached) = state
-        .relation_caches
-        .get_prepared_value_decl(root_identity)
-    {
+    if let Some(cached) = state.relation_caches.get_prepared_value_decl(root_identity) {
         return cached;
     }
 
@@ -1942,18 +1980,14 @@ fn resolve_root_in_context(
 
     if let Some(decl) = state.type_decl_context_stack.last() {
         let canonical_id = decl.root_identity.canonical_id.clone();
-        if let Some(identity) =
-            resolve_root_identity_cached(state, host, &canonical_id, name)
-        {
+        if let Some(identity) = resolve_root_identity_cached(state, host, &canonical_id, name) {
             return Some(identity);
         }
     }
 
     if let Some(decl) = state.value_decl_context_stack.last() {
         let canonical_id = decl.root_identity.canonical_id.clone();
-        if let Some(identity) =
-            resolve_root_identity_cached(state, host, &canonical_id, name)
-        {
+        if let Some(identity) = resolve_root_identity_cached(state, host, &canonical_id, name) {
             return Some(identity);
         }
     }
@@ -2948,20 +2982,29 @@ fn node_contains_infer(arena: &QueryArena, node: NodeId) -> bool {
             Node::Array { element, .. } | Node::KeyOf(element) | Node::Rest(element) => {
                 visit(arena, *element, seen)
             }
-            Node::Tuple { elements, .. } => elements.iter().any(|element| visit(arena, element.ty, seen)),
+            Node::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| visit(arena, element.ty, seen)),
             Node::Object(obj) => {
-                obj.properties.iter().any(|prop| visit(arena, prop.ty, seen))
+                obj.properties
+                    .iter()
+                    .any(|prop| visit(arena, prop.ty, seen))
+                    || obj.index_signatures.iter().any(|sig| {
+                        visit(arena, sig.key_type, seen) || visit(arena, sig.value_type, seen)
+                    })
                     || obj
-                        .index_signatures
+                        .call_signatures
                         .iter()
-                        .any(|sig| visit(arena, sig.key_type, seen) || visit(arena, sig.value_type, seen))
-                    || obj.call_signatures.iter().any(|sig| visit_signature(arena, sig, seen))
+                        .any(|sig| visit_signature(arena, sig, seen))
                     || obj
                         .construct_signatures
                         .iter()
                         .any(|sig| visit_signature(arena, sig, seen))
             }
-            Node::Function(func) => func.signatures.iter().any(|sig| visit_signature(arena, sig, seen)),
+            Node::Function(func) => func
+                .signatures
+                .iter()
+                .any(|sig| visit_signature(arena, sig, seen)),
             Node::Ref { type_arguments, .. } => {
                 type_arguments.iter().any(|&arg| visit(arena, arg, seen))
             }
@@ -3012,7 +3055,9 @@ fn node_contains_infer(arena: &QueryArena, node: NodeId) -> bool {
         seen: &mut std::collections::HashSet<NodeId>,
     ) -> bool {
         signature.type_parameters.iter().any(|param| {
-            param.constraint.is_some_and(|node| visit(arena, node, seen))
+            param
+                .constraint
+                .is_some_and(|node| visit(arena, node, seen))
                 || param.default.is_some_and(|node| visit(arena, node, seen))
         }) || signature
             .parameters
@@ -3426,8 +3471,13 @@ fn resolve_typeof(
                     match node {
                         Node::Object(obj) => {
                             if let Some(prop) = obj.properties.iter().find(|p| p.name == *segment) {
-                                current =
-                                    resolve_node(arena, prop.ty, host, state, &SubstitutionEnv::new());
+                                current = resolve_node(
+                                    arena,
+                                    prop.ty,
+                                    host,
+                                    state,
+                                    &SubstitutionEnv::new(),
+                                );
                             } else {
                                 ok = false;
                                 break;
@@ -5252,11 +5302,157 @@ mod tests {
     }
 
     #[test]
+    fn solve_omit_includes_inherited_interface_members_from_prepared_ref() {
+        struct ScopedTypeHost {
+            decls: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
+        }
+
+        impl TypeSolverHost for ScopedTypeHost {
+            fn resolve_prepared_type_decl(
+                &self,
+                root_identity: &ResolvedRootIdentity,
+            ) -> Option<Arc<PreparedTypeDecl>> {
+                self.decls
+                    .get(&(
+                        root_identity.canonical_id.clone(),
+                        root_identity.symbol_name.clone(),
+                    ))
+                    .cloned()
+            }
+
+            fn resolve_prepared_value_decl(
+                &self,
+                _: &ResolvedRootIdentity,
+            ) -> Option<Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>
+            {
+                None
+            }
+
+            fn utility_source(&self, name: &str) -> UtilitySource {
+                if BuiltinUtility::from_name(name).is_some() {
+                    UtilitySource::Builtin
+                } else {
+                    UtilitySource::Unknown
+                }
+            }
+
+            fn root_identity(
+                &self,
+                canonical_id: &str,
+                symbol_name: &str,
+            ) -> Option<ResolvedRootIdentity> {
+                if canonical_id.is_empty() {
+                    return self
+                        .decls
+                        .contains_key(&("/types.ts".into(), symbol_name.to_string()))
+                        .then(|| ResolvedRootIdentity::new("/types.ts", symbol_name));
+                }
+
+                self.decls
+                    .contains_key(&(canonical_id.to_string(), symbol_name.to_string()))
+                    .then(|| ResolvedRootIdentity::new(canonical_id, symbol_name))
+            }
+        }
+
+        let mut icon_props = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "IconProps"),
+            TypeDeclKind::Interface,
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "icon".into(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: true,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+        icon_props.build_member_index();
+
+        let mut button_props = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "ButtonProps"),
+            TypeDeclKind::Interface,
+            TypeExpr::intersection(vec![
+                TypeExpr::named("IconProps"),
+                TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "label".into(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        ),
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "color".into(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                })),
+            ]),
+        );
+        button_props.build_member_index();
+
+        let host = ScopedTypeHost {
+            decls: FxHashMap::from_iter([
+                (
+                    ("/types.ts".into(), "IconProps".into()),
+                    Arc::new(icon_props),
+                ),
+                (
+                    ("/types.ts".into(), "ButtonProps".into()),
+                    Arc::new(button_props),
+                ),
+            ]),
+        };
+
+        let result = solve_type(
+            &TypeExpr::named_with_args(
+                "Omit",
+                vec![
+                    TypeExpr::named("ButtonProps"),
+                    TypeExpr::string_literal("color"),
+                ],
+            ),
+            &host,
+        );
+
+        let TypeExpr::Object(obj) = result.value else {
+            panic!("expected Object, got {:?}", result.value);
+        };
+        let mut property_names: Vec<_> = obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        property_names.sort_unstable();
+
+        assert_eq!(
+            property_names,
+            vec!["icon", "label"],
+            "structural Omit should preserve inherited interface members behind prepared refs",
+        );
+    }
+
+    #[test]
     fn solve_typeof_uses_active_value_decl_canonical_scope_when_name_resolution_is_empty() {
         struct ScopedValueHost {
             types: FxHashMap<(String, String), Arc<PreparedTypeDecl>>,
-            values:
-                FxHashMap<(String, String), Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>>,
+            values: FxHashMap<
+                (String, String),
+                Arc<crate::analysis::type_solver::prepared::PreparedValueDecl>,
+            >,
         }
 
         impl TypeSolverHost for ScopedValueHost {
@@ -5300,7 +5496,9 @@ mod tests {
             ) -> Option<ResolvedRootIdentity> {
                 if canonical_id.is_empty() {
                     return match symbol_name {
-                        "Alias" | "theme" => Some(ResolvedRootIdentity::new("/value.ts", symbol_name)),
+                        "Alias" | "theme" => {
+                            Some(ResolvedRootIdentity::new("/value.ts", symbol_name))
+                        }
                         _ => None,
                     };
                 }
@@ -6221,13 +6419,12 @@ mod tests {
         let mut host = TestHost::new();
         host.add_alias("Foo", TypeExpr::Primitive(PrimitiveName::String));
 
-        let function_expr = TypeExpr::Function(Arc::new(
-            crate::analysis::type_expr::FunctionExpr {
+        let function_expr =
+            TypeExpr::Function(Arc::new(crate::analysis::type_expr::FunctionExpr {
                 parameters: vec![],
                 return_type: Some(Arc::new(TypeExpr::named("Foo"))),
                 type_parameters: vec![],
-            },
-        ));
+            }));
 
         let result = solve_type(&function_expr, &host);
         let TypeExpr::Function(function) = result.value else {
@@ -9256,10 +9453,8 @@ mod tests {
                 decl.type_parameters = type_parameters;
                 decl.build_member_index();
                 decl.classify_wrapper_shape();
-                self.decls.insert(
-                    (canonical_id.to_string(), name.to_string()),
-                    Arc::new(decl),
-                );
+                self.decls
+                    .insert((canonical_id.to_string(), name.to_string()), Arc::new(decl));
             }
 
             fn clear_queries(&self) {
@@ -9371,10 +9566,8 @@ mod tests {
                 )],
             })),
         );
-        let open_value_key = lower_type_expr(
-            &mut arena,
-            &TypeExpr::type_parameter(make_type_param("VK")),
-        );
+        let open_value_key =
+            lower_type_expr(&mut arena, &TypeExpr::type_parameter(make_type_param("VK")));
         let deferred = resolve_prepared_ref(
             &mut arena,
             &host,
@@ -9393,11 +9586,13 @@ mod tests {
         host.clear_queries();
 
         let mut caller_state = SolveState::new(SolveLimits::default());
-        caller_state.type_decl_context_stack.push(Arc::new(PreparedTypeDecl::new(
-            ResolvedRootIdentity::new("/input.ts", "Wrapper"),
-            TypeDeclKind::Alias,
-            TypeExpr::Primitive(PrimitiveName::Unknown),
-        )));
+        caller_state
+            .type_decl_context_stack
+            .push(Arc::new(PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/input.ts", "Wrapper"),
+                TypeDeclKind::Alias,
+                TypeExpr::Primitive(PrimitiveName::Unknown),
+            )));
         let mut caller_subst = SubstitutionEnv::new();
         caller_subst.bind("VK", arena.string_literal("label"));
         let resolved = resolve_node(
@@ -9480,10 +9675,8 @@ mod tests {
                 decl.type_parameters = type_parameters;
                 decl.build_member_index();
                 decl.classify_wrapper_shape();
-                self.decls.insert(
-                    (canonical_id.to_string(), name.to_string()),
-                    Arc::new(decl),
-                );
+                self.decls
+                    .insert((canonical_id.to_string(), name.to_string()), Arc::new(decl));
             }
         }
 

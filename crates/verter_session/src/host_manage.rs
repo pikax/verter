@@ -129,9 +129,7 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
         return None;
     }
 
-    let has_explicit_extension = std::path::Path::new(dep_canonical)
-        .extension()
-        .is_some();
+    let has_explicit_extension = std::path::Path::new(dep_canonical).extension().is_some();
 
     let prefers_type_companion = dep_canonical.ends_with(".js")
         || dep_canonical.ends_with(".jsx")
@@ -190,11 +188,41 @@ fn dep_edges_from_resolutions(
 ) -> rustc_hash::FxHashMap<String, String> {
     let mut edges = rustc_hash::FxHashMap::default();
     for (specifier, res) in resolutions {
-        if let Some(target) = res.effective_target() {
-            edges.insert(specifier.clone(), target.to_string());
+        if let Some(target) = res
+            .resolved_canonical_id
+            .clone()
+            .or_else(|| res.effective_target().map(str::to_string))
+        {
+            edges.insert(specifier.clone(), target);
         }
     }
     edges
+}
+
+fn shallow_state_resolved_edge_count(state: &crate::resolver_core::ShallowFileState) -> usize {
+    let import_targets = state
+        .import_targets
+        .values()
+        .filter(|target| !target.canonical_id.is_empty())
+        .count();
+    let reexports = state
+        .exports
+        .values()
+        .filter(|target| {
+            matches!(
+                target,
+                crate::resolver_core::ExportTarget::Reexport { canonical_id, .. }
+                    if !canonical_id.is_empty()
+            )
+        })
+        .count();
+    let wildcards = state
+        .wildcard_reexports
+        .iter()
+        .filter(|target| !target.canonical_id.is_empty())
+        .count();
+
+    import_targets + reexports + wildcards
 }
 
 pub(crate) fn component_meta_debug_enabled() -> bool {
@@ -917,6 +945,21 @@ fn log_snapshot_debug(
 
 pub(crate) type ComputedEvaluatedTypes = crate::resolver_core::ComputedEvaluatedTypes;
 
+/// Host-backed import resolver for `ShallowFileState` construction.
+///
+/// Resolves import specifiers to canonical file IDs from already-cached
+/// dependency routes. Used during shallow state materialization to
+/// pre-canonicalize cross-file edges without live workspace reads.
+struct HostShallowImportResolver<'a> {
+    dep_edges: &'a rustc_hash::FxHashMap<String, String>,
+}
+
+impl crate::resolver_core::ShallowImportResolver for HostShallowImportResolver<'_> {
+    fn resolve_canonical(&self, specifier: &str) -> Option<String> {
+        self.dep_edges.get(specifier).cloned()
+    }
+}
+
 struct HostRuntimeValueResolver<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
@@ -962,25 +1005,33 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         &self,
         canonical_id: &str,
         source: &str,
-        sig: &verter_semantic::analysis::ExportSignature,
+        _sig: &verter_semantic::analysis::ExportSignature,
     ) -> Option<String> {
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-        if sig.is_type || declaration_file {
-            self.host.resolve_type_dependency_canonical_in_view(
-                canonical_id,
-                source,
-                self.store_view,
-            )
-        } else {
-            self.host.resolve_loaded_dependency_canonical_in_view(
-                canonical_id,
-                source,
-                verter_workspace::ResolveRequestKind::EsmImport,
-                self.store_view,
-            )
+        if let Some(shallow) = self
+            .host
+            .shallow_file_state_in_view(canonical_id, self.store_view)
+        {
+            for target in shallow.exports.values() {
+                if let crate::resolver_core::ExportTarget::Reexport {
+                    source_specifier,
+                    canonical_id: reexport_canonical,
+                    ..
+                } = target
+                {
+                    if source_specifier == source && !reexport_canonical.is_empty() {
+                        return Some(reexport_canonical.clone());
+                    }
+                }
+            }
         }
+
+        self.host
+            .dependency_resolutions_for_eval_in_view(canonical_id, self.store_view)
+            .and_then(|resolutions| {
+                resolutions
+                    .get(source)
+                    .and_then(VerterHost::eval_dependency_resolution_target)
+            })
     }
 }
 
@@ -1007,30 +1058,23 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
         owner_canonical_id: &str,
         import: &verter_semantic::analysis::types::AnalyzedImport,
     ) -> Option<String> {
+        if let Some(shallow) = self
+            .host
+            .shallow_file_state_in_view(owner_canonical_id, self.store_view)
+        {
+            for target in shallow.import_targets.values() {
+                if target.source_specifier == import.source && !target.canonical_id.is_empty() {
+                    return Some(target.canonical_id.clone());
+                }
+            }
+        }
+
         self.host
             .dependency_resolutions_for_eval_in_view(owner_canonical_id, self.store_view)
             .and_then(|resolutions| {
                 resolutions
                     .get(&import.source)
-                    .and_then(DependencyResolution::effective_target)
-                    .map(str::to_string)
-                    .or_else(|| {
-                        resolutions
-                            .get(&import.source)
-                            .and_then(|resolution| resolution.resolved_canonical_id.clone())
-                    })
-            })
-            .or_else(|| {
-                self.host.resolve_loaded_dependency_canonical_in_view(
-                    owner_canonical_id,
-                    &import.source,
-                    if import.is_type_only {
-                        verter_workspace::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_workspace::ResolveRequestKind::EsmImport
-                    },
-                    self.store_view,
-                )
+                    .and_then(VerterHost::eval_dependency_resolution_target)
             })
     }
 
@@ -1667,8 +1711,11 @@ impl VerterHost {
         {
             if let Some(source) = self.get_source(canonical_id) {
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
-                return self
-                    .store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view);
+                return self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    whole_hash,
+                    store_view,
+                );
             }
         }
 
@@ -2164,10 +2211,15 @@ impl VerterHost {
             }
         };
 
-        // Export-only imported state must stay structural: keep export signatures for
-        // route selection, but defer all dependency route publication until a specific
-        // symbol lookup asks for it.
-        let dependency_resolutions = rustc_hash::FxHashMap::default();
+        let dependency_resolutions = current
+            .as_ref()
+            .map(|entry| entry.dependency_resolutions.clone())
+            .filter(|resolutions| !resolutions.is_empty())
+            .or_else(|| {
+                store_view.and_then(|view| view.dependency_resolutions(canonical_id).cloned())
+            })
+            .or_else(|| self.dependency_resolutions_for_eval_in_view(canonical_id, store_view))
+            .unwrap_or_default();
 
         Some(self.cache_imported_dependency_shallow_state(
             canonical_id,
@@ -2220,26 +2272,51 @@ impl VerterHost {
             cached_parse.as_deref(),
             &eval_source,
         );
+        let use_shallow_decl_routes = canonical_id.ends_with(".d.ts")
+            || canonical_id.ends_with(".d.mts")
+            || canonical_id.ends_with(".d.cts");
 
-        // Shallow imported state must stay route-agnostic. Keep import/export
-        // structure for later symbol-specific routing, but do not eagerly
-        // resolve the imported file's dependency map up front.
-        let (script_analysis, export_signatures, dependency_resolutions) =
-            if let Some(entry) = current.as_ref() {
-                (
-                    entry.script_analysis.clone(),
-                    entry.export_signatures.clone(),
-                    entry.dependency_resolutions.clone(),
-                )
-            } else {
-                (
-                    None,
-                    None,
-                    store_view
-                        .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-                        .unwrap_or_default(),
-                )
-            };
+        let (script_analysis, export_signatures, dependency_resolutions) = if let Some(entry) =
+            current.as_ref()
+        {
+            (
+                entry.script_analysis.clone(),
+                entry.export_signatures.clone(),
+                if entry.dependency_resolutions.is_empty() {
+                    if use_shallow_decl_routes {
+                        self.dependency_resolutions_from_external_type_analysis_in_view(
+                            canonical_id,
+                            external_type_analysis.as_ref(),
+                            store_view,
+                        )
+                    } else {
+                        self.dependency_resolutions_for_eval_in_view(canonical_id, store_view)
+                            .unwrap_or_default()
+                    }
+                } else {
+                    entry.dependency_resolutions.clone()
+                },
+            )
+        } else {
+            (
+                None,
+                None,
+                store_view
+                    .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
+                    .unwrap_or_else(|| {
+                        if use_shallow_decl_routes {
+                            self.dependency_resolutions_from_external_type_analysis_in_view(
+                                canonical_id,
+                                external_type_analysis.as_ref(),
+                                store_view,
+                            )
+                        } else {
+                            self.dependency_resolutions_for_eval_in_view(canonical_id, store_view)
+                                .unwrap_or_default()
+                        }
+                    }),
+            )
+        };
 
         Some(self.cache_imported_dependency_shallow_state(
             canonical_id,
@@ -2624,9 +2701,42 @@ impl VerterHost {
             .into_iter()
             .find(|property| property.name == tag)
             .map(|property| property.ty)?;
-        let tag_shape =
-            self.expand_project_intrinsic_shape_for_expr_in_view(entry, &tag_type, store_view)?;
+        // `JSX.IntrinsicElements` often forwards tag bodies through an imported
+        // `NativeElements` type. Materialize nested helper refs in the
+        // declaration file that actually owns that forwarded tag body so bare
+        // names like `ProjectClickEvent` keep the right same-file scope.
+        let tag_scope_entry = self.project_intrinsic_scope_entry_for_type_in_view(
+            entry,
+            "NativeElements",
+            store_view,
+        );
+        let tag_shape = self.expand_project_intrinsic_shape_for_expr_in_view(
+            tag_scope_entry.as_deref().unwrap_or(entry),
+            &tag_type,
+            store_view,
+        )?;
         Some(Self::owned_intrinsic_members_from_shape(tag_shape))
+    }
+
+    fn project_intrinsic_scope_entry_for_type_in_view(
+        &self,
+        entry: &crate::ImportedDependencyCacheEntry,
+        type_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::ImportedDependencyCacheEntry>> {
+        let (resolved_canonical_id, _) = self.resolve_local_import_symbol_target_in_view(
+            &entry.resolved_canonical_id,
+            type_name,
+            store_view,
+        )?;
+        (resolved_canonical_id != entry.resolved_canonical_id)
+            .then(|| {
+                self.materialize_imported_dependency_state_in_view(
+                    resolved_canonical_id.as_str(),
+                    store_view,
+                )
+            })
+            .flatten()
     }
 
     fn expand_project_intrinsic_shape_for_type_in_view(
@@ -2654,7 +2764,319 @@ impl VerterHost {
             &entry.resolved_canonical_id,
         );
         let result = verter_semantic::analysis::type_solver::solve::solve_type(expr, &solver_host);
-        Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value))
+        let mut shape =
+            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value);
+        Self::materialize_project_intrinsic_shape_members(&mut shape, &solver_host);
+        Some(shape)
+    }
+
+    fn solve_project_intrinsic_member_type(
+        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        verter_semantic::analysis::type_solver::solve::solve_type(expr, solver_host).value
+    }
+
+    fn materialize_project_intrinsic_member_surface_expr(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+        nested_surface: bool,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        if nested_surface {
+            let solved = Self::solve_project_intrinsic_member_type(solver_host, expr);
+            if solved != *expr {
+                return Self::materialize_project_intrinsic_member_surface_expr(
+                    &solved,
+                    solver_host,
+                    true,
+                );
+            }
+        }
+
+        match expr {
+            TypeExpr::Function(function) => {
+                let mut function = function.as_ref().clone();
+                for param in &mut function.parameters {
+                    param.ty = Self::materialize_project_intrinsic_member_surface_expr(
+                        &param.ty,
+                        solver_host,
+                        true,
+                    );
+                }
+                if let Some(return_type) = function.return_type.as_mut() {
+                    let materialized = Self::materialize_project_intrinsic_member_surface_expr(
+                        return_type,
+                        solver_host,
+                        true,
+                    );
+                    *return_type = Arc::new(materialized);
+                }
+                TypeExpr::Function(Arc::new(function))
+            }
+            TypeExpr::Object(object) => {
+                let mut object = object.as_ref().clone();
+                for member in &mut object.properties {
+                    match member {
+                        ObjectMember::Property(property) => {
+                            if nested_surface
+                                || matches!(
+                                    &property.ty,
+                                    TypeExpr::Function(_) | TypeExpr::Object(_)
+                                )
+                            {
+                                property.ty =
+                                    Self::materialize_project_intrinsic_member_surface_expr(
+                                        &property.ty,
+                                        solver_host,
+                                        true,
+                                    );
+                            }
+                        }
+                        ObjectMember::IndexSignature(signature) => {
+                            signature.key_type =
+                                Self::materialize_project_intrinsic_member_surface_expr(
+                                    &signature.key_type,
+                                    solver_host,
+                                    true,
+                                );
+                            signature.value_type =
+                                Self::materialize_project_intrinsic_member_surface_expr(
+                                    &signature.value_type,
+                                    solver_host,
+                                    true,
+                                );
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            for param in &mut function.parameters {
+                                param.ty = Self::materialize_project_intrinsic_member_surface_expr(
+                                    &param.ty,
+                                    solver_host,
+                                    true,
+                                );
+                            }
+                            if let Some(return_type) = function.return_type.as_mut() {
+                                let materialized =
+                                    Self::materialize_project_intrinsic_member_surface_expr(
+                                        return_type,
+                                        solver_host,
+                                        true,
+                                    );
+                                *return_type = Arc::new(materialized);
+                            }
+                        }
+                        ObjectMember::Method(method) => {
+                            for param in &mut method.function.parameters {
+                                param.ty = Self::materialize_project_intrinsic_member_surface_expr(
+                                    &param.ty,
+                                    solver_host,
+                                    true,
+                                );
+                            }
+                            if let Some(return_type) = method.function.return_type.as_mut() {
+                                let materialized =
+                                    Self::materialize_project_intrinsic_member_surface_expr(
+                                        return_type,
+                                        solver_host,
+                                        true,
+                                    );
+                                *return_type = Arc::new(materialized);
+                            }
+                        }
+                    }
+                }
+                TypeExpr::Object(Arc::new(object))
+            }
+            TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                element: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    element,
+                    solver_host,
+                    nested_surface,
+                )),
+                readonly: *readonly,
+            },
+            TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+                elements: Arc::from(
+                    elements
+                        .iter()
+                        .map(
+                            |element| verter_semantic::analysis::type_expr::TupleElement {
+                                label: element.label.clone(),
+                                ty: Self::materialize_project_intrinsic_member_surface_expr(
+                                    &element.ty,
+                                    solver_host,
+                                    nested_surface,
+                                ),
+                                optional: element.optional,
+                                rest: element.rest,
+                            },
+                        )
+                        .collect::<Vec<_>>(),
+                ),
+                readonly: *readonly,
+            },
+            TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
+                types
+                    .iter()
+                    .map(|ty| {
+                        Self::materialize_project_intrinsic_member_surface_expr(
+                            ty,
+                            solver_host,
+                            nested_surface,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
+                types
+                    .iter()
+                    .map(|ty| {
+                        Self::materialize_project_intrinsic_member_surface_expr(
+                            ty,
+                            solver_host,
+                            nested_surface,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
+                Self::materialize_project_intrinsic_member_surface_expr(
+                    inner,
+                    solver_host,
+                    nested_surface,
+                ),
+            )),
+            TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
+                Self::materialize_project_intrinsic_member_surface_expr(
+                    inner,
+                    solver_host,
+                    nested_surface,
+                ),
+            )),
+            TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
+                Self::materialize_project_intrinsic_member_surface_expr(
+                    inner,
+                    solver_host,
+                    nested_surface,
+                ),
+            )),
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => TypeExpr::Conditional {
+                check: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    check,
+                    solver_host,
+                    nested_surface,
+                )),
+                extends: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    extends,
+                    solver_host,
+                    nested_surface,
+                )),
+                true_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    true_type,
+                    solver_host,
+                    nested_surface,
+                )),
+                false_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    false_type,
+                    solver_host,
+                    nested_surface,
+                )),
+            },
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                optional,
+                readonly,
+                name_type,
+                value,
+            } => TypeExpr::Mapped {
+                parameter: parameter.clone(),
+                source: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    source,
+                    solver_host,
+                    nested_surface,
+                )),
+                optional: *optional,
+                readonly: *readonly,
+                name_type: name_type.as_deref().map(|name_type| {
+                    Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                        name_type,
+                        solver_host,
+                        nested_surface,
+                    ))
+                }),
+                value: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
+                    value,
+                    solver_host,
+                    nested_surface,
+                )),
+            },
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => TypeExpr::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: Arc::from(
+                    expressions
+                        .iter()
+                        .map(|expr| {
+                            Self::materialize_project_intrinsic_member_surface_expr(
+                                expr,
+                                solver_host,
+                                nested_surface,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    fn materialize_project_intrinsic_shape_members(
+        shape: &mut verter_semantic::analysis::type_expand::ExpandedObjectShape,
+        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+    ) {
+        for property in &mut shape.properties {
+            property.ty = Self::materialize_project_intrinsic_member_surface_expr(
+                &property.ty,
+                solver_host,
+                false,
+            );
+        }
+        for signature in &mut shape.index_signatures {
+            signature.key_type = Self::materialize_project_intrinsic_member_surface_expr(
+                &signature.key_type,
+                solver_host,
+                true,
+            );
+            signature.value_type = Self::materialize_project_intrinsic_member_surface_expr(
+                &signature.value_type,
+                solver_host,
+                true,
+            );
+        }
+        for signature in &mut shape.call_signatures {
+            for parameter in &mut signature.parameters {
+                parameter.ty = Self::materialize_project_intrinsic_member_surface_expr(
+                    &parameter.ty,
+                    solver_host,
+                    true,
+                );
+            }
+            signature.return_type = Self::materialize_project_intrinsic_member_surface_expr(
+                &signature.return_type,
+                solver_host,
+                true,
+            );
+        }
     }
 
     fn owned_intrinsic_members_from_shape(
@@ -2865,27 +3287,19 @@ impl VerterHost {
             .dependency_resolutions_for_eval_in_view(canonical_id, store_view)
             .unwrap_or_default();
         let mut seen_sources = rustc_hash::FxHashSet::default();
-        for (source_specifier, _) in state.import_targets.values() {
-            if !seen_sources.insert(source_specifier.clone()) {
+        for target in state.import_targets.values() {
+            if !seen_sources.insert(target.source_specifier.clone()) {
                 continue;
             }
-            if let Some(resolved) = dependency_resolutions
-                .get(source_specifier)
-                .and_then(|resolution| {
-                    resolution
-                        .effective_target()
-                        .map(str::to_string)
-                        .or_else(|| resolution.resolved_canonical_id.clone())
-                })
+            if let Some(resolved) = (!target.canonical_id.is_empty())
+                .then(|| target.canonical_id.clone())
                 .or_else(|| {
-                    self.resolve_type_dependency_canonical_shallow_in_view(
-                        canonical_id,
-                        source_specifier,
-                        store_view,
-                    )
+                    dependency_resolutions
+                        .get(&target.source_specifier)
+                        .and_then(Self::eval_dependency_resolution_target)
                 })
             {
-                edges.insert(source_specifier.clone(), resolved);
+                edges.insert(target.source_specifier.clone(), resolved);
             }
         }
         edges
@@ -2909,8 +3323,11 @@ impl VerterHost {
 
         let dep_edges =
             self.shallow_dep_edges_for_state_in_view(canonical_id, state.as_ref(), store_view);
-        let needs_route_refresh =
-            Self::prepared_decl_caches_need_route_refresh(entry.as_ref(), state.as_ref(), &dep_edges);
+        let needs_route_refresh = Self::prepared_decl_caches_need_route_refresh(
+            entry.as_ref(),
+            state.as_ref(),
+            &dep_edges,
+        );
         if !needs_route_refresh
             && entry.prepared_type_decls.len() >= state.symbols.len()
             && entry.prepared_value_decls.len() >= state.value_symbols.len()
@@ -2966,8 +3383,8 @@ impl VerterHost {
             return false;
         }
 
-        state.import_targets.iter().any(|(local_name, (source_specifier, _))| {
-            let Some(expected_canonical) = dep_edges.get(source_specifier) else {
+        state.import_targets.iter().any(|(local_name, target)| {
+            let Some(expected_canonical) = dep_edges.get(&target.source_specifier) else {
                 return false;
             };
 
@@ -2997,12 +3414,14 @@ impl VerterHost {
             return false;
         }
 
-        state.import_targets.iter().any(|(local_name, (source_specifier, _))| {
-            dep_edges.get(source_specifier).is_some_and(|expected_canonical| {
-                name_resolution
-                    .get(local_name)
-                    .is_some_and(|identity| identity.canonical_id != *expected_canonical)
-            })
+        state.import_targets.iter().any(|(local_name, target)| {
+            dep_edges
+                .get(&target.source_specifier)
+                .is_some_and(|expected_canonical| {
+                    name_resolution
+                        .get(local_name)
+                        .is_some_and(|identity| identity.canonical_id != *expected_canonical)
+                })
         })
     }
 
@@ -3627,12 +4046,17 @@ impl VerterHost {
 
         // Build from analysis + eval source if available
         let analysis = entry.external_type_analysis.clone()?;
+        let dep_edges = dep_edges_from_resolutions(&entry.dependency_resolutions);
+        let resolver = HostShallowImportResolver {
+            dep_edges: &dep_edges,
+        };
         let state = Arc::new(
-            crate::resolver_core::ShallowFileState::from_analysis_with_source(
+            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 entry.whole_hash,
                 analysis,
                 entry.eval_source.as_deref(),
                 None,
+                &resolver,
             ),
         );
 
@@ -3686,12 +4110,17 @@ impl VerterHost {
         }
 
         let analysis = entry.external_type_analysis.clone()?;
+        let dep_edges = dep_edges_from_resolutions(&entry.dependency_resolutions);
+        let resolver = HostShallowImportResolver {
+            dep_edges: &dep_edges,
+        };
         let state = Arc::new(
-            crate::resolver_core::ShallowFileState::from_analysis_with_source(
+            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 entry.whole_hash,
                 analysis,
                 entry.eval_source.as_deref(),
                 None,
+                &resolver,
             ),
         );
 
@@ -3795,21 +4224,34 @@ impl VerterHost {
             "resolve_direct_type_reexport_target_in_view",
             format!("owner={} requested={}", dep_canonical, requested_name),
         );
-        let analysis = self.external_type_analysis_in_view(dep_canonical, store_view)?;
-        let (import_source, imported_name) = analysis.direct_reexport_target(requested_name)?;
-        let next_canonical = self.resolve_type_dependency_canonical_in_view(
-            dep_canonical,
-            import_source,
-            store_view,
-        )?;
+        let shallow = self.shallow_file_state_in_view(dep_canonical, store_view)?;
+        let crate::resolver_core::ExportTarget::Reexport {
+            source_specifier,
+            original_name,
+            canonical_id,
+            ..
+        } = shallow.export_target(requested_name)?
+        else {
+            return None;
+        };
+        let next_canonical = if canonical_id.is_empty() {
+            self.dependency_resolutions_for_eval_in_view(dep_canonical, store_view)
+                .and_then(|resolutions| {
+                    resolutions
+                        .get(source_specifier)
+                        .and_then(Self::eval_dependency_resolution_target)
+                })?
+        } else {
+            canonical_id.clone()
+        };
         component_meta_trace_event!(
             "resolve_direct_type_reexport_target_in_view_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
-                dep_canonical, requested_name, import_source, next_canonical, imported_name
+                dep_canonical, requested_name, source_specifier, next_canonical, original_name
             ),
         );
-        Some((next_canonical, imported_name.to_string()))
+        Some((next_canonical, original_name.clone()))
     }
 
     pub(crate) fn resolve_local_import_symbol_target_in_view(
@@ -3822,21 +4264,30 @@ impl VerterHost {
             "resolve_local_import_symbol_target_in_view",
             format!("owner={} requested={}", dep_canonical, resolved_name),
         );
-        let analysis = self.external_type_analysis_in_view(dep_canonical, store_view)?;
-        let (import_source, imported_name) = analysis.local_import_symbol_target(resolved_name)?;
-        let next_canonical = self.resolve_type_dependency_canonical_in_view(
-            dep_canonical,
-            import_source,
-            store_view,
-        )?;
+        let shallow = self.shallow_file_state_in_view(dep_canonical, store_view)?;
+        let import_target = shallow.import_target(resolved_name)?;
+        let next_canonical = if import_target.canonical_id.is_empty() {
+            self.dependency_resolutions_for_eval_in_view(dep_canonical, store_view)
+                .and_then(|resolutions| {
+                    resolutions
+                        .get(&import_target.source_specifier)
+                        .and_then(Self::eval_dependency_resolution_target)
+                })?
+        } else {
+            import_target.canonical_id.clone()
+        };
         component_meta_trace_event!(
             "resolve_local_import_symbol_target_in_view_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
-                dep_canonical, resolved_name, import_source, next_canonical, imported_name
+                dep_canonical,
+                resolved_name,
+                import_target.source_specifier,
+                next_canonical,
+                import_target.imported_name
             ),
         );
-        Some((next_canonical, imported_name.to_string()))
+        Some((next_canonical, import_target.imported_name.clone()))
     }
 
     pub(crate) fn resolve_local_export_symbol_target_in_view(
@@ -4004,6 +4455,8 @@ impl VerterHost {
                     (Some(cached_state), Some(next_state)) => {
                         next_state.symbols.len() + next_state.value_symbols.len()
                             > cached_state.symbols.len() + cached_state.value_symbols.len()
+                            || shallow_state_resolved_edge_count(next_state)
+                                > shallow_state_resolved_edge_count(cached_state)
                     }
                     _ => false,
                 };
@@ -4022,10 +4475,47 @@ impl VerterHost {
                     cached_entry.required_owner_import_names =
                         entry.required_owner_import_names.clone();
                 }
-                if cached_entry.dependency_resolutions.is_empty()
-                    && !entry.dependency_resolutions.is_empty()
-                {
-                    cached_entry.dependency_resolutions = entry.dependency_resolutions.clone();
+                for (specifier, next_resolution) in &entry.dependency_resolutions {
+                    use std::collections::hash_map::Entry;
+
+                    match cached_entry.dependency_resolutions.entry(specifier.clone()) {
+                        Entry::Vacant(slot) => {
+                            slot.insert(next_resolution.clone());
+                        }
+                        Entry::Occupied(mut slot) => {
+                            let replace = {
+                                let existing = slot.get();
+                                let existing_target =
+                                    Self::eval_dependency_resolution_target(existing);
+                                let next_target =
+                                    Self::eval_dependency_resolution_target(next_resolution);
+                                existing_target.is_none() && next_target.is_some()
+                                    || Self::eval_dependency_resolution_target_priority(
+                                        existing_target.clone(),
+                                    ) > Self::eval_dependency_resolution_target_priority(
+                                        next_target.clone(),
+                                    )
+                                    || (existing.resolved_canonical_id.is_none()
+                                        && next_resolution.resolved_canonical_id.is_some())
+                            };
+
+                            if replace {
+                                slot.insert(next_resolution.clone());
+                            } else {
+                                let existing = slot.get_mut();
+                                if existing.resolved_canonical_id.is_none() {
+                                    existing.resolved_canonical_id =
+                                        next_resolution.resolved_canonical_id.clone();
+                                }
+                                if existing.possible_canonical_ids.is_empty()
+                                    && !next_resolution.possible_canonical_ids.is_empty()
+                                {
+                                    existing.possible_canonical_ids =
+                                        next_resolution.possible_canonical_ids.clone();
+                                }
+                            }
+                        }
+                    }
                 }
                 for (key, required_names) in &entry.exported_required_import_names {
                     cached_entry
@@ -4191,17 +4681,21 @@ impl VerterHost {
         } else {
             external_type_analysis
         };
+        let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
+        let resolver = HostShallowImportResolver {
+            dep_edges: &dep_edges,
+        };
         let shallow_file_state = external_type_analysis.as_ref().map(|eta| {
             Arc::new(
-                crate::resolver_core::ShallowFileState::from_analysis_with_source(
+                crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                     whole_hash,
                     Arc::clone(eta),
                     eval_source.as_deref(),
                     None,
+                    &resolver,
                 ),
             )
         });
-        let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
         let dep_edges_ref = if dep_edges.is_empty() {
             None
         } else {
@@ -4209,10 +4703,10 @@ impl VerterHost {
         };
         let can_prepare_from_shallow = shallow_file_state.as_ref().is_some_and(|state| {
             state.import_targets.is_empty()
-                || state
-                    .import_targets
-                    .values()
-                    .all(|(source_specifier, _)| dep_edges.contains_key(source_specifier))
+                || state.import_targets.values().all(|target| {
+                    !target.canonical_id.is_empty()
+                        || dep_edges.contains_key(&target.source_specifier)
+                })
         });
         let prepared_type_decls = if can_prepare_from_shallow {
             shallow_file_state
@@ -4280,17 +4774,21 @@ impl VerterHost {
         >,
         dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> Arc<crate::ImportedDependencyCacheEntry> {
+        let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
+        let resolver = HostShallowImportResolver {
+            dep_edges: &dep_edges,
+        };
         let shallow_file_state = external_type_analysis.as_ref().map(|eta| {
             Arc::new(
-                crate::resolver_core::ShallowFileState::from_analysis_with_source(
+                crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                     whole_hash,
                     Arc::clone(eta),
                     eval_source.as_deref(),
                     None,
+                    &resolver,
                 ),
             )
         });
-        let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
         let dep_edges_ref = if dep_edges.is_empty() {
             None
         } else {
@@ -4606,6 +5104,46 @@ impl VerterHost {
             .collect()
     }
 
+    fn dependency_resolutions_from_external_type_analysis_in_view(
+        &self,
+        canonical_id: &str,
+        analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
+        let mut specifiers = rustc_hash::FxHashSet::default();
+
+        for binding in &analysis.extracted.bindings {
+            specifiers.insert(binding.source.clone());
+        }
+        for binding in &analysis.extracted.reexport_bindings {
+            specifiers.insert(binding.source.clone());
+        }
+        for source in &analysis.extracted.wildcard_reexport_sources {
+            specifiers.insert(source.clone());
+        }
+
+        specifiers
+            .into_iter()
+            .map(|specifier| {
+                let resolved_canonical_id = self.resolve_type_dependency_canonical_shallow_in_view(
+                    canonical_id,
+                    &specifier,
+                    store_view,
+                );
+                let possible_canonical_ids =
+                    resolved_canonical_id.iter().cloned().collect::<Vec<_>>();
+                (
+                    specifier.clone(),
+                    DependencyResolution {
+                        specifier,
+                        resolved_canonical_id,
+                        possible_canonical_ids,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn eval_dependency_resolution_target(resolution: &DependencyResolution) -> Option<String> {
         resolution
             .resolved_canonical_id
@@ -4627,6 +5165,13 @@ impl VerterHost {
         export_signatures: &[verter_semantic::analysis::ExportSignature],
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
+        fn runtime_like_dependency_target(path: &str) -> bool {
+            path.ends_with(".js")
+                || path.ends_with(".jsx")
+                || path.ends_with(".mjs")
+                || path.ends_with(".cjs")
+        }
+
         let mut resolutions: rustc_hash::FxHashMap<String, DependencyResolution> = imports
             .iter()
             .map(|import| {
@@ -4655,13 +5200,21 @@ impl VerterHost {
                 let resolved: Option<String> = match kind {
                     // Type routes must prefer the shallow declaration target even when the
                     // current snapshot/store view still carries a stale JS companion route.
-                    verter_workspace::ResolveRequestKind::TypeImport => self
-                        .resolve_type_dependency_canonical_shallow_in_view(
-                            canonical_id,
-                            specifier,
-                            store_view,
-                        )
-                        .or(existing_target),
+                    verter_workspace::ResolveRequestKind::TypeImport => {
+                        let should_upgrade_snapshot_target = existing_target
+                            .as_deref()
+                            .is_none_or(runtime_like_dependency_target);
+                        if should_upgrade_snapshot_target {
+                            self.resolve_type_dependency_canonical_shallow_in_view(
+                                canonical_id,
+                                specifier,
+                                store_view,
+                            )
+                            .or(existing_target)
+                        } else {
+                            existing_target
+                        }
+                    }
                     _ => existing_target.or_else(|| {
                         self.resolve_loaded_dependency_canonical_in_view(
                             canonical_id,
@@ -4671,21 +5224,19 @@ impl VerterHost {
                         )
                     }),
                 }
-                    .or_else(|| {
-                        if !prefer_live_fallback {
-                            return None;
+                .or_else(|| {
+                    if !prefer_live_fallback {
+                        return None;
+                    }
+                    match kind {
+                        verter_workspace::ResolveRequestKind::TypeImport => {
+                            self.resolve_type_dependency_canonical(canonical_id, specifier)
                         }
-                        match kind {
-                            verter_workspace::ResolveRequestKind::TypeImport => {
-                                self.resolve_type_dependency_canonical(canonical_id, specifier)
-                            }
-                            _ => self.resolve_loaded_dependency_canonical(
-                                canonical_id,
-                                specifier,
-                                kind,
-                            ),
+                        _ => {
+                            self.resolve_loaded_dependency_canonical(canonical_id, specifier, kind)
                         }
-                    });
+                    }
+                });
 
                 let entry = resolutions.entry(specifier.to_string()).or_insert_with(|| {
                     DependencyResolution {
@@ -4751,7 +5302,8 @@ impl VerterHost {
         usize,
         bool,
     ) {
-        let Some(snapshot) = self.get_raw_analysis_snapshot_in_view(canonical_id, store_view) else {
+        let Some(snapshot) = self.get_raw_analysis_snapshot_in_view(canonical_id, store_view)
+        else {
             return (resolutions, 0, 0, false);
         };
 
@@ -5361,15 +5913,19 @@ impl VerterHost {
             Arc::new(analysis)
         };
 
+        let dep_edges = dep_edges_from_resolutions(dep_resolutions);
+        let resolver = HostShallowImportResolver {
+            dep_edges: &dep_edges,
+        };
         let shallow_file_state = Arc::new(
-            crate::resolver_core::ShallowFileState::from_analysis_with_source(
+            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
                 whole_hash,
                 Arc::clone(&external_type_analysis),
                 Some(eval_source),
                 None,
+                &resolver,
             ),
         );
-        let dep_edges = dep_edges_from_resolutions(dep_resolutions);
         let dep_edges_ref = if dep_edges.is_empty() {
             None
         } else {
@@ -5458,8 +6014,9 @@ impl VerterHost {
         eval_source: &str,
         dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        external_engine:
-            Option<&mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>>,
+        external_engine: Option<
+            &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+        >,
     ) -> Option<ComputedEvaluatedTypes> {
         {
             let _trace = component_meta_trace_scope!(
@@ -7465,9 +8022,15 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::HostSourceData;
-            if let Some(snap) = self.scheduler.try_get_source(canonical) {
-                let hd = snap.downcast_data::<HostSourceData>()?;
-                return Some(hd.parse.whole_hash);
+            if self
+                .compile_cache
+                .get(canonical)
+                .is_some_and(|entry| !entry.evicted)
+            {
+                if let Some(snap) = self.scheduler.try_get_source(canonical) {
+                    let hd = snap.downcast_data::<HostSourceData>()?;
+                    return Some(hd.parse.whole_hash);
+                }
             }
             let workspace_generation = self.ws().content_generation();
             self.imported_dependency_cache
@@ -8293,6 +8856,12 @@ impl VerterHost {
 
         // Sync exact resolutions to workspace.
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
+        self.imported_dependency_cache.lock().remove(&canonical);
+        self.resolved_type_cache.lock().clear();
+        self.provider_route_store.invalidate(&canonical);
+        self.resolver.clear_all();
+        self.semantic_invalidate(&canonical);
+        self.bump_store_view_epoch();
     }
 
     /// Returns all known canonical file IDs and their file kinds.

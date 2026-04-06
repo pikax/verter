@@ -314,6 +314,10 @@ pub struct VerterHost {
     /// Each entry is valid only for its exact whole_hash.
     pub(crate) imported_dependency_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
+    /// Provider-owned export route cache.  Single shared owner for all
+    /// export route answers across component-meta, LSP, MCP, and other
+    /// host-backed consumers.
+    pub(crate) provider_route_store: types::SharedProviderRouteStore,
     /// Semantic query database: revision-gated caches for component surfaces,
     /// binding facts, and reactivity provenance.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
@@ -376,6 +380,7 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            provider_route_store: types::SharedProviderRouteStore::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -405,6 +410,7 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            provider_route_store: types::SharedProviderRouteStore::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -1033,8 +1039,6 @@ impl VerterHost {
                 entry.cached_resolved_meta.clear();
                 entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
-                entry.barrel_export_surface = None;
-                entry.import_route_cache.clear();
             }
         }
         #[cfg(not(feature = "scheduler"))]
@@ -1046,15 +1050,14 @@ impl VerterHost {
                 entry.cached_resolved_meta.clear();
                 entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
-                entry.barrel_export_surface = None;
                 entry.export_registry = None;
-                entry.import_route_cache.clear();
             }
         }
         self.resolved_type_cache.lock().clear();
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
         self.imported_dependency_cache.lock().clear();
+        self.provider_route_store.clear_all();
         self.bump_store_view_epoch();
     }
 
@@ -1331,9 +1334,9 @@ impl VerterHost {
             cc.cached_resolved_meta.clear();
             cc.cached_meta_payloads.clear();
             cc.cached_fallthrough = None;
-            cc.barrel_export_surface = None;
-            cc.import_route_cache.clear();
         }
+        // Invalidate this file's provider route cache
+        self.provider_route_store.invalidate(canonical_id);
         self.bump_store_view_epoch();
     }
 
