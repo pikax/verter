@@ -527,16 +527,7 @@ export interface Button {
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: crate::resolver_core::build_prepared_type_decl_cache(
-                    "/src/types.ts",
-                    &state,
-                    None,
-                ),
-                prepared_value_decls: crate::resolver_core::build_prepared_value_decl_cache(
-                    "/src/types.ts",
-                    &state,
-                    None,
-                ),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );

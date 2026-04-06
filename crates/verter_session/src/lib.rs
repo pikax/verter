@@ -226,14 +226,6 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
     pub resolved_type_declarations:
         rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,
-    pub prepared_type_decls: rustc_hash::FxHashMap<
-        String,
-        Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
-    >,
-    pub prepared_value_decls: rustc_hash::FxHashMap<
-        String,
-        Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
-    >,
     pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
 }
 

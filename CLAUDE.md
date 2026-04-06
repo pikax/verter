@@ -157,7 +157,8 @@ pnpm vitest --run                            # All tests (non-watch)
 pnpm vitest --run path/to/test.spec.ts       # Specific file
 
 # Rust
-cargo test --workspace --verbose             # All Rust tests
+cargo test --workspace --tests --verbose     # Default Rust verification for agents (workspace test targets only; skips doctests/examples)
+cargo test --workspace --doc                 # Rust doctests only; run when rustdoc examples changed or explicitly requested
 cargo test --package verter_compiler test_name   # Specific Rust test
 cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncated output
 ```
@@ -167,13 +168,15 @@ cargo test --package verter_compiler 2>&1 | tail -60  # Full suite with truncate
 Run these after **every** change. Verter's crates are highly interconnected — a change in one crate frequently breaks tests in dependent crates. Always run the full workspace suite:
 
 ```bash
-cargo test --workspace --verbose 2>&1 | tee /tmp/test-output.txt
+cargo test --workspace --tests --verbose 2>&1 | tee /tmp/test-output.txt
 cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
 cargo fmt --all
 pnpm install --frozen-lockfile   # Verify lockfile is in sync (CI uses this)
 ```
 
 For TypeScript changes, also run `pnpm test`. Do not skip workspace-wide testing even for "small" changes.
+
+**Agent test policy:** Do not run bare `cargo test --workspace` by default. In this repository it pulls in doctests and example builds, which adds substantial runtime without improving the normal agent verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
 
 ### Documentation Updates
 

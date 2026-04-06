@@ -501,19 +501,25 @@ impl VerterHost {
         let imported_cache = self.imported_dependency_cache.lock();
         let mut imported_dependency_entries = 0u32;
         let mut imported_dependency_bytes = 0u64;
-        let mut prepared_type_decls = 0u32;
-        let mut prepared_value_decls = 0u32;
 
         for (canonical_id, entry) in imported_cache.iter() {
             imported_dependency_entries = imported_dependency_entries.saturating_add(1);
             imported_dependency_bytes = imported_dependency_bytes.saturating_add(
                 imported_dependency_entry_bytes(canonical_id.as_str(), entry.as_ref()),
             );
-            prepared_type_decls =
-                prepared_type_decls.saturating_add(entry.prepared_type_decls.len() as u32);
-            prepared_value_decls =
-                prepared_value_decls.saturating_add(entry.prepared_value_decls.len() as u32);
         }
+        drop(imported_cache);
+
+        let prepared_bundles = self
+            .resolver_runtime()
+            .prepared_decl_bundles
+            .cached_values();
+        let prepared_type_decls = prepared_bundles.iter().fold(0u32, |count, bundle| {
+            count.saturating_add(bundle.prepared_type_decls.len() as u32)
+        });
+        let prepared_value_decls = prepared_bundles.iter().fold(0u32, |count, bundle| {
+            count.saturating_add(bundle.prepared_value_decls.len() as u32)
+        });
 
         crate::component_meta_audit::RustStoreAudit {
             store_view_hits: u32::from(store_view.is_some()),

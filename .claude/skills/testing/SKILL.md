@@ -116,10 +116,12 @@ The extracted file contains the module contents directly — `use super::*;`, he
 
 After the TDD loop, run the full verification pass:
 
-1. `cargo test --workspace --verbose` (always workspace-wide, never just the modified crate)
+1. `cargo test --workspace --tests --verbose` (default workspace-wide Rust verification; skips doctests/examples)
 2. `cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings`
 3. `cargo fmt --all`
 4. `pnpm test` for TypeScript changes
+
+Do not run bare `cargo test --workspace` by default in this repo. It also runs doctests and example builds, which are substantially slower than the normal verification loop. Run doctests only when rustdoc examples changed or the user explicitly asks for them.
 
 ### Test Validation Pattern
 

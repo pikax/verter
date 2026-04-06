@@ -74,23 +74,19 @@ impl<'a> SessionSolverHost<'a> {
         let mut scope_type_names = FxHashSet::default();
         let mut scope_value_names = FxHashSet::default();
         let mut scope_type_bindings = FxHashMap::default();
-        let dependency_resolutions = host
-            .dependency_resolutions_for_eval_in_view(declaration_canonical_id, store_view)
-            .unwrap_or_default();
+
+        // Read dep_edges from the fact-validated bundle instead of calling
+        // dependency_resolutions_for_eval_in_view (which was the main source
+        // of repeated dep-resolution work in the component-meta path).
+        let bundle = host.prepared_decl_bundle_in_view(declaration_canonical_id, store_view);
+        let dep_edges = bundle.as_ref().map(|b| &b.dep_edges);
 
         if let Some(state) = host.shallow_file_state_in_view(declaration_canonical_id, store_view) {
             scope_type_names.extend(state.symbols.keys().cloned());
             scope_value_names.extend(state.value_symbols.keys().cloned());
             for (local_name, target) in state.import_targets.iter() {
                 let resolved_id = if target.canonical_id.is_empty() {
-                    dependency_resolutions
-                        .get(&target.source_specifier)
-                        .and_then(|resolution| {
-                            resolution
-                                .effective_target()
-                                .map(str::to_string)
-                                .or_else(|| resolution.resolved_canonical_id.clone())
-                        })
+                    dep_edges.and_then(|edges| edges.get(&target.source_specifier).cloned())
                 } else {
                     Some(target.canonical_id.clone())
                 };
@@ -167,11 +163,9 @@ impl<'a> SessionSolverHost<'a> {
         entry: &crate::ImportedDependencyCacheEntry,
         symbol_name: &str,
     ) -> bool {
-        entry.prepared_type_decls.contains_key(symbol_name)
-            || entry.prepared_value_decls.contains_key(symbol_name)
-            || entry.shallow_file_state.as_ref().is_some_and(|state| {
-                state.symbol(symbol_name).is_some() || state.value_symbol(symbol_name).is_some()
-            })
+        entry.shallow_file_state.as_ref().is_some_and(|state| {
+            state.symbol(symbol_name).is_some() || state.value_symbol(symbol_name).is_some()
+        })
     }
 
     fn resolve_cached_import_binding(
@@ -649,13 +643,6 @@ export interface Props { child: Inner }
             Arc::clone(&analysis),
             Some(&env),
         ));
-        let dep_edges = FxHashMap::from_iter([("./dep".to_string(), "/dep.ts".to_string())]);
-        let prepared_type_decls = crate::resolver_core::build_prepared_type_decl_cache(
-            "/decl.ts",
-            &state,
-            Some(&dep_edges),
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/decl.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -674,8 +661,7 @@ export interface Props { child: Inner }
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./dep".to_string(),
                     crate::types::DependencyResolution {
@@ -720,18 +706,6 @@ export const defaults: Props = {} as Props
             Arc::clone(&analysis),
             Some(&env),
         ));
-        let dep_edges = FxHashMap::from_iter([("./theme".to_string(), "/theme.ts".to_string())]);
-        let prepared_type_decls = crate::resolver_core::build_prepared_type_decl_cache(
-            "/decl.ts",
-            &state,
-            Some(&dep_edges),
-        );
-        let prepared_value_decls = crate::resolver_core::build_prepared_value_decl_cache(
-            "/decl.ts",
-            &state,
-            Some(&dep_edges),
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/decl.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -750,8 +724,7 @@ export const defaults: Props = {} as Props
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls,
-                prepared_value_decls,
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./theme".to_string(),
                     crate::types::DependencyResolution {
@@ -799,12 +772,6 @@ export const defaults: Props = {} as Props
             Arc::clone(&helper_analysis),
             Some(&helper_env),
         ));
-        let helper_prepared = crate::resolver_core::build_prepared_type_decl_cache(
-            "/helper.d.ts",
-            &helper_state,
-            None,
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/helper.d.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -823,8 +790,7 @@ export const defaults: Props = {} as Props
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: helper_prepared,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -859,8 +825,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: FxHashMap::default(),
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./helper".to_string(),
                     crate::types::DependencyResolution {
@@ -898,12 +863,6 @@ export type FancyProps = Prettify<{ open: boolean }>
             Arc::clone(&helper_analysis),
             Some(&helper_env),
         ));
-        let helper_prepared = crate::resolver_core::build_prepared_type_decl_cache(
-            "/helper.d.ts",
-            &helper_state,
-            None,
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/helper.d.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -922,8 +881,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: helper_prepared,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -958,8 +916,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: FxHashMap::default(),
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -1008,8 +965,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: FxHashMap::default(),
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./props".to_string(),
                     crate::types::DependencyResolution {
@@ -1029,12 +985,6 @@ export type FancyProps = Prettify<{ open: boolean }>
             Arc::clone(&props_analysis),
             Some(&props_env),
         ));
-        let prepared_type_decls = crate::resolver_core::build_prepared_type_decl_cache(
-            "/types/props.ts",
-            &props_state,
-            None,
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/types/props.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -1053,8 +1003,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -1102,8 +1051,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: FxHashMap::default(),
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./theme".to_string(),
                     crate::types::DependencyResolution {
@@ -1123,12 +1071,6 @@ export type FancyProps = Prettify<{ open: boolean }>
             Arc::clone(&theme_analysis),
             Some(&theme_env),
         ));
-        let prepared_value_decls = crate::resolver_core::build_prepared_value_decl_cache(
-            "/theme/theme.ts",
-            &theme_state,
-            None,
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/theme/theme.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -1147,8 +1089,7 @@ export type FancyProps = Prettify<{ open: boolean }>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: FxHashMap::default(),
-                prepared_value_decls,
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -1196,12 +1137,6 @@ export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
             Arc::clone(&config_analysis),
             Some(&config_env),
         ));
-        let config_prepared = crate::resolver_core::build_prepared_type_decl_cache(
-            "/types/config.ts",
-            &config_state,
-            None,
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/types/config.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -1220,8 +1155,7 @@ export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: config_prepared,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::default(),
             }),
         );
@@ -1237,14 +1171,6 @@ export type CheckboxGroup = ComponentConfig<Theme>
             Arc::clone(&consumer_analysis),
             Some(&consumer_env),
         ));
-        let dep_edges =
-            FxHashMap::from_iter([("./config".to_string(), "/types/config.ts".to_string())]);
-        let consumer_prepared = crate::resolver_core::build_prepared_type_decl_cache(
-            "/types/consumer.ts",
-            &consumer_state,
-            Some(&dep_edges),
-        );
-
         host.imported_dependency_cache.lock().insert(
             "/types/consumer.ts".into(),
             Arc::new(crate::ImportedDependencyCacheEntry {
@@ -1263,8 +1189,7 @@ export type CheckboxGroup = ComponentConfig<Theme>
                 exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
-                prepared_type_decls: consumer_prepared,
-                prepared_value_decls: FxHashMap::default(),
+
                 dependency_resolutions: FxHashMap::from_iter([(
                     "./config".to_string(),
                     crate::types::DependencyResolution {

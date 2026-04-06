@@ -9,9 +9,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    fallthrough_resolver::FallthroughResolverState, symbol_resolver::SymbolResolverState,
-    FactVersionRef, FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
-    StableExecutionValue, StoreView, ValidatedFactCache,
+    fallthrough_resolver::FallthroughResolverState, prepared_decl::PreparedDeclBundle,
+    symbol_resolver::SymbolResolverState, FactVersionRef, FallthroughNodeKey, ResolutionNodeKey,
+    ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView, ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -51,6 +51,10 @@ where
         self.cache.insert_arc(key, value, facts);
     }
 
+    pub fn cached_values(&self) -> Vec<Arc<V>> {
+        self.cache.values()
+    }
+
     pub fn remove(&self, key: &K) {
         self.cache.remove(key);
     }
@@ -87,6 +91,10 @@ where
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
+    /// Fact-validated prepared declaration bundles, keyed by canonical file ID.
+    /// Replaces the entry-owned `prepared_type_decls` / `prepared_value_decls`
+    /// on `ImportedDependencyCacheEntry` with an atomic, fact-validated cache.
+    pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
     /// Top-level fallthrough singleflight, with runtime fallthrough nodes remaining the cache authority.
     pub top_level_fallthrough_singleflight:
         SingleflightGroup<FallthroughNodeKey, StableExecutionValue<Option<FallthroughV>>, ()>,
@@ -106,6 +114,7 @@ where
             symbol: SymbolResolverState::new(counters.clone()),
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
         }
@@ -117,6 +126,7 @@ where
             symbol: SymbolResolverState::new(counters.clone()),
             fallthrough: FallthroughResolverState::new(counters.clone()),
             component_meta: StableRequestState::new(),
+            prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
         }
@@ -127,6 +137,7 @@ where
         self.symbol.clear_cache();
         self.fallthrough.clear_cache();
         self.component_meta.clear();
+        self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
     }
 

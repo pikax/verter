@@ -360,6 +360,14 @@ where
             .insert(key, ValidatedEntry { value, facts });
     }
 
+    pub fn values(&self) -> Vec<Arc<V>> {
+        self.entries
+            .lock()
+            .values()
+            .map(|entry| entry.value.clone())
+            .collect()
+    }
+
     pub fn clear(&self) {
         self.entries.lock().clear();
     }

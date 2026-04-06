@@ -42,6 +42,8 @@ Use this file as the neutral entry point. Reuse the shared sources below instead
 ## Working Rules
 
 - Follow TDD for code changes: write failing tests first, implement the minimum fix, rerun tests, then refactor.
+- Default Rust verification command: `cargo test --workspace --tests --verbose`.
+- Do not run bare `cargo test --workspace` unless the user explicitly asks for doctests or you changed rustdoc examples. In this repo it also runs doctests and example builds, which are substantially slower than the normal agent verification loop.
 - Update the **owning** documentation when public behavior, module paths, or APIs change. Update the relevant skill, not CLAUDE.md, unless summaries or pointers change.
 - Use conventional commits: `<type>(<scope>): <description>`.
 - Load only the specific reference material needed for the task instead of bulk-reading every file.

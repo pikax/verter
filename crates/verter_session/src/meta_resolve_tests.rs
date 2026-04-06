@@ -1665,13 +1665,11 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         ws,
     );
 
-    let seeded = host
+    let _seeded = host
         .materialize_imported_dependency_state_in_view("/src/types.ts", None)
         .expect("types dependency should seed imported state");
-    let decl = seeded
-        .prepared_type_decls
-        .get("Props")
-        .cloned()
+    let decl = host
+        .prepared_type_decl_in_view("/src/types.ts", "Props", None)
         .expect("seeded dependency should expose Props through the prepared declaration cache");
 
     {

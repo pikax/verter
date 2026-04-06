@@ -1445,6 +1445,7 @@ fn collect_structural_property_descriptors_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_structural_ref_properties(
     arena: &mut QueryArena,
     name: &str,

@@ -14,24 +14,26 @@ fn resolve_import_target(
     source_specifier: &str,
     canonical_id: Option<&str>,
 ) -> String {
+    if let Some(canonical_id) = dep_edges
+        .and_then(|edges| edges.get(source_specifier))
+        .cloned()
+    {
+        return canonical_id;
+    }
+
     if let Some(canonical_id) = canonical_id.filter(|canonical_id| !canonical_id.is_empty()) {
         return canonical_id.to_string();
     }
 
-    dep_edges
-        .and_then(|edges| edges.get(source_specifier))
-        .cloned()
-        .unwrap_or_else(|| {
-            let relative_last_segment = source_specifier
-                .rsplit('/')
-                .next()
-                .unwrap_or(source_specifier);
-            if source_specifier.starts_with('.') && relative_last_segment.contains('.') {
-                crate::id::resolve_external(owner_canonical_id, source_specifier)
-            } else {
-                source_specifier.to_string()
-            }
-        })
+    let relative_last_segment = source_specifier
+        .rsplit('/')
+        .next()
+        .unwrap_or(source_specifier);
+    if source_specifier.starts_with('.') && relative_last_segment.contains('.') {
+        crate::id::resolve_external(owner_canonical_id, source_specifier)
+    } else {
+        source_specifier.to_string()
+    }
 }
 
 /// Prepare a local type declaration from a canonical shallow file state.
@@ -205,6 +207,36 @@ pub fn prepare_exported_value_decl(
     let mut prepared = prepare_local_value_decl(canonical_id, state, symbol_name, dep_edges)?;
     prepared.exported_name = Some(exported_name.to_string());
     Some(prepared)
+}
+
+/// Atomic declaration-surface bundle for one canonical file.
+///
+/// Valid as long as its `ExactResolution` and `FileWholeHash` facts match the
+/// current store view. Never incrementally merged — rebuilt wholesale when the
+/// import graph or file content changes.
+#[derive(Clone)]
+pub struct PreparedDeclBundle {
+    pub prepared_type_decls: FxHashMap<String, Arc<PreparedTypeDecl>>,
+    pub prepared_value_decls: FxHashMap<String, Arc<PreparedValueDecl>>,
+    /// The dep_edges snapshot used to build this bundle.
+    /// Stored so `SessionSolverHost::with_declaration_scope` can read it
+    /// instead of recomputing `dependency_resolutions_for_eval_in_view`.
+    pub dep_edges: FxHashMap<String, String>,
+}
+
+/// Build an atomic declaration-surface bundle from a shallow file state and
+/// resolved dependency edges. The bundle is immutable after construction.
+pub fn build_prepared_decl_bundle(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    dep_edges: FxHashMap<String, String>,
+) -> PreparedDeclBundle {
+    let dep_edges_ref = (!dep_edges.is_empty()).then_some(&dep_edges);
+    PreparedDeclBundle {
+        prepared_type_decls: build_prepared_type_decl_cache(canonical_id, state, dep_edges_ref),
+        prepared_value_decls: build_prepared_value_decl_cache(canonical_id, state, dep_edges_ref),
+        dep_edges,
+    }
 }
 
 /// Build the host-owned prepared type declaration cache for one defining file.

@@ -1519,20 +1519,23 @@ defineProps<Props>()
         "prepared value decl should materialize on demand"
     );
 
-    let cached = host
-        .imported_dependency_cache
-        .lock()
-        .get("/src/types.ts")
-        .cloned()
-        .expect("imported dependency entry should exist");
+    assert!(
+        host.imported_dependency_cache
+            .lock()
+            .get("/src/types.ts")
+            .is_some(),
+        "imported dependency entry should exist"
+    );
 
     assert!(
-        cached.prepared_type_decls.contains_key("Props"),
-        "prepared type declarations should be cached on the imported dependency entry"
+        host.prepared_type_decl_in_view("/src/types.ts", "Props", None)
+            .is_some(),
+        "prepared type declarations should be available through the bundle cache"
     );
     assert!(
-        cached.prepared_value_decls.contains_key("defaults"),
-        "prepared value declarations should be cached on the imported dependency entry"
+        host.prepared_value_decl_in_view("/src/types.ts", "defaults", None)
+            .is_some(),
+        "prepared value declarations should be available through the bundle cache"
     );
 }
 

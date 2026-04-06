@@ -2050,6 +2050,7 @@ mod tests {
             }],
             evaluated_types: None,
             fact_versions: Vec::new(),
+            compute_audit: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -2163,6 +2164,7 @@ mod tests {
             }],
             evaluated_types: None,
             fact_versions: Vec::new(),
+            compute_audit: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -2355,6 +2357,7 @@ mod tests {
             max_profiles_per_file: Some(4),
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
+            audit_enabled: None,
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);
