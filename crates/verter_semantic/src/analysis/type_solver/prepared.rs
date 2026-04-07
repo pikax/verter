@@ -76,6 +76,11 @@ pub struct PreparedTypeDecl {
     /// Enables the solver to fast-path identity wrappers, pure overlays,
     /// key filters, key remaps, and transparent aliases.
     pub wrapper_shape: PreparedWrapperShape,
+
+    /// Projection classification computed at preparation time.
+    /// Determines how the solver can project individual members without
+    /// fully instantiating the declaration body.
+    pub projection_class: PreparedProjectionClass,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +104,10 @@ pub struct PreparedWrapperShape {
 }
 
 /// Classification of the wrapper kind.
+///
+/// Covers structural mapped-type patterns only. Alias forwarding (including
+/// transparent pass-through aliases like `type A<T> = B<T>`) is handled by
+/// `PreparedProjectionClass::ForwardSubject(IdentityParams)` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreparedWrapperKind {
     /// Not a recognized structural wrapper pattern.
@@ -112,8 +121,6 @@ pub enum PreparedWrapperKind {
     KeyFilter,
     /// Key remap: template literal or case transform on keys.
     KeyRemap,
-    /// Transparent alias: body is a single `Ref` with args matching type params in order.
-    TransparentAlias,
 }
 
 /// How the declaration filters its source keyspace (classified at prep time).
@@ -163,6 +170,60 @@ pub struct PreparedSurfaceModifiers {
     pub optional: Option<bool>,
     /// `Some(true)` = add readonly, `Some(false)` = remove readonly, `None` = unchanged.
     pub readonly: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Projection classification
+// ---------------------------------------------------------------------------
+
+/// Projection-oriented classification of a prepared type declaration.
+///
+/// Computed at prep time alongside `wrapper_shape`. Determines how the solver
+/// can project individual members without fully instantiating the declaration.
+///
+/// This is intentionally separate from `PreparedWrapperShape` which classifies
+/// mapped-type structural patterns. Projection classification covers the
+/// broader question of how member access should be routed.
+#[derive(Debug, Clone, Default)]
+pub enum PreparedProjectionClass {
+    /// Declaration has a `member_index` — project directly from it.
+    DirectMembers,
+    /// Declaration is a structural wrapper (identity, overlay, key filter, etc.).
+    /// Projection delegates through the wrapper shape.
+    Wrapper,
+    /// Declaration body is a single `Ref` to another type, possibly with args.
+    /// Projection can forward to the target without full instantiation.
+    ForwardSubject(PreparedForwardPayload),
+    /// Cannot be projected structurally — fall back to full instantiation.
+    #[default]
+    Opaque,
+}
+
+/// Structured forwarding payload for `PreparedProjectionClass::ForwardSubject`.
+///
+/// Stores the target type reference and its arguments as symbolic `TypeExpr`
+/// values (not arena `NodeId`s), because this metadata is computed at prep
+/// time before any request arena exists.
+#[derive(Debug, Clone)]
+pub struct PreparedForwardPayload {
+    /// Target type name (e.g., `"ComponentConfig"`).
+    pub target_name: String,
+    /// Symbolic type arguments passed to the target in alias scope.
+    /// For `type A = B<X, Y>`, this is `[X, Y]` as `TypeExpr` values.
+    pub target_args: Vec<TypeExpr>,
+    /// How the alias's own type parameters map to the forwarded args.
+    pub forwarding_kind: PreparedForwardingKind,
+}
+
+/// How an alias's type parameters relate to the forwarded target's arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedForwardingKind {
+    /// Args are exactly the alias's own params in order: `type A<T> = B<T>`.
+    /// The alias is structurally transparent for projection purposes.
+    IdentityParams,
+    /// Args include concrete types or reordered/partial params:
+    /// `type A = B<X, Y>` or `type A<T> = B<T, string>`.
+    AppliedAlias,
 }
 
 /// A member in the prepared member index — pre-extracted from the declaration
@@ -354,6 +415,7 @@ impl PreparedTypeDecl {
             provenance: DeclProvenance::default(),
             cache_deps: PreparedCacheDeps::default(),
             wrapper_shape: PreparedWrapperShape::default(),
+            projection_class: PreparedProjectionClass::default(),
         }
     }
 
@@ -427,6 +489,19 @@ impl PreparedTypeDecl {
     pub fn classify_wrapper_shape(&mut self) {
         self.wrapper_shape = classify_wrapper_shape_inner(&self.body, &self.type_parameters);
     }
+
+    /// Classify the projection class from the body, member index, and wrapper shape.
+    ///
+    /// Must be called after `build_member_index()` and `classify_wrapper_shape()`.
+    /// Sets `self.projection_class`.
+    pub fn classify_projection(&mut self) {
+        self.projection_class = classify_projection_inner(
+            &self.body,
+            &self.type_parameters,
+            &self.member_index,
+            &self.wrapper_shape,
+        );
+    }
 }
 
 /// Check if a TypeExpr is a bare `Ref` to the given name with no type args.
@@ -460,8 +535,9 @@ fn classify_wrapper_shape_inner(
             name_type,
         } => (parameter, source, value, optional, readonly, name_type),
         _ => {
-            // Check for transparent alias: body is Ref with args matching params in order
-            return classify_transparent_alias(body, type_params);
+            // Non-mapped body — not a structural wrapper. Alias forwarding
+            // is handled by PreparedProjectionClass::ForwardSubject instead.
+            return PreparedWrapperShape::default();
         }
     };
 
@@ -618,35 +694,80 @@ fn is_param_or_param_intersect_string(expr: &TypeExpr, param: &str) -> bool {
     false
 }
 
-/// Classify transparent alias: body is a single Ref with type args matching
-/// type params in order (e.g., `type Alias<T, U> = Other<T, U>`).
-fn classify_transparent_alias(body: &TypeExpr, type_params: &[TypeParam]) -> PreparedWrapperShape {
-    if type_params.is_empty() {
-        return PreparedWrapperShape::default();
+/// Classify the projection class for a prepared type declaration.
+///
+/// Priority order:
+/// 1. If `member_index` is non-empty → `DirectMembers` (interfaces, object aliases).
+/// 2. If `wrapper_shape.kind` is a recognized structural wrapper → `Wrapper`.
+/// 3. If the body is a single `Ref` (possibly parenthesized) → `ForwardSubject`.
+/// 4. Otherwise → `Opaque`.
+fn classify_projection_inner(
+    body: &TypeExpr,
+    type_params: &[TypeParam],
+    member_index: &FxHashMap<String, PreparedMember>,
+    wrapper_shape: &PreparedWrapperShape,
+) -> PreparedProjectionClass {
+    // 1. Direct members — interfaces and object-bodied aliases.
+    if !member_index.is_empty() {
+        return PreparedProjectionClass::DirectMembers;
     }
 
+    // 2. Structural wrapper — mapped types with recognized patterns.
+    if !matches!(wrapper_shape.kind, PreparedWrapperKind::None) {
+        return PreparedProjectionClass::Wrapper;
+    }
+
+    // 3. Forward subject — body is a single Ref to another type.
+    if let Some(payload) = extract_forward_payload(body, type_params) {
+        return PreparedProjectionClass::ForwardSubject(payload);
+    }
+
+    PreparedProjectionClass::Opaque
+}
+
+/// Try to extract a forward-subject payload from a declaration body.
+///
+/// Matches bodies of the form `Ref { name, type_arguments }` (allowing
+/// `Parenthesized` wrapping). Returns `None` for unions, intersections,
+/// conditionals, mapped types, objects, and other non-forwarding shapes.
+fn extract_forward_payload(
+    body: &TypeExpr,
+    type_params: &[TypeParam],
+) -> Option<PreparedForwardPayload> {
     match body {
         TypeExpr::Ref {
-            name: _,
+            name,
             type_arguments,
-        } if type_arguments.len() == type_params.len() => {
-            // Check each arg matches the corresponding type param
-            let all_match = type_arguments
-                .iter()
-                .zip(type_params.iter())
-                .all(|(arg, tp)| is_bare_ref(arg, &tp.name));
-
-            if all_match {
-                PreparedWrapperShape {
-                    kind: PreparedWrapperKind::TransparentAlias,
-                    ..PreparedWrapperShape::default()
-                }
-            } else {
-                PreparedWrapperShape::default()
-            }
+        } => {
+            let forwarding_kind = classify_forwarding_kind(type_arguments, type_params);
+            Some(PreparedForwardPayload {
+                target_name: name.to_string(),
+                target_args: type_arguments.to_vec(),
+                forwarding_kind,
+            })
         }
-        TypeExpr::Parenthesized(inner) => classify_transparent_alias(inner, type_params),
-        _ => PreparedWrapperShape::default(),
+        TypeExpr::Parenthesized(inner) => extract_forward_payload(inner, type_params),
+        _ => None,
+    }
+}
+
+/// Determine whether the forwarded args are an identity pass-through of the
+/// alias's own type parameters, or an applied (concrete/remapped) alias.
+fn classify_forwarding_kind(
+    target_args: &[TypeExpr],
+    alias_params: &[TypeParam],
+) -> PreparedForwardingKind {
+    // Identity: args must be exactly the alias params in order, with no extras.
+    if !alias_params.is_empty()
+        && target_args.len() == alias_params.len()
+        && target_args
+            .iter()
+            .zip(alias_params.iter())
+            .all(|(arg, param)| is_bare_ref(arg, &param.name))
+    {
+        PreparedForwardingKind::IdentityParams
+    } else {
+        PreparedForwardingKind::AppliedAlias
     }
 }
 
@@ -1046,12 +1167,8 @@ mod tests {
             decl.wrapper_shape.key_remap,
             PreparedKeyRemapShape::Identity
         ));
-        // Negative: must not be PureOverlay or TransparentAlias
+        // Negative: must not be PureOverlay
         assert_ne!(decl.wrapper_shape.kind, PreparedWrapperKind::PureOverlay);
-        assert_ne!(
-            decl.wrapper_shape.kind,
-            PreparedWrapperKind::TransparentAlias
-        );
     }
 
     #[test]
@@ -1222,8 +1339,10 @@ mod tests {
     }
 
     #[test]
-    fn classify_transparent_alias() {
+    fn classify_identity_alias_not_wrapper() {
         // type Alias<T, U> = Other<T, U>
+        // This is an identity-forwarding alias, NOT a structural wrapper.
+        // Handled by PreparedProjectionClass::ForwardSubject(IdentityParams).
         let body =
             TypeExpr::named_with_args("Other", vec![TypeExpr::named("T"), TypeExpr::named("U")]);
         let mut decl = PreparedTypeDecl::new(
@@ -1232,14 +1351,24 @@ mod tests {
             body,
         );
         decl.type_parameters = vec![make_type_param("T"), make_type_param("U")];
+        decl.build_member_index();
         decl.classify_wrapper_shape();
+        decl.classify_projection();
 
-        assert_eq!(
-            decl.wrapper_shape.kind,
-            PreparedWrapperKind::TransparentAlias
-        );
-        // Negative: source_param_index is None for transparent aliases (not mapped)
+        // Wrapper shape: None — not a mapped type
+        assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
         assert_eq!(decl.wrapper_shape.source_param_index, None);
+        // Projection class: ForwardSubject(IdentityParams)
+        match &decl.projection_class {
+            PreparedProjectionClass::ForwardSubject(payload) => {
+                assert_eq!(payload.target_name, "Other");
+                assert_eq!(
+                    payload.forwarding_kind,
+                    PreparedForwardingKind::IdentityParams
+                );
+            }
+            other => panic!("expected ForwardSubject(IdentityParams), got {:?}", other),
+        }
     }
 
     #[test]
@@ -1311,5 +1440,223 @@ mod tests {
         assert_eq!(decl.wrapper_shape.kind, PreparedWrapperKind::None);
         // Negative: no source param for non-generic types
         assert_eq!(decl.wrapper_shape.source_param_index, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Projection classification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn projection_interface_is_direct_members() {
+        // interface Props { msg: string }
+        let body = make_object(&[("msg", TypeExpr::Primitive(PrimitiveName::String), false)]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Props"),
+            TypeDeclKind::Interface,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        assert!(matches!(
+            decl.projection_class,
+            PreparedProjectionClass::DirectMembers
+        ));
+    }
+
+    #[test]
+    fn projection_object_alias_is_direct_members() {
+        // type Props = { msg: string }
+        let body = make_object(&[("msg", TypeExpr::Primitive(PrimitiveName::String), false)]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Props"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        assert!(matches!(
+            decl.projection_class,
+            PreparedProjectionClass::DirectMembers
+        ));
+    }
+
+    #[test]
+    fn projection_identity_alias_is_forward_identity() {
+        // type A<T> = B<T>
+        let body = TypeExpr::Ref {
+            name: "B".into(),
+            type_arguments: vec![TypeExpr::named("T")].into(),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "A"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![TypeParam {
+            name: "T".into(),
+            constraint: None,
+            default: None,
+        }];
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        match &decl.projection_class {
+            PreparedProjectionClass::ForwardSubject(payload) => {
+                assert_eq!(payload.target_name, "B");
+                assert_eq!(
+                    payload.forwarding_kind,
+                    PreparedForwardingKind::IdentityParams
+                );
+            }
+            other => panic!("expected ForwardSubject(IdentityParams), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn projection_concrete_alias_is_forward_applied() {
+        // type ChatShimmer = ComponentConfig<Theme, AppConfig, 'chatShimmer'>
+        let body = TypeExpr::Ref {
+            name: "ComponentConfig".into(),
+            type_arguments: vec![
+                TypeExpr::named("Theme"),
+                TypeExpr::named("AppConfig"),
+                TypeExpr::string_literal("chatShimmer"),
+            ]
+            .into(),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "ChatShimmer"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        match &decl.projection_class {
+            PreparedProjectionClass::ForwardSubject(payload) => {
+                assert_eq!(payload.target_name, "ComponentConfig");
+                assert_eq!(payload.target_args.len(), 3);
+                assert_eq!(
+                    payload.forwarding_kind,
+                    PreparedForwardingKind::AppliedAlias
+                );
+            }
+            other => panic!("expected ForwardSubject(AppliedAlias), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn projection_partial_remap_alias_is_forward_applied() {
+        // type A<T> = B<T, string>
+        let body = TypeExpr::Ref {
+            name: "B".into(),
+            type_arguments: vec![
+                TypeExpr::named("T"),
+                TypeExpr::Primitive(PrimitiveName::String),
+            ]
+            .into(),
+        };
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "A"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.type_parameters = vec![TypeParam {
+            name: "T".into(),
+            constraint: None,
+            default: None,
+        }];
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        match &decl.projection_class {
+            PreparedProjectionClass::ForwardSubject(payload) => {
+                assert_eq!(payload.target_name, "B");
+                assert_eq!(
+                    payload.forwarding_kind,
+                    PreparedForwardingKind::AppliedAlias
+                );
+            }
+            other => panic!("expected ForwardSubject(AppliedAlias), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn projection_union_is_opaque() {
+        // type A = string | number — not a forward subject
+        let body = TypeExpr::Union(
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ]
+            .into(),
+        );
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "A"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        assert!(matches!(
+            decl.projection_class,
+            PreparedProjectionClass::Opaque
+        ));
+    }
+
+    #[test]
+    fn projection_intersection_is_opaque() {
+        // type A = B & C — not a forward subject
+        let body = TypeExpr::Intersection(vec![TypeExpr::named("B"), TypeExpr::named("C")].into());
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "A"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        assert!(matches!(
+            decl.projection_class,
+            PreparedProjectionClass::Opaque
+        ));
+    }
+
+    #[test]
+    fn projection_parenthesized_ref_is_forward() {
+        // type A = (B<X>) — parenthesized refs still classify as forwarded
+        let body = TypeExpr::Parenthesized(Arc::new(TypeExpr::Ref {
+            name: "B".into(),
+            type_arguments: vec![TypeExpr::named("X")].into(),
+        }));
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "A"),
+            TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        match &decl.projection_class {
+            PreparedProjectionClass::ForwardSubject(payload) => {
+                assert_eq!(payload.target_name, "B");
+                assert_eq!(
+                    payload.forwarding_kind,
+                    PreparedForwardingKind::AppliedAlias
+                );
+            }
+            other => panic!("expected ForwardSubject, got {:?}", other),
+        }
     }
 }

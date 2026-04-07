@@ -3020,6 +3020,83 @@ defineProps<DashboardSidebarCollapseProps>()
 }
 
 #[test]
+fn demand_driven_import_resolution_without_prewarm() {
+    // Regression: the owner macro-expansion path no longer eagerly seeds
+    // every direct import.  Imports used by the type route must materialize
+    // on demand through the solver's lazy prepared-decl path.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/tv.ts",
+            r#"
+export type ComponentConfig<TTheme, TAppConfig, TName extends string> = {
+  variants: { color: 'primary' | 'neutral' }
+  slots: { base?: string }
+  AppConfig: TAppConfig
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/nuxt-schema.ts", "export interface AppConfig {}")
+        .unwrap();
+    project
+        .upsert_base("/theme.ts", "export default { slots: { base: '' } }")
+        .unwrap();
+    project
+        .upsert_base(
+            "/Shimmer.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from './nuxt-schema'
+import theme from './theme'
+import type { ComponentConfig } from './types/tv'
+
+type Shimmer = ComponentConfig<typeof theme, AppConfig, 'shimmer'>
+
+export interface ShimmerProps {
+  text: string
+  class?: any
+  ui?: Shimmer['slots']
+}
+</script>
+<script setup lang="ts">
+import { computed } from 'vue'
+
+const props = defineProps<ShimmerProps>()
+const len = computed(() => props.text.length)
+</script>
+<template><span>{{ text }}</span></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/Shimmer.vue")
+        .expect("should resolve component meta without eager import warmup");
+
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert!(
+        prop_names.contains(&"text") && prop_names.contains(&"ui") && prop_names.contains(&"class"),
+        "demand-driven resolution should find all props: got {:?}",
+        prop_names,
+    );
+
+    // `ui` should resolve to a slot-shaped type, not `any` or `unknown`.
+    let ui_prop = meta.props.iter().find(|p| p.name == "ui").unwrap();
+    assert!(
+        !matches!(
+            ui_prop.type_expr,
+            verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                verter_semantic::analysis::type_expr::PrimitiveName::Any
+                    | verter_semantic::analysis::type_expr::PrimitiveName::Unknown
+            )
+        ),
+        "ui prop should resolve to a concrete type, not any/unknown: got {:?}",
+        ui_prop.type_expr,
+    );
+}
+
+#[test]
 fn imported_mapped_slots_reach_final_component_meta() {
     let project = make_project();
     project
@@ -4443,7 +4520,7 @@ defineProps<Local>()
 // ===========================================================================
 
 #[test]
-fn resolver_view_caches_prepared_alias_lookups() {
+fn component_meta_query_engine_caches_prepared_alias_lookups() {
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { msg: string }")
@@ -4461,10 +4538,15 @@ defineProps<Props>()
 
     let host = project.host();
     let store_view = host.resolver_store_view();
-    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
 
     // First lookup
-    let result1 = view.resolve_prepared_alias(
+    let result1 = query_engine.resolve_prepared_alias(
         "/src/types.ts",
         "Props",
         &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
@@ -4472,7 +4554,7 @@ defineProps<Props>()
     assert!(result1.is_some(), "Props should resolve from types.ts");
 
     // Second lookup — should hit cache (routes_count stays at 1)
-    let result2 = view.resolve_prepared_alias(
+    let result2 = query_engine.resolve_prepared_alias(
         "/src/types.ts",
         "Props",
         &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
@@ -4483,14 +4565,14 @@ defineProps<Props>()
         "second lookup should return cached result"
     );
     assert_eq!(
-        view.routes_count(),
+        query_engine.routes_count(),
         1,
         "should have exactly one cached route"
     );
 }
 
 #[test]
-fn resolver_view_keys_prepared_alias_cache_by_route() {
+fn component_meta_query_engine_keys_prepared_alias_cache_by_route() {
     let project = make_project();
     project
         .upsert_base(
@@ -4501,14 +4583,19 @@ fn resolver_view_keys_prepared_alias_cache_by_route() {
 
     let host = project.host();
     let store_view = host.resolver_store_view();
-    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
 
-    let whole = view.resolve_prepared_alias(
+    let whole = query_engine.resolve_prepared_alias(
         "/src/types.ts",
         "Props",
         &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
     );
-    let narrow = view.resolve_prepared_alias(
+    let narrow = query_engine.resolve_prepared_alias(
         "/src/types.ts",
         "Props",
         &crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
@@ -4517,14 +4604,14 @@ fn resolver_view_keys_prepared_alias_cache_by_route() {
     assert!(whole.is_some(), "whole route should resolve");
     assert!(narrow.is_some(), "narrow member route should resolve");
     assert_eq!(
-        view.routes_count(),
+        query_engine.routes_count(),
         2,
-        "whole and narrow routes should occupy separate resolver-view cache entries",
+        "whole and narrow routes should occupy separate query-engine cache entries",
     );
 }
 
 #[test]
-fn resolver_view_can_resolve_filters_builtins() {
+fn component_meta_query_engine_can_resolve_filters_builtins() {
     let project = make_project();
     project
         .upsert_base(
@@ -4538,19 +4625,24 @@ defineProps<{ x: string }>()
 
     let host = project.host();
     let store_view = host.resolver_store_view();
-    let mut view = crate::resolver_core::ComponentMetaResolverView::new(host, Some(&store_view));
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
 
     // Built-in names should NOT be resolvable
     assert!(
-        !view.can_resolve("/src/App.vue", "Partial", None),
+        !query_engine.can_resolve("/src/App.vue", "Partial", None),
         "Partial is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !view.can_resolve("/src/App.vue", "Array", None),
+        !query_engine.can_resolve("/src/App.vue", "Array", None),
         "Array is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !view.can_resolve("/src/App.vue", "Record", None),
+        !query_engine.can_resolve("/src/App.vue", "Record", None),
         "Record is a builtin and should not be resolvable as a registry ref"
     );
 }

@@ -13,7 +13,8 @@ use super::display::display_node;
 use super::host::{RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource};
 use super::lower::{lower_type_expr, lower_type_expr_in_scope};
 use super::prepared::{
-    PreparedKeyFilterShape, PreparedTypeDecl, PreparedValueDecl, PreparedWrapperKind,
+    PreparedKeyFilterShape, PreparedProjectionClass, PreparedTypeDecl, PreparedValueDecl,
+    PreparedWrapperKind,
 };
 use super::recursion::{RecursionKey, RecursionTracker};
 use super::result::{
@@ -137,6 +138,20 @@ pub struct SolveState {
     /// cache into `SolveState` and take it back out after the solve completes.
     pub(crate) instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
 
+    /// Cache for member projection results. Keyed by
+    /// `(canonical_id, symbol_name, args_hash, member_name)`.
+    /// Prevents repeated projection of the same member from the same subject
+    /// within a single request.
+    pub(crate) projection_cache: rustc_hash::FxHashMap<ProjectionCacheKey, NodeId>,
+
+    /// Active projection keys currently being resolved. Guards forwarded alias
+    /// cycles so chained projection can recurse without reopening an
+    /// unbounded loop when aliases forward back to an in-flight subject.
+    pub(crate) active_projection_keys: rustc_hash::FxHashSet<ProjectionCacheKey>,
+
+    /// Audit: total projection cache hits in this query.
+    pub(crate) projection_cache_hits: u32,
+
     /// Relation caches accumulated across all conditionals in one query.
     ///
     /// One-shot callers allocate this per solve. Request-scoped callers move the
@@ -145,6 +160,15 @@ pub struct SolveState {
 
     /// Active prepared-ref expansion stack used to attribute nested traversal.
     pub(crate) prepared_ref_stack: Vec<String>,
+}
+
+/// Cache key for member projection results.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ProjectionCacheKey {
+    pub canonical_id: String,
+    pub symbol_name: String,
+    pub args_hash: u64,
+    pub member_name: String,
 }
 
 /// Structured capture of conditional context frames for a recursive ref.
@@ -210,6 +234,9 @@ impl SolveState {
             conditional_deferrals: 0,
             indexed_access_open_skips: 0,
             instantiation_cache,
+            projection_cache: rustc_hash::FxHashMap::default(),
+            active_projection_keys: rustc_hash::FxHashSet::default(),
+            projection_cache_hits: 0,
             relation_caches,
             prepared_ref_stack: Vec::new(),
         }
@@ -401,6 +428,10 @@ pub struct SolverAudit {
     pub conditional_deferrals: u32,
     /// Total indexed access open-generic skips.
     pub indexed_access_open_skips: u32,
+    /// Total projection cache hits.
+    pub projection_cache_hits: u32,
+    /// Projection cache size at end of query.
+    pub projection_cache_size: usize,
     /// Arena node count at end of query.
     pub arena_nodes: usize,
     /// Total resolve steps.
@@ -429,6 +460,8 @@ pub fn solve_type_with_audit(
         instantiation_cache_hits: state.instantiation_cache_hits,
         conditional_deferrals: state.conditional_deferrals,
         indexed_access_open_skips: state.indexed_access_open_skips,
+        projection_cache_hits: state.projection_cache_hits,
+        projection_cache_size: state.projection_cache.len(),
         arena_nodes: arena.len(),
         resolve_steps: state.steps,
     };
@@ -1096,42 +1129,238 @@ fn try_resolve_structural_ref_member(
         }
     }
 
-    if let Some(member) = prepared.member(key_name) {
-        let lowered = lower_type_expr_in_scope(
-            arena,
-            &member.ty,
-            Some(prepared.root_identity.canonical_id.as_str()),
-        );
-        if !prepared.name_resolution.is_empty() {
-            state.type_decl_context_stack.push(prepared);
-            let resolved = resolve_node(arena, lowered, host, state, subst);
-            state.type_decl_context_stack.pop();
-            return Some(resolved);
-        }
-        return Some(resolve_node(arena, lowered, host, state, subst));
-    }
-
-    let resolved_args: Vec<NodeId> = type_arguments
-        .iter()
-        .map(|&arg| resolve_node(arena, arg, host, state, subst))
-        .collect();
-    let resolved_body = resolve_prepared_ref(arena, host, state, subst, &root_id, &resolved_args);
-    if matches!(
-        arena.get(resolved_body),
-        Node::Applied { .. } | Node::RecursiveRef { .. }
-    ) {
-        return None;
-    }
-
-    let key = arena.string_literal(key_name);
-    Some(resolve_indexed_access(
+    // Delegate to the centralized projection pipeline.
+    project_member_from_prepared_decl(
         arena,
-        resolved_body,
-        key,
         host,
         state,
         subst,
-    ))
+        &prepared,
+        type_arguments,
+        key_name,
+        scope_canonical_id,
+    )
+}
+
+/// Centralized member projection pipeline for prepared declarations.
+///
+/// Handles all `PreparedProjectionClass` cases:
+/// 1. **DirectMembers** — project from `member_index` without full expansion.
+/// 2. **ForwardSubject** — resolve the target, build forwarded args, project
+///    the member from the target directly.
+/// 3. **Opaque / Wrapper / fallback** — fall back to full instantiation via
+///    `resolve_prepared_ref(...)` then indexed access.
+///
+/// `try_resolve_structural_ref_member` delegates here after handling
+/// builtin utilities and structural wrapper shapes.
+#[allow(clippy::too_many_arguments)]
+fn project_member_from_prepared_decl(
+    arena: &mut QueryArena,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+    prepared: &Arc<PreparedTypeDecl>,
+    type_arguments: &[NodeId],
+    key_name: &str,
+    scope_canonical_id: Option<&str>,
+) -> Option<NodeId> {
+    // Projection cache: check if we already projected this member from this
+    // subject within this request.
+    let (projection_subst, effective_args) =
+        build_substitution_for_prepared_args(arena, prepared, subst, type_arguments);
+    let cache_key = ProjectionCacheKey {
+        canonical_id: prepared.root_identity.canonical_id.clone(),
+        symbol_name: prepared.root_identity.symbol_name.clone(),
+        args_hash: hash_effective_args(arena, &effective_args),
+        member_name: key_name.to_string(),
+    };
+    if let Some(&cached) = state.projection_cache.get(&cache_key) {
+        state.projection_cache_hits += 1;
+        return Some(cached);
+    }
+
+    if !state.active_projection_keys.insert(cache_key.clone()) {
+        return None;
+    }
+
+    let result = if let Some(member) = prepared.member(key_name) {
+        // 1. DirectMembers — project from member_index.
+        Some(resolve_prepared_member(
+            arena,
+            host,
+            state,
+            &projection_subst,
+            prepared,
+            member,
+        ))
+    } else if let PreparedProjectionClass::ForwardSubject(ref payload) = prepared.projection_class {
+        // 2. ForwardSubject — resolve the target and project the member there.
+        project_member_through_forward(
+            arena,
+            host,
+            state,
+            subst,
+            prepared,
+            type_arguments,
+            payload,
+            key_name,
+            scope_canonical_id,
+        )
+    } else {
+        // 3. Opaque fallback — full instantiation then indexed access.
+        let root_id = &prepared.root_identity;
+        let resolved_args: Vec<NodeId> = type_arguments
+            .iter()
+            .map(|&arg| resolve_node(arena, arg, host, state, subst))
+            .collect();
+        let resolved_body =
+            resolve_prepared_ref(arena, host, state, subst, root_id, &resolved_args);
+        if matches!(
+            arena.get(resolved_body),
+            Node::Applied { .. } | Node::RecursiveRef { .. }
+        ) {
+            None
+        } else {
+            let key = arena.string_literal(key_name);
+            Some(resolve_indexed_access(
+                arena,
+                resolved_body,
+                key,
+                host,
+                state,
+                subst,
+            ))
+        }
+    };
+
+    state.active_projection_keys.remove(&cache_key);
+    if let Some(projected) = result {
+        state.projection_cache.insert(cache_key, projected);
+        Some(projected)
+    } else {
+        None
+    }
+}
+
+/// Resolve a single member from a prepared declaration's member_index.
+fn resolve_prepared_member(
+    arena: &mut QueryArena,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    subst: &SubstitutionEnv,
+    prepared: &Arc<PreparedTypeDecl>,
+    member: &super::prepared::PreparedMember,
+) -> NodeId {
+    let lowered = lower_type_expr_in_scope(
+        arena,
+        &member.ty,
+        Some(prepared.root_identity.canonical_id.as_str()),
+    );
+    if !prepared.name_resolution.is_empty() {
+        state.type_decl_context_stack.push(Arc::clone(prepared));
+        let resolved = resolve_node(arena, lowered, host, state, subst);
+        state.type_decl_context_stack.pop();
+        resolved
+    } else {
+        resolve_node(arena, lowered, host, state, subst)
+    }
+}
+
+/// Project a single member through a forwarded alias without fully
+/// instantiating the alias body.
+///
+/// For `type ChatShimmer = ComponentConfig<Theme, AppConfig, 'x'>`, accessing
+/// `ChatShimmer['slots']` resolves the `slots` member from `ComponentConfig`
+/// directly, skipping unrelated members like `variants`.
+#[allow(clippy::too_many_arguments)]
+fn project_member_through_forward(
+    arena: &mut QueryArena,
+    host: &dyn TypeSolverHost,
+    state: &mut SolveState,
+    parent_subst: &SubstitutionEnv,
+    outer_prepared: &Arc<PreparedTypeDecl>,
+    outer_type_arguments: &[NodeId],
+    payload: &super::prepared::PreparedForwardPayload,
+    key_name: &str,
+    scope_canonical_id: Option<&str>,
+) -> Option<NodeId> {
+    // Resolve the target type's root identity. Check the outer declaration's
+    // name_resolution map first, then use context-based resolution (mirrors
+    // the context stack resolution the full-expansion path uses).
+    let target_root = if let Some(identity) =
+        outer_prepared.name_resolution.get(&payload.target_name)
+    {
+        identity.clone()
+    } else {
+        // Push outer prepared onto context stack temporarily so
+        // resolve_root_in_context can use its scope for name resolution.
+        state
+            .type_decl_context_stack
+            .push(Arc::clone(outer_prepared));
+        let resolved = resolve_root_for_ref(state, host, scope_canonical_id, &payload.target_name);
+        state.type_decl_context_stack.pop();
+        resolved?
+    };
+    let target_prepared = resolve_prepared_type_decl_cached(state, host, &target_root)?;
+
+    // Build the target substitution. The strategy differs by forwarding kind:
+    //
+    // IdentityParams (`type W<T, A> = Target<T, A>`):
+    //   Target params map 1:1 to outer call-site args. No intermediate arg
+    //   resolution needed — this avoids expanding args the projected member
+    //   doesn't reference (e.g., Noise passed as A when projecting a member
+    //   that only uses T).
+    //
+    // AppliedAlias (`type C = Target<Theme, AppConfig, 'x'>`):
+    //   Forwarded args are concrete or mixed — materialize them through the
+    //   outer substitution without fully resolving unrelated refs. This keeps
+    //   unused forwarded args lazy while still substituting outer type params
+    //   and allowing the target to apply its own defaults.
+    let (outer_subst, outer_effective_args) = build_substitution_for_prepared_args(
+        arena,
+        outer_prepared,
+        parent_subst,
+        outer_type_arguments,
+    );
+    let explicit_target_args = match payload.forwarding_kind {
+        super::prepared::PreparedForwardingKind::IdentityParams => outer_effective_args,
+        super::prepared::PreparedForwardingKind::AppliedAlias => payload
+            .target_args
+            .iter()
+            .map(|arg_expr| {
+                let lowered = lower_type_expr_in_scope(
+                    arena,
+                    arg_expr,
+                    Some(outer_prepared.root_identity.canonical_id.as_str()),
+                );
+                materialize_effective_arg(arena, lowered, &outer_subst)
+            })
+            .collect(),
+    };
+    project_member_from_prepared_decl(
+        arena,
+        host,
+        state,
+        parent_subst,
+        &target_prepared,
+        &explicit_target_args,
+        key_name,
+        Some(target_root.canonical_id.as_str()),
+    )
+}
+
+fn build_substitution_for_prepared_args(
+    arena: &mut QueryArena,
+    prepared: &PreparedTypeDecl,
+    parent_subst: &SubstitutionEnv,
+    args: &[NodeId],
+) -> (SubstitutionEnv, Vec<NodeId>) {
+    let effective_args = build_effective_args(arena, prepared, parent_subst, args);
+    let mut subst = parent_subst.clone();
+    for (param, arg) in prepared.type_parameters.iter().zip(effective_args.iter()) {
+        subst.bind(param.name.clone(), *arg);
+    }
+    (subst, effective_args)
 }
 
 #[derive(Debug, Clone)]
@@ -4899,6 +5128,7 @@ mod tests {
             );
             decl.build_member_index();
             decl.classify_wrapper_shape();
+            decl.classify_projection();
             self.decls.insert(name.to_string(), Arc::new(decl));
         }
 
@@ -4916,6 +5146,26 @@ mod tests {
             decl.type_parameters = params;
             decl.build_member_index();
             decl.classify_wrapper_shape();
+            decl.classify_projection();
+            self.decls.insert(name.to_string(), Arc::new(decl));
+        }
+
+        fn add_generic_alias_in(
+            &mut self,
+            canonical_id: &str,
+            name: &str,
+            params: Vec<crate::analysis::type_expr::TypeParam>,
+            body: TypeExpr,
+        ) {
+            let mut decl = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new(canonical_id, name),
+                TypeDeclKind::Alias,
+                body,
+            );
+            decl.type_parameters = params;
+            decl.build_member_index();
+            decl.classify_wrapper_shape();
+            decl.classify_projection();
             self.decls.insert(name.to_string(), Arc::new(decl));
         }
     }
@@ -4948,9 +5198,7 @@ mod tests {
             _canonical_id: &str,
             symbol_name: &str,
         ) -> Option<ResolvedRootIdentity> {
-            self.decls
-                .get(symbol_name)
-                .map(|decl| decl.root_identity.clone())
+            self.decls.get(symbol_name).map(|d| d.root_identity.clone())
         }
     }
 
@@ -8076,6 +8324,491 @@ mod tests {
             !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
             "userland required-style wrappers should stay structural and avoid unrelated external branches, got visits {:?}",
             audit.external_decl_visit_counts
+        );
+    }
+
+    // ===================================================================
+    // Alias member projection tests
+    // ===================================================================
+
+    #[test]
+    fn solve_forwarded_alias_member_projection_skips_unrelated_members() {
+        // Models the ChatShimmer pattern:
+        //   type ComponentConfig<T, A, K> = { slots: { base?: string }, variants: Noise }
+        //   type ChatShimmer = ComponentConfig<Theme, AppConfig, 'x'>
+        //   type X = ChatShimmer['slots']
+        //
+        // The solver should project 'slots' from ComponentConfig without
+        // expanding the 'variants' member (which references Noise).
+        let mut host = TestHost::new();
+
+        // External Noise type that should NOT be visited
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+
+        // ComponentConfig<T, A, K> = { slots: { base?: string }, variants: Noise }
+        host.add_generic_alias_in(
+            "/types/tv.ts",
+            "ComponentConfig",
+            vec![
+                make_type_param("T"),
+                make_type_param("A"),
+                make_type_param("K"),
+            ],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "slots".into(),
+                            ty: make_object_type(&[(
+                                "base",
+                                TypeExpr::Primitive(PrimitiveName::String),
+                            )]),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "variants".into(),
+                            ty: TypeExpr::named("Noise"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                ],
+            })),
+        );
+
+        // type ChatShimmer = ComponentConfig<string, string, 'chatShimmer'>
+        host.add_alias(
+            "ChatShimmer",
+            TypeExpr::Ref {
+                name: "ComponentConfig".into(),
+                type_arguments: vec![
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    TypeExpr::string_literal("chatShimmer"),
+                ]
+                .into(),
+            },
+        );
+
+        // Resolve: ChatShimmer['slots']
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("ChatShimmer")),
+            index: Arc::new(TypeExpr::string_literal("slots")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        // slots should resolve to { base: string }
+        assert_eq!(
+            object_property_type(&result.value, "base"),
+            &TypeExpr::Primitive(PrimitiveName::String),
+        );
+        // Noise should NOT have been visited — the projection should skip 'variants'
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "forwarded alias member projection should not visit unrelated external declarations in other members, got visits {:?}",
+            audit.external_decl_visit_counts,
+        );
+    }
+
+    #[test]
+    fn solve_identity_forwarded_alias_member_projection_skips_unrelated_members() {
+        // Models identity-forwarded alias:
+        //   type Target<T, A> = { keep: T, noise: A }
+        //   type Wrapper<T, A> = Target<T, A>   (IdentityParams forwarding)
+        //   type X = Wrapper<string, Noise>['keep']
+        //
+        // The solver should project 'keep' from Target without expanding 'noise'.
+        let mut host = TestHost::new();
+
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+
+        // Target<T, A> = { keep: T, noise: A }
+        host.add_generic_alias_in(
+            "/types/target.ts",
+            "Target",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "keep".into(),
+                            ty: TypeExpr::named("T"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "noise".into(),
+                            ty: TypeExpr::named("A"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                ],
+            })),
+        );
+
+        // type Wrapper<T, A> = Target<T, A>  (identity forwarding)
+        host.add_generic_alias(
+            "Wrapper",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Ref {
+                name: "Target".into(),
+                type_arguments: vec![TypeExpr::named("T"), TypeExpr::named("A")].into(),
+            },
+        );
+
+        // Resolve: Wrapper<string, Noise>['keep']
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: "Wrapper".into(),
+                type_arguments: vec![
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    TypeExpr::named("Noise"),
+                ]
+                .into(),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(
+            !audit
+                .external_decl_visit_counts
+                .contains_key("/noise.ts::Noise"),
+            "identity-forwarded alias projection should skip Noise in 'noise' member, got visits {:?}",
+            audit.external_decl_visit_counts,
+        );
+    }
+
+    #[test]
+    fn solve_identity_forwarded_alias_member_projection_applies_target_defaults() {
+        let mut host = TestHost::new();
+
+        host.add_generic_alias_in(
+            "/types/target.ts",
+            "Target",
+            vec![
+                make_type_param("T"),
+                crate::analysis::type_expr::TypeParam {
+                    name: "U".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                },
+            ],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "keep".into(),
+                        ty: TypeExpr::named("U"),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        host.add_generic_alias(
+            "Wrapper",
+            vec![make_type_param("T")],
+            TypeExpr::Ref {
+                name: "Target".into(),
+                type_arguments: vec![TypeExpr::named("T")].into(),
+            },
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: "Wrapper".into(),
+                type_arguments: vec![TypeExpr::Primitive(PrimitiveName::Number)].into(),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "identity-forwarded projection should preserve target defaults",
+        );
+    }
+
+    #[test]
+    fn solve_direct_generic_member_projection_applies_explicit_args() {
+        let mut host = TestHost::new();
+
+        host.add_generic_alias(
+            "Box",
+            vec![make_type_param("T")],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "value".into(),
+                        ty: TypeExpr::named("T"),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: "Box".into(),
+                type_arguments: vec![TypeExpr::Primitive(PrimitiveName::String)].into(),
+            }),
+            index: Arc::new(TypeExpr::string_literal("value")),
+        };
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "direct generic member projection should apply explicit type arguments",
+        );
+    }
+
+    #[test]
+    fn solve_direct_generic_member_projection_applies_defaults() {
+        let mut host = TestHost::new();
+
+        host.add_generic_alias(
+            "Target",
+            vec![
+                make_type_param("T"),
+                crate::analysis::type_expr::TypeParam {
+                    name: "U".into(),
+                    constraint: None,
+                    default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                },
+            ],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "keep".into(),
+                        ty: TypeExpr::named("U"),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: "Target".into(),
+                type_arguments: vec![TypeExpr::Primitive(PrimitiveName::Number)].into(),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let result = solve_type(&expr, &host);
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "direct generic member projection should apply target defaults",
+        );
+    }
+
+    #[test]
+    fn solve_applied_forwarded_alias_member_projection_skips_unused_forwarded_args() {
+        let mut host = TestHost::new();
+
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+
+        host.add_generic_alias_in(
+            "/types/target.ts",
+            "Target",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "keep".into(),
+                        ty: TypeExpr::named("T"),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        host.add_alias(
+            "Applied",
+            TypeExpr::Ref {
+                name: "Target".into(),
+                type_arguments: vec![
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    TypeExpr::named("Noise"),
+                ]
+                .into(),
+            },
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Applied")),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "applied-forwarded projection should not resolve unused forwarded args, got visits {:?}",
+            audit.external_decl_visit_counts,
+        );
+    }
+
+    #[test]
+    fn solve_projection_cache_respects_distributive_branch_substitutions() {
+        let mut host = TestHost::new();
+
+        host.add_generic_alias(
+            "Wrapper",
+            vec![make_type_param("T")],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "keep".into(),
+                        ty: TypeExpr::named("T"),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+        );
+
+        host.add_generic_alias(
+            "Outer",
+            vec![make_type_param("T")],
+            TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::named("T")),
+                extends: Arc::new(TypeExpr::Primitive(PrimitiveName::Any)),
+                true_type: Arc::new(TypeExpr::IndexedAccess {
+                    object: Arc::new(TypeExpr::Ref {
+                        name: "Wrapper".into(),
+                        type_arguments: vec![TypeExpr::named("T")].into(),
+                    }),
+                    index: Arc::new(TypeExpr::string_literal("keep")),
+                }),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
+            },
+        );
+
+        let expr = TypeExpr::named_with_args(
+            "Outer",
+            vec![TypeExpr::union(vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::Primitive(PrimitiveName::Number),
+            ])],
+        );
+
+        let result = solve_type(&expr, &host);
+
+        match &result.value {
+            TypeExpr::Union(members) => {
+                assert!(members.contains(&TypeExpr::Primitive(PrimitiveName::String)));
+                assert!(members.contains(&TypeExpr::Primitive(PrimitiveName::Number)));
+            }
+            other => panic!("expected string | number union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solve_forwarded_alias_chain_projection_stays_on_projection_path() {
+        let mut host = TestHost::new();
+
+        host.add_alias_in(
+            "/noise.ts",
+            "Noise",
+            make_object_type(&[("noise", TypeExpr::Primitive(PrimitiveName::Number))]),
+        );
+
+        host.add_generic_alias_in(
+            "/types/target.ts",
+            "Target",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "keep".into(),
+                            ty: TypeExpr::named("T"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                    crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "noise".into(),
+                            ty: TypeExpr::named("A"),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ),
+                ],
+            })),
+        );
+
+        host.add_generic_alias(
+            "Inner",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Ref {
+                name: "Target".into(),
+                type_arguments: vec![TypeExpr::named("T"), TypeExpr::named("A")].into(),
+            },
+        );
+
+        host.add_generic_alias(
+            "Outer",
+            vec![make_type_param("T"), make_type_param("A")],
+            TypeExpr::Ref {
+                name: "Inner".into(),
+                type_arguments: vec![TypeExpr::named("T"), TypeExpr::named("A")].into(),
+            },
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: "Outer".into(),
+                type_arguments: vec![
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    TypeExpr::named("Noise"),
+                ]
+                .into(),
+            }),
+            index: Arc::new(TypeExpr::string_literal("keep")),
+        };
+
+        let (result, audit) = solve_type_with_audit(&expr, &host);
+
+        assert_eq!(result.value, TypeExpr::Primitive(PrimitiveName::String));
+        assert!(
+            !audit.external_decl_visit_counts.contains_key("/noise.ts::Noise"),
+            "forwarded alias chain projection should not expand unrelated forwarded members, got visits {:?}",
+            audit.external_decl_visit_counts,
         );
     }
 

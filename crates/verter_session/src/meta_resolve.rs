@@ -725,10 +725,8 @@ impl VerterHost {
             store_view,
             owner_engine,
         );
-        let mut resolver_view =
-            crate::resolver_core::ComponentMetaResolverView::new(self, store_view);
         // Pre-seed routes for initial registry entries
-        resolver_view.pre_seed_routes(&parts.resolved_type_registry_meta, canonical);
+        query_engine.pre_seed_routes(&parts.resolved_type_registry_meta, canonical);
         self.append_component_meta_registry_entries(
             canonical,
             &snapshot,
@@ -738,7 +736,6 @@ impl VerterHost {
             &mut parts.tracked_dependencies,
             store_view,
             &mut query_engine,
-            &mut resolver_view,
         );
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         let solver_audit = crate::component_meta_audit::RustSolverAudit {
@@ -815,7 +812,6 @@ impl VerterHost {
         tracked_dependencies: &mut BTreeSet<String>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-        resolver_view: &mut crate::resolver_core::ComponentMetaResolverView<'_>,
     ) {
         fn track_component_meta_dependency(
             tracked_dependencies: &mut BTreeSet<String>,
@@ -844,7 +840,7 @@ impl VerterHost {
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let Some((resolved_canonical_id, resolved_exported_name, prepared)) = resolver_view
+            let Some((resolved_canonical_id, resolved_exported_name, prepared)) = query_engine
                 .resolve_prepared_alias(
                     declaration_source,
                     requested_exported_name,
@@ -928,7 +924,7 @@ impl VerterHost {
                 .get(index)
                 .map(|meta| meta.declaration.canonical_source.as_str());
             let source_expr =
-                resolver_view.owner_collection_expr(owner_canonical, entry.name.as_str());
+                query_engine.owner_collection_expr(owner_canonical, entry.name.as_str());
             collect_component_meta_registry_refs(
                 source_expr.as_ref().unwrap_or(&entry.type_expr),
                 &published_names,
@@ -979,7 +975,7 @@ impl VerterHost {
             if published_names.contains(&type_name) {
                 continue;
             }
-            if !resolver_view.can_resolve(
+            if !query_engine.can_resolve(
                 owner_canonical,
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 pending_source_hint,
@@ -992,7 +988,7 @@ impl VerterHost {
             {
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                    resolver_view.resolve_prepared_alias(
+                    query_engine.resolve_prepared_alias(
                         source_hint,
                         requested_exported_name,
                         &pending_route,
@@ -1010,7 +1006,7 @@ impl VerterHost {
                             dependency.as_str(),
                         );
                     }
-                    let mut declaration = resolver_view.resolve_type_declaration(
+                    let mut declaration = query_engine.resolve_type_declaration(
                         resolved_canonical_id.as_str(),
                         resolved_exported_name.as_str(),
                     );
@@ -1053,10 +1049,10 @@ impl VerterHost {
                 declaration_owner,
             );
             let mut declaration =
-                resolver_view.resolve_type_declaration(declaration_owner, type_name.as_str());
+                query_engine.resolve_type_declaration(declaration_owner, type_name.as_str());
             if declaration.canonical_source.is_empty() && declaration_owner != owner_canonical {
                 declaration =
-                    resolver_view.resolve_type_declaration(owner_canonical, type_name.as_str());
+                    query_engine.resolve_type_declaration(owner_canonical, type_name.as_str());
             }
             let mut materialized = if declaration_owner != owner_canonical {
                 query_engine.solve_scoped(declaration_owner, type_name.as_str())
@@ -1064,7 +1060,7 @@ impl VerterHost {
                 None
             };
             let owner_collection_expr =
-                resolver_view.owner_collection_expr(owner_canonical, type_name.as_str());
+                query_engine.owner_collection_expr(owner_canonical, type_name.as_str());
             materialized =
                 materialized.or_else(|| query_engine.solve_owner_named(type_name.as_str()));
             if materialized.is_some() && declaration.canonical_source.is_empty() {
@@ -1121,18 +1117,9 @@ impl VerterHost {
             ));
         }
 
-        // NOTE(architecture-debt): This enrichment loop uses standalone
-        // `solve_type()` calls (via `materialize_component_meta_member_surface_expr`)
-        // instead of routing through the shared request-scoped `TypeQueryEngine`.
-        // Rationale: the materialization function is a recursive tree walker that
-        // calls `solve_type()` at multiple nesting levels. Threading
-        // `&mut TypeQueryEngine` through the 5+ function recursive chain would
-        // require mutable borrow propagation across all materialization helpers.
-        // Each entry here is a unique imported type_expr so op_cache reuse is
-        // low. The primary scoped-solve path (ComponentMetaQueryEngine.solve_scoped)
-        // already uses the shared engine for the high-frequency bare-name lookups.
-        // TODO: Route through shared engine when materialization helpers are
-        // refactored to accept a shared solver boundary.
+        // Registry enrichment: materialize imported type expressions through
+        // the shared request-scoped engine so projection/instantiation caches
+        // are reused across all registry entries in one request.
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
@@ -1153,14 +1140,10 @@ impl VerterHost {
             {
                 continue;
             }
-            let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
-                self,
-                store_view,
-                scope_canonical,
-            );
             entry.type_expr = materialize_component_meta_member_surface_expr(
                 &entry.type_expr,
-                &solver_host,
+                scope_canonical,
+                query_engine,
                 false,
             );
         }
@@ -1961,22 +1944,17 @@ fn choose_preferred_component_meta_registry_candidate(
     }
 }
 
-fn solve_component_meta_member_surface_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    verter_semantic::analysis::type_solver::solve::solve_type(expr, solver_host).value
-}
-
 fn materialize_component_meta_member_surface_expr(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested_surface: bool,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     let mut active = rustc_hash::FxHashSet::default();
     materialize_component_meta_member_surface_expr_with_active_stack(
         expr,
-        solver_host,
+        scope_canonical_id,
+        engine,
         nested_surface,
         &mut active,
     )
@@ -1984,7 +1962,8 @@ fn materialize_component_meta_member_surface_expr(
 
 fn materialize_component_meta_member_surface_expr_with_active_stack(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested_surface: bool,
     active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
@@ -1995,11 +1974,12 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
     }
 
     if nested_surface {
-        let solved = solve_component_meta_member_surface_expr(expr, solver_host);
+        let solved = engine.solve_expr_in_scope(scope_canonical_id, expr);
         if solved != *expr {
             let result = materialize_component_meta_member_surface_expr_with_active_stack(
                 &solved,
-                solver_host,
+                scope_canonical_id,
+                engine,
                 true,
                 active,
             );
@@ -2014,7 +1994,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             for param in &mut function.parameters {
                 param.ty = materialize_component_meta_member_surface_expr_with_active_stack(
                     &param.ty,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     true,
                     active,
                 );
@@ -2022,7 +2003,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             if let Some(return_type) = function.return_type.as_mut() {
                 let materialized = materialize_component_meta_member_surface_expr_with_active_stack(
                     return_type,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     true,
                     active,
                 );
@@ -2041,7 +2023,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             property.ty =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     &property.ty,
-                                    solver_host,
+                                    scope_canonical_id,
+                                    engine,
                                     true,
                                     active,
                                 );
@@ -2051,14 +2034,16 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                         signature.key_type =
                             materialize_component_meta_member_surface_expr_with_active_stack(
                                 &signature.key_type,
-                                solver_host,
+                                scope_canonical_id,
+                                engine,
                                 true,
                                 active,
                             );
                         signature.value_type =
                             materialize_component_meta_member_surface_expr_with_active_stack(
                                 &signature.value_type,
-                                solver_host,
+                                scope_canonical_id,
+                                engine,
                                 true,
                                 active,
                             );
@@ -2069,7 +2054,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             param.ty =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     &param.ty,
-                                    solver_host,
+                                    scope_canonical_id,
+                                    engine,
                                     true,
                                     active,
                                 );
@@ -2078,7 +2064,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             let materialized =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     return_type,
-                                    solver_host,
+                                    scope_canonical_id,
+                                    engine,
                                     true,
                                     active,
                                 );
@@ -2090,7 +2077,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             param.ty =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     &param.ty,
-                                    solver_host,
+                                    scope_canonical_id,
+                                    engine,
                                     true,
                                     active,
                                 );
@@ -2099,7 +2087,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             let materialized =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     return_type,
-                                    solver_host,
+                                    scope_canonical_id,
+                                    engine,
                                     true,
                                     active,
                                 );
@@ -2114,7 +2103,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             element: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     element,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2130,7 +2120,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                             label: element.label.clone(),
                             ty: materialize_component_meta_member_surface_expr_with_active_stack(
                                 &element.ty,
-                                solver_host,
+                                scope_canonical_id,
+                                engine,
                                 nested_surface,
                                 active,
                             ),
@@ -2148,7 +2139,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 .map(|ty| {
                     materialize_component_meta_member_surface_expr_with_active_stack(
                         ty,
-                        solver_host,
+                        scope_canonical_id,
+                        engine,
                         nested_surface,
                         active,
                     )
@@ -2161,7 +2153,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 .map(|ty| {
                     materialize_component_meta_member_surface_expr_with_active_stack(
                         ty,
-                        solver_host,
+                        scope_canonical_id,
+                        engine,
                         nested_surface,
                         active,
                     )
@@ -2171,7 +2164,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
             materialize_component_meta_member_surface_expr_with_active_stack(
                 inner,
-                solver_host,
+                scope_canonical_id,
+                engine,
                 nested_surface,
                 active,
             ),
@@ -2179,7 +2173,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
             materialize_component_meta_member_surface_expr_with_active_stack(
                 inner,
-                solver_host,
+                scope_canonical_id,
+                engine,
                 nested_surface,
                 active,
             ),
@@ -2187,7 +2182,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
             materialize_component_meta_member_surface_expr_with_active_stack(
                 inner,
-                solver_host,
+                scope_canonical_id,
+                engine,
                 nested_surface,
                 active,
             ),
@@ -2201,7 +2197,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             check: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     check,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2209,7 +2206,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             extends: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     extends,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2217,7 +2215,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             true_type: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     true_type,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2225,7 +2224,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             false_type: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     false_type,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2243,7 +2243,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             source: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     source,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2254,7 +2255,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 Arc::new(
                     materialize_component_meta_member_surface_expr_with_active_stack(
                         name_type,
-                        solver_host,
+                        scope_canonical_id,
+                        engine,
                         nested_surface,
                         active,
                     ),
@@ -2263,7 +2265,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             value: Arc::new(
                 materialize_component_meta_member_surface_expr_with_active_stack(
                     value,
-                    solver_host,
+                    scope_canonical_id,
+                    engine,
                     nested_surface,
                     active,
                 ),
@@ -2280,7 +2283,8 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                     .map(|expr| {
                         materialize_component_meta_member_surface_expr_with_active_stack(
                             expr,
-                            solver_host,
+                            scope_canonical_id,
+                            engine,
                             nested_surface,
                             active,
                         )
@@ -3862,7 +3866,9 @@ fn resolve_jsdoc_tag_type(
         store_view,
         canonical_source,
     );
-    let resolved = verter_semantic::analysis::type_solver::solve::solve_type(&parsed, &solver_host);
+    let mut engine =
+        verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(&solver_host);
+    let resolved = engine.solve(&parsed);
     Some(resolved.value)
 }
 

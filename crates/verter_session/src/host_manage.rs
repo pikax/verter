@@ -2731,13 +2731,6 @@ impl VerterHost {
         )
     }
 
-    // NOTE(architecture-debt): Uses standalone `solve_type()` instead of a
-    // shared request-scoped `TypeQueryEngine`. This is a VerterHost method
-    // reachable from LSP, MCP, and component-meta paths — threading a
-    // request-scoped engine would require adding engine parameters to host
-    // methods shared across all consumers. The intrinsic shape expressions
-    // are unique per HTML tag so op_cache reuse is low.
-    // TODO: Route through shared engine when host methods gain a query context.
     fn expand_project_intrinsic_shape_for_expr_in_view(
         &self,
         entry: &crate::ImportedDependencyCacheEntry,
@@ -2749,34 +2742,35 @@ impl VerterHost {
             store_view,
             &entry.resolved_canonical_id,
         );
-        let result = verter_semantic::analysis::type_solver::solve::solve_type(expr, &solver_host);
+        let mut engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+            &solver_host,
+        );
+        let result = engine.solve(expr);
         let mut shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value);
-        Self::materialize_project_intrinsic_shape_members(&mut shape, &solver_host);
+        Self::materialize_project_intrinsic_shape_members(&mut shape, &mut engine);
         Some(shape)
     }
 
     fn solve_project_intrinsic_member_type(
-        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        verter_semantic::analysis::type_solver::solve::solve_type(expr, solver_host).value
+        engine.solve(expr).value
     }
 
     fn materialize_project_intrinsic_member_surface_expr(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
         nested_surface: bool,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
         use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
         if nested_surface {
-            let solved = Self::solve_project_intrinsic_member_type(solver_host, expr);
+            let solved = Self::solve_project_intrinsic_member_type(engine, expr);
             if solved != *expr {
                 return Self::materialize_project_intrinsic_member_surface_expr(
-                    &solved,
-                    solver_host,
-                    true,
+                    &solved, engine, true,
                 );
             }
         }
@@ -2786,15 +2780,13 @@ impl VerterHost {
                 let mut function = function.as_ref().clone();
                 for param in &mut function.parameters {
                     param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                        &param.ty,
-                        solver_host,
-                        true,
+                        &param.ty, engine, true,
                     );
                 }
                 if let Some(return_type) = function.return_type.as_mut() {
                     let materialized = Self::materialize_project_intrinsic_member_surface_expr(
                         return_type,
-                        solver_host,
+                        engine,
                         true,
                     );
                     *return_type = Arc::new(materialized);
@@ -2815,7 +2807,7 @@ impl VerterHost {
                                 property.ty =
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         &property.ty,
-                                        solver_host,
+                                        engine,
                                         true,
                                     );
                             }
@@ -2824,13 +2816,13 @@ impl VerterHost {
                             signature.key_type =
                                 Self::materialize_project_intrinsic_member_surface_expr(
                                     &signature.key_type,
-                                    solver_host,
+                                    engine,
                                     true,
                                 );
                             signature.value_type =
                                 Self::materialize_project_intrinsic_member_surface_expr(
                                     &signature.value_type,
-                                    solver_host,
+                                    engine,
                                     true,
                                 );
                         }
@@ -2838,16 +2830,14 @@ impl VerterHost {
                         | ObjectMember::ConstructSignature(function) => {
                             for param in &mut function.parameters {
                                 param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                                    &param.ty,
-                                    solver_host,
-                                    true,
+                                    &param.ty, engine, true,
                                 );
                             }
                             if let Some(return_type) = function.return_type.as_mut() {
                                 let materialized =
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         return_type,
-                                        solver_host,
+                                        engine,
                                         true,
                                     );
                                 *return_type = Arc::new(materialized);
@@ -2856,16 +2846,14 @@ impl VerterHost {
                         ObjectMember::Method(method) => {
                             for param in &mut method.function.parameters {
                                 param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                                    &param.ty,
-                                    solver_host,
-                                    true,
+                                    &param.ty, engine, true,
                                 );
                             }
                             if let Some(return_type) = method.function.return_type.as_mut() {
                                 let materialized =
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         return_type,
-                                        solver_host,
+                                        engine,
                                         true,
                                     );
                                 *return_type = Arc::new(materialized);
@@ -2878,7 +2866,7 @@ impl VerterHost {
             TypeExpr::Array { element, readonly } => TypeExpr::Array {
                 element: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     element,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
                 readonly: *readonly,
@@ -2892,7 +2880,7 @@ impl VerterHost {
                                 label: element.label.clone(),
                                 ty: Self::materialize_project_intrinsic_member_surface_expr(
                                     &element.ty,
-                                    solver_host,
+                                    engine,
                                     nested_surface,
                                 ),
                                 optional: element.optional,
@@ -2909,7 +2897,7 @@ impl VerterHost {
                     .map(|ty| {
                         Self::materialize_project_intrinsic_member_surface_expr(
                             ty,
-                            solver_host,
+                            engine,
                             nested_surface,
                         )
                     })
@@ -2921,7 +2909,7 @@ impl VerterHost {
                     .map(|ty| {
                         Self::materialize_project_intrinsic_member_surface_expr(
                             ty,
-                            solver_host,
+                            engine,
                             nested_surface,
                         )
                     })
@@ -2930,21 +2918,21 @@ impl VerterHost {
             TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
-                    solver_host,
+                    engine,
                     nested_surface,
                 ),
             )),
             TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
-                    solver_host,
+                    engine,
                     nested_surface,
                 ),
             )),
             TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
-                    solver_host,
+                    engine,
                     nested_surface,
                 ),
             )),
@@ -2956,22 +2944,22 @@ impl VerterHost {
             } => TypeExpr::Conditional {
                 check: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     check,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
                 extends: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     extends,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
                 true_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     true_type,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
                 false_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     false_type,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
             },
@@ -2986,7 +2974,7 @@ impl VerterHost {
                 parameter: parameter.clone(),
                 source: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     source,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
                 optional: *optional,
@@ -2994,13 +2982,13 @@ impl VerterHost {
                 name_type: name_type.as_deref().map(|name_type| {
                     Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                         name_type,
-                        solver_host,
+                        engine,
                         nested_surface,
                     ))
                 }),
                 value: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     value,
-                    solver_host,
+                    engine,
                     nested_surface,
                 )),
             },
@@ -3015,7 +3003,7 @@ impl VerterHost {
                         .map(|expr| {
                             Self::materialize_project_intrinsic_member_surface_expr(
                                 expr,
-                                solver_host,
+                                engine,
                                 nested_surface,
                             )
                         })
@@ -3028,24 +3016,24 @@ impl VerterHost {
 
     fn materialize_project_intrinsic_shape_members(
         shape: &mut verter_semantic::analysis::type_expand::ExpandedObjectShape,
-        solver_host: &dyn verter_semantic::analysis::type_solver::host::TypeSolverHost,
+        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
     ) {
         for property in &mut shape.properties {
             property.ty = Self::materialize_project_intrinsic_member_surface_expr(
                 &property.ty,
-                solver_host,
+                engine,
                 false,
             );
         }
         for signature in &mut shape.index_signatures {
             signature.key_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.key_type,
-                solver_host,
+                engine,
                 true,
             );
             signature.value_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.value_type,
-                solver_host,
+                engine,
                 true,
             );
         }
@@ -3053,13 +3041,13 @@ impl VerterHost {
             for parameter in &mut signature.parameters {
                 parameter.ty = Self::materialize_project_intrinsic_member_surface_expr(
                     &parameter.ty,
-                    solver_host,
+                    engine,
                     true,
                 );
             }
             signature.return_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.return_type,
-                solver_host,
+                engine,
                 true,
             );
         }
@@ -5853,31 +5841,6 @@ impl VerterHost {
                 store_view,
             )
         };
-        // Solver start precondition: ensure the owner's direct imports are
-        // present in the host cache before macro expansion starts.
-        //
-        // Do not prewarm transitive frontier files here. The solver is
-        // demand-driven and reads prepared declarations on demand; eagerly
-        // materializing every touched transitive file reopens the old
-        // request-wide frontier warmup path and dominates cold-query latency
-        // on large declaration packages.
-        {
-            let _trace = component_meta_trace_scope!(
-                "compute_evaluated_types_seed_direct_imports",
-                format!(
-                    "owner={} imports={} store_view={}",
-                    canonical,
-                    snapshot.imports.len(),
-                    store_view.is_some()
-                ),
-            );
-            for import in snapshot.imports.iter() {
-                if let Some(ref canonical_id) = import.resolved_canonical_id {
-                    let _ = self
-                        .ensure_shallow_imported_dependency_state_in_view(canonical_id, store_view);
-                }
-            }
-        }
         let result = {
             let _trace = component_meta_trace_scope!(
                 "compute_evaluated_types_expand_macros",
@@ -6407,22 +6370,17 @@ impl VerterHost {
                 if reexported_package_utility {
                     (prepared.body.clone(), true)
                 } else {
-                    // NOTE(architecture-debt): Standalone solve_type() — same
-                    // rationale as expand_project_intrinsic_shape_for_expr_in_view.
-                    // This is a VerterHost method shared across consumers; threading
-                    // a request-scoped engine here would require cross-module changes.
-                    // Only fires for re-exported builtin utility aliases from
-                    // node_modules, which is a low-frequency path.
                     let solver_host =
                         crate::resolver_core::SessionSolverHost::with_declaration_scope(
                             self,
                             store_view,
                             resolved_canonical_id.as_str(),
                         );
-                    let solved = verter_semantic::analysis::type_solver::solve::solve_type(
-                        &TypeExpr::named(resolved_exported_name.as_str()),
-                        &solver_host,
-                    );
+                    let mut engine =
+                        verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                            &solver_host,
+                        );
+                    let solved = engine.solve(&TypeExpr::named(resolved_exported_name.as_str()));
                     match solved.value {
                         TypeExpr::Object(_)
                         | TypeExpr::Intersection(_)

@@ -112,28 +112,23 @@ pub enum SubjectKey {
 // ---------------------------------------------------------------------------
 
 /// Semantic identity for a type operation.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum OpKey {
+    #[allow(dead_code)]
     Instantiate {
         canonical_id: String,
         symbol_name: String,
         args_hash: u64,
     },
-    ProjectMember {
-        subject: SubjectId,
-        member: String,
-    },
-    ProjectKeyspace {
-        subject: SubjectId,
-    },
-    ProjectSurface {
-        subject: SubjectId,
-    },
-    IndexedAccess {
-        object: SubjectId,
-        index_hash: u64,
-    },
+    #[allow(dead_code)]
+    ProjectMember { subject: SubjectId, member: String },
+    #[allow(dead_code)]
+    ProjectKeyspace { subject: SubjectId },
+    #[allow(dead_code)]
+    ProjectSurface { subject: SubjectId },
+    #[allow(dead_code)]
+    IndexedAccess { object: SubjectId, index_hash: u64 },
+    #[allow(dead_code)]
     Conditional {
         check_hash: u64,
         extends_hash: u64,
@@ -141,10 +136,12 @@ pub enum OpKey {
         false_hash: u64,
         distributive: bool,
     },
+    #[allow(dead_code)]
     StructuralTransform {
         subject: SubjectId,
         transform_hash: u64,
     },
+    #[allow(dead_code)]
     TypeOf {
         canonical_id: String,
         path: Vec<String>,
@@ -156,7 +153,6 @@ pub enum OpKey {
 }
 
 /// Cached result of an operation.
-#[allow(dead_code)]
 struct OpResult {
     result: SolverResult<TypeExpr>,
     visited_decls: Vec<ResolvedRootIdentity>,
@@ -174,7 +170,6 @@ struct OpResult {
 /// `TypeQueryEngine` is `&mut self` throughout — not `Send` or `Sync`.
 pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     host: &'a dyn TypeSolverHost,
-    #[allow(dead_code)]
     op_cache: FxHashMap<OpKey, OpResult>,
     #[allow(dead_code)]
     subjects: FxHashMap<SubjectKey, SubjectId>,
@@ -186,6 +181,8 @@ pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     arena: QueryArena,
     /// Shared request-scoped instantiation cache.
     instantiation_cache: FxHashMap<super::recursion::RecursionKey, NodeId>,
+    /// Shared request-scoped projection cache.
+    projection_cache: FxHashMap<super::solve::ProjectionCacheKey, NodeId>,
     /// Shared request-scoped caches (relation, instantiation, keyspace, member).
     caches: SolverCaches,
     /// Trace accumulator: all external decls visited across all solves.
@@ -223,6 +220,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             next_subject_id: 0,
             arena: QueryArena::new(),
             instantiation_cache: FxHashMap::default(),
+            projection_cache: FxHashMap::default(),
             caches: SolverCaches::default(),
             visited_decls: Vec::new(),
             total_steps: 0,
@@ -258,6 +256,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             std::mem::take(&mut self.instantiation_cache),
             std::mem::take(&mut self.caches),
         );
+        state.projection_cache = std::mem::take(&mut self.projection_cache);
         let root = lower_type_expr(&mut self.arena, expr);
         let resolved = resolve_node(
             &mut self.arena,
@@ -271,6 +270,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         let visited = std::mem::take(&mut state.visited_external_decls);
         self.visited_decls.extend(visited.iter().cloned());
         self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
+        self.projection_cache = std::mem::take(&mut state.projection_cache);
         self.caches = std::mem::take(&mut state.relation_caches);
 
         let result = SolverResult {
@@ -324,6 +324,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             std::mem::take(&mut self.caches),
             scope_canonical_id.to_string(),
         );
+        state.projection_cache = std::mem::take(&mut self.projection_cache);
         let root = lower_type_expr(&mut self.arena, expr);
         let resolved = resolve_node(
             &mut self.arena,
@@ -337,6 +338,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         let visited = std::mem::take(&mut state.visited_external_decls);
         self.visited_decls.extend(visited.iter().cloned());
         self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
+        self.projection_cache = std::mem::take(&mut state.projection_cache);
         self.caches = std::mem::take(&mut state.relation_caches);
 
         let result = SolverResult {

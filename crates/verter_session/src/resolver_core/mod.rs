@@ -6,7 +6,6 @@ use std::sync::Arc;
 mod component_meta;
 pub mod component_meta_query_engine;
 mod component_meta_request;
-pub mod component_meta_resolver_view;
 mod declaration_metadata;
 mod export_graph;
 mod external_macro_types;
@@ -37,7 +36,6 @@ pub use component_meta::{
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
-pub use component_meta_resolver_view::ComponentMetaResolverView;
 pub use declaration_metadata::{
     resolve_local_type_declaration, resolve_type_declaration, DeclarationMetadataResolver,
     ResolvedDeclarationKind, ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata,

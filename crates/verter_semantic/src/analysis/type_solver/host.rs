@@ -163,6 +163,7 @@ impl TypeSolverHost for EvalEnvSolverHost {
             prepared.type_parameters = decl.type_parameters.clone();
             prepared.build_member_index();
             prepared.classify_wrapper_shape();
+            prepared.classify_projection();
             return Some(Arc::new(prepared));
         }
 
@@ -174,6 +175,7 @@ impl TypeSolverHost for EvalEnvSolverHost {
         );
         prepared.build_member_index();
         prepared.classify_wrapper_shape();
+        prepared.classify_projection();
         Some(Arc::new(prepared))
     }
 

@@ -115,6 +115,7 @@ pub fn prepare_local_type_decl(
 
     prepared.build_member_index();
     prepared.classify_wrapper_shape();
+    prepared.classify_projection();
     Some(prepared)
 }
 

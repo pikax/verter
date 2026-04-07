@@ -16,9 +16,14 @@ use verter_semantic::analysis::type_solver::host::TypeSolverHost;
 use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
+use super::declaration_metadata::ResolvedTypeDeclaration;
+use super::shallow_file_state::ExportedRoute;
 use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
+
+/// Cached import route: (resolved_canonical_id, resolved_exported_name, prepared alias).
+type PreparedAliasEntry = Option<(String, String, super::CachedPreparedImportedTypeAlias)>;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ScopedSolveKey {
@@ -44,6 +49,15 @@ pub struct ComponentMetaQueryEngine<'a> {
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
+    /// Cached import-route resolutions.
+    routes: FxHashMap<(String, String, ExportedRoute), PreparedAliasEntry>,
+    /// Cached type declarations.
+    declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
+    /// Cached resolvability checks.
+    resolvable: FxHashMap<(String, String), bool>,
+    /// Cached owner collection expressions.
+    owner_collection_exprs:
+        FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -57,6 +71,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             scoped_cache: FxHashMap::default(),
+            routes: FxHashMap::default(),
+            declarations: FxHashMap::default(),
+            resolvable: FxHashMap::default(),
+            owner_collection_exprs: FxHashMap::default(),
         }
     }
 
@@ -70,6 +88,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine,
             scoped_cache: FxHashMap::default(),
+            routes: FxHashMap::default(),
+            declarations: FxHashMap::default(),
+            resolvable: FxHashMap::default(),
+            owner_collection_exprs: FxHashMap::default(),
         }
     }
 
@@ -85,6 +107,114 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let expr = TypeExpr::named(requested_name);
         let result = self.owner_engine.solve(&expr);
         filter_identity_ref(&result, requested_name)
+    }
+
+    /// Pre-seed import-route resolutions for the initial registry entries from
+    /// imported sources.
+    pub fn pre_seed_routes(
+        &mut self,
+        registry_meta: &[super::component_meta::ResolvedTypeRegistryMeta],
+        owner_canonical: &str,
+    ) {
+        for meta in registry_meta {
+            let source = meta.declaration.canonical_source.as_str();
+            if source.is_empty() || source == owner_canonical {
+                continue;
+            }
+            let name = if meta.declaration.resolved_name.is_empty() {
+                meta.name.as_str()
+            } else {
+                meta.declaration.resolved_name.as_str()
+            };
+            let _ = self.resolve_prepared_alias(source, name, &ExportedRoute::Whole);
+        }
+    }
+
+    /// Resolve a prepared import alias, cached per query.
+    pub fn resolve_prepared_alias(
+        &mut self,
+        canonical_id: &str,
+        exported_name: &str,
+        route: &ExportedRoute,
+    ) -> PreparedAliasEntry {
+        let key = (
+            canonical_id.to_string(),
+            exported_name.to_string(),
+            route.clone(),
+        );
+        self.routes
+            .entry(key)
+            .or_insert_with_key(|_| {
+                self.host
+                    .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+                        canonical_id,
+                        exported_name,
+                        route,
+                        self.store_view,
+                    )
+            })
+            .clone()
+    }
+
+    /// Resolve a type declaration, cached per query.
+    pub fn resolve_type_declaration(
+        &mut self,
+        canonical_source: &str,
+        requested_name: &str,
+    ) -> ResolvedTypeDeclaration {
+        let key = (canonical_source.to_string(), requested_name.to_string());
+        self.declarations
+            .entry(key)
+            .or_insert_with_key(|_| {
+                crate::meta_resolve::resolve_type_declaration_in_view(
+                    self.host,
+                    canonical_source,
+                    requested_name,
+                    self.store_view,
+                )
+            })
+            .clone()
+    }
+
+    /// Check if a registry ref can resolve, cached per query.
+    pub fn can_resolve(
+        &mut self,
+        owner_canonical: &str,
+        exported_name: &str,
+        source_hint: Option<&str>,
+    ) -> bool {
+        if is_builtin_name(exported_name) {
+            return false;
+        }
+        let source_key = source_hint
+            .filter(|s| !s.is_empty())
+            .unwrap_or(owner_canonical);
+        let key = (source_key.to_string(), exported_name.to_string());
+        *self.resolvable.entry(key).or_insert_with_key(|_| {
+            can_resolve_ref(
+                self.host,
+                owner_canonical,
+                exported_name,
+                source_hint,
+                self.store_view,
+            )
+        })
+    }
+
+    /// Get the owner's collection expression for a name, cached per query.
+    pub fn owner_collection_expr(
+        &mut self,
+        owner_canonical: &str,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        self.owner_collection_exprs
+            .entry(name.to_string())
+            .or_insert_with_key(|_| {
+                self.host
+                    .prepared_type_decl_in_view(owner_canonical, name, self.store_view)
+                    .map(|prepared| prepared.body.clone())
+            })
+            .clone()
     }
 
     pub fn solve_scoped(
@@ -152,8 +282,28 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         filtered
     }
 
+    /// Solve an arbitrary `TypeExpr` in a declaration scope, sharing the
+    /// request-scoped engine. Used by the materialization tree walker so
+    /// that repeated solves within one component-meta request benefit from
+    /// the shared projection and instantiation caches.
+    pub fn solve_expr_in_scope(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        let (result, _trace) =
+            self.owner_engine
+                .solve_scoped(&solver_host, scope_canonical_id, expr);
+        result.value
+    }
+
     pub fn scoped_cache_len(&self) -> usize {
         self.scoped_cache.len()
+    }
+
+    pub fn routes_count(&self) -> usize {
+        self.routes.len()
     }
 
     pub fn total_steps(&self) -> u64 {
@@ -199,4 +349,42 @@ fn is_direct_surface_no_deps(
                 .external_deps
                 .iter()
                 .all(|dep| dep.canonical_id.contains("/node_modules/")))
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
+        || matches!(name, "Array" | "ReadonlyArray" | "Promise")
+}
+
+fn can_resolve_ref(
+    host: &VerterHost,
+    owner_canonical: &str,
+    exported_name: &str,
+    source_hint: Option<&str>,
+    store_view: Option<&HostStoreView>,
+) -> bool {
+    let source = source_hint
+        .filter(|source| !source.is_empty())
+        .unwrap_or(owner_canonical);
+
+    if host
+        .prepared_type_decl_in_view(source, exported_name, store_view)
+        .is_some()
+    {
+        return true;
+    }
+
+    if let Some((resolved_id, resolved_name, _)) =
+        host.resolve_prepared_symbol_dependency_alias_in_view(source, exported_name, store_view)
+    {
+        if (resolved_id != source || resolved_name != exported_name)
+            && host
+                .prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)
+                .is_some()
+        {
+            return true;
+        }
+    }
+
+    false
 }
