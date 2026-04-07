@@ -250,6 +250,34 @@ pub fn project_keyspace(
 /// Does not require full normalization of every nested child.
 pub fn project_surface(arena: &QueryArena, node: NodeId) -> SolverResult<SurfaceShape> {
     match arena.get(node) {
+        Node::Function(func) => {
+            let call_signatures = func
+                .signatures
+                .iter()
+                .map(|sig| SurfaceCallSignature {
+                    parameters: sig
+                        .parameters
+                        .iter()
+                        .map(|p| SurfaceParam {
+                            name: p.name.clone(),
+                            ty: p.ty,
+                            optional: p.optional,
+                            rest: p.rest,
+                        })
+                        .collect(),
+                    return_type: sig.return_type,
+                })
+                .collect();
+
+            SolverResult::exact_concrete(SurfaceShape {
+                properties: Vec::new(),
+                call_signatures,
+                construct_signatures: Vec::new(),
+                index_signatures: Vec::new(),
+                is_open: false,
+            })
+        }
+
         Node::Object(obj) => {
             let properties = obj
                 .properties

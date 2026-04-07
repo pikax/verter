@@ -6,8 +6,6 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::TypeDeclKind;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_semantic::analysis::type_solver::host::{
     RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
@@ -18,15 +16,10 @@ use crate::host_manage::component_meta_trace_event;
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
-/// Import binding: maps a local import name to its resolved target.
-#[derive(Debug, Clone)]
-struct ImportBinding {
-    canonical_id: String,
-    exported_name: String,
-}
+use super::prepared_decl::ImportBinding;
 
 /// Host-backed `TypeSolverHost` that resolves from:
-/// 1. Declaration-scoped same-file prepared declarations
+/// 1. Declaration-scoped same-file prepared declarations (via `PreparedDeclBundle`)
 /// 2. Import bindings (local name → canonical_id + exported name)
 /// 3. Host's `ImportedDependencyCacheEntry` prepared decl caches (cross-file)
 pub struct SessionSolverHost<'a> {
@@ -41,7 +34,7 @@ pub struct SessionSolverHost<'a> {
     /// Script-setup generic bindings visible in the active declaration scope.
     scope_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
     /// Import bindings: local name → (canonical_id, exported_name).
-    /// Built from the owner file's `AnalyzedImport` entries.
+    /// Read from the host-owned `PreparedDeclBundle`.
     import_bindings: FxHashMap<String, ImportBinding>,
 }
 
@@ -58,95 +51,39 @@ impl<'a> SessionSolverHost<'a> {
         }
     }
 
-    /// Create a solver host scoped to one declaration file's cached shallow
-    /// state.
+    /// Create a solver host scoped to one declaration file's cached
+    /// `PreparedDeclBundle`.
     ///
-    /// Reads same-file symbol names and import targets from the host-owned
-    /// `ShallowFileState` for the declaration file. This keeps declaration-
-    /// scoped solving on the prepared/cache-backed path instead of rebuilding
-    /// any owner-local eval state.
+    /// All declaration-scope data (symbol names, import bindings, script-setup
+    /// generics) is read from the host-owned bundle — no inline reconstruction
+    /// or `current_eval_state_in_view` probing. This keeps the solver hot path
+    /// on a single cached read per declaration scope.
     pub fn with_declaration_scope(
         host: &'a VerterHost,
         store_view: Option<&'a HostStoreView>,
         declaration_canonical_id: &str,
     ) -> Self {
-        let mut import_bindings = FxHashMap::default();
-        let mut scope_type_names = FxHashSet::default();
-        let mut scope_value_names = FxHashSet::default();
-        let mut scope_type_bindings = FxHashMap::default();
-
-        // Read dep_edges from the fact-validated bundle instead of calling
-        // dependency_resolutions_for_eval_in_view (which was the main source
-        // of repeated dep-resolution work in the component-meta path).
-        let bundle = host.prepared_decl_bundle_in_view(declaration_canonical_id, store_view);
-        let dep_edges = bundle.as_ref().map(|b| &b.dep_edges);
-
-        if let Some(state) = host.shallow_file_state_in_view(declaration_canonical_id, store_view) {
-            scope_type_names.extend(state.symbols.keys().cloned());
-            scope_value_names.extend(state.value_symbols.keys().cloned());
-            for (local_name, target) in state.import_targets.iter() {
-                let resolved_id = if target.canonical_id.is_empty() {
-                    dep_edges.and_then(|edges| edges.get(&target.source_specifier).cloned())
-                } else {
-                    Some(target.canonical_id.clone())
-                };
-                if let Some(resolved_id) = resolved_id {
-                    import_bindings.insert(
-                        local_name.clone(),
-                        ImportBinding {
-                            canonical_id: resolved_id,
-                            exported_name: target.imported_name.clone(),
-                        },
-                    );
-                }
+        if let Some(bundle) =
+            host.prepared_decl_bundle_in_view(declaration_canonical_id, store_view)
+        {
+            // Include script-setup generic param names in type_names so the
+            // solver recognises them as in-scope.
+            let mut scope_type_names = bundle.scope_type_names.clone();
+            for param_name in bundle.script_setup_type_bindings.keys() {
+                scope_type_names.insert(param_name.clone());
             }
 
-            if let Some((raw_source, cached_parse, _)) =
-                host.current_eval_state_in_view(declaration_canonical_id, store_view)
-            {
-                for param in VerterHost::sfc_script_setup_type_params(
-                    raw_source.as_ref(),
-                    cached_parse.as_deref(),
-                ) {
-                    let mut prepared = PreparedTypeDecl::new(
-                        ResolvedRootIdentity::new(declaration_canonical_id, &param.name),
-                        TypeDeclKind::Alias,
-                        TypeExpr::type_parameter(param.clone()),
-                    );
-                    for local_name in state.symbols.keys() {
-                        prepared.name_resolution.insert(
-                            local_name.clone(),
-                            ResolvedRootIdentity::new(declaration_canonical_id, local_name),
-                        );
-                    }
-                    for local_name in state.value_symbols.keys() {
-                        prepared.name_resolution.insert(
-                            local_name.clone(),
-                            ResolvedRootIdentity::new(declaration_canonical_id, local_name),
-                        );
-                    }
-                    for (local_name, binding) in &import_bindings {
-                        prepared.name_resolution.insert(
-                            local_name.clone(),
-                            ResolvedRootIdentity::new(
-                                &binding.canonical_id,
-                                &binding.exported_name,
-                            ),
-                        );
-                    }
-                    scope_type_names.insert(param.name.clone());
-                    scope_type_bindings.insert(param.name.clone(), Arc::new(prepared));
-                }
+            Self {
+                host,
+                store_view,
+                scope_canonical_id: Some(declaration_canonical_id.to_string()),
+                scope_type_names,
+                scope_value_names: bundle.scope_value_names.clone(),
+                scope_type_bindings: bundle.script_setup_type_bindings.clone(),
+                import_bindings: bundle.import_bindings.clone(),
             }
-        }
-        Self {
-            host,
-            store_view,
-            scope_canonical_id: Some(declaration_canonical_id.to_string()),
-            scope_type_names,
-            scope_value_names,
-            scope_type_bindings,
-            import_bindings,
+        } else {
+            Self::new(host, store_view)
         }
     }
 

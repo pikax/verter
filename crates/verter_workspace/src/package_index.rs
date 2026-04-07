@@ -3,13 +3,26 @@ use std::sync::Arc;
 
 use crate::types::PackageManifest;
 
-/// Lazy cache for parsed `package.json` manifests.
+/// Tri-state cache entry for package manifest lookups.
+#[derive(Debug, Clone)]
+pub enum ManifestEntry {
+    /// Successfully parsed manifest.
+    Found(Box<PackageManifest>),
+    /// File does not exist (negative cache).
+    NotFound,
+}
+
+/// Host-owned cache for parsed `package.json` manifests with negative caching.
 ///
-/// Manifests are loaded through normal `read_file()` on first access and cached.
-/// `node_modules` add/remove/update events invalidate affected entries.
+/// Both positive (Found) and negative (NotFound) results are cached so
+/// repeated ancestor-chain probes for missing manifests are answered from
+/// cache instead of repeated I/O.
+///
+/// Invalidation via `invalidate` / `invalidate_under` clears both positive
+/// and negative entries, allowing re-probe after `npm install` or file changes.
 pub struct PackageIndex {
-    /// Cached manifests keyed by canonical path to package.json.
-    cache: FxHashMap<String, PackageManifest>,
+    /// Cached manifest entries keyed by canonical path to package.json.
+    cache: FxHashMap<String, ManifestEntry>,
 }
 
 impl PackageIndex {
@@ -23,32 +36,64 @@ impl PackageIndex {
     ///
     /// The caller is responsible for reading the file content via the VFS
     /// and passing it here. This keeps PackageIndex free of I/O concerns.
+    /// If a prior `NotFound` entry exists, it is upgraded to `Found`.
     pub fn get_or_parse(&mut self, package_json_path: &str, source: &str) -> &PackageManifest {
-        if !self.cache.contains_key(package_json_path) {
+        // Always insert/overwrite with Found when source is provided.
+        let needs_insert = match self.cache.get(package_json_path) {
+            Some(ManifestEntry::Found(_)) => false,
+            _ => true, // None or NotFound → insert
+        };
+        if needs_insert {
             let manifest = parse_package_json(source);
-            self.cache.insert(package_json_path.to_string(), manifest);
+            self.cache.insert(
+                package_json_path.to_string(),
+                ManifestEntry::Found(Box::new(manifest)),
+            );
         }
-        self.cache.get(package_json_path).unwrap()
+        match self.cache.get(package_json_path).unwrap() {
+            ManifestEntry::Found(m) => m,
+            ManifestEntry::NotFound => unreachable!("just inserted Found"),
+        }
     }
 
-    /// Get a cached manifest without triggering a parse.
-    pub fn get_cached(&self, package_json_path: &str) -> Option<&PackageManifest> {
+    /// Get a cached entry without triggering a parse.
+    /// Returns `Some(ManifestEntry::Found(_))` for positive hits,
+    /// `Some(ManifestEntry::NotFound)` for negative hits,
+    /// `None` for never-probed paths.
+    pub fn get_cached(&self, package_json_path: &str) -> Option<&ManifestEntry> {
         self.cache.get(package_json_path)
     }
 
-    /// Invalidate a cached manifest (e.g., after a watcher event).
+    /// Record that a package.json file does not exist at the given path.
+    /// Subsequent `get_cached` calls will return `Some(ManifestEntry::NotFound)`.
+    pub fn insert_not_found(&mut self, package_json_path: &str) {
+        self.cache
+            .insert(package_json_path.to_string(), ManifestEntry::NotFound);
+    }
+
+    /// Invalidate a cached entry (e.g., after a watcher event).
+    /// Clears both positive and negative entries.
     pub fn invalidate(&mut self, package_json_path: &str) -> bool {
         self.cache.remove(package_json_path).is_some()
     }
 
-    /// Invalidate all manifests under a given directory prefix.
+    /// Invalidate all entries under a given directory prefix.
+    /// Clears both positive and negative entries.
     pub fn invalidate_under(&mut self, prefix: &str) {
         self.cache.retain(|k, _| !k.starts_with(prefix));
     }
 
-    /// Number of cached manifests.
+    /// Number of cached entries (both positive and negative).
     pub fn len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Number of positive (Found) entries only.
+    pub fn found_count(&self) -> usize {
+        self.cache
+            .values()
+            .filter(|e| matches!(e, ManifestEntry::Found(_)))
+            .count()
     }
 
     /// Whether the cache is empty.

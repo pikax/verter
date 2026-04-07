@@ -319,6 +319,12 @@ macro_rules! type_runtime_trace_event {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::{Mutex, OnceLock};
+
+    fn trace_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn format_runtime_trace_line_uses_component_meta_shape() {
@@ -341,6 +347,7 @@ mod tests {
 
     #[test]
     fn runtime_trace_scope_inherits_host_request_context() {
+        let _guard = trace_env_lock().lock().unwrap();
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
             "verter-type-runtime-trace-{}-{}.log",
@@ -381,6 +388,7 @@ mod tests {
 
     #[test]
     fn runtime_trace_macros_skip_detail_evaluation_when_disabled() {
+        let _guard = trace_env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("VERTER_COMPONENT_META_TRACE");
             std::env::remove_var("VERTER_META_TRACE");

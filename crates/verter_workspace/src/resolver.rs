@@ -756,7 +756,7 @@ fn resolve_path_mapping_target(
 ) -> Option<String> {
     let normalized = normalize_canonical_id(candidate);
     let package_json_path = join_paths(&normalized, "package.json");
-    if let Some(package_json) = reader.read_package_manifest(&package_json_path) {
+    if let Some(package_json) = read_package_manifest_if_present(reader, &package_json_path) {
         if let Some(exports) = package_json.exports.as_ref() {
             if let Some(resolved) = resolve_package_exports(reader, &normalized, exports, ".", ctx)
             {
@@ -1039,7 +1039,7 @@ fn package_follow_is_confirmed(
         return true;
     };
     let package_json_path = join_paths(&package_dir, "package.json");
-    if reader.read_package_manifest(&package_json_path).is_none() {
+    if read_package_manifest_if_present(reader, &package_json_path).is_none() {
         return false;
     }
     normalized_starts_with(resolved, &package_dir)
@@ -1167,7 +1167,7 @@ fn resolve_package_imports(
 ) -> Option<String> {
     for directory in ancestor_dirs(importer_id, boundary) {
         let Some(package_json) =
-            reader.read_package_manifest(&join_paths(&directory, "package.json"))
+            read_package_manifest_if_present(reader, &join_paths(&directory, "package.json"))
         else {
             continue;
         };
@@ -1200,7 +1200,7 @@ fn resolve_package_imports_from_dir(
 ) -> Option<String> {
     for directory in ancestor_dirs_from_dir(start_dir, boundary) {
         let Some(package_json) =
-            reader.read_package_manifest(&join_paths(&directory, "package.json"))
+            read_package_manifest_if_present(reader, &join_paths(&directory, "package.json"))
         else {
             continue;
         };
@@ -1268,7 +1268,7 @@ where
         let package_dir = join_paths(&join_paths(&directory, "node_modules"), &package_name);
         let package_json_path = join_paths(&package_dir, "package.json");
 
-        if let Some(package_json) = reader.read_package_manifest(&package_json_path) {
+        if let Some(package_json) = read_package_manifest_if_present(reader, &package_json_path) {
             if let Some(exports) = package_json.exports.as_ref() {
                 let export_key = if subpath.is_empty() {
                     ".".to_string()
@@ -1320,6 +1320,17 @@ where
     }
 
     None
+}
+
+fn read_package_manifest_if_present(
+    reader: &dyn crate::traits::WorkspaceAccess,
+    canonical_id: &str,
+) -> Option<PackageManifest> {
+    let normalized = normalize_canonical_id(canonical_id);
+    if !reader.file_exists(&normalized) {
+        return None;
+    }
+    reader.read_package_manifest(&normalized)
 }
 
 fn resolve_package_exports(

@@ -454,7 +454,7 @@ fn resolve_import_populates_engine_manifest_cache() {
     assert!(first.is_some(), "first importer should resolve vue");
     assert!(second.is_some(), "second importer should resolve vue");
     assert_eq!(
-        ws.engine.package_index.read().len(),
+        ws.engine.package_index.read().found_count(),
         1,
         "package manifests should be cached in Engine::package_index"
     );
@@ -487,7 +487,7 @@ fn package_manifest_cache_invalidates_after_package_json_write() {
         .expect("initial package.json should resolve");
     assert_eq!(first.source_id, "/repo/node_modules/pkg/dist/old.js");
     assert_eq!(
-        ws.engine.package_index.read().len(),
+        ws.engine.package_index.read().found_count(),
         1,
         "initial resolution should populate the manifest cache"
     );
@@ -498,8 +498,9 @@ fn package_manifest_cache_invalidates_after_package_json_write() {
     )
     .expect("package.json rewrite should succeed");
 
-    assert!(
-        ws.engine.package_index.read().is_empty(),
+    assert_eq!(
+        ws.engine.package_index.read().found_count(),
+        0,
         "writing package.json should invalidate the cached manifest"
     );
 

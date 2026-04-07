@@ -2028,6 +2028,65 @@ fn package_imports_reread_per_importer() {
 // ── Test 1: Pure path transforms work without ownership ──
 
 #[test]
+fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
+    use crate::engine::Engine;
+    use crate::types::{ResolutionContext, ResolveRequestKind};
+
+    let mut reader = CountingReader::with_files(&[
+        "/repo/src/components/App.vue",
+        "/repo/node_modules/vue/dist/index.d.ts",
+    ]);
+    reader.add_file(
+        "/repo/node_modules/vue/package.json",
+        r#"{"types":"dist/index.d.ts"}"#,
+    );
+
+    let engine = Engine::new();
+    {
+        use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
+        use crate::resolver::IdeProjectCompilerOptions;
+        let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: "/repo".to_string(),
+            rank: ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/repo".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::MatchAll,
+        }]);
+        *engine.project_graph.write() = graph;
+        engine.rebuild_and_publish();
+    }
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::TypeImport,
+    };
+
+    let result = engine.resolve_import(&reader, "/repo/src/components/App.vue", "vue", ctx);
+    assert!(result.is_some(), "package import should resolve");
+
+    assert_eq!(
+        reader.read_file_calls_for("/repo/src/components/node_modules/vue/package.json"),
+        0,
+        "missing nearest node_modules manifest should be skipped by existence facts"
+    );
+    assert_eq!(
+        reader.read_file_calls_for("/repo/src/node_modules/vue/package.json"),
+        0,
+        "missing intermediate node_modules manifest should be skipped by existence facts"
+    );
+    assert_eq!(
+        reader.read_file_calls_for("/repo/node_modules/vue/package.json"),
+        1,
+        "real package manifest should still be read exactly once"
+    );
+}
+
+#[test]
 fn provider_id_for_source_vue_without_ownership() {
     let resolver = NativeProjectResolver::new(vec![]);
     assert_eq!(

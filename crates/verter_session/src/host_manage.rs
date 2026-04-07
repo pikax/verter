@@ -1457,6 +1457,73 @@ impl VerterHost {
                 && self.current_store_view_epoch() == view.mutation_epoch())
     }
 
+    /// Build script-setup generic type parameter bindings for a Vue SFC.
+    /// Called once during `PreparedDeclBundle` materialization. Returns an
+    /// empty map for non-Vue files or Vue files without `<script setup>` generics.
+    fn build_script_setup_type_bindings(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        state: &crate::resolver_core::ShallowFileState,
+        dep_edges: &rustc_hash::FxHashMap<String, String>,
+    ) -> rustc_hash::FxHashMap<
+        String,
+        std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
+    > {
+        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_semantic::analysis::type_expr::TypeExpr;
+        use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+        use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+
+        let mut bindings = rustc_hash::FxHashMap::default();
+
+        let Some((raw_source, cached_parse, _)) =
+            self.current_eval_state_in_view(canonical_id, store_view)
+        else {
+            return bindings;
+        };
+
+        for param in
+            Self::sfc_script_setup_type_params(raw_source.as_ref(), cached_parse.as_deref())
+        {
+            let mut prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new(canonical_id, &param.name),
+                TypeDeclKind::Alias,
+                TypeExpr::type_parameter(param.clone()),
+            );
+            // Populate name_resolution so the solver can resolve bare names
+            // from within the generic param's scope.
+            for local_name in state.symbols.keys() {
+                prepared.name_resolution.insert(
+                    local_name.clone(),
+                    ResolvedRootIdentity::new(canonical_id, local_name),
+                );
+            }
+            for local_name in state.value_symbols.keys() {
+                prepared.name_resolution.insert(
+                    local_name.clone(),
+                    ResolvedRootIdentity::new(canonical_id, local_name),
+                );
+            }
+            for (local_name, target) in state.import_targets.iter() {
+                let resolved_id = if target.canonical_id.is_empty() {
+                    dep_edges.get(&target.source_specifier).cloned()
+                } else {
+                    Some(target.canonical_id.clone())
+                };
+                if let Some(resolved_id) = resolved_id {
+                    prepared.name_resolution.insert(
+                        local_name.clone(),
+                        ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
+                    );
+                }
+            }
+            bindings.insert(param.name.clone(), std::sync::Arc::new(prepared));
+        }
+
+        bindings
+    }
+
     pub(crate) fn sfc_script_setup_type_params(
         source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
@@ -3377,16 +3444,30 @@ impl VerterHost {
             }
         }
 
-        // 4. Build the bundle atomically.
+        // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
+        // Non-Vue files get an empty map — zero cost.
+        let script_setup_type_bindings = if canonical_id.ends_with(".vue") {
+            self.build_script_setup_type_bindings(
+                canonical_id,
+                store_view,
+                state.as_ref(),
+                &dep_edges,
+            )
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
+        // 5. Build the bundle atomically.
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
                 state.as_ref(),
                 dep_edges,
+                script_setup_type_bindings,
             ),
         );
 
-        // 5. Compute fact versions.
+        // 6. Compute fact versions.
         let whole_hash = entry.whole_hash;
         let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
@@ -3400,7 +3481,7 @@ impl VerterHost {
             });
         }
 
-        // 6. Insert into the stable cache.
+        // 7. Insert into the stable cache.
         self.resolver.runtime.prepared_decl_bundles.insert_arc(
             canonical_id.to_string(),
             std::sync::Arc::clone(&bundle),

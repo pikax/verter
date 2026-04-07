@@ -3679,24 +3679,35 @@ fn resolve_mapped(
             construct_signatures: vec![],
         })
     } else {
-        let resolved_value = if should_eagerly_resolve_open_mapped_value(arena, source) {
+        if should_eagerly_resolve_open_mapped_value(arena, source, parameter, value, name_type) {
             let mut child_subst = subst.clone();
             child_subst.bind(parameter, source);
-            resolve_node(arena, value, host, state, &child_subst)
+            let resolved_value = resolve_node(arena, value, host, state, &child_subst);
+            arena.object(ObjectNode {
+                properties: vec![],
+                index_signatures: vec![IndexSignatureNode {
+                    key_type: source,
+                    value_type: resolved_value,
+                    readonly: matches!(readonly, MappedModifierKind::Add),
+                }],
+                call_signatures: vec![],
+                construct_signatures: vec![],
+            })
         } else {
             state.mark_symbolic();
-            value
-        };
-        arena.object(ObjectNode {
-            properties: vec![],
-            index_signatures: vec![IndexSignatureNode {
-                key_type: source,
-                value_type: resolved_value,
-                readonly: matches!(readonly, MappedModifierKind::Add),
-            }],
-            call_signatures: vec![],
-            construct_signatures: vec![],
-        })
+            let materialized_source = materialize_effective_arg(arena, source, subst);
+            let materialized_value = materialize_effective_arg(arena, value, subst);
+            let materialized_name_type =
+                name_type.map(|node| materialize_effective_arg(arena, node, subst));
+            arena.mapped(
+                parameter,
+                materialized_source,
+                materialized_value,
+                optional,
+                readonly,
+                materialized_name_type,
+            )
+        }
     }
 }
 
@@ -3727,11 +3738,12 @@ fn collect_finite_keys(arena: &QueryArena, node: NodeId) -> Option<Vec<String>> 
     Some(keys)
 }
 
-fn should_eagerly_resolve_open_mapped_value(arena: &QueryArena, source: NodeId) -> bool {
+/// Check whether the source of an open mapped type is a simple keyspace
+/// (string, number, symbol, any, or union thereof).
+fn is_simple_open_keyspace(arena: &QueryArena, source: NodeId) -> bool {
     if source.is_unresolved() {
         return false;
     }
-
     match arena.get(source) {
         Node::Primitive(
             PrimitiveKind::String
@@ -3741,9 +3753,194 @@ fn should_eagerly_resolve_open_mapped_value(arena: &QueryArena, source: NodeId) 
         ) => true,
         Node::Union(members) => members
             .iter()
-            .all(|member| should_eagerly_resolve_open_mapped_value(arena, *member)),
+            .all(|member| is_simple_open_keyspace(arena, *member)),
         _ => false,
     }
+}
+
+/// Check whether an arena subtree references a specific type parameter name.
+fn subtree_references_parameter(arena: &QueryArena, node: NodeId, param: &str) -> bool {
+    if node.is_unresolved() {
+        return false;
+    }
+    match arena.get(node) {
+        Node::TypeParam { name, .. } => name == param,
+        // Mapped parameters appear as Ref nodes before substitution.
+        // Also check type_arguments for transitive parameter references.
+        Node::Ref {
+            name,
+            type_arguments,
+            ..
+        } => {
+            name == param
+                || type_arguments
+                    .iter()
+                    .any(|&a| subtree_references_parameter(arena, a, param))
+        }
+        Node::Union(members) | Node::Intersection(members) => members
+            .iter()
+            .any(|&m| subtree_references_parameter(arena, m, param)),
+        Node::Array { element, .. } => subtree_references_parameter(arena, *element, param),
+        Node::Tuple { elements, .. } => elements
+            .iter()
+            .any(|e| subtree_references_parameter(arena, e.ty, param)),
+        Node::Object(obj) => {
+            obj.properties
+                .iter()
+                .any(|p| subtree_references_parameter(arena, p.ty, param))
+                || obj.index_signatures.iter().any(|s| {
+                    subtree_references_parameter(arena, s.key_type, param)
+                        || subtree_references_parameter(arena, s.value_type, param)
+                })
+        }
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            subtree_references_parameter(arena, *check, param)
+                || subtree_references_parameter(arena, *extends, param)
+                || subtree_references_parameter(arena, *true_branch, param)
+                || subtree_references_parameter(arena, *false_branch, param)
+        }
+        Node::IndexedAccess { object, index } => {
+            subtree_references_parameter(arena, *object, param)
+                || subtree_references_parameter(arena, *index, param)
+        }
+        Node::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|&e| subtree_references_parameter(arena, e, param)),
+        Node::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            subtree_references_parameter(arena, *source, param)
+                || subtree_references_parameter(arena, *value, param)
+                || name_type.is_some_and(|nt| subtree_references_parameter(arena, nt, param))
+        }
+        Node::KeyOf(inner) | Node::Rest(inner) => {
+            subtree_references_parameter(arena, *inner, param)
+        }
+        Node::Applied { args, .. } => args
+            .iter()
+            .any(|&a| subtree_references_parameter(arena, a, param)),
+        Node::Function(f) => f.signatures.iter().any(|sig| {
+            sig.parameters
+                .iter()
+                .any(|p| subtree_references_parameter(arena, p.ty, param))
+                || subtree_references_parameter(arena, sig.return_type, param)
+        }),
+        _ => false,
+    }
+}
+
+/// Check whether an arena subtree's reference to a parameter goes through
+/// an expensive operation (Conditional, IndexedAccess, TemplateLiteral, or
+/// nested Mapped). These operations cause expansion when the parameter is
+/// bound to an open keyspace.
+fn has_expensive_parameter_dependency(arena: &QueryArena, node: NodeId, param: &str) -> bool {
+    if node.is_unresolved() {
+        return false;
+    }
+    match arena.get(node) {
+        // These operations are the expansion amplifiers — if the param is
+        // reachable through them, eager resolution will explode.
+        // Note: IndexedAccess is NOT flagged as expensive because `X[K]`
+        // is the standard pattern for open mapped types (Record<string, T>).
+        Node::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            subtree_references_parameter(arena, *check, param)
+                || subtree_references_parameter(arena, *extends, param)
+                || subtree_references_parameter(arena, *true_branch, param)
+                || subtree_references_parameter(arena, *false_branch, param)
+        }
+        Node::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|&e| subtree_references_parameter(arena, e, param)),
+        Node::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            subtree_references_parameter(arena, *source, param)
+                || subtree_references_parameter(arena, *value, param)
+                || name_type.is_some_and(|nt| subtree_references_parameter(arena, nt, param))
+        }
+        // Transparent wrappers — recurse into children.
+        Node::Union(members) | Node::Intersection(members) => members
+            .iter()
+            .any(|&m| has_expensive_parameter_dependency(arena, m, param)),
+        Node::Array { element, .. } => has_expensive_parameter_dependency(arena, *element, param),
+        Node::Tuple { elements, .. } => elements
+            .iter()
+            .any(|e| has_expensive_parameter_dependency(arena, e.ty, param)),
+        Node::Object(obj) => {
+            obj.properties
+                .iter()
+                .any(|p| has_expensive_parameter_dependency(arena, p.ty, param))
+                || obj
+                    .index_signatures
+                    .iter()
+                    .any(|s| has_expensive_parameter_dependency(arena, s.value_type, param))
+        }
+        Node::Function(f) => f.signatures.iter().any(|sig| {
+            sig.parameters
+                .iter()
+                .any(|p| has_expensive_parameter_dependency(arena, p.ty, param))
+                || has_expensive_parameter_dependency(arena, sig.return_type, param)
+        }),
+        Node::KeyOf(inner) | Node::Rest(inner) => {
+            has_expensive_parameter_dependency(arena, *inner, param)
+        }
+        Node::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(|&a| has_expensive_parameter_dependency(arena, a, param)),
+        Node::Applied { args, .. } => args
+            .iter()
+            .any(|&a| has_expensive_parameter_dependency(arena, a, param)),
+        // TypeParam, Primitive, Literal — no expensive dependency
+        _ => false,
+    }
+}
+
+/// Decide whether to eagerly resolve a mapped type's value when the keyspace
+/// is open. Returns true for cheap cases (no parameter dependency, or only
+/// cheap parameter usage); false when the value depends on the mapped
+/// parameter through expensive operations that would cause expansion.
+fn should_eagerly_resolve_open_mapped_value(
+    arena: &QueryArena,
+    source: NodeId,
+    parameter: &str,
+    value: NodeId,
+    name_type: Option<NodeId>,
+) -> bool {
+    // Source must be a simple open keyspace.
+    if !is_simple_open_keyspace(arena, source) {
+        return false;
+    }
+    // Parameter-dependent key remaps must stay symbolic for open keyspaces.
+    // Collapsing them to an index signature loses the remapped keyspace shape.
+    if name_type.is_some_and(|nt| subtree_references_parameter(arena, nt, parameter)) {
+        return false;
+    }
+    // If the value doesn't reference the mapped parameter at all, safe to resolve.
+    if !subtree_references_parameter(arena, value, parameter) {
+        return true;
+    }
+    // If the value references the parameter through expensive operations
+    // (conditional, indexed-access, template-literal, nested mapped),
+    // stay symbolic to avoid expansion explosion.
+    !has_expensive_parameter_dependency(arena, value, parameter)
 }
 
 // ---------------------------------------------------------------------------
@@ -12326,5 +12523,161 @@ mod tests {
             }
             _ => panic!("expected Object, got {:?}", result.value),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // WS0C: Solver symbolic-surface contract tests
+    // -----------------------------------------------------------------------
+
+    /// Open mapped type with parameter-dependent conditional value stays
+    /// symbolic — should NOT eagerly expand when value depends on the
+    /// mapped parameter through a conditional.
+    #[test]
+    fn open_mapped_with_conditional_value_stays_symbolic() {
+        // { [K in string]?: K extends "a" ? number : boolean }
+        let expr = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            value: Arc::new(TypeExpr::Conditional {
+                check: Arc::new(TypeExpr::Ref {
+                    name: Arc::from("K"),
+                    type_arguments: Arc::from(vec![]),
+                }),
+                extends: Arc::new(TypeExpr::string_literal("a")),
+                true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+                false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Boolean)),
+            }),
+            optional: crate::analysis::type_expr::MappedModifier::Add,
+            readonly: crate::analysis::type_expr::MappedModifier::None,
+            name_type: None,
+        };
+        let result = solve_type(&expr, &NoopSolverHost);
+        // The value depends on K through a conditional. With the symbolic
+        // deferral path, the solver must preserve the mapped transform rather
+        // than collapsing it to an open index-signature object.
+        assert_eq!(
+            result.exactness,
+            SolverExactness::ExactSymbolic,
+            "open mapped type with conditional value should be symbolic"
+        );
+        assert!(
+            matches!(result.value, TypeExpr::Mapped { .. }),
+            "expected symbolic mapped result, got: {:?}",
+            result.value
+        );
+    }
+
+    /// Finite keyspace mapped type materializes concretely — this must
+    /// remain true after the symbolic projection cutover.
+    #[test]
+    fn finite_keyspace_mapped_type_materializes_concrete() {
+        // { [K in "a" | "b"]: number }
+        let expr = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::Union(Arc::from(vec![
+                TypeExpr::string_literal("a"),
+                TypeExpr::string_literal("b"),
+            ]))),
+            value: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            optional: crate::analysis::type_expr::MappedModifier::None,
+            readonly: crate::analysis::type_expr::MappedModifier::None,
+            name_type: None,
+        };
+        let result = solve_type(&expr, &NoopSolverHost);
+        match &result.value {
+            TypeExpr::Object(obj) => {
+                assert_eq!(
+                    obj.properties.len(),
+                    2,
+                    "finite keyspace should produce 2 concrete properties"
+                );
+            }
+            _ => panic!(
+                "finite mapped type must materialize to Object, got: {:?}",
+                result.value
+            ),
+        }
+        assert_eq!(
+            result.exactness,
+            SolverExactness::ExactConcrete,
+            "finite mapped type should be exactly concrete"
+        );
+    }
+
+    /// Record<string, number> pattern should still resolve eagerly (cheap
+    /// open keyspace with no parameter dependency in the value).
+    #[test]
+    fn record_string_number_resolves_eagerly() {
+        use crate::analysis::type_expr::ObjectMember;
+        // { [K in string]: number }
+        let expr = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            value: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            optional: crate::analysis::type_expr::MappedModifier::None,
+            readonly: crate::analysis::type_expr::MappedModifier::None,
+            name_type: None,
+        };
+        let result = solve_type(&expr, &NoopSolverHost);
+        match &result.value {
+            TypeExpr::Object(obj) => {
+                let idx_sigs: Vec<_> = obj
+                    .properties
+                    .iter()
+                    .filter_map(|m| match m {
+                        ObjectMember::IndexSignature(sig) => Some(sig),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    !idx_sigs.is_empty(),
+                    "Record<string, number> should produce index signature"
+                );
+                // Value type should be concretely number.
+                assert_eq!(
+                    idx_sigs[0].value_type,
+                    TypeExpr::Primitive(PrimitiveName::Number),
+                    "index signature value should be Number"
+                );
+            }
+            _ => panic!(
+                "Record<string, number> must produce Object, got: {:?}",
+                result.value
+            ),
+        }
+    }
+
+    /// Open mapped type with parameter-dependent key remap must stay symbolic.
+    /// Otherwise the solver collapses a constrained keyspace into a plain
+    /// string index signature and loses the remap semantics entirely.
+    #[test]
+    fn open_mapped_with_parameter_dependent_name_type_stays_symbolic() {
+        let expr = TypeExpr::Mapped {
+            parameter: "K".into(),
+            source: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+            value: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
+            optional: crate::analysis::type_expr::MappedModifier::None,
+            readonly: crate::analysis::type_expr::MappedModifier::None,
+            name_type: Some(Arc::new(TypeExpr::TemplateLiteral {
+                quasis: vec!["".into(), "-body".into()],
+                expressions: Arc::from(vec![TypeExpr::Ref {
+                    name: Arc::from("K"),
+                    type_arguments: Arc::from(vec![]),
+                }]),
+            })),
+        };
+
+        let result = solve_type(&expr, &NoopSolverHost);
+
+        assert_eq!(
+            result.exactness,
+            SolverExactness::ExactSymbolic,
+            "open mapped remap should stay symbolic"
+        );
+        assert!(
+            matches!(result.value, TypeExpr::Mapped { .. }),
+            "expected symbolic mapped result, got: {:?}",
+            result.value
+        );
     }
 }

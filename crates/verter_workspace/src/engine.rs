@@ -127,7 +127,7 @@ impl Engine {
             snapshot_bytes: snapshot.approx_bytes(),
             edge_file_count: edges.file_count(),
             reverse_dep_bucket_count: edges.reverse_dep_bucket_count(),
-            package_manifest_count: package_index.len(),
+            package_manifest_count: package_index.found_count(),
             published_project_count: published
                 .as_ref()
                 .map(|root| root.snapshot.projects.len())
@@ -177,17 +177,30 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceAccess,
         canonical_id: &str,
     ) -> Option<crate::types::PackageManifest> {
+        use crate::package_index::ManifestEntry;
+
         let canonical_id = crate::resolver::normalize_canonical_id(canonical_id);
         {
             let cache = self.package_index.read();
-            if let Some(manifest) = cache.get_cached(&canonical_id) {
-                return Some(manifest.clone());
+            match cache.get_cached(&canonical_id) {
+                Some(ManifestEntry::Found(manifest)) => return Some((**manifest).clone()),
+                Some(ManifestEntry::NotFound) => return None, // negative cache hit
+                None => {}                                    // cache miss — proceed to read
             }
         }
 
-        let source = reader.read_file(&canonical_id)?;
-        let mut cache = self.package_index.write();
-        Some(cache.get_or_parse(&canonical_id, &source).clone())
+        match reader.read_file(&canonical_id) {
+            Some(source) => {
+                let mut cache = self.package_index.write();
+                Some(cache.get_or_parse(&canonical_id, &source).clone())
+            }
+            None => {
+                // Cache the negative result so repeated probes are free.
+                let mut cache = self.package_index.write();
+                cache.insert_not_found(&canonical_id);
+                None
+            }
+        }
     }
 
     pub(crate) fn invalidate_package_manifest(&self, canonical_id: &str) {

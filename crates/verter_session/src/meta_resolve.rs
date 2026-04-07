@@ -1785,6 +1785,20 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
     }
 
     if nested_surface {
+        if let Some(projected) = engine.project_expr_surface_expr(scope_canonical_id, expr) {
+            if projected != *expr {
+                let result = materialize_component_meta_member_surface_expr_with_active_stack(
+                    &projected,
+                    scope_canonical_id,
+                    engine,
+                    true,
+                    active,
+                );
+                active.remove(expr);
+                return result;
+            }
+        }
+
         let solved = engine.solve_expr_in_scope(scope_canonical_id, expr);
         if solved != *expr {
             let result = materialize_component_meta_member_surface_expr_with_active_stack(

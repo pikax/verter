@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn audit_builder_captures_process_rss() {
         let builder = AuditBuilder::new(4, "rss.vue".into());
-        let record = builder.finish();
+        let _record = builder.finish();
 
         // On supported platforms (macOS, Linux), RSS should be > 0.
         // On unsupported platforms, it's 0 which is acceptable.

@@ -58,7 +58,12 @@ fn get_cached_returns_manifest_after_parse() {
 
     let cached = index.get_cached("node_modules/foo/package.json");
     assert!(cached.is_some());
-    assert_eq!(cached.unwrap().name.as_deref(), Some("my-package"));
+    match cached.unwrap() {
+        ManifestEntry::Found(manifest) => {
+            assert_eq!(manifest.name.as_deref(), Some("my-package"));
+        }
+        ManifestEntry::NotFound => panic!("expected Found, got NotFound"),
+    }
 }
 
 #[test]
@@ -138,5 +143,105 @@ fn len_and_empty() {
     assert_eq!(index.len(), 1);
 
     index.get_or_parse("b/package.json", SIMPLE_PKG);
+    assert_eq!(index.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// WS4: Negative manifest-miss / directory-facts tests
+// ---------------------------------------------------------------------------
+
+/// Negative miss is cached: after insert_not_found, get_cached returns NotFound.
+#[test]
+fn negative_miss_is_cached() {
+    let mut index = PackageIndex::new();
+
+    // Never-probed path returns None.
+    assert!(
+        index
+            .get_cached("node_modules/nonexistent/package.json")
+            .is_none(),
+        "unknown path should return None"
+    );
+
+    // After recording negative result, returns NotFound.
+    index.insert_not_found("node_modules/nonexistent/package.json");
+    match index.get_cached("node_modules/nonexistent/package.json") {
+        Some(ManifestEntry::NotFound) => {} // correct
+        other => panic!("expected NotFound, got: {other:?}"),
+    }
+}
+
+/// Negative miss is cleared on invalidation so subsequent lookups re-probe.
+#[test]
+fn negative_miss_invalidated_on_write() {
+    let mut index = PackageIndex::new();
+    index.insert_not_found("node_modules/foo/package.json");
+
+    // Verify negative entry exists.
+    assert!(matches!(
+        index.get_cached("node_modules/foo/package.json"),
+        Some(ManifestEntry::NotFound)
+    ));
+
+    // Invalidate clears it.
+    assert!(index.invalidate("node_modules/foo/package.json"));
+    assert!(
+        index.get_cached("node_modules/foo/package.json").is_none(),
+        "invalidated negative entry should be cleared"
+    );
+}
+
+/// invalidate_under clears negative entries too.
+#[test]
+fn invalidate_under_clears_negative_entries() {
+    let mut index = PackageIndex::new();
+    index.get_or_parse("workspace/node_modules/a/package.json", SIMPLE_PKG);
+    index.insert_not_found("workspace/node_modules/b/package.json");
+    index.insert_not_found("other/node_modules/c/package.json");
+
+    index.invalidate_under("workspace/node_modules/");
+    assert!(
+        index
+            .get_cached("workspace/node_modules/a/package.json")
+            .is_none(),
+        "positive entry under prefix should be cleared"
+    );
+    assert!(
+        index
+            .get_cached("workspace/node_modules/b/package.json")
+            .is_none(),
+        "negative entry under prefix should be cleared"
+    );
+    assert!(
+        index
+            .get_cached("other/node_modules/c/package.json")
+            .is_some(),
+        "entry outside prefix should survive"
+    );
+}
+
+/// Negative entry can be upgraded to positive when a manifest later appears.
+#[test]
+fn negative_entry_upgrades_to_positive_on_reparse() {
+    let mut index = PackageIndex::new();
+    index.insert_not_found("node_modules/foo/package.json");
+
+    // Now the package exists — get_or_parse should upgrade.
+    let manifest = index.get_or_parse("node_modules/foo/package.json", SIMPLE_PKG);
+    assert_eq!(manifest.name.as_deref(), Some("my-package"));
+
+    // Subsequent get_cached returns Found.
+    match index.get_cached("node_modules/foo/package.json") {
+        Some(ManifestEntry::Found(m)) => assert_eq!(m.name.as_deref(), Some("my-package")),
+        other => panic!("expected Found after upgrade, got: {other:?}"),
+    }
+}
+
+/// Counts include both positive and negative entries.
+#[test]
+fn len_includes_negative_entries() {
+    let mut index = PackageIndex::new();
+    index.get_or_parse("a/package.json", SIMPLE_PKG);
+    index.insert_not_found("b/package.json");
     assert_eq!(index.len(), 2);
 }

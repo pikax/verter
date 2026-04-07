@@ -12837,3 +12837,258 @@ defineProps<{ childProp: string; newProp: boolean }>()
     // The full payload should have changed because the child's prop surface changed.
     // (This is a weaker assertion — we just check that re-encoding happened.)
 }
+
+// ---------------------------------------------------------------------------
+// WS0A: Real-shape regression tests for the semantic-DB cutover
+// ---------------------------------------------------------------------------
+
+/// Real nuxt-ui DynamicSlots pattern with conditional template-literal keys
+/// and `Extract` in the mapped value. This is the pattern that causes solver
+/// explosion via O(N^2) conditional distribution.
+#[test]
+fn get_component_meta_dynamic_slots_real_shape_accordion() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/utils.ts",
+            r#"export type DynamicSlotsKeys<
+  Name extends string | undefined,
+  Suffix extends string | undefined = undefined
+> = (
+  Name extends string
+    ? Suffix extends string
+      ? Name | `${Name}-${Suffix}`
+      : Name
+    : never
+)
+
+export type DynamicSlots<
+  T extends { slot?: string },
+  Suffix extends string | undefined = undefined,
+  ExtraProps extends object = {}
+> = {
+  [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+  ) => any[]
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Accordion.vue",
+            r#"<script setup lang="ts">
+import type { DynamicSlots } from './utils'
+
+type AccordionItem = { slot?: 'default' | 'leading' | 'trailing' }
+
+interface AccordionSlots extends DynamicSlots<AccordionItem, 'body', { index: number; open: boolean }> {
+  default(props: { item: AccordionItem }): any
+  leading?(): any
+  trailing?(): any
+}
+
+defineSlots<AccordionSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Accordion.vue");
+    let slot_names: Vec<&str> = meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+
+    // Named slots from the interface should survive.
+    assert!(
+        slot_names.contains(&"default"),
+        "real-shape DynamicSlots accordion must keep 'default' slot, got: {slot_names:?}"
+    );
+    assert!(
+        slot_names.contains(&"leading"),
+        "real-shape DynamicSlots accordion must keep 'leading' slot, got: {slot_names:?}"
+    );
+    assert!(
+        slot_names.contains(&"trailing"),
+        "real-shape DynamicSlots accordion must keep 'trailing' slot, got: {slot_names:?}"
+    );
+
+    // Helper internals must NOT leak into the public surface.
+    assert!(
+        !slot_names.iter().any(|n| *n == "item" || *n == "slot"),
+        "DynamicSlots helper internals must not leak into slot surface: {slot_names:?}"
+    );
+}
+
+/// ColorModeSelect regression: cross-file generic SelectMenuProps + Omit +
+/// ButtonHTMLAttributes. Must complete without HardStop/timeout.
+#[test]
+fn get_component_meta_color_mode_select_completion_regression() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface UseComponentIconsProps {
+  loading?: boolean
+  leadingIcon?: string
+  trailingIcon?: string
+}
+
+export interface InputProps {
+  modelValue?: string
+  placeholder?: string
+}
+
+export type GetItemKeys<T> = T extends readonly (infer U)[]
+  ? U extends Record<string, any> ? keyof U : never
+  : T extends Record<string, any> ? keyof T : never
+
+export interface SelectMenuItem {
+  label?: string
+  value?: string | number
+  icon?: string
+  disabled?: boolean
+}
+
+export interface SelectMenuProps<
+  T extends SelectMenuItem | SelectMenuItem[] = SelectMenuItem[],
+  VK extends GetItemKeys<T> | undefined = undefined,
+  M extends boolean = false
+> extends UseComponentIconsProps, Omit<ButtonHTMLAttributes, 'name'> {
+  open?: boolean
+  disabled?: boolean
+  name?: string
+  searchInput?: boolean | Omit<InputProps, 'modelValue'>
+  valueKey?: VK
+  items?: T
+  modelValue?: M extends true ? T : SelectMenuItem
+}
+
+interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'submit' | 'reset' | 'button'
+  value?: string
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/ColorModeSelect.vue",
+            r#"<script lang="ts">
+import type { SelectMenuProps, SelectMenuItem } from './types'
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<SelectMenuItem[]>, 'icon' | 'items' | 'modelValue'> {
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/ColorModeSelect.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    // Core props from SelectMenuProps should survive through Omit + extends.
+    assert!(
+        prop_names.contains(&"open")
+            && prop_names.contains(&"disabled")
+            && prop_names.contains(&"name"),
+        "ColorModeSelect must keep direct generic survivors, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"loading"),
+        "ColorModeSelect must keep inherited UseComponentIconsProps members, got: {prop_names:?}"
+    );
+    // Omitted props should NOT appear.
+    assert!(
+        !prop_names.contains(&"icon")
+            && !prop_names.contains(&"items")
+            && !prop_names.contains(&"modelValue"),
+        "ColorModeSelect must respect wrapper Omit, got: {prop_names:?}"
+    );
+    // ButtonHTMLAttributes survivors (after Omit<..., 'name'>).
+    assert!(
+        prop_names.contains(&"formaction") && prop_names.contains(&"formtarget"),
+        "ColorModeSelect must keep ButtonHTMLAttributes heritage, got: {prop_names:?}"
+    );
+}
+
+/// defineEmits: call-signature / overload form. Projection must preserve event
+/// names and payloads for callable emit declarations.
+#[test]
+fn get_component_meta_define_emits_call_signature_form() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<{
+  (e: 'change', value: string): void
+  (e: 'update', id: number, force?: boolean): void
+  (e: 'close'): void
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+    let event_names: Vec<&str> = meta.events.iter().map(|ev| ev.name.as_str()).collect();
+
+    assert!(
+        event_names.contains(&"change"),
+        "call-signature emits must include 'change', got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"update"),
+        "call-signature emits must include 'update', got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"close"),
+        "call-signature emits must include 'close', got: {event_names:?}"
+    );
+}
+
+/// defineEmits: object-literal form. Simpler shape must also work on the new
+/// projection path.
+#[test]
+fn get_component_meta_define_emits_object_literal_form() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const emit = defineEmits<{
+  change: [value: string]
+  update: [id: number, force?: boolean]
+  close: []
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+    let event_names: Vec<&str> = meta.events.iter().map(|ev| ev.name.as_str()).collect();
+
+    assert!(
+        event_names.contains(&"change"),
+        "object-literal emits must include 'change', got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"update"),
+        "object-literal emits must include 'update', got: {event_names:?}"
+    );
+    assert!(
+        event_names.contains(&"close"),
+        "object-literal emits must include 'close', got: {event_names:?}"
+    );
+}

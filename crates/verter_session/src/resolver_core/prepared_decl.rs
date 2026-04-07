@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::prepared::PreparedExternalDep;
 use verter_semantic::analysis::type_solver::{
     PreparedTypeDecl, PreparedValueDecl, ResolvedRootIdentity,
 };
 
 use super::{ExportTarget, ShallowFileState};
+
+/// Import binding: maps a local import name to its resolved target.
+/// Used by the declaration-scope solver host to resolve cross-file references.
+#[derive(Debug, Clone)]
+pub struct ImportBinding {
+    pub canonical_id: String,
+    pub exported_name: String,
+}
 
 fn resolve_import_target(
     owner_canonical_id: &str,
@@ -223,20 +231,65 @@ pub struct PreparedDeclBundle {
     /// Stored so `SessionSolverHost::with_declaration_scope` can read it
     /// instead of recomputing `dependency_resolutions_for_eval_in_view`.
     pub dep_edges: FxHashMap<String, String>,
+    /// Resolved import bindings: local name → (canonical_id, exported_name).
+    /// Built from the owner file's import targets + dep_edges during
+    /// bundle materialization.
+    pub import_bindings: FxHashMap<String, ImportBinding>,
+    /// Same-file type names visible in the declaration scope.
+    pub scope_type_names: FxHashSet<String>,
+    /// Same-file value names visible in the declaration scope.
+    pub scope_value_names: FxHashSet<String>,
+    /// Script-setup generic type parameter bindings (Vue SFC only).
+    /// Empty for non-Vue files. Populated once during bundle materialization
+    /// so the solver hot path never calls `current_eval_state_in_view`.
+    pub script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
 }
 
 /// Build an atomic declaration-surface bundle from a shallow file state and
 /// resolved dependency edges. The bundle is immutable after construction.
+///
+/// `script_setup_type_bindings` are supplied by the caller (host_manage) because
+/// extracting them requires access to the host's source/parse state, which is a
+/// session-level concern. For non-Vue files the caller passes an empty map.
 pub fn build_prepared_decl_bundle(
     canonical_id: &str,
     state: &ShallowFileState,
     dep_edges: FxHashMap<String, String>,
+    script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
 ) -> PreparedDeclBundle {
     let dep_edges_ref = (!dep_edges.is_empty()).then_some(&dep_edges);
+
+    // Build import bindings from shallow state import_targets + dep_edges.
+    let mut import_bindings = FxHashMap::default();
+    for (local_name, target) in state.import_targets.iter() {
+        let resolved_id = if target.canonical_id.is_empty() {
+            dep_edges.get(&target.source_specifier).cloned()
+        } else {
+            Some(target.canonical_id.clone())
+        };
+        if let Some(resolved_id) = resolved_id {
+            import_bindings.insert(
+                local_name.clone(),
+                ImportBinding {
+                    canonical_id: resolved_id,
+                    exported_name: target.imported_name.clone(),
+                },
+            );
+        }
+    }
+
+    // Collect same-file symbol name sets.
+    let scope_type_names: FxHashSet<String> = state.symbols.keys().cloned().collect();
+    let scope_value_names: FxHashSet<String> = state.value_symbols.keys().cloned().collect();
+
     PreparedDeclBundle {
         prepared_type_decls: build_prepared_type_decl_cache(canonical_id, state, dep_edges_ref),
         prepared_value_decls: build_prepared_value_decl_cache(canonical_id, state, dep_edges_ref),
         dep_edges,
+        import_bindings,
+        scope_type_names,
+        scope_value_names,
+        script_setup_type_bindings,
     }
 }
 

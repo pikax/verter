@@ -319,6 +319,120 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> &verter_semantic::analysis::type_solver::query_engine::SolverTraceSummary {
         &self.owner_engine.trace_summary
     }
+
+    // -------------------------------------------------------------------
+    // WS3: Projection-based surface extraction
+    // -------------------------------------------------------------------
+
+    /// Project the full surface of a type expression in a declaration scope.
+    ///
+    /// This is the projection-based alternative to `solve_scoped` + manual
+    /// surface extraction. It builds a `SubjectKey::Decl` for the type,
+    /// interns it, and calls `project_surface` to get all members and call
+    /// signatures without full structural normalization.
+    pub fn project_type_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface> {
+        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        let subject_key = SubjectKey::Decl {
+            canonical_id: scope_canonical_id.to_string(),
+            symbol_name: symbol_name.to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        };
+        let subject_id = self.owner_engine.intern_subject(subject_key);
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        self.owner_engine
+            .project_surface(subject_id, &solver_host, scope_canonical_id)
+    }
+
+    pub fn project_type_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<TypeExpr> {
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        self.owner_engine.project_expr_surface_as_type_expr(
+            &solver_host,
+            scope_canonical_id,
+            &TypeExpr::named(symbol_name),
+        )
+    }
+
+    /// Project a single member from a type expression in a declaration scope.
+    pub fn project_type_member(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedMember> {
+        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        let subject_key = SubjectKey::Decl {
+            canonical_id: scope_canonical_id.to_string(),
+            symbol_name: symbol_name.to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        };
+        let subject_id = self.owner_engine.intern_subject(subject_key);
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        self.owner_engine
+            .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
+    }
+
+    /// Project the keyspace (member names) from a type expression in a
+    /// declaration scope.
+    pub fn project_type_keyspace(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedKeyspace> {
+        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        let subject_key = SubjectKey::Decl {
+            canonical_id: scope_canonical_id.to_string(),
+            symbol_name: symbol_name.to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        };
+        let subject_id = self.owner_engine.intern_subject(subject_key);
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        self.owner_engine
+            .project_keyspace(subject_id, &solver_host, scope_canonical_id)
+    }
+
+    pub fn project_expr_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let solver_host = SessionSolverHost::with_declaration_scope(
+            self.host,
+            self.store_view,
+            scope_canonical_id,
+        );
+        self.owner_engine
+            .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
+    }
 }
 
 fn filter_identity_ref(result: &SolverResult<TypeExpr>, requested_name: &str) -> Option<TypeExpr> {
