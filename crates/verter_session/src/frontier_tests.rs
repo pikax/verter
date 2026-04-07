@@ -1,8 +1,4 @@
-//! Phase 0 + Phase 1 behavioral tests for the semantic type resolution overhaul.
-//!
-//! These tests lock the desired behavior *before* the frontier/shallow-state
-//! implementation lands.  Tests that rely on new public API are `#[ignore]`
-//! until Phases 1â€“3 provide them.
+//! Behavioral tests for the semantic type resolution overhaul.
 //!
 //! Invariants under test:
 //! - Each canonical imported file is loaded/parsed at most once per request.
@@ -1571,7 +1567,7 @@ export { InternalProps as PublicProps }
 
     let _ = host.shallow_file_state_in_view("/src/types.ts", None);
 
-    let member_route = crate::resolver_core::shallow_file_state::ExportedRoute::Member("a".into());
+    let member_route = crate::resolver_core::RouteDemand::MemberPath(vec!["a".into()]);
     let member_required = host.required_import_names_for_exported_route_in_view(
         "/src/types.ts",
         "PublicProps",
@@ -1581,7 +1577,7 @@ export { InternalProps as PublicProps }
     let whole_required = host.required_import_names_for_exported_route_in_view(
         "/src/types.ts",
         "PublicProps",
-        &crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+        &crate::resolver_core::RouteDemand::Whole,
         None,
     );
 
@@ -1595,20 +1591,6 @@ export { InternalProps as PublicProps }
     );
     assert!(whole_required.contains("Alpha"));
     assert!(whole_required.contains("Beta"));
-
-    let cached = host
-        .imported_dependency_cache
-        .lock()
-        .get("/src/types.ts")
-        .cloned()
-        .expect("imported dependency entry should exist");
-    assert!(cached
-        .exported_required_import_names
-        .contains_key(&("PublicProps".to_string(), member_route)));
-    assert!(cached.exported_required_import_names.contains_key(&(
-        "PublicProps".to_string(),
-        crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
-    )));
 }
 
 // ===========================================================================
@@ -1660,6 +1642,7 @@ defineProps<Props>()
     frontier.seed(vec![crate::resolver_core::PendingExternalSymbol {
         canonical_id: "/src/barrel.ts".to_string(),
         exported_name: "Props".to_string(),
+        route: Some(crate::resolver_core::RouteDemand::Whole),
     }]);
 
     frontier.run(&adapter).unwrap();
@@ -1720,6 +1703,7 @@ defineProps<Props>()
     frontier.seed(vec![crate::resolver_core::PendingExternalSymbol {
         canonical_id: "/src/barrel.ts".to_string(),
         exported_name: "Props".to_string(),
+        route: Some(crate::resolver_core::RouteDemand::Whole),
     }]);
 
     frontier.run(&adapter).unwrap();

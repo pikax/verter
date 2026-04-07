@@ -4,7 +4,7 @@
 //! cross-file types through `PreparedTypeDecl` / `PreparedValueDecl` and the
 //! `name_resolution` context stack. This module survives only because the
 //! component-meta registry materialization code (`meta_resolve.rs`) uses
-//! `resolve_prepared_symbol_dependency_alias_in_view` to resolve and cache
+//! `resolve_prepared_symbol_dependency_alias_for_route_in_view` to resolve and cache
 //! imported type aliases for registry publishing.
 //!
 //! **Do not add solver-level semantic resolution here.** If a type needs

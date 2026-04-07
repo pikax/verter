@@ -216,23 +216,11 @@ pub(crate) struct ImportedDependencyCacheEntry {
     pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
     pub eval_source: Option<Arc<str>>,
     pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
-    pub exported_required_import_names: rustc_hash::FxHashMap<
-        (
-            String,
-            crate::resolver_core::shallow_file_state::ExportedRoute,
-        ),
-        Arc<rustc_hash::FxHashSet<String>>,
-    >,
-    pub resolved_type_roots: rustc_hash::FxHashMap<String, ImportedTypeRootCacheEntry>,
+    /// Cached type root resolutions: imported_name → (canonical_source, resolved_name).
+    pub resolved_type_roots: rustc_hash::FxHashMap<String, (String, String)>,
     pub resolved_type_declarations:
         rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,
     pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ImportedTypeRootCacheEntry {
-    pub canonical_source: String,
-    pub resolved_name: String,
 }
 
 /// Central file store and compile cache for Vue SFC compilation.
@@ -305,10 +293,6 @@ pub struct VerterHost {
     /// Each entry is valid only for its exact whole_hash.
     pub(crate) imported_dependency_cache:
         parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
-    /// Provider-owned export route cache.  Single shared owner for all
-    /// export route answers across component-meta, LSP, MCP, and other
-    /// host-backed consumers.
-    pub(crate) provider_route_store: types::SharedProviderRouteStore,
     /// Semantic query database: revision-gated caches for component surfaces,
     /// binding facts, and reactivity provenance.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
@@ -371,7 +355,6 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            provider_route_store: types::SharedProviderRouteStore::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -401,7 +384,6 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            provider_route_store: types::SharedProviderRouteStore::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -1048,7 +1030,6 @@ impl VerterHost {
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
         self.imported_dependency_cache.lock().clear();
-        self.provider_route_store.clear_all();
         self.bump_store_view_epoch();
     }
 
@@ -1326,8 +1307,6 @@ impl VerterHost {
             cc.cached_meta_payloads.clear();
             cc.cached_fallthrough = None;
         }
-        // Invalidate this file's provider route cache
-        self.provider_route_store.invalidate(canonical_id);
         self.bump_store_view_epoch();
     }
 

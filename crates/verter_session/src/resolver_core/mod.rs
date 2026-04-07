@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 mod component_meta;
 pub mod component_meta_query_engine;
+pub mod component_meta_registry;
 mod component_meta_request;
 mod declaration_metadata;
 mod export_graph;
@@ -17,6 +18,7 @@ pub mod fallthrough_resolver;
 mod imported_type_alias;
 pub mod prepared_decl;
 pub mod resolver_runtime;
+pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
 pub mod solver_host;
@@ -74,6 +76,10 @@ pub use imported_type_alias::{
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,
     prepare_exported_value_decl, prepare_local_type_decl, prepare_local_value_decl,
+};
+pub use route_demand::{
+    merge_route_demands, RouteDemand, RouteProvenance, RouteProvenanceKind, RoutedExternalDep,
+    RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
 };
 pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
@@ -157,7 +163,12 @@ pub enum TraversalLens {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolutionNodeKind {
-    Route,
+    /// Importer-side import-edge node: keyed by owner + import source +
+    /// requested symbol + binding context.
+    ImporterEdge,
+    /// Provider-side export-route node: keyed by provider canonical +
+    /// requested symbol + route demand + symbol space. Reusable across importers.
+    ProviderExportRoute,
     BarrelLookup,
     DeclarationMetadata,
     SymbolExpand,

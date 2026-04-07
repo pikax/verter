@@ -1,4 +1,4 @@
-//! Unified external type frontier engine (Phase 3).
+//! Unified external type frontier engine.
 //!
 //! Shared BFS kernel for cross-file type deepening.
 //! Host-backed resolver entrypoints and merge-root collection can use this
@@ -14,8 +14,8 @@
 //! - Tracks counters against the frontier budget
 //!
 //! The engine does NOT perform type evaluation or expansion.  It produces
-//! `ResolvedSymbol` entries with post-local-closure symbolic bodies that the
-//! builder stage (Phase 6) consumes from cache.
+//! `ResolvedSymbol` entries with post-local-closure symbolic bodies that later
+//! materialization stages consume from cache.
 
 use std::sync::Arc;
 
@@ -32,10 +32,13 @@ use verter_semantic::analysis::type_expr::{TypeExpr, TypeParam};
 // ---------------------------------------------------------------------------
 
 /// A pending symbol to resolve in the next frontier level.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct PendingExternalSymbol {
     pub canonical_id: String,
     pub exported_name: String,
+    /// Route demand carried through alias and wildcard hops.
+    /// `None` means `Whole`.
+    pub route: Option<super::route_demand::RouteDemand>,
 }
 
 /// How a symbol's export route was discovered.
@@ -294,6 +297,7 @@ impl ExternalTypeFrontier {
                 let next = PendingExternalSymbol {
                     canonical_id: target_canonical.clone(),
                     exported_name: ext_ref.imported_name.clone(),
+                    route: None,
                 };
                 let key = (next.canonical_id.clone(), next.exported_name.clone());
                 if self.seen.insert(key) {
@@ -392,6 +396,7 @@ impl ExternalTypeFrontier {
                     let next = PendingExternalSymbol {
                         canonical_id: target_canonical.clone(),
                         exported_name: pending.exported_name.clone(),
+                        route: pending.route.clone(),
                     };
                     let key = (next.canonical_id.clone(), next.exported_name.clone());
                     if self.seen.insert(key) {
@@ -426,6 +431,7 @@ impl ExternalTypeFrontier {
                     let next = PendingExternalSymbol {
                         canonical_id: target_canonical.clone(),
                         exported_name: pending.exported_name.clone(),
+                        route: pending.route.clone(),
                     };
                     let key = (next.canonical_id.clone(), next.exported_name.clone());
                     if self.seen.insert(key) {
@@ -471,6 +477,7 @@ impl ExternalTypeFrontier {
                             let next = PendingExternalSymbol {
                                 canonical_id: target_canonical.clone(),
                                 exported_name: import_target.imported_name.clone(),
+                                route: pending.route.clone(),
                             };
                             let key = (next.canonical_id.clone(), next.exported_name.clone());
                             if self.seen.insert(key) {
@@ -537,10 +544,15 @@ impl ExternalTypeFrontier {
                     })
                     .unwrap_or_else(|| (None, Vec::new()));
 
-                // Run local closure
-                let closure = state
-                    .type_view()
-                    .local_closure(symbol_name, self.budgets.local_closure_steps);
+                // Run route-aware closure when a route demand is present,
+                // otherwise fall back to full local closure.
+                let closure = if let Some(ref route) = pending.route {
+                    state.route_closure(symbol_name, route, self.budgets.local_closure_steps)
+                } else {
+                    state
+                        .type_view()
+                        .local_closure(symbol_name, self.budgets.local_closure_steps)
+                };
                 self.counters.local_closure_steps += closure.steps;
 
                 let status = match &closure.status {
@@ -584,6 +596,7 @@ impl ExternalTypeFrontier {
                     let next = PendingExternalSymbol {
                         canonical_id: reexport_canonical.clone(),
                         exported_name: original_name.clone(),
+                        route: pending.route.clone(),
                     };
                     let key = (next.canonical_id.clone(), next.exported_name.clone());
                     if self.seen.insert(key) {
@@ -844,6 +857,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/types.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -879,6 +893,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -914,6 +929,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -938,10 +954,12 @@ mod tests {
             PendingExternalSymbol {
                 canonical_id: "/src/types.ts".to_string(),
                 exported_name: "Shared".to_string(),
+                route: None,
             },
             PendingExternalSymbol {
                 canonical_id: "/src/types.ts".to_string(),
                 exported_name: "Shared".to_string(),
+                route: None,
             },
         ]);
 
@@ -970,10 +988,12 @@ mod tests {
             PendingExternalSymbol {
                 canonical_id: "/src/types.ts".to_string(),
                 exported_name: "A".to_string(),
+                route: None,
             },
             PendingExternalSymbol {
                 canonical_id: "/src/types.ts".to_string(),
                 exported_name: "B".to_string(),
+                route: None,
             },
         ]);
 
@@ -992,6 +1012,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/missing.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1017,6 +1038,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/a.ts".to_string(),
             exported_name: "B".to_string(),
+            route: None,
         }]);
 
         // Must not hang
@@ -1053,6 +1075,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1094,6 +1117,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/a.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1128,6 +1152,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/root.ts".to_string(),
             exported_name: "RootProps".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1162,6 +1187,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/types.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1197,6 +1223,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/a.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1231,6 +1258,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/index.ts".to_string(),
             exported_name: "Bar".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1265,6 +1293,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/index.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1307,6 +1336,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/index.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1353,6 +1383,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1400,6 +1431,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1439,6 +1471,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/barrel.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();
@@ -1474,6 +1507,7 @@ mod tests {
         frontier.seed(vec![PendingExternalSymbol {
             canonical_id: "/src/types.ts".to_string(),
             exported_name: "Props".to_string(),
+            route: None,
         }]);
 
         frontier.run(&host).unwrap();

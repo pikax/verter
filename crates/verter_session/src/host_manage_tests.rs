@@ -1597,7 +1597,6 @@ export type FancyProps = Local
             snapshot: None,
             eval_source: None,
             required_owner_import_names: None,
-            exported_required_import_names: rustc_hash::FxHashMap::default(),
             resolved_type_roots: rustc_hash::FxHashMap::default(),
             resolved_type_declarations: rustc_hash::FxHashMap::default(),
             dependency_resolutions: rustc_hash::FxHashMap::default(),
@@ -2413,12 +2412,17 @@ export interface Props {
         .resolve_prepared_symbol_dependency_alias_for_route_in_view(
             "/src/types.ts",
             "Props",
-            &crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
+            &crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into()]),
             None,
         )
         .expect("narrow member route should resolve from cached imported state");
     let whole = host
-        .resolve_prepared_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+            "/src/types.ts",
+            "Props",
+            &crate::resolver_core::RouteDemand::Whole,
+            None,
+        )
         .expect("whole route should resolve from cached imported state");
 
     assert!(
@@ -2578,6 +2582,97 @@ import { shared } from './shared'
         host.raw_analysis_snapshot_cache_entry("/src/UnrelatedB.vue")
             .is_none(),
         "fallthrough extraction should stay on the captured store view for all child lookups",
+    );
+}
+
+#[test]
+fn fallthrough_barrel_routing_preserves_default_vs_named_binding_identity() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/components/index.ts",
+        "export { default as Button } from './NamedButton.vue'\nexport { default } from './DefaultButton.vue'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/components/NamedButton.vue",
+        "<template><button /></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/components/DefaultButton.vue",
+        "<template><a /></template>",
+    );
+    upsert_vue(
+        &host,
+        "/src/AppNamed.vue",
+        r#"<script setup lang="ts">
+import { Button } from './components'
+</script>
+<template><Button /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/AppDefault.vue",
+        r#"<script setup lang="ts">
+import Button from './components'
+</script>
+<template><Button /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/AppNamed.vue",
+        vec![exact_dependency("./components", "/src/components/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/AppDefault.vue",
+        vec![exact_dependency("./components", "/src/components/index.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/components/index.ts",
+        vec![
+            exact_dependency("./NamedButton.vue", "/src/components/NamedButton.vue"),
+            exact_dependency("./DefaultButton.vue", "/src/components/DefaultButton.vue"),
+        ],
+    );
+
+    let named = host
+        .get_component_meta("/src/AppNamed.vue")
+        .expect("named barrel import should resolve component meta");
+    let default = host
+        .get_component_meta("/src/AppDefault.vue")
+        .expect("default barrel import should resolve component meta");
+
+    let named_props: std::collections::BTreeSet<_> = named
+        .accepted_props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    let default_props: std::collections::BTreeSet<_> = default
+        .accepted_props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+
+    assert!(
+        named_props.contains("disabled"),
+        "named barrel import should route to the button child surface, got {:?}",
+        named_props
+    );
+    assert!(
+        !named_props.contains("href"),
+        "named barrel import should not route through the barrel default export, got {:?}",
+        named_props
+    );
+    assert!(
+        default_props.contains("href"),
+        "default barrel import should route to the default-exported child surface, got {:?}",
+        default_props
+    );
+    assert!(
+        !default_props.contains("disabled"),
+        "default barrel import should not route through the named Button export, got {:?}",
+        default_props
     );
 }
 
@@ -2805,7 +2900,12 @@ fn resolve_prepared_symbol_dependency_alias_does_not_populate_legacy_alias_cache
         .expect("barrel dependency should materialize");
 
     let resolved = host
-        .resolve_prepared_symbol_dependency_alias_in_view("/src/barrel.ts", "BaseProps", None)
+        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+            "/src/barrel.ts",
+            "BaseProps",
+            &crate::resolver_core::RouteDemand::Whole,
+            None,
+        )
         .expect("registry lookup should resolve through prepared declarations");
     assert_eq!(resolved.0, "/src/base.ts");
     assert_eq!(resolved.1, "BaseProps");
@@ -5914,7 +6014,12 @@ fn resolve_shallow_symbol_dependency_alias_skips_raw_snapshot_fallback_for_sourc
     }
 
     let prepared = host
-        .resolve_prepared_symbol_dependency_alias_in_view("/src/types.ts", "Props", None)
+        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+            "/src/types.ts",
+            "Props",
+            &crate::resolver_core::RouteDemand::Whole,
+            None,
+        )
         .expect("prepared alias should resolve from cached imported state");
     assert!(
         prepared.2.requires_source_merge,
@@ -9056,7 +9161,6 @@ fn regression_imported_entry_no_prepared_decl_fields() {
         snapshot: entry.snapshot.clone(),
         eval_source: entry.eval_source.clone(),
         required_owner_import_names: entry.required_owner_import_names.clone(),
-        exported_required_import_names: entry.exported_required_import_names.clone(),
         resolved_type_roots: entry.resolved_type_roots.clone(),
         resolved_type_declarations: entry.resolved_type_declarations.clone(),
         dependency_resolutions: entry.dependency_resolutions.clone(),

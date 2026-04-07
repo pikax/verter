@@ -54,71 +54,8 @@ type FrontierTargetResult = (
     bool,
 );
 
-type FrontierRequestedRoutes = rustc_hash::FxHashMap<
-    (String, String),
-    crate::resolver_core::shallow_file_state::ExportedRoute,
->;
-
-fn merge_frontier_requested_route(
-    requested_routes: &mut FrontierRequestedRoutes,
-    canonical_id: impl Into<String>,
-    exported_name: impl Into<String>,
-    route: crate::resolver_core::shallow_file_state::ExportedRoute,
-) {
-    use crate::resolver_core::shallow_file_state::ExportedRoute;
-
-    let key = (canonical_id.into(), exported_name.into());
-    match requested_routes.get_mut(&key) {
-        Some(existing) => {
-            if matches!(existing, ExportedRoute::Whole) || *existing == route {
-                return;
-            }
-            // Merge two different non-Whole routes. Member+Member → Pick,
-            // Omit or mixed combinations widen to Whole conservatively.
-            *existing = match (&*existing, &route) {
-                (ExportedRoute::Whole, _) | (_, ExportedRoute::Whole) => ExportedRoute::Whole,
-                (ExportedRoute::Member(a), ExportedRoute::Member(b)) => {
-                    let mut members = vec![a.clone(), b.clone()];
-                    members.sort();
-                    members.dedup();
-                    ExportedRoute::Pick(members)
-                }
-                (ExportedRoute::Member(m), ExportedRoute::Pick(ps))
-                | (ExportedRoute::Pick(ps), ExportedRoute::Member(m)) => {
-                    let mut merged = ps.clone();
-                    merged.push(m.clone());
-                    merged.sort();
-                    merged.dedup();
-                    ExportedRoute::Pick(merged)
-                }
-                (ExportedRoute::Pick(a), ExportedRoute::Pick(b)) => {
-                    let mut merged = a.clone();
-                    merged.extend(b.iter().cloned());
-                    merged.sort();
-                    merged.dedup();
-                    ExportedRoute::Pick(merged)
-                }
-                // Omit routes or Omit+Pick/Member combinations: widen to Whole
-                // (computing the precise intersection is not worth the complexity)
-                _ => ExportedRoute::Whole,
-            };
-        }
-        None => {
-            requested_routes.insert(key, route);
-        }
-    }
-}
-
-fn frontier_requested_route(
-    requested_routes: &FrontierRequestedRoutes,
-    canonical_id: &str,
-    exported_name: &str,
-) -> crate::resolver_core::shallow_file_state::ExportedRoute {
-    requested_routes
-        .get(&(canonical_id.to_string(), exported_name.to_string()))
-        .cloned()
-        .unwrap_or(crate::resolver_core::shallow_file_state::ExportedRoute::Whole)
-}
+type FrontierRequestedRoutes =
+    rustc_hash::FxHashMap<(String, String), crate::resolver_core::RouteDemand>;
 
 fn external_type_debug_enabled() -> bool {
     std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
@@ -935,11 +872,9 @@ impl VerterHost {
         tracked_deps.insert(dep_canonical.clone());
         resolution_deps.insert(dep_canonical.clone());
         let mut requested_routes = FrontierRequestedRoutes::default();
-        merge_frontier_requested_route(
-            &mut requested_routes,
-            dep_canonical.clone(),
-            type_name.to_string(),
-            crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
+        requested_routes.insert(
+            (dep_canonical.clone(), type_name.to_string()),
+            crate::resolver_core::RouteDemand::Whole,
         );
 
         let cache_key = (dep_canonical.clone(), type_name.to_string());
@@ -1192,6 +1127,7 @@ impl VerterHost {
             crate::resolver_core::PendingExternalSymbol {
                 canonical_id: dep_canonical.to_string(),
                 exported_name: type_name.to_string(),
+                route: Some(crate::resolver_core::RouteDemand::Whole),
             },
         ));
         if let Err(failure) = frontier.run(&adapter) {
@@ -1239,6 +1175,12 @@ impl VerterHost {
             crate::resolver_core::PendingExternalSymbol {
                 canonical_id: dep_canonical.to_string(),
                 exported_name: type_name.to_string(),
+                route: Some(
+                    requested_routes
+                        .get(&(dep_canonical.to_string(), type_name.to_string()))
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
             },
         ));
 
@@ -1282,12 +1224,15 @@ impl VerterHost {
             }
 
             for seed in &companion_seeds {
-                merge_frontier_requested_route(
-                    requested_routes,
-                    seed.canonical_id.clone(),
-                    seed.exported_name.clone(),
-                    crate::resolver_core::shallow_file_state::ExportedRoute::Whole,
-                );
+                requested_routes
+                    .entry((seed.canonical_id.clone(), seed.exported_name.clone()))
+                    .and_modify(|existing| {
+                        *existing = crate::resolver_core::merge_route_demands(
+                            existing,
+                            &crate::resolver_core::RouteDemand::Whole,
+                        );
+                    })
+                    .or_insert(crate::resolver_core::RouteDemand::Whole);
             }
             frontier.seed(companion_seeds);
         }
@@ -1318,12 +1263,13 @@ impl VerterHost {
             ) else {
                 continue;
             };
-            merge_frontier_requested_route(
-                requested_routes,
-                canonical_id.clone(),
-                exported_name.clone(),
-                requested_route.clone(),
-            );
+            requested_routes
+                .entry((canonical_id.clone(), exported_name.clone()))
+                .and_modify(|existing| {
+                    *existing =
+                        crate::resolver_core::merge_route_demands(existing, &requested_route);
+                })
+                .or_insert_with(|| requested_route.clone());
             if !inspected_symbols.insert((canonical_id.clone(), exported_name.clone())) {
                 continue;
             }
@@ -1376,6 +1322,7 @@ impl VerterHost {
                     seeds.push(crate::resolver_core::PendingExternalSymbol {
                         canonical_id: target_canonical,
                         exported_name: target_name,
+                        route: Some(crate::resolver_core::RouteDemand::Whole),
                     });
                 }
             }
@@ -1453,7 +1400,10 @@ impl VerterHost {
 
         let resolved = (|| {
             let analysis = self.external_type_analysis_in_view(canonical_id, store_view)?;
-            let route = frontier_requested_route(requested_routes, canonical_id, exported_name);
+            let route = requested_routes
+                .get(&(canonical_id.to_string(), exported_name.to_string()))
+                .cloned()
+                .unwrap_or_default();
             let required_import_names = self.required_import_names_for_exported_route_in_view(
                 canonical_id,
                 exported_name,
@@ -1761,51 +1711,18 @@ impl VerterHost {
                 store_view,
             )
             .ok()?;
-        let frontier_result = frontier_result.map(|(canonical, exported_name)| {
+        // Frontier is the single routing authority for type resolution.
+        // No graph fallback — frontier None or self-reference is a true miss.
+        let result = frontier_result.and_then(|(canonical, exported_name)| {
             let canonical = self
                 .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
                 .unwrap_or(canonical);
-            (canonical, exported_name)
-        });
-        // Only fall back to the graph resolver when the frontier didn't
-        // produce a definitive result (None) or when it resolved back to
-        // the barrel itself (same canonical).  Calling resolve_named_export_in_view
-        // unconditionally would trigger full snapshot materialization which
-        // violates the shallow-state contract.
-        let needs_graph_fallback = match frontier_result {
-            None => true,
-            Some(ref fr) if fr.0 == normalized_canonical => true,
-            _ => false,
-        };
-        let graph_result = if needs_graph_fallback {
-            self.resolve_named_export_in_view(
-                normalized_canonical.as_str(),
-                requested_name,
-                Some(true),
-                store_view,
-            )
-            .map(|resolved| {
-                let canonical = resolved
-                    .source_canonical_id
-                    .unwrap_or_else(|| normalized_canonical.clone());
-                let canonical = self
-                    .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
-                    .unwrap_or(canonical);
-                (canonical, resolved.source_name)
-            })
-        } else {
-            None
-        };
-        let result = match (frontier_result, graph_result) {
-            (Some(frontier), Some(graph))
-                if frontier.0 == normalized_canonical && frontier != graph =>
-            {
-                graph
+            // Self-reference (barrel resolving to itself) is a true miss.
+            if canonical == normalized_canonical {
+                return None;
             }
-            (Some(frontier), _) => frontier,
-            (None, Some(graph)) => graph,
-            (None, None) => return None,
-        };
+            Some((canonical, exported_name))
+        })?;
         let _ =
             self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
         #[cfg(test)]
@@ -3419,7 +3336,7 @@ fn find_next_known_root_block(bytes: &[u8], from: usize) -> Option<usize> {
 /// Wraps a `VerterHost` reference with an optional `HostStoreView` for
 /// snapshot-consistent resolution.
 ///
-/// Consumed by component-meta resolution (Phase 4+) and frontier integration tests.
+/// Consumed by component-meta resolution and frontier integration tests.
 pub(crate) struct HostFrontierAdapter<'a> {
     pub host: &'a VerterHost,
     pub store_view: Option<&'a crate::resolver_store::HostStoreView>,

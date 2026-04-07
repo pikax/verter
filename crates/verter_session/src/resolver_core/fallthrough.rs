@@ -28,7 +28,10 @@ pub trait FallthroughResolverHost {
     fn resolve_child_component_canonical(
         &self,
         parent_canonical: &str,
+        component_name: &str,
         import_source: &str,
+        imported_name: Option<&str>,
+        binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
     ) -> Option<String>;
     fn current_dependency_fact_versions(&self, canonical_id: &str) -> Vec<FactVersionRef>;
     fn resolve_child_fallthrough(
@@ -93,6 +96,12 @@ pub enum DynamicRootCandidate {
     ComponentImport {
         component_name: String,
         import_source: String,
+        /// Original exported/imported name, when it differs from the local
+        /// component binding name.
+        imported_name: Option<String>,
+        /// Import binding kind — preserved for value-space routing.
+        /// Some hosts derive it later from the owning file's import snapshot.
+        binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
     },
 }
 
@@ -236,6 +245,8 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     parent_canonical_id: &str,
     component_name: &str,
     import_source: &str,
+    imported_name: Option<&str>,
+    binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
     branch_key: String,
     condition_text: Option<String>,
     consumed_attrs: &[String],
@@ -251,8 +262,13 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     fact_versions: &mut Vec<FactVersionRef>,
     visiting: &mut FxHashSet<String>,
 ) {
-    let Some(child_id) = host.resolve_child_component_canonical(parent_canonical_id, import_source)
-    else {
+    let Some(child_id) = host.resolve_child_component_canonical(
+        parent_canonical_id,
+        component_name,
+        import_source,
+        imported_name,
+        binding_kind,
+    ) else {
         *any_unresolved = true;
         fallthrough_branches.push(unresolved_child_import_branch(
             branch_key,
@@ -726,12 +742,16 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                 DynamicRootCandidate::ComponentImport {
                                     component_name,
                                     import_source,
+                                    imported_name,
+                                    binding_kind,
                                 } => {
                                     append_component_candidate_branches(
                                         host,
                                         canonical_id,
                                         &component_name,
                                         &import_source,
+                                        imported_name.as_deref(),
+                                        binding_kind,
                                         candidate_key,
                                         branch.condition_text.clone(),
                                         &consumed.attrs,
@@ -770,6 +790,8 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                                     canonical_id,
                                     name,
                                     import_source,
+                                    None,
+                                    None,
                                     branch_key,
                                     branch.condition_text.clone(),
                                     &consumed.attrs,
@@ -992,9 +1014,21 @@ pub fn collect_dynamic_root_candidates_from_type(
                     .bindings
                     .iter()
                     .find(|binding| !binding.is_type_only && binding.name == value_ref.path[0])
-                    .map(|_| DynamicRootCandidate::ComponentImport {
+                    .map(|binding| DynamicRootCandidate::ComponentImport {
                         component_name: value_ref.path[0].clone(),
                         import_source: import.source.clone(),
+                        imported_name: binding.imported_name.clone(),
+                        binding_kind: Some(match binding.kind {
+                            verter_semantic::analysis::types::ImportBindingKind::Named => {
+                                crate::resolver_core::symbol_resolver::ImportBindingKind::Named
+                            }
+                            verter_semantic::analysis::types::ImportBindingKind::Default => {
+                                crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                            }
+                            verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                                crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
+                            }
+                        }),
                     })
             })
             .into_iter()
@@ -1304,7 +1338,10 @@ mod tests {
         fn resolve_child_component_canonical(
             &self,
             parent_canonical: &str,
+            _component_name: &str,
             import_source: &str,
+            _imported_name: Option<&str>,
+            _binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
         ) -> Option<String> {
             self.canonical_routes
                 .get(&(parent_canonical.to_string(), import_source.to_string()))
@@ -1510,6 +1547,8 @@ mod tests {
             "/App.vue",
             "Child",
             "./Child.vue",
+            None,
+            None,
             "0".to_string(),
             None,
             &[],
@@ -1645,6 +1684,45 @@ mod tests {
             vec![super::DynamicRootCandidate::ComponentImport {
                 component_name: "Child".to_string(),
                 import_source: "./Child.vue".to_string(),
+                imported_name: None,
+                binding_kind: Some(crate::resolver_core::symbol_resolver::ImportBindingKind::Named),
+            }]
+        );
+    }
+
+    #[test]
+    fn collect_dynamic_root_candidates_from_type_preserves_default_binding_kind() {
+        let imports = vec![AnalyzedImport {
+            source: "./Child.vue".to_string(),
+            is_type_only: false,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Child".to_string(),
+                kind: ImportBindingKind::Default,
+                imported_name: Some("default".to_string()),
+                is_type_only: false,
+                vue_api: None,
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+            resolved_canonical_id: Some("/Child.vue".to_string()),
+        }];
+
+        let candidates = collect_dynamic_root_candidates_from_type(
+            &TypeExpr::TypeOf(ValueRef {
+                path: vec!["Child".to_string()],
+            }),
+            imports.as_slice(),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![super::DynamicRootCandidate::ComponentImport {
+                component_name: "Child".to_string(),
+                import_source: "./Child.vue".to_string(),
+                imported_name: Some("default".to_string()),
+                binding_kind: Some(
+                    crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                ),
             }]
         );
     }

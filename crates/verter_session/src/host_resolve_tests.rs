@@ -1951,11 +1951,9 @@ export interface Props {
 
     let view = host.resolver_store_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
-    super::merge_frontier_requested_route(
-        &mut requested_routes,
-        "/src/barrel.ts".to_string(),
-        "PublicProps".to_string(),
-        crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into()),
+    requested_routes.insert(
+        ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
+        crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into()]),
     );
 
     let (frontier, target, _had_route_cycle) = host
@@ -1973,7 +1971,9 @@ export interface Props {
     );
     assert_eq!(
         requested_routes.get(&("/src/types.ts".to_string(), "Props".to_string())),
-        Some(&crate::resolver_core::shallow_file_state::ExportedRoute::Member("primary".into())),
+        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
+            "primary".into()
+        ])),
         "the active member route should be transferred onto the defining target",
     );
 
@@ -1990,6 +1990,12 @@ export interface Props {
         Some(&view),
         &mut inspected_symbols,
         &mut requested_routes,
+    );
+    assert!(
+        seeds
+            .iter()
+            .all(|seed| { seed.route == Some(crate::resolver_core::RouteDemand::Whole) }),
+        "companion seeds should carry an explicit whole-route demand",
     );
     let seeded: std::collections::BTreeSet<_> = seeds
         .into_iter()

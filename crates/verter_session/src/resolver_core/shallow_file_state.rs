@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use super::route_demand::RouteDemand;
 use verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::type_eval::{FunctionSignature, TypeDeclKind, ValueDeclKind};
 use verter_semantic::analysis::type_expr::{ObjectExpr, TypeExpr, TypeParam};
@@ -108,21 +110,6 @@ pub enum ExportTarget {
         /// Used by the export graph to choose type vs. value resolution.
         is_type: bool,
     },
-}
-
-/// Narrow access route for an exported type. Used to compute a narrower
-/// import closure that only includes dependencies reachable from the
-/// requested route, not the full export.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ExportedRoute {
-    /// Full export — all dependencies.
-    Whole,
-    /// Single member access: `Type['member']`.
-    Member(String),
-    /// Pick subset: `Pick<Type, 'a' | 'b'>`.
-    Pick(Vec<String>),
-    /// Omit subset: `Omit<Type, 'a' | 'b'>`.
-    Omit(Vec<String>),
 }
 
 /// Shallow metadata for one locally-declared type symbol.
@@ -707,19 +694,20 @@ impl ShallowFileState {
     pub fn route_closure(
         &self,
         symbol_name: &str,
-        route: &ExportedRoute,
+        route: &RouteDemand,
         budget: usize,
     ) -> LocalClosureResult {
         match route {
-            ExportedRoute::Whole => self.local_closure(symbol_name, budget),
-            ExportedRoute::Member(member) => {
-                self.member_route_closure(symbol_name, &[member.as_str()], budget)
+            RouteDemand::Whole => self.local_closure(symbol_name, budget),
+            RouteDemand::MemberPath(path) if !path.is_empty() => {
+                self.member_path_route_closure(symbol_name, path, budget)
             }
-            ExportedRoute::Pick(members) => {
+            RouteDemand::MemberPath(_) => self.local_closure(symbol_name, budget),
+            RouteDemand::Pick(members) => {
                 let refs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
                 self.member_route_closure(symbol_name, &refs, budget)
             }
-            ExportedRoute::Omit(omitted) => {
+            RouteDemand::Omit(omitted) => {
                 let Some(sym) = self.symbols.get(symbol_name) else {
                     return self.local_closure(symbol_name, budget);
                 };
@@ -742,6 +730,116 @@ impl ShallowFileState {
                 let refs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
                 self.member_route_closure(symbol_name, &refs, budget)
             }
+        }
+    }
+
+    fn member_path_route_closure(
+        &self,
+        symbol_name: &str,
+        path: &[String],
+        budget: usize,
+    ) -> LocalClosureResult {
+        if path.len() == 1 {
+            return self.member_route_closure(symbol_name, &[path[0].as_str()], budget);
+        }
+
+        let Some(sym) = self.symbols.get(symbol_name) else {
+            return self.local_closure(symbol_name, budget);
+        };
+
+        let mut seed_names = Vec::new();
+        let mut seen_symbols = FxHashSet::default();
+        let found_path = collect_member_path_seed_names(
+            self,
+            &sym.raw_body,
+            path,
+            &mut seed_names,
+            &mut seen_symbols,
+        );
+
+        if !found_path {
+            return LocalClosureResult {
+                status: LocalClosureStatus::Resolved,
+                local_symbols_used: vec![symbol_name.to_string()],
+                unresolved_external: Vec::new(),
+                steps: 1,
+            };
+        }
+
+        if seed_names.is_empty() {
+            return LocalClosureResult {
+                status: LocalClosureStatus::Resolved,
+                local_symbols_used: vec![symbol_name.to_string()],
+                unresolved_external: Vec::new(),
+                steps: 1,
+            };
+        }
+
+        let mut visited = FxHashSet::default();
+        visited.insert(symbol_name.to_string());
+        let mut pending = seed_names;
+        let mut external_refs = Vec::new();
+        let mut local_used = vec![symbol_name.to_string()];
+        let mut steps = 1u64;
+
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            steps += 1;
+            if steps as usize >= budget {
+                return LocalClosureResult {
+                    status: LocalClosureStatus::BudgetExceeded,
+                    local_symbols_used: local_used,
+                    unresolved_external: external_refs,
+                    steps,
+                };
+            }
+
+            if let Some(dep_sym) = self.symbols.get(&current) {
+                local_used.push(current.clone());
+                for dep in &dep_sym.local_deps {
+                    if !visited.contains(dep.as_str()) {
+                        pending.push(dep.clone());
+                    }
+                }
+                for ext in &dep_sym.external_deps {
+                    if !external_refs.iter().any(|e: &ExternalSymbolRef| {
+                        e.source_specifier == ext.source_specifier
+                            && e.imported_name == ext.imported_name
+                    }) {
+                        external_refs.push(ext.clone());
+                    }
+                }
+            } else if self.import_locals.contains(&current) {
+                if let Some(target) = self.import_targets.get(&current) {
+                    let ext_ref = ExternalSymbolRef {
+                        local_name: current.clone(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: target.canonical_id.clone(),
+                    };
+                    if !external_refs.iter().any(|e| {
+                        e.source_specifier == ext_ref.source_specifier
+                            && e.imported_name == ext_ref.imported_name
+                    }) {
+                        external_refs.push(ext_ref);
+                    }
+                }
+            }
+        }
+
+        let status = if external_refs.is_empty() {
+            LocalClosureStatus::Resolved
+        } else {
+            LocalClosureStatus::ResolvedWithExternalDeps
+        };
+
+        LocalClosureResult {
+            status,
+            local_symbols_used: local_used,
+            unresolved_external: external_refs,
+            steps,
         }
     }
 
@@ -869,6 +967,69 @@ impl ShallowFileState {
             local_symbols_used: local_used,
             unresolved_external: external_refs,
             steps,
+        }
+    }
+}
+
+fn collect_member_path_seed_names(
+    state: &ShallowFileState,
+    expr: &TypeExpr,
+    path: &[String],
+    seed_names: &mut Vec<String>,
+    seen_symbols: &mut FxHashSet<String>,
+) -> bool {
+    if path.is_empty() {
+        collect_type_refs(expr, seed_names);
+        seed_names.sort();
+        seed_names.dedup();
+        return true;
+    }
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let symbol_name = name.to_string();
+            if !seen_symbols.insert(symbol_name.clone()) {
+                return false;
+            }
+            let result = state
+                .symbols
+                .get(symbol_name.as_str())
+                .is_some_and(|symbol| {
+                    collect_member_path_seed_names(
+                        state,
+                        &symbol.raw_body,
+                        path,
+                        seed_names,
+                        seen_symbols,
+                    )
+                });
+            seen_symbols.remove(symbol_name.as_str());
+            result
+        }
+        TypeExpr::Parenthesized(inner) => {
+            collect_member_path_seed_names(state, inner, path, seed_names, seen_symbols)
+        }
+        _ => {
+            let Some(prop) = direct_object_property(expr, path[0].as_str()) else {
+                return false;
+            };
+            if path.len() == 1 {
+                collect_type_refs(&prop.ty, seed_names);
+                seed_names.sort();
+                seed_names.dedup();
+                true
+            } else {
+                collect_member_path_seed_names(
+                    state,
+                    &prop.ty,
+                    &path[1..],
+                    seed_names,
+                    seen_symbols,
+                )
+            }
         }
     }
 }
@@ -1733,7 +1894,8 @@ export interface Props {
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
         // Route::Member("a") should only include Alpha deps, not Beta
-        let closure_a = state.route_closure("Props", &ExportedRoute::Member("a".into()), 500);
+        let closure_a =
+            state.route_closure("Props", &RouteDemand::MemberPath(vec!["a".into()]), 500);
         let ext_names: Vec<&str> = closure_a
             .unresolved_external
             .iter()
@@ -1750,7 +1912,7 @@ export interface Props {
         );
 
         // Route::Whole should include both
-        let closure_whole = state.route_closure("Props", &ExportedRoute::Whole, 500);
+        let closure_whole = state.route_closure("Props", &RouteDemand::Whole, 500);
         let ext_names_whole: Vec<&str> = closure_whole
             .unresolved_external
             .iter()
@@ -1783,7 +1945,7 @@ export interface Props {
         // Pick(['x', 'z']) should include A and C but not B
         let closure = state.route_closure(
             "Props",
-            &ExportedRoute::Pick(vec!["x".into(), "z".into()]),
+            &RouteDemand::Pick(vec!["x".into(), "z".into()]),
             500,
         );
         let ext_names: Vec<&str> = closure
@@ -1816,7 +1978,7 @@ export interface Props {
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let closure = state.route_closure("Props", &ExportedRoute::Omit(vec!["y".into()]), 500);
+        let closure = state.route_closure("Props", &RouteDemand::Omit(vec!["y".into()]), 500);
         let ext_names: Vec<&str> = closure
             .unresolved_external
             .iter()
@@ -1841,9 +2003,92 @@ export interface Props {
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let closure = state.route_closure("Props", &ExportedRoute::Member("color".into()), 500);
+        let closure =
+            state.route_closure("Props", &RouteDemand::MemberPath(vec!["color".into()]), 500);
         assert!(closure.unresolved_external.is_empty());
         assert_eq!(closure.local_symbols_used, vec!["Props".to_string()]);
+    }
+
+    #[test]
+    fn route_closure_nested_member_path_follows_full_depth() {
+        let source = r#"
+import type { Alpha } from './alpha'
+import type { Beta } from './beta'
+
+type Variants = {
+  color: Alpha
+  size: Beta
+}
+
+export interface Props {
+  variants: Variants
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure(
+            "Props",
+            &RouteDemand::MemberPath(vec!["variants".into(), "color".into()]),
+            500,
+        );
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(
+            ext_names.contains(&"Alpha"),
+            "nested member path should include Alpha, got {:?}",
+            ext_names
+        );
+        assert!(
+            !ext_names.contains(&"Beta"),
+            "nested member path should not widen to sibling nested members, got {:?}",
+            ext_names
+        );
+    }
+
+    #[test]
+    fn route_closure_nested_member_path_miss_stays_bounded() {
+        let source = r#"
+import type { Alpha } from './alpha'
+import type { Beta } from './beta'
+
+type Variants = {
+  color: Alpha
+  size: Beta
+}
+
+export interface Props {
+  variants: Variants
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure(
+            "Props",
+            &RouteDemand::MemberPath(vec!["variants".into(), "missing".into()]),
+            500,
+        );
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert!(
+            ext_names.is_empty(),
+            "nested member miss should stay bounded instead of widening, got {:?}",
+            ext_names
+        );
+        assert_eq!(
+            closure.local_symbols_used,
+            vec!["Props".to_string()],
+            "nested member miss should not widen into the nested object route"
+        );
     }
 
     #[test]
@@ -1970,7 +2215,11 @@ export interface Props extends Base {
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let closure = state.route_closure("Props", &ExportedRoute::Member("inherited".into()), 500);
+        let closure = state.route_closure(
+            "Props",
+            &RouteDemand::MemberPath(vec!["inherited".into()]),
+            500,
+        );
         let ext_names: Vec<&str> = closure
             .unresolved_external
             .iter()

@@ -17,7 +17,7 @@ use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::ResolvedTypeDeclaration;
-use super::shallow_file_state::ExportedRoute;
+use super::route_demand::RouteDemand;
 use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
@@ -50,7 +50,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
     /// Cached import-route resolutions.
-    routes: FxHashMap<(String, String, ExportedRoute), PreparedAliasEntry>,
+    routes: FxHashMap<(String, String, RouteDemand), PreparedAliasEntry>,
     /// Cached type declarations.
     declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
     /// Cached resolvability checks.
@@ -126,7 +126,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let _ = self.resolve_prepared_alias(source, name, &ExportedRoute::Whole);
+            let _ = self.resolve_prepared_alias(source, name, &RouteDemand::Whole);
         }
     }
 
@@ -135,7 +135,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         canonical_id: &str,
         exported_name: &str,
-        route: &ExportedRoute,
+        route: &RouteDemand,
     ) -> PreparedAliasEntry {
         let key = (
             canonical_id.to_string(),
@@ -374,8 +374,13 @@ fn can_resolve_ref(
         return true;
     }
 
-    if let Some((resolved_id, resolved_name, _)) =
-        host.resolve_prepared_symbol_dependency_alias_in_view(source, exported_name, store_view)
+    if let Some((resolved_id, resolved_name, _)) = host
+        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
+            source,
+            exported_name,
+            &crate::resolver_core::RouteDemand::Whole,
+            store_view,
+        )
     {
         if (resolved_id != source || resolved_name != exported_name)
             && host

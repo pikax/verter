@@ -658,7 +658,6 @@ export interface Props { child: Inner }
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -721,7 +720,6 @@ export const defaults: Props = {} as Props
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -787,7 +785,6 @@ export const defaults: Props = {} as Props
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(helper_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -822,7 +819,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(decl_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -878,7 +874,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(helper_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -913,7 +908,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(decl_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -962,7 +956,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(barrel_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -1000,7 +993,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(props_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -1048,7 +1040,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(barrel_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -1086,7 +1077,6 @@ export type FancyProps = Prettify<{ open: boolean }>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(theme_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -1152,7 +1142,6 @@ export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(config_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 
@@ -1186,7 +1175,6 @@ export type CheckboxGroup = ComponentConfig<Theme>
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(consumer_source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 

@@ -161,6 +161,16 @@ impl HostStoreView {
                     hash_dependency_resolutions(&entry.dependency_resolutions),
                 );
             }
+            // Insert Route fact for files that already have a shallow state.
+            if let Some(state) = entry.shallow_file_state.as_ref() {
+                view.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        crate::resolver_core::DerivedFactKind::Route,
+                    ),
+                    hash_route_surface(state),
+                );
+            }
         }
 
         view.snapshot_transitive_dependency_targets(host);
@@ -434,6 +444,26 @@ pub(crate) fn hash_dependency_resolutions(
             }
             candidates.hash(hasher);
         }
+    })
+}
+
+pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
+    hash16_from_sorted(|hasher| {
+        // Hash sorted export names.
+        let mut export_names: Vec<&str> = state.exports.keys().map(|s| s.as_str()).collect();
+        export_names.sort_unstable();
+        for name in &export_names {
+            name.hash(hasher);
+        }
+
+        // Hash wildcard reexport source specifiers in declaration order.
+        for wildcard in &state.wildcard_reexports {
+            wildcard.source_specifier.hash(hasher);
+            wildcard.canonical_id.hash(hasher);
+        }
+
+        // Hash the file content hash.
+        state.whole_hash.hash(hasher);
     })
 }
 

@@ -524,7 +524,6 @@ export interface Button {
                 snapshot: None,
                 eval_source: Some(Arc::<str>::from(source)),
                 required_owner_import_names: None,
-                exported_required_import_names: FxHashMap::default(),
                 resolved_type_roots: FxHashMap::default(),
                 resolved_type_declarations: FxHashMap::default(),
 

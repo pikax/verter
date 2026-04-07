@@ -205,16 +205,17 @@ fn style_override_updates_style_without_reupsert() {
         })
         .unwrap();
 
-    host.apply_style_overrides(StyleOverrideRequest {
-        canonical_id: "Comp.vue".to_string(),
-        compile_profile: profile_dev(),
-        overrides: vec![StyleOverrideEntry {
-            index: 0,
-            code: Arc::from(".a{color:green}"),
-            source_map: None,
-        }],
-    })
-    .unwrap();
+    let _ = host
+        .apply_style_overrides(StyleOverrideRequest {
+            canonical_id: "Comp.vue".to_string(),
+            compile_profile: profile_dev(),
+            overrides: vec![StyleOverrideEntry {
+                index: 0,
+                code: Arc::from(".a{color:green}"),
+                source_map: None,
+            }],
+        })
+        .unwrap();
 
     let after = host
         .get_virtual_file(VirtualQuery {
@@ -651,12 +652,13 @@ fn apply_style_overrides_idempotent_has_empty_changed_nodes() {
     }];
 
     // First apply changes something
-    host.apply_style_overrides(StyleOverrideRequest {
-        canonical_id: "Comp.vue".to_string(),
-        compile_profile: profile_dev(),
-        overrides: overrides.clone(),
-    })
-    .unwrap();
+    let _ = host
+        .apply_style_overrides(StyleOverrideRequest {
+            canonical_id: "Comp.vue".to_string(),
+            compile_profile: profile_dev(),
+            overrides: overrides.clone(),
+        })
+        .unwrap();
 
     // Second apply is idempotent — nothing changed
     let second = host
@@ -1301,16 +1303,17 @@ fn style_override_cleared_on_source_reupsert() {
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
     let _ = upsert_vue(&host, "Comp.vue", src1);
 
-    host.apply_style_overrides(StyleOverrideRequest {
-        canonical_id: "Comp.vue".to_string(),
-        compile_profile: profile_dev(),
-        overrides: vec![StyleOverrideEntry {
-            index: 0,
-            code: Arc::from(".a{color:green}"),
-            source_map: None,
-        }],
-    })
-    .unwrap();
+    let _ = host
+        .apply_style_overrides(StyleOverrideRequest {
+            canonical_id: "Comp.vue".to_string(),
+            compile_profile: profile_dev(),
+            overrides: vec![StyleOverrideEntry {
+                index: 0,
+                code: Arc::from(".a{color:green}"),
+                source_map: None,
+            }],
+        })
+        .unwrap();
 
     // Re-upsert with a template change — whole_hash changes, overrides cleared
     let src2 = "<script setup>const n = 1</script><template><section>{{n}}</section></template><style>.a{color:red}</style>";
@@ -2461,7 +2464,7 @@ fn cross_file_type_resolution_missing_dep_reports_compile_error() {
 #[test]
 fn main_module_lang_is_js_when_force_js() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/Comp.vue",
         r#"<script setup lang="ts">
@@ -2494,7 +2497,7 @@ const x = 1
 #[test]
 fn main_module_lang_uses_script_lang_when_not_force_js() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/Comp.vue",
         r#"<script setup lang="ts">
@@ -2527,7 +2530,7 @@ const x = 1
 #[test]
 fn main_module_lang_defaults_to_js_when_no_script_lang() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/Comp.vue",
         r#"<script setup>
@@ -2560,7 +2563,7 @@ const x = 1
 #[test]
 fn main_module_strips_export_type_when_force_js() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/src/Comp.vue",
         r#"<script setup lang="ts">
@@ -2701,17 +2704,18 @@ const msg = "hello"
   <Child :msg="msg" />
 </template>"#;
 
-    upsert_vue(&host, "App.vue", sfc);
+    let _ = upsert_vue(&host, "App.vue", sfc);
 
     // Before compilation, template analysis may not be present
     // Trigger compilation by requesting a virtual file
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("App.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("App.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     // Now get_analysis should include template data
     let analysis = host.get_analysis("App.vue").unwrap();
@@ -2743,14 +2747,15 @@ const count = 42
   <span>{{ count }}</span>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("Comp.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     let tpl = analysis.template.expect("template analysis should exist");
@@ -2791,14 +2796,15 @@ const msg = "hello"
   <div>{{ msg }}</div>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("Comp.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     assert!(
@@ -2820,14 +2826,15 @@ const el = ref<HTMLDivElement | null>(null)
   <div ref="el">content</div>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("Comp.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     let tpl = analysis.template.expect("template analysis should exist");
@@ -2853,14 +2860,15 @@ function handleClick() {}
   <button @click="handleClick">Click</button>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("Comp.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     let tpl = analysis.template.expect("template analysis should exist");
@@ -2886,14 +2894,15 @@ fn template_analysis_detects_slot_definitions() {
   </div>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("Comp.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     let tpl = analysis.template.expect("template analysis should exist");
@@ -2924,14 +2933,15 @@ import Child from './Child.vue'
   <Child />
 </template>"#;
 
-    upsert_vue(&host, "App.vue", sfc_v1);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("App.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "App.vue", sfc_v1);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("App.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis_v1 = host.get_analysis("App.vue").unwrap();
     let tpl_v1 = analysis_v1
@@ -2950,14 +2960,15 @@ import Other from './Other.vue'
   <Other />
 </template>"#;
 
-    upsert_vue(&host, "App.vue", sfc_v2);
-    host.get_virtual_file(VirtualQuery {
-        raw_id: Some("App.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    })
-    .unwrap();
+    let _ = upsert_vue(&host, "App.vue", sfc_v2);
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("App.vue?vue&type=template".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
 
     let analysis_v2 = host.get_analysis("App.vue").unwrap();
     let tpl_v2 = analysis_v2
@@ -2983,7 +2994,7 @@ const msg = "hello"
   <div>{{ msg }}</div>
 </template>"#;
 
-    upsert_vue(&host, "Comp.vue", sfc);
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
 
     let analysis = host.get_analysis("Comp.vue").unwrap();
     assert!(
@@ -2996,7 +3007,7 @@ const msg = "hello"
         analysis_level: AnalysisLevel::None,
         ..HostConfig::default()
     });
-    upsert_vue(&lazy_host, "Comp.vue", sfc);
+    let _ = upsert_vue(&lazy_host, "Comp.vue", sfc);
     let lazy_analysis = lazy_host.get_analysis("Comp.vue").unwrap();
     assert!(
         lazy_analysis.template.is_none(),
@@ -3013,7 +3024,7 @@ fn list_virtual_nodes_full_sfc() {
     let sfc = r#"<script setup>const n = 1</script>
 <template><div>{{n}}</div></template>
 <style scoped>.a{color:red}</style>"#;
-    upsert_vue(&host, "Comp.vue", sfc);
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
 
     let nodes = host.list_virtual_nodes("Comp.vue");
     assert!(
@@ -3058,7 +3069,7 @@ fn list_virtual_nodes_template_only_with_scoped_style() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc = r#"<template><div>hello</div></template>
 <style scoped>.a{color:red}</style>"#;
-    upsert_vue(&host, "Comp.vue", sfc);
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
 
     let nodes = host.list_virtual_nodes("Comp.vue");
     // Should include Script because of scoped style (even without <script>)
@@ -3082,7 +3093,7 @@ fn list_virtual_nodes_multiple_styles() {
 <template><div>{{n}}</div></template>
 <style>.a{color:red}</style>
 <style scoped>.b{color:blue}</style>"#;
-    upsert_vue(&host, "Comp.vue", sfc);
+    let _ = upsert_vue(&host, "Comp.vue", sfc);
 
     let nodes = host.list_virtual_nodes("Comp.vue");
     assert!(
@@ -3102,7 +3113,7 @@ fn list_virtual_nodes_multiple_styles() {
 #[test]
 fn v_bind_css_analysis_has_generated_var_name() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    upsert_vue(
+    let _ = upsert_vue(
         &host,
         "/test/VBindComp.vue",
         r#"<script setup>
@@ -3148,7 +3159,7 @@ fn css_var_flow_across_files() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // File A defines --theme-color in style
-    host.upsert(UpsertRequest {
+    let _ = host.upsert(UpsertRequest {
         canonical_id: None,
         input_id: "src/A.vue".to_string(),
         source: Arc::from(

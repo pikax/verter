@@ -20,15 +20,38 @@ use crate::resolver_core::{
 pub enum SymbolNodeValue {
     Declaration(ResolvedTypeDeclaration),
     TypeShape(Option<Arc<ResolvedElements>>),
-    Route(Option<RouteResolution>),
+    /// Importer-side import-edge resolution: normalizes owner-local binding
+    /// context and points to the provider canonical + exported name.
+    ImporterEdge(Option<ImporterEdgeResolution>),
+    /// Provider-side export-route resolution: the reusable cross-owner answer.
+    /// Includes full routed-symbol result with provenance and dependency closure.
+    ProviderExportRoute(Option<crate::resolver_core::RoutedSymbolResult>),
     BarrelSurface(Vec<String>),
     Assembled(AssembledSurface),
 }
 
+/// Importer-side resolution: where an import binding routes to.
+///
+/// This is the importer-local answer: it normalizes binding context
+/// (named/default/namespace) and points to the provider canonical ID
+/// and exported name. The actual route answer lives in a separate
+/// provider/export-route node for cross-owner reuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteResolution {
-    pub final_canonical_id: String,
+pub struct ImporterEdgeResolution {
+    /// Provider canonical ID that this import resolves to.
+    pub provider_canonical_id: String,
+    /// Exported name in the provider file.
     pub exported_name: String,
+    /// Import binding kind (named, default, namespace).
+    pub binding_kind: ImportBindingKind,
+}
+
+/// Kind of import binding — preserved for value-space routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImportBindingKind {
+    Named,
+    Default,
+    Namespace,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -225,19 +248,54 @@ pub fn declaration_node_key(canonical_id: &str, type_name: &str) -> ResolutionNo
     }
 }
 
-pub fn route_node_key(
+/// Create a node key for an importer-side import-edge resolution.
+///
+/// Keyed by the importer file, import source specifier, requested symbol,
+/// and binding kind. This normalizes owner-local binding context.
+pub fn importer_edge_node_key(
     owner_canonical: &str,
     import_source: &str,
     type_name: &str,
+    binding_kind: ImportBindingKind,
+    symbol_space: crate::resolver_core::SymbolSpace,
 ) -> ResolutionNodeKey {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     import_source.hash(&mut hasher);
     type_name.hash(&mut hasher);
+    binding_kind.hash(&mut hasher);
+    symbol_space.hash(&mut hasher);
 
     ResolutionNodeKey {
         symbol_id: owner_canonical.to_string(),
-        node_kind: ResolutionNodeKind::Route,
+        node_kind: ResolutionNodeKind::ImporterEdge,
+        traversal_lens: TraversalLens::StructuralObject,
+        member_path_hash: hasher.finish(),
+        type_args_hash: 0,
+        behavior_flags: 0,
+    }
+}
+
+/// Create a node key for a provider-side export-route resolution.
+///
+/// Keyed by the provider file, exported symbol, route demand, and symbol space.
+/// This is the reusable cross-owner answer — identical queries from different
+/// importers produce the same key and share the cached result.
+pub fn provider_export_route_node_key(
+    provider_canonical: &str,
+    exported_name: &str,
+    route_demand: &crate::resolver_core::RouteDemand,
+    symbol_space: crate::resolver_core::SymbolSpace,
+) -> ResolutionNodeKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    exported_name.hash(&mut hasher);
+    route_demand.hash(&mut hasher);
+    symbol_space.hash(&mut hasher);
+
+    ResolutionNodeKey {
+        symbol_id: provider_canonical.to_string(),
+        node_kind: ResolutionNodeKind::ProviderExportRoute,
         traversal_lens: TraversalLens::StructuralObject,
         member_path_hash: hasher.finish(),
         type_args_hash: 0,
@@ -514,16 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn route_node_key_convergence() {
-        let key_a = route_node_key("/src/App.vue", "./types", "Props");
-        let key_b = route_node_key("/src/App.vue", "./types", "Props");
-        assert_eq!(key_a, key_b);
-
-        let key_c = route_node_key("/src/App.vue", "./other", "Props");
-        assert_ne!(key_a, key_c);
-    }
-
-    #[test]
     fn assemble_node_key_uses_behavior_flags() {
         let key_type = assemble_node_key("/src/App.vue", 1);
         let key_expanded = assemble_node_key("/src/App.vue", 2);
@@ -552,9 +600,10 @@ mod tests {
 
         let mut ctx1 = ResolveContext::new();
         state.resolve_node(key.clone(), &view_v1, &mut ctx1, |_| SymbolNodeResult {
-            value: SymbolNodeValue::Route(Some(RouteResolution {
-                final_canonical_id: "/src/types.ts".to_string(),
+            value: SymbolNodeValue::ImporterEdge(Some(ImporterEdgeResolution {
+                provider_canonical_id: "/src/types.ts".to_string(),
                 exported_name: "Props_v1".to_string(),
+                binding_kind: ImportBindingKind::Named,
             })),
             facts: vec![fact_v1],
             diagnostics: vec![],
@@ -565,9 +614,10 @@ mod tests {
         state.resolve_node(key.clone(), &view_v2, &mut ctx2, |_| {
             v2_computed = true;
             SymbolNodeResult {
-                value: SymbolNodeValue::Route(Some(RouteResolution {
-                    final_canonical_id: "/src/types.ts".to_string(),
+                value: SymbolNodeValue::ImporterEdge(Some(ImporterEdgeResolution {
+                    provider_canonical_id: "/src/types.ts".to_string(),
                     exported_name: "Props_v2".to_string(),
+                    binding_kind: ImportBindingKind::Named,
                 })),
                 facts: vec![fact_v2],
                 diagnostics: vec![],
@@ -643,6 +693,247 @@ mod tests {
                 branch_selector: None,
             }));
     }
+
+    // ── Layered routed-symbol node topology tests ─────────────────────
+
+    /// Provider/export-route node key must include route demand and symbol space.
+    /// Two queries with different RouteDemand must produce different keys.
+    #[test]
+    fn provider_route_node_key_includes_route_demand_and_symbol_space() {
+        use crate::resolver_core::route_demand::{RouteDemand, SymbolSpace};
+
+        let key_whole = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+        let key_member = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::MemberPath(vec!["foo".to_string()]),
+            SymbolSpace::Type,
+        );
+        assert_ne!(
+            key_whole, key_member,
+            "different route demands must produce different keys"
+        );
+
+        let key_value = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Value,
+        );
+        assert_ne!(
+            key_whole, key_value,
+            "different symbol spaces must produce different keys"
+        );
+    }
+
+    /// Identical routed queries from different importers must reuse the
+    /// same provider/export-route node.
+    #[test]
+    fn provider_route_node_reuses_across_distinct_importers() {
+        use crate::resolver_core::route_demand::{RouteDemand, SymbolSpace};
+
+        let key_from_a = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+        let key_from_b = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+        assert_eq!(
+            key_from_a, key_from_b,
+            "same provider query from different importers must produce the same key"
+        );
+    }
+
+    /// Importer/import-edge nodes must be distinct from provider/export-route nodes.
+    #[test]
+    fn importer_and_provider_nodes_are_distinct() {
+        use crate::resolver_core::route_demand::{RouteDemand, SymbolSpace};
+
+        let importer_key = importer_edge_node_key(
+            "/src/App.vue",
+            "./types",
+            "Props",
+            ImportBindingKind::Named,
+            SymbolSpace::Type,
+        );
+        let provider_key = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+        assert_ne!(
+            importer_key.node_kind, provider_key.node_kind,
+            "importer and provider nodes must have different node kinds"
+        );
+        assert_eq!(importer_key.node_kind, ResolutionNodeKind::ImporterEdge);
+        assert_eq!(
+            provider_key.node_kind,
+            ResolutionNodeKind::ProviderExportRoute
+        );
+    }
+
+    /// Deep barrel chain (A -> B -> C -> Leaf) must warm once and not
+    /// replay intermediate hops on warm lookup.
+    #[test]
+    fn deep_barrel_chain_warm_lookup_does_not_replay_intermediate_hops() {
+        use crate::resolver_core::route_demand::{
+            RouteDemand, RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
+        };
+
+        let counters = Arc::new(ResolverCounters::new());
+        let state = SymbolResolverState::new(counters.clone());
+        let fact_leaf = make_fact("/src/leaf.ts");
+        let view = make_view(1, vec![fact_leaf.clone()]);
+
+        // Provider key for "Props" at the leaf — this is what gets cached.
+        let provider_key = provider_export_route_node_key(
+            "/src/leaf.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+
+        // First resolution: populate the cache
+        let mut ctx = ResolveContext::new();
+        state.resolve_node(provider_key.clone(), &view, &mut ctx, |_| {
+            SymbolNodeResult {
+                value: SymbolNodeValue::ProviderExportRoute(Some(RoutedSymbolResult {
+                    final_canonical_id: "/src/leaf.ts".to_string(),
+                    final_exported_name: "Props".to_string(),
+                    status: RoutedSymbolStatus::Resolved,
+                    normalized_route: RouteDemand::Whole,
+                    provenance: vec![],
+                    external_dependency_closure: vec![],
+                })),
+                facts: vec![fact_leaf.clone()],
+                diagnostics: vec![],
+            }
+        });
+        assert_eq!(counters.snapshot().node_cache_misses, 1);
+
+        // Second lookup: should hit cache without recompute
+        let mut ctx2 = ResolveContext::new();
+        let result = state.resolve_node(provider_key.clone(), &view, &mut ctx2, |_| {
+            panic!("should not recompute — cached provider route must be reused");
+        });
+        assert_eq!(counters.snapshot().node_cache_hits, 1);
+        assert!(matches!(
+            result.value,
+            SymbolNodeValue::ProviderExportRoute(Some(_))
+        ));
+    }
+
+    /// Deep barrel chain negative miss must be cached and reused.
+    #[test]
+    fn deep_barrel_chain_negative_miss_is_reused() {
+        use crate::resolver_core::route_demand::{
+            RouteDemand, RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
+        };
+
+        let counters = Arc::new(ResolverCounters::new());
+        let state = SymbolResolverState::new(counters.clone());
+        let fact = make_fact("/src/barrel.ts");
+        let view = make_view(1, vec![fact.clone()]);
+
+        let provider_key = provider_export_route_node_key(
+            "/src/barrel.ts",
+            "Missing",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+
+        // First resolution: negative miss
+        let mut ctx = ResolveContext::new();
+        state.resolve_node(provider_key.clone(), &view, &mut ctx, |_| {
+            SymbolNodeResult {
+                value: SymbolNodeValue::ProviderExportRoute(Some(RoutedSymbolResult {
+                    final_canonical_id: String::new(),
+                    final_exported_name: "Missing".to_string(),
+                    status: RoutedSymbolStatus::NotFound,
+                    normalized_route: RouteDemand::Whole,
+                    provenance: vec![],
+                    external_dependency_closure: vec![],
+                })),
+                facts: vec![fact.clone()],
+                diagnostics: vec![],
+            }
+        });
+
+        // Second lookup: must reuse the cached negative answer
+        let mut ctx2 = ResolveContext::new();
+        state.resolve_node(provider_key.clone(), &view, &mut ctx2, |_| {
+            panic!("should not recompute — negative miss must be cached and reused");
+        });
+        assert_eq!(counters.snapshot().node_cache_hits, 1);
+    }
+
+    /// Route facts must invalidate on both importer-side and provider-side changes.
+    #[test]
+    fn route_facts_invalidate_on_importer_and_provider_changes() {
+        use crate::resolver_core::route_demand::{RouteDemand, SymbolSpace};
+
+        let counters = Arc::new(ResolverCounters::new());
+        let state = SymbolResolverState::new(counters.clone());
+
+        // Provider fact — keyed by provider file hash
+        let provider_fact_v1 = FactVersionRef::FileWholeHash {
+            canonical_id: "/src/types.ts".to_string(),
+            hash: [1; 16],
+        };
+        let provider_fact_v2 = FactVersionRef::FileWholeHash {
+            canonical_id: "/src/types.ts".to_string(),
+            hash: [2; 16],
+        };
+
+        let view_v1 = make_view(1, vec![provider_fact_v1.clone()]);
+        let provider_key = provider_export_route_node_key(
+            "/src/types.ts",
+            "Props",
+            &RouteDemand::Whole,
+            SymbolSpace::Type,
+        );
+
+        // Populate cache with v1 facts
+        let mut ctx = ResolveContext::new();
+        state.resolve_node(provider_key.clone(), &view_v1, &mut ctx, |_| {
+            SymbolNodeResult {
+                value: SymbolNodeValue::ProviderExportRoute(None),
+                facts: vec![provider_fact_v1],
+                diagnostics: vec![],
+            }
+        });
+
+        // Provider content changes → v2 facts → must invalidate
+        let view_v2 = make_view(2, vec![provider_fact_v2.clone()]);
+        let mut ctx2 = ResolveContext::new();
+        let mut recomputed = false;
+        state.resolve_node(provider_key.clone(), &view_v2, &mut ctx2, |_| {
+            recomputed = true;
+            SymbolNodeResult {
+                value: SymbolNodeValue::ProviderExportRoute(None),
+                facts: vec![provider_fact_v2],
+                diagnostics: vec![],
+            }
+        });
+        assert!(
+            recomputed,
+            "provider content change must invalidate cached route"
+        );
+    }
+
+    // ── End layered routed-symbol node topology tests ────────────────
 
     #[test]
     fn resolve_context_collects_facts_from_sub_resolutions() {
