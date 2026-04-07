@@ -160,6 +160,28 @@ pub struct SolveState {
 
     /// Active prepared-ref expansion stack used to attribute nested traversal.
     pub(crate) prepared_ref_stack: Vec<String>,
+
+    // -- Hot-path trace counters (zero-cost u32 increments) --
+    /// Total Ref node resolutions.
+    pub resolve_ref_count: u32,
+    /// Total host root_identity lookups from Ref resolution.
+    pub resolve_ref_host_lookups: u32,
+    /// Total indexed access resolutions.
+    pub resolve_indexed_access_count: u32,
+    /// Total instantiation cache misses (new prepared-ref instantiations).
+    pub instantiation_cache_misses: u32,
+    /// Total union nodes resolved.
+    pub resolve_union_count: u32,
+    /// Total intersection nodes resolved.
+    pub resolve_intersection_count: u32,
+    /// Total object nodes resolved.
+    pub resolve_object_count: u32,
+    /// Total conditional nodes resolved.
+    pub resolve_conditional_count: u32,
+    /// Total mapped type nodes resolved.
+    pub resolve_mapped_count: u32,
+    /// Arena high water mark (max nodes allocated).
+    pub arena_high_water: u32,
 }
 
 /// Cache key for member projection results.
@@ -239,6 +261,16 @@ impl SolveState {
             projection_cache_hits: 0,
             relation_caches,
             prepared_ref_stack: Vec::new(),
+            resolve_ref_count: 0,
+            resolve_ref_host_lookups: 0,
+            resolve_indexed_access_count: 0,
+            instantiation_cache_misses: 0,
+            resolve_union_count: 0,
+            resolve_intersection_count: 0,
+            resolve_object_count: 0,
+            resolve_conditional_count: 0,
+            resolve_mapped_count: 0,
+            arena_high_water: 0,
         }
     }
 
@@ -601,6 +633,7 @@ pub(crate) fn resolve_node(
     match node_data {
         // Union — resolve each member
         Node::Union(members) => {
+            state.resolve_union_count += 1;
             let resolved: Vec<NodeId> = members
                 .iter()
                 .map(|&m| resolve_node(arena, m, host, state, subst))
@@ -610,6 +643,7 @@ pub(crate) fn resolve_node(
 
         // Intersection — resolve each member
         Node::Intersection(members) => {
+            state.resolve_intersection_count += 1;
             let resolved: Vec<NodeId> = members
                 .iter()
                 .map(|&m| resolve_node(arena, m, host, state, subst))
@@ -675,6 +709,7 @@ pub(crate) fn resolve_node(
         // signatures shallow so slot/callback return types do not force
         // unrelated deep expansion.
         Node::Object(mut obj) => {
+            state.resolve_object_count += 1;
             for prop in &mut obj.properties {
                 prop.ty = resolve_node(arena, prop.ty, host, state, subst);
             }
@@ -735,6 +770,7 @@ pub(crate) fn resolve_node(
             ref type_arguments,
             ref scope_canonical_id,
         } => {
+            state.resolve_ref_count += 1;
             let name = name.clone();
             let args = type_arguments.clone();
             let scope_canonical_id = scope_canonical_id.clone();
@@ -835,6 +871,7 @@ pub(crate) fn resolve_node(
 
         // -- indexed access T[K] --
         Node::IndexedAccess { object, index } => {
+            state.resolve_indexed_access_count += 1;
             if let Some(projected) =
                 try_resolve_structural_indexed_access_raw(arena, object, index, host, state, subst)
             {
@@ -882,6 +919,7 @@ pub(crate) fn resolve_node(
             false_branch,
             distributive,
         } => {
+            state.resolve_conditional_count += 1;
             let resolved_check = resolve_node(arena, check, host, state, subst);
             let resolved_extends = resolve_node(arena, extends, host, state, subst);
             resolve_conditional(

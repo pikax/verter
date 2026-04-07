@@ -191,8 +191,27 @@ pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     total_steps: u64,
     /// Number of uncached solves performed by this engine.
     solve_count: u32,
+    /// Accumulated hot-path trace counters across all solves.
+    pub trace_summary: SolverTraceSummary,
     #[allow(dead_code)]
     audit: A,
+}
+
+/// Accumulated solver hot-path counters for tracing/profiling.
+#[derive(Debug, Default, Clone)]
+pub struct SolverTraceSummary {
+    pub resolve_ref_count: u32,
+    pub resolve_ref_host_lookups: u32,
+    pub resolve_indexed_access_count: u32,
+    pub instantiation_cache_hits: u32,
+    pub instantiation_cache_misses: u32,
+    pub resolve_union_count: u32,
+    pub resolve_intersection_count: u32,
+    pub resolve_object_count: u32,
+    pub resolve_conditional_count: u32,
+    pub resolve_mapped_count: u32,
+    pub projection_cache_hits: u32,
+    pub arena_high_water: u32,
 }
 
 impl<'a> TypeQueryEngine<'a, NoopAudit> {
@@ -225,6 +244,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             visited_decls: Vec::new(),
             total_steps: 0,
             solve_count: 0,
+            trace_summary: SolverTraceSummary::default(),
             audit,
         }
     }
@@ -272,6 +292,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
         self.projection_cache = std::mem::take(&mut state.projection_cache);
         self.caches = std::mem::take(&mut state.relation_caches);
+        self.accumulate_trace_summary(&state);
 
         let result = SolverResult {
             value: result_expr,
@@ -340,6 +361,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
         self.projection_cache = std::mem::take(&mut state.projection_cache);
         self.caches = std::mem::take(&mut state.relation_caches);
+        self.accumulate_trace_summary(&state);
 
         let result = SolverResult {
             value: result_expr,
@@ -386,6 +408,25 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
     /// Get the audit sink.
     pub fn audit(&self) -> &A {
         &self.audit
+    }
+
+    fn accumulate_trace_summary(&mut self, state: &super::solve::SolveState) {
+        let s = &mut self.trace_summary;
+        s.resolve_ref_count += state.resolve_ref_count;
+        s.resolve_ref_host_lookups += state.resolve_ref_host_lookups;
+        s.resolve_indexed_access_count += state.resolve_indexed_access_count;
+        s.instantiation_cache_hits += state.instantiation_cache_hits;
+        s.instantiation_cache_misses += state.instantiation_cache_misses;
+        s.resolve_union_count += state.resolve_union_count;
+        s.resolve_intersection_count += state.resolve_intersection_count;
+        s.resolve_object_count += state.resolve_object_count;
+        s.resolve_conditional_count += state.resolve_conditional_count;
+        s.resolve_mapped_count += state.resolve_mapped_count;
+        s.projection_cache_hits += state.projection_cache_hits;
+        let arena_len = self.arena.len() as u32;
+        if arena_len > s.arena_high_water {
+            s.arena_high_water = arena_len;
+        }
     }
 }
 

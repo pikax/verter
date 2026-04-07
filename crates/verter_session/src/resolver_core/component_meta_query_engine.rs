@@ -313,6 +313,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn solve_count(&self) -> u32 {
         self.owner_engine.solve_count()
     }
+
+    pub fn trace_summary(
+        &self,
+    ) -> &verter_semantic::analysis::type_solver::query_engine::SolverTraceSummary {
+        &self.owner_engine.trace_summary
+    }
 }
 
 fn filter_identity_ref(result: &SolverResult<TypeExpr>, requested_name: &str) -> Option<TypeExpr> {

@@ -738,6 +738,31 @@ impl VerterHost {
             &mut query_engine,
         );
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
+        {
+            let ts = query_engine.trace_summary();
+            crate::host_manage::component_meta_trace_event!(
+                "solver_trace_summary",
+                format!(
+                    "owner={} steps={} solves={} refs={} host_lookups={} indexed_access={} unions={} intersections={} objects={} conditionals={} mapped={} inst_cache_hits={} inst_cache_misses={} proj_cache_hits={} arena_high_water={} scoped_cache={}",
+                    canonical,
+                    query_engine.total_steps(),
+                    query_engine.solve_count(),
+                    ts.resolve_ref_count,
+                    ts.resolve_ref_host_lookups,
+                    ts.resolve_indexed_access_count,
+                    ts.resolve_union_count,
+                    ts.resolve_intersection_count,
+                    ts.resolve_object_count,
+                    ts.resolve_conditional_count,
+                    ts.resolve_mapped_count,
+                    ts.instantiation_cache_hits,
+                    ts.instantiation_cache_misses,
+                    ts.projection_cache_hits,
+                    ts.arena_high_water,
+                    query_engine.scoped_cache_len(),
+                ),
+            );
+        }
         let solver_audit = crate::component_meta_audit::RustSolverAudit {
             total_resolve_steps: query_engine.total_steps(),
             solve_count: query_engine.solve_count(),

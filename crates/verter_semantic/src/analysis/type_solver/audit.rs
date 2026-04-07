@@ -39,6 +39,14 @@ pub trait AuditSink {
     fn indexed_access_open_skip(&mut self) {}
     fn structural_transform_fast_path(&mut self) {}
     fn incomplete_reason(&mut self, kind: &'static str) {}
+
+    // --- Solver hot-path tracing events ---
+    fn resolve_ref(&mut self, name: &str, scope: Option<&str>) {}
+    fn resolve_ref_host_lookup(&mut self, canonical_id: &str, symbol: &str) {}
+    fn resolve_indexed_access(&mut self, object_summary: &str, key: &str) {}
+    fn resolve_node_step(&mut self, node_kind: &str) {}
+    fn instantiation_cache_hit(&mut self, key_summary: &str) {}
+    fn instantiation_cache_miss(&mut self, key_summary: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +78,12 @@ pub struct RecordingAudit {
     pub op_cache_misses: u32,
     pub prepared_ref_entries: u32,
     pub prepared_ref_reentries: u32,
+    pub resolve_ref_count: u32,
+    pub resolve_ref_host_lookups: u32,
+    pub resolve_indexed_access_count: u32,
+    pub resolve_node_steps_by_kind: FxHashMap<String, u32>,
+    pub instantiation_cache_hits: u32,
+    pub instantiation_cache_misses: u32,
     pub detail: RecordingAuditDetail,
 }
 
@@ -180,6 +194,33 @@ impl AuditSink for RecordingAudit {
 
     fn incomplete_reason(&mut self, kind: &'static str) {
         *self.detail.incomplete_reason_kinds.entry(kind).or_insert(0) += 1;
+    }
+
+    fn resolve_ref(&mut self, _name: &str, _scope: Option<&str>) {
+        self.resolve_ref_count += 1;
+    }
+
+    fn resolve_ref_host_lookup(&mut self, _canonical_id: &str, _symbol: &str) {
+        self.resolve_ref_host_lookups += 1;
+    }
+
+    fn resolve_indexed_access(&mut self, _object_summary: &str, _key: &str) {
+        self.resolve_indexed_access_count += 1;
+    }
+
+    fn resolve_node_step(&mut self, kind: &str) {
+        *self
+            .resolve_node_steps_by_kind
+            .entry(kind.to_string())
+            .or_insert(0) += 1;
+    }
+
+    fn instantiation_cache_hit(&mut self, _key_summary: &str) {
+        self.instantiation_cache_hits += 1;
+    }
+
+    fn instantiation_cache_miss(&mut self, _key_summary: &str) {
+        self.instantiation_cache_misses += 1;
     }
 }
 
