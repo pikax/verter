@@ -191,18 +191,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             exported_name.to_string(),
             route.clone(),
         );
-        self.routes
-            .entry(key)
-            .or_insert_with_key(|_| {
-                let _ = route;
-                resolve_routed_prepared_alias(
-                    self.host,
-                    canonical_id,
-                    exported_name,
-                    self.store_view,
-                )
-            })
-            .clone()
+        if let Some(cached) = self.routes.get(&key) {
+            return cached.clone();
+        }
+        if !self.allow_wildcard_route() {
+            return None;
+        }
+        let result =
+            resolve_routed_prepared_alias(self.host, canonical_id, exported_name, self.store_view);
+        self.routes.insert(key, result.clone());
+        result
     }
 
     /// Resolve a type declaration, cached per query.
@@ -396,6 +394,49 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         !self
             .fuse_state
             .check_structural_slow_lane(&self.fuse_budgets)
+    }
+
+    /// Check wildcard route fanout budget. Returns `true` if within budget.
+    pub fn allow_wildcard_route(&mut self) -> bool {
+        !self
+            .fuse_state
+            .check_wildcard_route_fanout(&self.fuse_budgets)
+    }
+
+    /// Check imported-root fanout budget. Returns `true` if within budget.
+    pub fn allow_imported_root(&mut self) -> bool {
+        !self
+            .fuse_state
+            .check_imported_root_fanout(&self.fuse_budgets)
+    }
+
+    /// Check registry deepening fanout budget. Returns `true` if within budget.
+    pub fn allow_registry_deepening(&mut self) -> bool {
+        !self
+            .fuse_state
+            .check_registry_deepening_fanout(&self.fuse_budgets)
+    }
+
+    /// Check union/member explosion budget. Returns `true` if within budget.
+    pub fn allow_union_member(&mut self) -> bool {
+        !self
+            .fuse_state
+            .check_union_member_explosion(&self.fuse_budgets)
+    }
+
+    /// Reset union member counter for per-member branch counting.
+    pub fn reset_union_members(&mut self) {
+        self.fuse_state.reset_union_members();
+    }
+
+    /// Whether any fuse has tripped.
+    pub fn has_fuse_tripped(&self) -> bool {
+        self.fuse_state.has_tripped()
+    }
+
+    /// Get fuse trip details for provenance/tracing.
+    pub fn fuse_trips(&self) -> &[super::FuseTrip] {
+        &self.fuse_state.trips
     }
 
     pub fn solve_count(&self) -> u32 {

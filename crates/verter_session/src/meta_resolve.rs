@@ -918,6 +918,17 @@ impl VerterHost {
                 ),
             );
         }
+        if query_engine.has_fuse_tripped() {
+            for trip in query_engine.fuse_trips() {
+                crate::host_manage::component_meta_trace_event!(
+                    "fuse_tripped",
+                    format!(
+                        "owner={} fuse={} budget={} actual={}",
+                        canonical, trip.fuse_name, trip.budget, trip.actual,
+                    ),
+                );
+            }
+        }
         let solver_audit = crate::component_meta_audit::RustSolverAudit {
             total_resolve_steps: query_engine.total_steps(),
             solve_count: query_engine.solve_count(),
@@ -1150,6 +1161,9 @@ impl VerterHost {
         let _loop_start = std::time::Instant::now();
         while let Some(pending) = referenced_names.pop_front() {
             _loop_iterations += 1;
+            if !query_engine.allow_registry_deepening() {
+                break;
+            }
             let PendingComponentMetaRegistryRef {
                 name: type_name,
                 source_hint: pending_source_hint_owned,
@@ -1196,6 +1210,9 @@ impl VerterHost {
             if let Some(source_hint) = pending_source_hint
                 .filter(|source| !source.is_empty() && *source != owner_canonical)
             {
+                if !query_engine.allow_imported_root() {
+                    continue;
+                }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
                     query_engine.resolve_prepared_alias(
@@ -2065,20 +2082,26 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             ),
             readonly: *readonly,
         },
-        TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
-            types
-                .iter()
-                .map(|ty| {
-                    materialize_component_meta_member_surface_expr_with_active_stack(
-                        ty,
-                        scope_canonical_id,
-                        engine,
-                        nested_surface,
-                        active,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )),
+        TypeExpr::Union(types) => {
+            engine.reset_union_members();
+            TypeExpr::Union(Arc::from(
+                types
+                    .iter()
+                    .map(|ty| {
+                        if !engine.allow_union_member() {
+                            return ty.clone();
+                        }
+                        materialize_component_meta_member_surface_expr_with_active_stack(
+                            ty,
+                            scope_canonical_id,
+                            engine,
+                            nested_surface,
+                            active,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        }
         TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
             types
                 .iter()
