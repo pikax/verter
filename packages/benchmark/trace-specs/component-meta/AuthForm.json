@@ -1,0 +1,31 @@
+{
+  "component": "AuthForm",
+  "componentPath": "src/runtime/components/AuthForm.vue",
+  "maxTotalDurationMs": 6000,
+  "required": [
+    {
+      "namePattern": "resolve_component_meta",
+      "detailPattern": "mode=Expanded",
+      "note": "must resolve in Expanded mode"
+    },
+    {
+      "namePattern": "resolve_component_meta_result",
+      "detailPattern": "has_evaluated_types=true",
+      "note": "must produce evaluated types"
+    }
+  ],
+  "forbidden": [],
+  "maxCounts": [],
+  "maxDurations": [
+    {
+      "namePattern": "resolve_component_meta",
+      "maxDurationMs": 6000,
+      "note": "total resolution should complete within 6s"
+    },
+    {
+      "namePattern": "resolve_imported_type_root",
+      "maxDurationMs": 500,
+      "note": "any single imported type root resolution should take under 500ms"
+    }
+  ]
+}
