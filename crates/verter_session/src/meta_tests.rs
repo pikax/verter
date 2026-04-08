@@ -8732,7 +8732,7 @@ const attrs = { label: 'Hello' }
 // ===========================================================================
 
 #[test]
-fn resolved_type_cache_is_reused_across_different_owners() {
+fn component_meta_avoids_legacy_resolved_type_cache_across_different_owners() {
     let project = make_project();
 
     // Shared dependency
@@ -8785,16 +8785,24 @@ defineProps<SharedProps>()
 
     let session = project.open_session().unwrap();
 
-    // First owner resolves the type (cache miss)
+    // First owner resolves the type without touching the legacy host cache.
     project.host().provenance().reset();
     let meta_a = session.get_component_meta("/src/A.vue").unwrap().unwrap();
     let p1 = provenance(&project);
 
-    assert!(
-        p1.resolved_external_type_cache_misses >= 1,
-        "first owner should miss the resolved type cache"
-    );
     assert_eq!(meta_a.props.len(), 1, "A.vue should have the shared prop");
+    assert_eq!(
+        p1.resolved_external_type_cache_misses, 0,
+        "component-meta should not populate the legacy resolved type cache on first owner resolution"
+    );
+    assert_eq!(
+        p1.resolved_external_type_cache_hits, 0,
+        "component-meta should not hit the legacy resolved type cache on first owner resolution"
+    );
+    assert!(
+        project.host().resolved_type_cache.lock().is_empty(),
+        "component-meta queries should leave the legacy host resolved type cache empty"
+    );
 
     // Reset counters for second owner
     project.host().provenance().reset();
@@ -8804,17 +8812,22 @@ defineProps<SharedProps>()
     assert_eq!(meta_b.props.len(), 1, "B.vue should have the shared prop");
     assert_eq!(meta_b.props[0].name, "shared");
 
-    // Assert+: second owner should hit the host-level cache
+    assert_eq!(
+        p2.resolved_external_type_cache_hits, 0,
+        "component-meta should not hit the legacy host resolved type cache for a second owner"
+    );
+    assert_eq!(
+        p2.resolved_external_type_cache_misses, 0,
+        "component-meta should not miss the legacy host resolved type cache for a second owner"
+    );
     assert!(
-        p2.resolved_external_type_cache_hits >= 1,
-        "second owner importing the same type from the same unchanged dep should hit the host-level cache, got hits={} misses={}",
-        p2.resolved_external_type_cache_hits,
-        p2.resolved_external_type_cache_misses,
+        project.host().resolved_type_cache.lock().is_empty(),
+        "component-meta queries should leave the legacy host resolved type cache empty"
     );
 }
 
 #[test]
-fn resolved_type_cache_is_reused_for_workspace_only_package_dependencies() {
+fn component_meta_avoids_legacy_resolved_type_cache_for_workspace_only_package_dependencies() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -8884,9 +8897,17 @@ defineProps<SharedProps>()
         1,
         "A.vue should resolve the package prop"
     );
+    assert_eq!(
+        p1.resolved_external_type_cache_misses, 0,
+        "component-meta should not miss the legacy resolved type cache for a workspace-only dep"
+    );
+    assert_eq!(
+        p1.resolved_external_type_cache_hits, 0,
+        "component-meta should not hit the legacy resolved type cache on first workspace-only dep resolution"
+    );
     assert!(
-        p1.resolved_external_type_cache_misses >= 1,
-        "first owner should miss the resolved type cache for a workspace-only dep"
+        project.host().resolved_type_cache.lock().is_empty(),
+        "component-meta queries should leave the legacy host resolved type cache empty"
     );
 
     project.host().provenance().reset();
@@ -8901,16 +8922,22 @@ defineProps<SharedProps>()
         "B.vue should resolve the package prop"
     );
     assert_eq!(meta_b.props[0].name, "shared");
+    assert_eq!(
+        p2.resolved_external_type_cache_hits, 0,
+        "component-meta should not hit the legacy host resolved type cache for a second workspace-only owner"
+    );
+    assert_eq!(
+        p2.resolved_external_type_cache_misses, 0,
+        "component-meta should not miss the legacy host resolved type cache for a second workspace-only owner"
+    );
     assert!(
-        p2.resolved_external_type_cache_hits >= 1,
-        "second owner should hit the host-level resolved type cache even when the dep only exists in the workspace, got hits={} misses={}",
-        p2.resolved_external_type_cache_hits,
-        p2.resolved_external_type_cache_misses,
+        project.host().resolved_type_cache.lock().is_empty(),
+        "component-meta queries should leave the legacy host resolved type cache empty"
     );
 }
 
 #[test]
-fn resolved_type_cache_cleared_on_host_close() {
+fn component_meta_queries_do_not_populate_legacy_resolved_type_cache() {
     let project = make_project();
     project
         .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
@@ -8937,18 +8964,16 @@ defineProps<Props>()
     let session = project.open_session().unwrap();
     let _ = session.get_component_meta("/App.vue").unwrap();
 
-    // Verify cache is populated
     assert!(
-        !project.host().resolved_type_cache.lock().is_empty(),
-        "cache should be populated after resolution"
+        project.host().resolved_type_cache.lock().is_empty(),
+        "component-meta should no longer populate the legacy resolved type cache"
     );
 
-    // Clear caches
     project.clear_caches().unwrap();
 
     assert!(
         project.host().resolved_type_cache.lock().is_empty(),
-        "clear_caches must flush the resolved type cache"
+        "clear_caches should leave the legacy resolved type cache empty"
     );
 }
 

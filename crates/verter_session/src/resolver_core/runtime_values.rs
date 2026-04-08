@@ -15,14 +15,6 @@ pub trait ImportedRuntimeValueResolver {
         None
     }
 
-    fn resolve_import_canonical_id(
-        &self,
-        _owner_canonical_id: &str,
-        _import: &AnalyzedImport,
-    ) -> Option<String> {
-        None
-    }
-
     fn resolve_value_export_target(
         &self,
         _dep_canonical_id: &str,
@@ -33,7 +25,6 @@ pub trait ImportedRuntimeValueResolver {
 }
 
 pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResolver>(
-    owner_canonical_id: &str,
     imports: &[AnalyzedImport],
     owner_local_value_names: &FxHashSet<String>,
     required_binding_names: Option<&FxHashSet<String>>,
@@ -46,10 +37,7 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
         if import.is_type_only {
             continue;
         }
-        let dep_canonical_id = import
-            .resolved_canonical_id
-            .clone()
-            .or_else(|| resolver.resolve_import_canonical_id(owner_canonical_id, import));
+        let dep_canonical_id = import.resolved_canonical_id.clone();
         let Some(dep_canonical_id) = dep_canonical_id.as_deref() else {
             continue;
         };
@@ -148,7 +136,6 @@ mod tests {
         >,
         lookup_counts: RefCell<FxHashMap<String, usize>>,
         value_export_targets: FxHashMap<(String, String), (String, String)>,
-        import_targets: FxHashMap<(String, String), String>,
     }
 
     impl ImportedRuntimeValueResolver for TestResolver {
@@ -168,16 +155,6 @@ mod tests {
         ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
             self.prepared_values
                 .get(&(canonical_id.to_string(), symbol_name.to_string()))
-                .cloned()
-        }
-
-        fn resolve_import_canonical_id(
-            &self,
-            owner_canonical_id: &str,
-            import: &AnalyzedImport,
-        ) -> Option<String> {
-            self.import_targets
-                .get(&(owner_canonical_id.to_string(), import.source.clone()))
                 .cloned()
         }
 
@@ -227,7 +204,6 @@ mod tests {
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             None,
@@ -274,7 +250,6 @@ mod tests {
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             None,
@@ -334,7 +309,6 @@ mod tests {
             object_shape: None,
         });
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::from_iter(["theme".to_string()].into_iter()),
             None,
@@ -406,7 +380,6 @@ mod tests {
         let mut env = EvalEnv::new();
         let required = FxHashSet::from_iter(["theme".to_string()].into_iter());
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             Some(&required),
@@ -484,7 +457,6 @@ mod tests {
         let mut env = EvalEnv::new();
         let required = FxHashSet::from_iter(["theme".to_string()].into_iter());
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             Some(&required),
@@ -567,7 +539,6 @@ mod tests {
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             Some(&FxHashSet::from_iter(["theme".to_string()])),
@@ -585,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_imported_runtime_values_falls_back_to_resolved_import_targets() {
+    fn materialize_imported_runtime_values_skips_unresolved_import_without_canonical_id() {
         let imports = vec![AnalyzedImport {
             source: "./theme".to_string(),
             is_type_only: false,
@@ -617,14 +588,9 @@ mod tests {
         resolver
             .dep_envs
             .insert("/src/theme.ts".to_string(), Arc::new(dep_env));
-        resolver.import_targets.insert(
-            ("/src/Button.vue".to_string(), "./theme".to_string()),
-            "/src/theme.ts".to_string(),
-        );
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
-            "/src/Button.vue",
             &imports,
             &FxHashSet::default(),
             None,
@@ -632,19 +598,14 @@ mod tests {
             &resolver,
         );
 
-        assert_eq!(
-            env.value_symbols
-                .get("theme")
-                .and_then(|value| value.type_annotation.clone()),
-            Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("primary")),
+        assert!(
+            !env.value_symbols.contains_key("theme"),
+            "runtime value hydration should skip imports until resolved_canonical_id is populated"
         );
     }
 
     #[test]
-    fn resolved_canonical_id_on_import_skips_resolver_fallback() {
-        // When import.resolved_canonical_id is set (from canonical shallow
-        // import edges), the resolver's resolve_import_canonical_id must NOT
-        // be called.
+    fn resolved_canonical_id_on_import_hydrates_without_fallback() {
         let mut dep_env = EvalEnv::new();
         dep_env.value_symbols.insert(
             "defaults".to_string(),
@@ -680,16 +641,9 @@ mod tests {
         resolver
             .dep_envs
             .insert("/resolved/dep.ts".to_string(), Arc::new(dep_env));
-        // Add a WRONG target to the fallback — if the fallback fires,
-        // the value won't be found and the test will fail.
-        resolver.import_targets.insert(
-            ("/src/owner.ts".to_string(), "./dep".to_string()),
-            "/wrong/target.ts".to_string(),
-        );
 
         let mut env = EvalEnv::new();
         materialize_imported_runtime_values_into_env(
-            "/src/owner.ts",
             &imports,
             &FxHashSet::default(),
             None,
@@ -697,23 +651,12 @@ mod tests {
             &resolver,
         );
 
-        // The value should be found via the pre-resolved canonical ID,
-        // NOT through the resolver fallback.
         assert_eq!(
             env.value_symbols
                 .get("defaults")
                 .and_then(|v| v.type_annotation.clone()),
             Some(verter_semantic::analysis::type_expr::TypeExpr::string_literal("cached")),
-            "runtime value materialization should use import.resolved_canonical_id, \
-             not fall back to resolver.resolve_import_canonical_id"
-        );
-
-        // The fallback resolver should NOT have been called for /resolved/dep.ts
-        let lookup_counts = resolver.lookup_counts.borrow();
-        assert!(
-            lookup_counts.get("/wrong/target.ts").is_none()
-                || *lookup_counts.get("/wrong/target.ts").unwrap() == 0,
-            "fallback resolver should not have been consulted when resolved_canonical_id is set"
+            "runtime value materialization should use import.resolved_canonical_id directly"
         );
     }
 }

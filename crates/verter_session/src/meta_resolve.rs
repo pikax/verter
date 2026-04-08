@@ -2523,24 +2523,16 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         cache: &mut crate::resolver_core::ExternalTypeBodyCache,
         visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        self.host
-            .resolve_external_type_from_loaded_files_in_view(
-                owner_canonical,
-                import_source,
-                exported_name,
-                tracked_deps,
-                resolution_deps,
-                cache,
-                visiting,
-                false,
-                verter_workspace::ResolveRequestKind::TypeImport,
-                true,
-                None,
-                0,
-                self.store_view,
-            )
-            .ok()
-            .flatten()
+        let _ = visiting;
+        self.host.resolve_component_meta_macro_elements_in_view(
+            owner_canonical,
+            import_source,
+            exported_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            self.store_view,
+        )
     }
 
     fn resolve_jsdoc_block(

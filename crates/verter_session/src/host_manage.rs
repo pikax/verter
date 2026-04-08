@@ -1110,34 +1110,6 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
             .prepared_value_decl_in_view(canonical_id, symbol_name, self.store_view)
     }
 
-    fn resolve_import_canonical_id(
-        &self,
-        owner_canonical_id: &str,
-        import: &verter_semantic::analysis::types::AnalyzedImport,
-    ) -> Option<String> {
-        if let Some(shallow) = self
-            .host
-            .shallow_file_state_in_view(owner_canonical_id, self.store_view)
-        {
-            for target in shallow.import_targets.values() {
-                if target.source_specifier == import.source && !target.canonical_id.is_empty() {
-                    return Some(target.canonical_id.clone());
-                }
-            }
-        }
-
-        self.host.resolve_loaded_dependency_canonical_in_view(
-            owner_canonical_id,
-            &import.source,
-            if import.is_type_only {
-                verter_workspace::ResolveRequestKind::TypeImport
-            } else {
-                verter_workspace::ResolveRequestKind::EsmImport
-            },
-            self.store_view,
-        )
-    }
-
     fn resolve_value_export_target(
         &self,
         dep_canonical_id: &str,
@@ -4842,7 +4814,6 @@ impl VerterHost {
         let local_value_names: rustc_hash::FxHashSet<String> =
             env.value_symbols.keys().cloned().collect();
         self.materialize_imported_runtime_values_into_env_in_view(
-            canonical_id,
             snapshot,
             &local_value_names,
             Some(&required_runtime_value_names),
@@ -4861,7 +4832,6 @@ impl VerterHost {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn materialize_imported_runtime_values_into_env_in_view(
         &self,
-        canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<String>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
@@ -4884,7 +4854,6 @@ impl VerterHost {
             store_view,
         };
         materialize_imported_runtime_values_into_env(
-            canonical_id,
             snapshot.imports.as_slice(),
             owner_local_value_names,
             required_runtime_value_names,

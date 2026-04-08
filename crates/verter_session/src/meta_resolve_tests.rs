@@ -700,6 +700,45 @@ defineProps<Props>()
 }
 
 #[test]
+fn expanded_component_meta_imported_props_avoid_loaded_files_macro_path() {
+    let project = make_project();
+    project
+        .upsert_base("/types.ts", r#"export interface Props { a: string }"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().provenance().reset();
+
+    let state = project
+        .host()
+        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .expect("Expanded mode should return result");
+    let provenance = provenance(&project);
+
+    assert!(
+        prop_names_from_resolved(&state).contains(&"a".to_string()),
+        "Expanded mode should still materialize imported props"
+    );
+    assert_eq!(
+        provenance.resolved_external_type_cache_hits, 0,
+        "component-meta should not hit the legacy loaded-files macro traversal cache"
+    );
+    assert_eq!(
+        provenance.resolved_external_type_cache_misses, 0,
+        "component-meta should not call resolve_external_type_from_loaded_files for imported macro types"
+    );
+}
+
+#[test]
 fn imported_class_props_use_shared_resolver_path() {
     let project = make_project();
     project

@@ -110,6 +110,7 @@ fn assert_route_frontier_allowed() {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn assert_import_route_shadow_allowed() {
     assert!(
         !FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.load(Ordering::SeqCst),
@@ -1095,6 +1096,106 @@ impl VerterHost {
             ),
         );
         result
+    }
+
+    pub(crate) fn resolve_component_meta_macro_elements_in_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        let _trace = component_meta_trace_scope!(
+            "resolve_component_meta_macro_elements",
+            format!(
+                "owner={} import={} type={} store_view={} cache_entries={}",
+                owner_canonical,
+                import_source,
+                type_name,
+                store_view.is_some(),
+                cache.len(),
+            ),
+        );
+
+        let dep_canonical = self.resolve_loaded_dependency_canonical_in_view(
+            owner_canonical,
+            import_source,
+            verter_workspace::ResolveRequestKind::TypeImport,
+            store_view,
+        )?;
+
+        tracked_deps.insert(dep_canonical.clone());
+        resolution_deps.insert(dep_canonical.clone());
+
+        let cache_key = (dep_canonical.clone(), type_name.to_string());
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+
+        let mut requested_routes = FrontierRequestedRoutes::default();
+        requested_routes.insert(
+            (dep_canonical.clone(), type_name.to_string()),
+            crate::resolver_core::RouteDemand::Whole,
+        );
+
+        let (frontier, target, had_route_cycle) = self
+            .run_external_type_frontier_closure_in_view(
+                dep_canonical.as_str(),
+                type_name,
+                &mut requested_routes,
+                store_view,
+            )
+            .ok()?;
+
+        for touched_id in frontier.touched_canonical_ids() {
+            tracked_deps.insert(touched_id.clone());
+            resolution_deps.insert(touched_id);
+        }
+
+        let Some((effective_dep_canonical, effective_type_name)) = target else {
+            if had_route_cycle {
+                self.provenance
+                    .resolver_cycle_detections
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            cache.insert(cache_key, None);
+            return None;
+        };
+
+        tracked_deps.insert(effective_dep_canonical.clone());
+        resolution_deps.insert(effective_dep_canonical.clone());
+
+        let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
+        if let Some(cached) = cache.get(&final_target_key).cloned() {
+            cache.insert(cache_key, cached.clone());
+            return cached;
+        }
+
+        let resolved = self
+            .materialize_frontier_resolved_type_in_view(
+                &frontier,
+                &requested_routes,
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                tracked_deps,
+                resolution_deps,
+                store_view,
+            )
+            .or_else(|| {
+                self.resolve_external_type_from_cached_dependency_state_in_view(
+                    effective_dep_canonical.as_str(),
+                    effective_type_name.as_str(),
+                    &ResolvedExternalTypes::default(),
+                    store_view,
+                )
+            });
+
+        cache.insert(cache_key, resolved.clone());
+        cache.insert(final_target_key, resolved.clone());
+        resolved
     }
 
     fn current_type_resolution_hash_in_view(
