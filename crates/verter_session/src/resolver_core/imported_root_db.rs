@@ -75,6 +75,25 @@ impl ImportedRootDb {
         self.roots.get_if_valid(&key, view)
     }
 
+    /// Permissive lookup without store-view validation.
+    pub fn get_any(
+        &self,
+        provider_canonical: &str,
+        imported_name: &str,
+    ) -> Option<Arc<ImportedRootResult>> {
+        struct PermissiveView;
+        impl crate::resolver_core::StoreView for PermissiveView {
+            fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
+                crate::resolver_core::StoreViewCompatToken(0)
+            }
+            fn validates(&self, _fact: &FactVersionRef) -> bool {
+                true
+            }
+        }
+        let key = (provider_canonical.to_owned(), imported_name.to_owned());
+        self.roots.get_if_valid(&key, &PermissiveView)
+    }
+
     /// Look up or resolve a root for `(provider, imported_name)`.
     pub fn get_or_resolve<V, F>(
         &self,

@@ -1480,18 +1480,24 @@ impl VerterHost {
             .unwrap_or_else(|| dep_canonical.to_string());
 
         // Check RouteDb first (shared validated cache).
-        if let Some(sv) = store_view {
-            if let Some(cached) = self.resolver.runtime.routes.get_route(
+        let cached_route = if let Some(sv) = store_view {
+            self.resolver.runtime.routes.get_route(
                 normalized_canonical.as_str(),
                 requested_name,
                 sv,
-            ) {
-                match cached.resolved() {
-                    Some((defining_canonical, defining_symbol)) => {
-                        return Some((defining_canonical.to_owned(), defining_symbol.to_owned()));
-                    }
-                    None => return None, // Cached miss.
+            )
+        } else {
+            self.resolver
+                .runtime
+                .routes
+                .get_route_any(normalized_canonical.as_str(), requested_name)
+        };
+        if let Some(cached) = cached_route {
+            match cached.resolved() {
+                Some((defining_canonical, defining_symbol)) => {
+                    return Some((defining_canonical.to_owned(), defining_symbol.to_owned()));
                 }
+                None => return None, // Cached miss.
             }
         }
 

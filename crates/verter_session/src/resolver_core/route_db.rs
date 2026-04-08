@@ -95,6 +95,25 @@ impl RouteDb {
         self.routes.get_if_valid(&key, view)
     }
 
+    /// Permissive route lookup without store-view validation.
+    pub fn get_route_any(
+        &self,
+        provider_canonical: &str,
+        exported_name: &str,
+    ) -> Option<Arc<RouteResult>> {
+        struct PermissiveView;
+        impl StoreView for PermissiveView {
+            fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
+                crate::resolver_core::StoreViewCompatToken(0)
+            }
+            fn validates(&self, _fact: &FactVersionRef) -> bool {
+                true
+            }
+        }
+        let key = (provider_canonical.to_owned(), exported_name.to_owned());
+        self.routes.get_if_valid(&key, &PermissiveView)
+    }
+
     /// Look up or materialize a route for `(provider, name)`.
     pub fn get_or_resolve_route<V, F>(
         &self,

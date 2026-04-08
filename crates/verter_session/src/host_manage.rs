@@ -3109,24 +3109,22 @@ impl VerterHost {
             .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
             .unwrap_or_else(|| canonical_id.to_string());
 
-        // ModuleFactsDb fast path.
-        if let Some(sv) = store_view {
-            if let Some(facts) = self
-                .resolver
+        // ModuleFactsDb fast path (cache read only — no materialization to avoid recursion).
+        let cached_facts = if let Some(sv) = store_view {
+            self.resolver
                 .runtime
                 .module_facts
                 .get(resolved_canonical_id.as_str(), sv)
-            {
-                if !facts.shallow_state.symbols.is_empty() {
-                    return Some(facts.shallow_state.clone());
-                }
+        } else {
+            self.resolver
+                .runtime
+                .module_facts
+                .get_any(resolved_canonical_id.as_str())
+        };
+        if let Some(facts) = cached_facts {
+            if !facts.shallow_state.symbols.is_empty() {
+                return Some(facts.shallow_state.clone());
             }
-        }
-
-        // Materialize through ensure_module_facts_in_view.
-        let facts = self.ensure_module_facts_in_view(resolved_canonical_id.as_str(), store_view)?;
-        if !facts.shallow_state.symbols.is_empty() {
-            return Some(facts.shallow_state.clone());
         }
 
         None
@@ -3151,11 +3149,14 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // Fast path: check ModuleFactsDb.
-        if let Some(sv) = store_view {
-            if let Some(facts) = self.resolver.runtime.module_facts.get(canonical_id, sv) {
-                return Some(facts);
-            }
+        // Fast path: check ModuleFactsDb (validated or permissive).
+        let cached = if let Some(sv) = store_view {
+            self.resolver.runtime.module_facts.get(canonical_id, sv)
+        } else {
+            self.resolver.runtime.module_facts.get_any(canonical_id)
+        };
+        if let Some(facts) = cached {
+            return Some(facts);
         }
 
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
@@ -3186,23 +3187,12 @@ impl VerterHost {
             &eval_source,
         );
 
-        let use_shallow_decl_routes = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-
+        // Use store_view dep resolutions if available; otherwise use empty.
+        // Do NOT call dependency_resolutions_from_external_type_analysis_in_view
+        // here — it can recurse through import resolution.
         let dependency_resolutions = store_view
             .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-            .unwrap_or_else(|| {
-                if use_shallow_decl_routes {
-                    self.dependency_resolutions_from_external_type_analysis_in_view(
-                        canonical_id,
-                        external_type_analysis.as_ref(),
-                        store_view,
-                    )
-                } else {
-                    rustc_hash::FxHashMap::default()
-                }
-            });
+            .unwrap_or_default();
 
         let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
         let resolver = HostShallowImportResolver {
@@ -3218,12 +3208,13 @@ impl VerterHost {
             ),
         );
 
-        let mut snapshot = self.build_snapshot_from_source_state(
+        // Build snapshot without resolving imports (no recursion).
+        // Import resolution happens later in get_raw_analysis_snapshot_in_view.
+        let snapshot = self.build_snapshot_from_source_state(
             canonical_id,
             &raw_source,
             cached_parse.as_deref(),
         );
-        self.resolve_snapshot_imports_in_view(canonical_id, &mut snapshot, store_view);
         let snapshot = Arc::new(snapshot);
 
         let script_analysis = self
@@ -3446,17 +3437,23 @@ impl VerterHost {
             .unwrap_or_else(|| dep_canonical.to_string());
 
         // Check ImportedRootDb first (shared validated cache).
-        if let Some(sv) = store_view {
-            if let Some(cached) = self.resolver.runtime.imported_roots.get(
+        let cached_root = if let Some(sv) = store_view {
+            self.resolver.runtime.imported_roots.get(
                 normalized_canonical.as_str(),
                 imported_name,
                 sv,
-            ) {
-                if let Some(tuple) = cached.as_tuple() {
-                    return tuple;
-                }
-                return (normalized_canonical, imported_name.to_string());
+            )
+        } else {
+            self.resolver
+                .runtime
+                .imported_roots
+                .get_any(normalized_canonical.as_str(), imported_name)
+        };
+        if let Some(cached) = cached_root {
+            if let Some(tuple) = cached.as_tuple() {
+                return tuple;
             }
+            return (normalized_canonical, imported_name.to_string());
         }
 
         let _ = self.ensure_module_facts_in_view(normalized_canonical.as_str(), store_view);
@@ -3764,46 +3761,6 @@ impl VerterHost {
             store_definitions: Arc::new(script_analysis.store_definitions),
             is_typescript: script_analysis.is_typescript,
         }
-    }
-
-    fn dependency_resolutions_from_external_type_analysis_in_view(
-        &self,
-        canonical_id: &str,
-        analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
-        let mut specifiers = rustc_hash::FxHashSet::default();
-
-        for binding in &analysis.extracted.bindings {
-            specifiers.insert(binding.source.clone());
-        }
-        for binding in &analysis.extracted.reexport_bindings {
-            specifiers.insert(binding.source.clone());
-        }
-        for source in &analysis.extracted.wildcard_reexport_sources {
-            specifiers.insert(source.clone());
-        }
-
-        specifiers
-            .into_iter()
-            .map(|specifier| {
-                let resolved_canonical_id = self.resolve_type_dependency_canonical_shallow_in_view(
-                    canonical_id,
-                    &specifier,
-                    store_view,
-                );
-                let possible_canonical_ids =
-                    resolved_canonical_id.iter().cloned().collect::<Vec<_>>();
-                (
-                    specifier.clone(),
-                    DependencyResolution {
-                        specifier,
-                        resolved_canonical_id,
-                        possible_canonical_ids,
-                    },
-                )
-            })
-            .collect()
     }
 
     /// Read dependency resolutions: store_view first, then cached data, then
@@ -4191,14 +4148,17 @@ impl VerterHost {
         let canonical_id = normalized_canonical_id.as_ref();
 
         // ModuleFactsDb fast path.
-        if let Some(sv) = store_view {
-            if let Some(facts) = self.resolver.runtime.module_facts.get(canonical_id, sv) {
-                return Some((
-                    Arc::clone(&facts.raw_source),
-                    facts.cached_parse.clone(),
-                    facts.whole_hash,
-                ));
-            }
+        let cached_facts = if let Some(sv) = store_view {
+            self.resolver.runtime.module_facts.get(canonical_id, sv)
+        } else {
+            self.resolver.runtime.module_facts.get_any(canonical_id)
+        };
+        if let Some(facts) = cached_facts {
+            return Some((
+                Arc::clone(&facts.raw_source),
+                facts.cached_parse.clone(),
+                facts.whole_hash,
+            ));
         }
 
         #[cfg(feature = "scheduler")]
