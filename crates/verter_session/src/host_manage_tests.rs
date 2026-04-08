@@ -1,7 +1,4 @@
 use super::*;
-use crate::resolver_core::{
-    choose_preferred_imported_type_body, imported_type_body_specificity_score,
-};
 
 use std::sync::Arc;
 use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
@@ -256,34 +253,6 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
     }
 }
 
-fn object_with_props(names: &[&str]) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use verter_semantic::analysis::type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
-    };
-
-    TypeExpr::Object(Arc::new(ObjectExpr {
-        properties: names
-            .iter()
-            .map(|name| {
-                ObjectMember::Property(ObjectProperty {
-                    name: (*name).to_string(),
-                    ty: TypeExpr::Primitive(PrimitiveName::String),
-                    optional: false,
-                    readonly: false,
-                })
-            })
-            .collect(),
-    }))
-}
-
-fn empty_object() -> verter_semantic::analysis::type_expr::TypeExpr {
-    verter_semantic::analysis::type_expr::TypeExpr::Object(std::sync::Arc::new(
-        verter_semantic::analysis::type_expr::ObjectExpr {
-            properties: Vec::new(),
-        },
-    ))
-}
-
 fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
     DependencyResolution {
         specifier: specifier.to_string(),
@@ -422,130 +391,6 @@ defineProps<Props>()
     assert!(
         !extracted.contains("<template>"),
         "template markup must not be passed into type evaluation, got: {extracted}"
-    );
-}
-
-#[test]
-fn choose_preferred_imported_type_body_prefers_more_specific_shapes() {
-    let resolved_body = Some(verter_semantic::analysis::type_expr::TypeExpr::named(
-        "Props",
-    ));
-    let decl_body = Some(object_with_props(&["label", "count"]));
-
-    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-    assert_eq!(
-        chosen, decl_body,
-        "the body with the richer concrete surface should win"
-    );
-}
-
-#[test]
-fn choose_preferred_imported_type_body_keeps_existing_body_on_equal_specificity() {
-    let left = object_with_props(&["label"]);
-    let right = object_with_props(&["count"]);
-
-    let chosen = choose_preferred_imported_type_body(Some(left.clone()), Some(right));
-
-    assert_eq!(
-        chosen,
-        Some(left),
-        "equal scores should preserve the first successful resolution"
-    );
-}
-
-#[test]
-fn choose_preferred_imported_type_body_rejects_empty_object_placeholders() {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
-
-    let resolved_body = Some(empty_object());
-    let decl_body = Some(TypeExpr::union(vec![
-        TypeExpr::Literal(LiteralValue::String("to".to_string())),
-        TypeExpr::Literal(LiteralValue::String("replace".to_string())),
-    ]));
-
-    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-    assert_eq!(
-        chosen, decl_body,
-        "empty-object placeholders must not outrank concrete literal-union aliases"
-    );
-}
-
-#[test]
-fn imported_type_body_specificity_prefers_object_surfaces_over_refs_and_typeof() {
-    let typeof_score = imported_type_body_specificity_score(
-        &verter_semantic::analysis::type_expr::TypeExpr::TypeOf(
-            verter_semantic::analysis::type_expr::ValueRef {
-                path: vec!["theme".to_string()],
-            },
-        ),
-    );
-    let ref_score = imported_type_body_specificity_score(
-        &verter_semantic::analysis::type_expr::TypeExpr::named("Props"),
-    );
-    let object_score = imported_type_body_specificity_score(&object_with_props(&["label"]));
-
-    assert!(
-        typeof_score < ref_score && ref_score < object_score,
-        "specificity ordering should keep typeof < ref < object, got typeof={typeof_score} ref={ref_score} object={object_score}"
-    );
-}
-
-#[test]
-fn imported_type_body_specificity_rewards_richer_object_surfaces() {
-    let small = imported_type_body_specificity_score(&object_with_props(&["label"]));
-    let large = imported_type_body_specificity_score(&object_with_props(&["label", "count"]));
-
-    assert!(
-        large > small,
-        "object surfaces with more top-level members should score higher, got small={small} large={large}"
-    );
-}
-
-#[test]
-fn choose_preferred_imported_type_body_prefers_richer_object_surface_with_nested_members() {
-    let resolved_body = Some(object_with_props(&["next"]));
-    let decl_body = Some(verter_semantic::analysis::type_expr::TypeExpr::Object(
-        std::sync::Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
-            properties: vec![
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "base".to_string(),
-                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                            verter_semantic::analysis::type_expr::PrimitiveName::String,
-                        ),
-                        optional: true,
-                        readonly: false,
-                    },
-                ),
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "current".to_string(),
-                        ty: verter_semantic::analysis::type_expr::TypeExpr::named("T"),
-                        optional: true,
-                        readonly: false,
-                    },
-                ),
-                verter_semantic::analysis::type_expr::ObjectMember::Property(
-                    verter_semantic::analysis::type_expr::ObjectProperty {
-                        name: "next".to_string(),
-                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                            verter_semantic::analysis::type_expr::PrimitiveName::Number,
-                        ),
-                        optional: true,
-                        readonly: false,
-                    },
-                ),
-            ],
-        }),
-    ));
-
-    let chosen = choose_preferred_imported_type_body(resolved_body, decl_body.clone());
-
-    assert_eq!(
-        chosen, decl_body,
-        "a richer concrete object surface should beat a smaller local-eval object even when one member type stays symbolic"
     );
 }
 

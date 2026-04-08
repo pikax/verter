@@ -1009,7 +1009,6 @@ export type FancyProps = Prettify<{ open: boolean }>
     }
 
     #[test]
-    #[ignore = "TODO(follow-up): value barrel routing via resolve_value_export_target_in_view needs adaptation after ImportedDependencyCacheEntry deletion"]
     fn prepared_value_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),

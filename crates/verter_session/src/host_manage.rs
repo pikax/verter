@@ -24,8 +24,8 @@ use crate::resolver_core::{
     resolve_named_export_from_graph as resolver_resolve_named_export_from_graph,
     resolve_usage_prop_type, DynamicRootCandidate, ExportGraphFileKind, ExportGraphResolver,
     ExportSurface, FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedRuntimeValueResolver, ImportedSymbolDependency, RequestSource,
-    ResolvedConsumedBindings, SingleflightRole, StoreView,
+    FallthroughResolverHost, ImportedRuntimeValueResolver, RequestSource, ResolvedConsumedBindings,
+    SingleflightRole, StoreView,
 };
 use crate::resolver_store::HostStoreView;
 use crate::shared::{read_lock, write_lock};
@@ -944,7 +944,19 @@ fn log_snapshot_debug(
     ));
 }
 
-pub(crate) type ComputedEvaluatedTypes = crate::resolver_core::ComputedEvaluatedTypes;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ImportedSymbolDependency {
+    pub(crate) local_name: String,
+    pub(crate) canonical_id: String,
+    pub(crate) exported_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ComputedEvaluatedTypes {
+    pub(crate) evaluated_types:
+        Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub(crate) discovered_dependencies: std::collections::BTreeSet<String>,
+}
 
 /// Host-backed import resolver for `ShallowFileState` construction.
 ///
@@ -3861,15 +3873,8 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
         if self
-            .get_raw_analysis_snapshot_in_view(canonical_source, store_view)
-            .is_some_and(|snapshot| {
-                snapshot.imports.iter().any(|import| {
-                    import
-                        .bindings
-                        .iter()
-                        .any(|binding| binding.name == resolved_name)
-                })
-            })
+            .ensure_module_facts_in_view(canonical_source, store_view)
+            .is_some_and(|facts| facts.shallow_state.import_target(resolved_name).is_some())
         {
             return None;
         }

@@ -4535,7 +4535,7 @@ defineProps<Local>()
 // ===========================================================================
 
 #[test]
-fn component_meta_query_engine_caches_prepared_alias_lookups() {
+fn component_meta_query_engine_resolves_imported_registry_symbols_from_db_facts() {
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { msg: string }")
@@ -4560,39 +4560,48 @@ defineProps<Props>()
         &owner_solver_host,
     );
 
-    // First lookup
-    let result1 = query_engine.resolve_prepared_alias(
-        "/src/types.ts",
-        "Props",
-        &crate::resolver_core::RouteDemand::Whole,
-    );
-    assert!(result1.is_some(), "Props should resolve from types.ts");
+    let result1 = query_engine
+        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .expect("Props should resolve from DB-backed prepared declarations");
+    let result2 = query_engine
+        .resolve_imported_registry_symbol("/src/types.ts", "Props")
+        .expect("repeated resolution should stay stable");
 
-    // Second lookup — should hit cache (routes_count stays at 1)
-    let result2 = query_engine.resolve_prepared_alias(
-        "/src/types.ts",
-        "Props",
-        &crate::resolver_core::RouteDemand::Whole,
+    assert_eq!(
+        result1.canonical_id, "/src/types.ts",
+        "resolved registry symbols should point at the defining file"
     );
     assert_eq!(
-        format!("{:?}", result1),
-        format!("{:?}", result2),
-        "second lookup should return cached result"
+        result1.exported_name, "Props",
+        "resolved registry symbols should retain the defining export name"
     );
     assert_eq!(
-        query_engine.routes_count(),
-        1,
-        "should have exactly one cached route"
+        result1.body, result2.body,
+        "repeated DB-backed resolutions should preserve the prepared body"
+    );
+    assert_eq!(
+        result1.canonical_dependencies, result2.canonical_dependencies,
+        "repeated DB-backed resolutions should preserve tracked dependencies"
+    );
+    assert!(
+        result1.canonical_dependencies.contains("/src/types.ts"),
+        "registry resolution should track the defining file as a dependency"
     );
 }
 
 #[test]
-fn component_meta_query_engine_keys_prepared_alias_cache_by_route() {
+fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_export() {
     let project = make_project();
     project
         .upsert_base(
             "/src/types.ts",
             "export interface Props { primary: string; secondary: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/index.ts",
+            "export { Props as ButtonProps } from './types'",
         )
         .unwrap();
 
@@ -4605,33 +4614,28 @@ fn component_meta_query_engine_keys_prepared_alias_cache_by_route() {
         &owner_solver_host,
     );
 
-    let whole = query_engine.resolve_prepared_alias(
-        "/src/types.ts",
-        "Props",
-        &crate::resolver_core::RouteDemand::Whole,
-    );
-    let narrow = query_engine.resolve_prepared_alias(
-        "/src/types.ts",
-        "Props",
-        &crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into()]),
-    );
+    let resolved = query_engine
+        .resolve_imported_registry_symbol("/src/index.ts", "ButtonProps")
+        .expect("barrel export should resolve through DB-backed route facts");
 
-    assert!(whole.is_some(), "whole route should resolve");
-    assert!(narrow.is_some(), "narrow member route should resolve");
     assert_eq!(
-        query_engine.routes_count(),
-        2,
-        "whole and narrow routes should occupy separate query-engine cache entries",
+        (resolved.canonical_id.as_str(), resolved.exported_name.as_str()),
+        ("/src/types.ts", "Props"),
+        "registry resolution should read the defining export directly instead of keeping a query-local alias payload",
     );
 }
 
 #[test]
-fn component_meta_query_engine_can_resolve_filters_builtins() {
+fn component_meta_query_engine_can_resolve_registry_symbols_filters_builtins() {
     let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Props { msg: string }")
+        .unwrap();
     project
         .upsert_base(
             "/src/App.vue",
             r#"<script setup lang="ts">
+import type { Props } from './types'
 defineProps<{ x: string }>()
 </script>
 <template><div /></template>"#,
@@ -4649,16 +4653,57 @@ defineProps<{ x: string }>()
 
     // Built-in names should NOT be resolvable
     assert!(
-        !query_engine.can_resolve("/src/App.vue", "Partial", None),
+        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Partial", None),
         "Partial is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve("/src/App.vue", "Array", None),
+        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Array", None),
         "Array is a builtin and should not be resolvable as a registry ref"
     );
     assert!(
-        !query_engine.can_resolve("/src/App.vue", "Record", None),
+        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Record", None),
         "Record is a builtin and should not be resolvable as a registry ref"
+    );
+    assert!(
+        query_engine.can_resolve_registry_symbol("/src/App.vue", "Props", Some("/src/types.ts")),
+        "imported registry refs should resolve from DB-backed prepared declarations"
+    );
+    assert!(
+        !query_engine.can_resolve_registry_symbol("/src/App.vue", "Missing", Some("/src/types.ts")),
+        "missing imported registry refs should still report unresolved"
+    );
+}
+
+#[test]
+fn local_type_declaration_id_ignores_import_bindings_from_module_facts() {
+    let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Props { msg: string }")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+type Local = { count: number }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+
+    assert!(
+        host.local_type_declaration_id_in_view("/src/App.vue", "Props", Some(&store_view))
+            .is_none(),
+        "imported names should not be treated as local declarations when module facts already expose the import target",
+    );
+    assert!(
+        host.local_type_declaration_id_in_view("/src/App.vue", "Local", Some(&store_view))
+            .is_some(),
+        "owner-local declarations should still resolve through the cached eval env",
     );
 }
 

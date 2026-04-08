@@ -852,8 +852,6 @@ impl VerterHost {
             store_view,
             owner_engine,
         );
-        // Pre-seed routes for initial registry entries
-        query_engine.pre_seed_routes(&parts.resolved_type_registry_meta, canonical);
         self.append_component_meta_registry_entries(
             canonical,
             &snapshot,
@@ -1060,35 +1058,31 @@ impl VerterHost {
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let Some((resolved_canonical_id, resolved_exported_name, prepared)) = query_engine
-                .resolve_prepared_alias(
-                    declaration_source,
-                    requested_exported_name,
-                    &crate::resolver_core::RouteDemand::Whole,
-                )
+            let Some(resolved) = query_engine
+                .resolve_imported_registry_symbol(declaration_source, requested_exported_name)
             else {
                 continue;
             };
             track_component_meta_dependency(
                 tracked_dependencies,
                 owner_canonical,
-                resolved_canonical_id.as_str(),
+                resolved.canonical_id.as_str(),
             );
-            for dependency in &prepared.canonical_dependencies {
+            for dependency in &resolved.canonical_dependencies {
                 track_component_meta_dependency(
                     tracked_dependencies,
                     owner_canonical,
                     dependency.as_str(),
                 );
             }
-            meta.declaration.canonical_source = resolved_canonical_id.clone();
+            meta.declaration.canonical_source = resolved.canonical_id.clone();
             let materialized = materialize_component_meta_registry_candidate(
                 query_engine,
-                resolved_canonical_id.as_str(),
-                resolved_exported_name.as_str(),
-                Some(&prepared.body),
+                resolved.canonical_id.as_str(),
+                resolved.exported_name.as_str(),
+                Some(&resolved.body),
             )
-            .unwrap_or_else(|| prepared.body.clone());
+            .unwrap_or_else(|| resolved.body.clone());
             entry.type_expr = choose_preferred_component_meta_registry_candidate(
                 Some(entry.type_expr.clone()),
                 Some(materialized),
@@ -1199,7 +1193,7 @@ impl VerterHost {
             if published_names.contains(&type_name) {
                 continue;
             }
-            if !query_engine.can_resolve(
+            if !query_engine.can_resolve_registry_symbol(
                 owner_canonical,
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 pending_source_hint,
@@ -1214,19 +1208,15 @@ impl VerterHost {
                     continue;
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
-                if let Some((resolved_canonical_id, resolved_exported_name, prepared)) =
-                    query_engine.resolve_prepared_alias(
-                        source_hint,
-                        requested_exported_name,
-                        &pending_route,
-                    )
+                if let Some(resolved) = query_engine
+                    .resolve_imported_registry_symbol(source_hint, requested_exported_name)
                 {
                     track_component_meta_dependency(
                         tracked_dependencies,
                         owner_canonical,
-                        resolved_canonical_id.as_str(),
+                        resolved.canonical_id.as_str(),
                     );
-                    for dependency in &prepared.canonical_dependencies {
+                    for dependency in &resolved.canonical_dependencies {
                         track_component_meta_dependency(
                             tracked_dependencies,
                             owner_canonical,
@@ -1234,11 +1224,11 @@ impl VerterHost {
                         );
                     }
                     let mut declaration = query_engine.resolve_type_declaration(
-                        resolved_canonical_id.as_str(),
-                        resolved_exported_name.as_str(),
+                        resolved.canonical_id.as_str(),
+                        resolved.exported_name.as_str(),
                     );
                     if declaration.canonical_source.is_empty() {
-                        declaration.canonical_source = resolved_canonical_id.clone();
+                        declaration.canonical_source = resolved.canonical_id.clone();
                     }
                     track_component_meta_dependency(
                         tracked_dependencies,
@@ -1247,11 +1237,11 @@ impl VerterHost {
                     );
                     let type_expr = materialize_component_meta_registry_candidate(
                         query_engine,
-                        resolved_canonical_id.as_str(),
-                        resolved_exported_name.as_str(),
-                        Some(&prepared.body),
+                        resolved.canonical_id.as_str(),
+                        resolved.exported_name.as_str(),
+                        Some(&resolved.body),
                     )
-                    .unwrap_or_else(|| prepared.body.clone());
+                    .unwrap_or_else(|| resolved.body.clone());
                     upsert_component_meta_registry_entry(
                         owner_canonical,
                         resolved_type_registry,
@@ -1865,19 +1855,6 @@ fn component_meta_ref_resolves_to_package(
     name: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> bool {
-    if engine
-        .resolve_prepared_alias(
-            scope_canonical_id,
-            name,
-            &crate::resolver_core::RouteDemand::Whole,
-        )
-        .is_some_and(|(resolved_canonical_id, _, _)| {
-            resolved_canonical_id.contains("/node_modules/")
-        })
-    {
-        return true;
-    }
-
     let declaration = engine.resolve_type_declaration(scope_canonical_id, name);
     declaration.canonical_source.contains("/node_modules/")
 }

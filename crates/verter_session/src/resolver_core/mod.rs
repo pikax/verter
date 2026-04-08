@@ -15,7 +15,6 @@ pub mod external_type_frontier;
 mod fallthrough;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
-mod imported_type_alias;
 pub mod prepared_decl;
 pub mod resolver_runtime;
 pub mod route_demand;
@@ -81,10 +80,6 @@ pub use fallthrough::{
     ResolvedFallthroughSurface,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
-pub use imported_type_alias::{
-    choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    ComputedEvaluatedTypes, ImportedSymbolDependency,
-};
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,
     prepare_exported_value_decl, prepare_local_type_decl, prepare_local_value_decl,

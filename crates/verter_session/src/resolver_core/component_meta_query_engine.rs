@@ -19,7 +19,6 @@ use verter_semantic::analysis::type_solver::query_engine::{ProjectedSurface, Typ
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::ResolvedTypeDeclaration;
-use super::route_demand::RouteDemand;
 use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::resolver_store::HostStoreView;
@@ -29,13 +28,12 @@ use crate::VerterHost;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
-pub struct RoutedPreparedAlias {
+pub struct ResolvedImportedRegistrySymbol {
+    pub canonical_id: String,
+    pub exported_name: String,
     pub body: TypeExpr,
     pub canonical_dependencies: BTreeSet<String>,
 }
-
-/// Cached import route: (resolved_canonical_id, resolved_exported_name, routed prepared decl).
-type PreparedAliasEntry = Option<(String, String, RoutedPreparedAlias)>;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ScopedSolveKey {
@@ -61,8 +59,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
-    /// Cached import-route resolutions.
-    routes: FxHashMap<(String, String, RouteDemand), PreparedAliasEntry>,
     /// Cached type declarations.
     declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
     /// Cached resolvability checks.
@@ -115,7 +111,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             scoped_cache: FxHashMap::default(),
-            routes: FxHashMap::default(),
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
@@ -134,7 +129,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine,
             scoped_cache: FxHashMap::default(),
-            routes: FxHashMap::default(),
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
@@ -158,49 +152,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         filter_identity_ref(&result, requested_name)
     }
 
-    /// Pre-seed import-route resolutions for the initial registry entries from
-    /// imported sources.
-    pub fn pre_seed_routes(
-        &mut self,
-        registry_meta: &[super::component_meta::ResolvedTypeRegistryMeta],
-        owner_canonical: &str,
-    ) {
-        for meta in registry_meta {
-            let source = meta.declaration.canonical_source.as_str();
-            if source.is_empty() || source == owner_canonical {
-                continue;
-            }
-            let name = if meta.declaration.resolved_name.is_empty() {
-                meta.name.as_str()
-            } else {
-                meta.declaration.resolved_name.as_str()
-            };
-            let _ = self.resolve_prepared_alias(source, name, &RouteDemand::Whole);
-        }
-    }
-
-    /// Resolve a prepared import alias, cached per query.
-    pub fn resolve_prepared_alias(
+    pub fn resolve_imported_registry_symbol(
         &mut self,
         canonical_id: &str,
         exported_name: &str,
-        route: &RouteDemand,
-    ) -> PreparedAliasEntry {
-        let key = (
-            canonical_id.to_string(),
-            exported_name.to_string(),
-            route.clone(),
-        );
-        if let Some(cached) = self.routes.get(&key) {
-            return cached.clone();
-        }
-        if !self.allow_wildcard_route() {
-            return None;
-        }
-        let result =
-            resolve_routed_prepared_alias(self.host, canonical_id, exported_name, self.store_view);
-        self.routes.insert(key, result.clone());
-        result
+    ) -> Option<ResolvedImportedRegistrySymbol> {
+        resolve_imported_registry_symbol_with_budget(
+            self.host,
+            canonical_id,
+            exported_name,
+            self.store_view,
+            || self.allow_wildcard_route(),
+        )
     }
 
     /// Resolve a type declaration, cached per query.
@@ -224,7 +187,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Check if a registry ref can resolve, cached per query.
-    pub fn can_resolve(
+    pub fn can_resolve_registry_symbol(
         &mut self,
         owner_canonical: &str,
         exported_name: &str,
@@ -247,7 +210,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             true
         } else {
-            self.resolve_prepared_alias(source_key, exported_name, &RouteDemand::Whole)
+            self.resolve_imported_registry_symbol(source_key, exported_name)
                 .is_some()
         };
         self.resolvable.insert(key, resolved);
@@ -346,33 +309,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         filtered
     }
 
-    /// Solve an arbitrary `TypeExpr` in a declaration scope, sharing the
-    /// request-scoped engine. Used by the materialization tree walker so
-    /// that repeated solves within one component-meta request benefit from
-    /// the shared projection and instantiation caches.
-    pub fn solve_expr_in_scope(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
-        assert_structural_slow_lane_allowed();
-        let owned_view;
-        let store_view = if let Some(view) = self.store_view {
-            Some(view)
-        } else {
-            owned_view = self.host.resolver_store_view();
-            Some(&owned_view)
-        };
-        let solver_host =
-            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
-        let (result, _trace) =
-            self.owner_engine
-                .solve_scoped(&solver_host, scope_canonical_id, expr);
-        result.value
-    }
-
     pub fn scoped_cache_len(&self) -> usize {
         self.scoped_cache.len()
-    }
-
-    pub fn routes_count(&self) -> usize {
-        self.routes.len()
     }
 
     pub fn total_steps(&self) -> u64 {
@@ -901,23 +839,11 @@ fn is_builtin_name(name: &str) -> bool {
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
 }
 
-fn resolve_routed_prepared_alias(
-    host: &VerterHost,
-    canonical_id: &str,
-    exported_name: &str,
-    store_view: Option<&HostStoreView>,
-) -> PreparedAliasEntry {
-    let (resolved_id, resolved_name) = if host
-        .prepared_type_decl_in_view(canonical_id, exported_name, store_view)
-        .is_some()
-    {
-        (canonical_id.to_string(), exported_name.to_string())
-    } else {
-        host.resolve_named_type_export_target_in_view(canonical_id, exported_name, store_view)?
-    };
-
-    let prepared = host.prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)?;
-    let mut canonical_dependencies = BTreeSet::from([resolved_id.clone()]);
+fn prepared_type_decl_canonical_dependencies(
+    resolved_id: &str,
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+) -> BTreeSet<String> {
+    let mut canonical_dependencies = BTreeSet::from([resolved_id.to_string()]);
     if let Some((defining_file, _)) = prepared.cache_deps.defining_file.as_ref() {
         canonical_dependencies.insert(defining_file.clone());
     }
@@ -934,13 +860,40 @@ fn resolve_routed_prepared_alias(
             canonical_dependencies.insert(identity.canonical_id.clone());
         }
     }
+    canonical_dependencies
+}
 
-    Some((
-        resolved_id,
-        resolved_name,
-        RoutedPreparedAlias {
-            body: prepared.body.clone(),
-            canonical_dependencies,
-        },
-    ))
+fn resolve_imported_registry_symbol_with_budget<F>(
+    host: &VerterHost,
+    canonical_id: &str,
+    exported_name: &str,
+    store_view: Option<&HostStoreView>,
+    mut allow_route: F,
+) -> Option<ResolvedImportedRegistrySymbol>
+where
+    F: FnMut() -> bool,
+{
+    let (resolved_id, resolved_name) = if host
+        .prepared_type_decl_in_view(canonical_id, exported_name, store_view)
+        .is_some()
+    {
+        (canonical_id.to_string(), exported_name.to_string())
+    } else {
+        if !allow_route() {
+            return None;
+        }
+        host.resolve_named_type_export_target_in_view(canonical_id, exported_name, store_view)?
+    };
+
+    let prepared = host.prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)?;
+
+    Some(ResolvedImportedRegistrySymbol {
+        canonical_id: resolved_id.clone(),
+        exported_name: resolved_name,
+        body: prepared.body.clone(),
+        canonical_dependencies: prepared_type_decl_canonical_dependencies(
+            resolved_id.as_str(),
+            prepared.as_ref(),
+        ),
+    })
 }
