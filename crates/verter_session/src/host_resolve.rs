@@ -3202,7 +3202,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
                 .module_facts
                 .get(canonical.as_str(), sv)
             {
-                if !facts.shallow_state.symbols.is_empty() || !self.materialize_symbols {
+                if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
                     if facts.shallow_state.has_wildcard_reexports() {
                         self.host
                             .provenance
@@ -3218,7 +3218,7 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
         let facts = self
             .host
             .ensure_module_facts_in_view(canonical.as_str(), self.store_view)?;
-        if !facts.shallow_state.symbols.is_empty() || !self.materialize_symbols {
+        if facts.shallow_state.has_resolvable_surface() || !self.materialize_symbols {
             if facts.shallow_state.has_wildcard_reexports() {
                 self.host
                     .provenance

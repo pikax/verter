@@ -548,6 +548,35 @@ impl ShallowFileState {
     }
 
     // -----------------------------------------------------------------------
+    // Emptiness check
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` when the shallow state carries no meaningful content
+    /// (no type symbols, no value symbols, no exports, no wildcard reexports,
+    /// and no import targets). A non-empty state is worth caching and
+    /// returning to callers even when `symbols` alone is empty (e.g. a
+    /// barrel file with only reexports, or an SFC with only value bindings).
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+            && self.value_symbols.is_empty()
+            && self.exports.is_empty()
+            && self.wildcard_reexports.is_empty()
+            && self.import_targets.is_empty()
+    }
+
+    /// Returns `true` when this state has content that the frontier can
+    /// actually resolve against: local type/value symbols, direct exports,
+    /// or wildcard reexport entries. Files that only contain imports but no
+    /// exports or symbols should not be handed to the frontier — they have
+    /// nothing to contribute to export resolution.
+    pub fn has_resolvable_surface(&self) -> bool {
+        !self.symbols.is_empty()
+            || !self.value_symbols.is_empty()
+            || !self.exports.is_empty()
+            || !self.wildcard_reexports.is_empty()
+    }
+
+    // -----------------------------------------------------------------------
     // Export routing
     // -----------------------------------------------------------------------
 

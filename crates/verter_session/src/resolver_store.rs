@@ -114,7 +114,7 @@ impl HostStoreView {
                 .entry(canonical_id.clone())
                 .or_insert(facts.whole_hash);
             // Insert Route fact from shallow state.
-            if !facts.shallow_state.symbols.is_empty() {
+            if facts.shallow_state.has_resolvable_surface() {
                 view.derived_hashes.insert(
                     (
                         canonical_id.clone(),

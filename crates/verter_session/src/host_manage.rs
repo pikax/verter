@@ -3122,7 +3122,7 @@ impl VerterHost {
                 .get_any(resolved_canonical_id.as_str())
         };
         if let Some(facts) = cached_facts {
-            if !facts.shallow_state.symbols.is_empty() {
+            if facts.shallow_state.has_resolvable_surface() {
                 return Some(facts.shallow_state.clone());
             }
         }
@@ -3156,7 +3156,23 @@ impl VerterHost {
             self.resolver.runtime.module_facts.get_any(canonical_id)
         };
         if let Some(facts) = cached {
-            return Some(facts);
+            if store_view.is_some() {
+                // Store-view validated — the cache is authoritative.
+                return Some(facts);
+            }
+            // Without a store_view the permissive cache does not check
+            // whole_hash validity. Read the authoritative source to verify
+            // the cached facts are still current. This avoids returning
+            // stale data after an upsert that changed the file content.
+            let current_hash = self
+                .read_analysis_source(canonical_id)
+                .map(|src| crate::hash::hash_16(src.as_bytes()));
+            if current_hash.is_some_and(|h| h == facts.whole_hash) {
+                return Some(facts);
+            }
+            // File no longer exists — the cached facts are stale.
+            current_hash?;
+            // Hash mismatch — fall through to re-materialize.
         }
 
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
@@ -3187,9 +3203,11 @@ impl VerterHost {
             &eval_source,
         );
 
-        // Use store_view dep resolutions if available; otherwise use empty.
-        // Do NOT call dependency_resolutions_from_external_type_analysis_in_view
-        // here — it can recurse through import resolution.
+        // Use store_view dep resolutions if available; otherwise resolve
+        // specifiers via workspace (non-recursive — just path resolution).
+        // Use store_view dep resolutions if available; otherwise empty.
+        // The frontier adapter handles empty canonical_ids in
+        // ShallowFileState by falling back to resolve_import_canonical.
         let dependency_resolutions = store_view
             .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
             .unwrap_or_default();
@@ -3208,8 +3226,11 @@ impl VerterHost {
             ),
         );
 
-        // Build snapshot without resolving imports (no recursion).
-        // Import resolution happens later in get_raw_analysis_snapshot_in_view.
+        // Build snapshot without resolving imports. Import resolution
+        // happens when get_raw_analysis_snapshot_in_view reads the facts
+        // and applies resolve_snapshot_imports_in_view on the clone.
+        // This avoids eagerly resolving ordinary imports that are irrelevant
+        // to the export surface, and prevents recursive materialization.
         let snapshot = self.build_snapshot_from_source_state(
             canonical_id,
             &raw_source,
@@ -3217,10 +3238,28 @@ impl VerterHost {
         );
         let snapshot = Arc::new(snapshot);
 
+        // Prefer the scheduler's file state for script_analysis (it may have
+        // richer compilation context), but fall back to the snapshot's data
+        // for workspace-only files that are not in the scheduler.
         let script_analysis = self
             .effective_file_state(canonical_id, None)
             .filter(|state| state.whole_hash == whole_hash)
-            .map(|state| Arc::new(state.script_analysis));
+            .map(|state| Arc::new(state.script_analysis))
+            .or_else(|| {
+                Some(Arc::new(
+                    verter_semantic::analysis::ScriptAnalysisSnapshot {
+                        imports: snapshot.imports.clone(),
+                        module_references: snapshot.module_references.as_ref().clone(),
+                        bindings: snapshot.bindings.clone(),
+                        macros: snapshot.macros.as_ref().clone(),
+                        macro_type_deps: snapshot.macro_type_deps.as_ref().clone(),
+                        flags: verter_semantic::analysis::AnalysisFlags::from_bits_truncate(
+                            snapshot.script_flags,
+                        ),
+                        ..Default::default()
+                    },
+                ))
+            });
         let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
 
         let facts = crate::resolver_core::ModuleFacts {
