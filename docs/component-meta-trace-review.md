@@ -19,7 +19,10 @@
    - Batch 1 cannot be accepted until traces are regenerated from current code into a new artifact directory.
 
 2. Desired trace specs for the active batch are missing.
-   - The validator exists in `packages/benchmark/src/trace-validator.ts` and has coverage in `packages/benchmark/src/trace-validator.spec.ts`.
+   - The validator logic currently exists only as local untracked files:
+     - `packages/benchmark/src/trace-validator.ts`
+     - `packages/benchmark/src/trace-validator.spec.ts`
+   - Because those files are not in git, they are not yet a committed campaign gate.
    - No committed per-component desired-trace specs were found for `Accordion.vue`, `Alert.vue`, or `App.vue`.
    - That means there is no normalized gate covering required patterns, forbidden patterns, max count thresholds, max duration thresholds, and assertion notes/rationale for Batch 1.
 
