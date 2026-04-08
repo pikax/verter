@@ -1666,19 +1666,11 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
     );
 
     let _seeded = host
-        .materialize_imported_dependency_state_in_view("/src/types.ts", None)
-        .expect("types dependency should seed imported state");
+        .ensure_module_facts_in_view("/src/types.ts", None)
+        .expect("types dependency should seed module facts");
     let decl = host
         .prepared_type_decl_in_view("/src/types.ts", "Props", None)
         .expect("seeded dependency should expose Props through the prepared declaration cache");
-
-    {
-        let mut cache = host.imported_dependency_cache.lock();
-        let entry = cache
-            .get_mut("/src/types.ts")
-            .expect("types dependency should stay cached");
-        Arc::make_mut(entry).snapshot = None;
-    }
 
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
@@ -1694,13 +1686,7 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
 
     assert_eq!(
         materialized, decl.body,
-        "registry decl solving should stay shallow when the imported cache does not own a snapshot yet",
-    );
-    assert!(
-        host.clone_current_imported_dependency_entry("/src/types.ts", None)
-            .and_then(|entry| entry.snapshot.clone())
-            .is_none(),
-        "registry decl solving must not bounce into raw snapshot building for imported files",
+        "registry decl solving should use cached prepared state from ModuleFactsDb",
     );
 }
 
@@ -4236,8 +4222,14 @@ fn resolve_component_meta_records_imported_root_proof_time_when_imports_are_foll
     });
     project
         .upsert_base(
+            "/src/base.ts",
+            "export type BaseProps = { foo: string; bar?: number }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
             "/src/types.ts",
-            "export type SharedProps = Partial<{ foo: string; bar?: number }>",
+            "import type { BaseProps } from './base'\nexport type SharedProps = Partial<BaseProps>",
         )
         .unwrap();
     project

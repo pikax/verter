@@ -1204,8 +1204,6 @@ pub(crate) struct FileEntry {
     /// Cached fallthrough resolution keyed by semantic fact versions and
     /// generic-root-propagation behavior.
     pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
-    /// Per-file export registry for non-scheduler hosts.
-    pub(crate) export_registry: Option<FileExportRegistry>,
 }
 
 impl FileMeta {
@@ -1299,12 +1297,6 @@ pub(crate) struct CompileCacheEntry {
     /// Eviction flag — when true, the file is invisible to host accessors
     /// but deps/aliases are preserved for old-state diffing during reload.
     pub(crate) evicted: bool,
-
-    // ── ExportRegistry: structural export graph index ──
-    /// Per-file export registry populated at analysis time from ExportSignature data.
-    /// Used by type resolution to follow export chains without re-parsing.
-    /// Does NOT store resolved type payloads — those stay in `resolved_type_cache`.
-    pub(crate) export_registry: Option<FileExportRegistry>,
 }
 
 /// Override-aware file state returned by `effective_file_state()`.
@@ -1392,44 +1384,6 @@ pub enum ExternalTypeResolveError {
     },
 }
 
-/// Progressive barrel export resolution state.
-/// Named export entry — stored in the per-file export registry.
-///
-/// Represents a single named export's structural routing information.
-/// Does NOT store resolved type payloads.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) enum ExportEntry {
-    /// The name is directly exported by this file — either a local declaration
-    /// (interface, type alias, enum, class, const, function) or a local re-export
-    /// of an imported value (`import { X } from './y'; export { X }`).
-    /// The type resolution pipeline will do actual OXC work only at this terminal.
-    Defined,
-    /// The name is re-exported from another file, possibly renamed.
-    /// e.g., `export { Props as IconProps } from './types'`
-    Alias {
-        source_specifier: String,
-        original_name: String,
-    },
-}
-
-/// Per-file export registry — populated at analysis time from ExportSignature data.
-///
-/// Purely structural: maps exported names to their routing information.
-/// Never stores resolved type payloads — those stay in `resolved_type_cache`.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) struct FileExportRegistry {
-    /// Whole-file source hash when this registry was built.
-    /// Used for freshness checks, including disk-only lazy-populated files.
-    pub source_hash: Hash16,
-    /// Named exports: name → Defined | Alias.
-    pub named: FxHashMap<String, ExportEntry>,
-    /// Wildcard re-export edges: source specifiers from `export * from`.
-    /// Preserves source declaration order for deterministic BFS resolution.
-    pub wildcard_edges: Vec<String>,
-}
-
 /// Key for the host-level resolved external type cache.
 ///
 /// Includes the dependency's source hash to guarantee freshness — when a
@@ -1499,8 +1453,6 @@ pub struct MetaProvenance {
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
-    pub raw_analysis_snapshot_cache_hits: std::sync::atomic::AtomicU64,
-    pub raw_analysis_snapshot_cache_misses: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
     pub resolver_node_cache_hits: std::sync::atomic::AtomicU64,
@@ -1530,8 +1482,6 @@ impl Default for MetaProvenance {
             component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64::new(0),
             get_analysis_calls: std::sync::atomic::AtomicU64::new(0),
             evaluate_types_calls: std::sync::atomic::AtomicU64::new(0),
-            raw_analysis_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            raw_analysis_snapshot_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_hits: std::sync::atomic::AtomicU64::new(0),
             resolved_external_type_cache_misses: std::sync::atomic::AtomicU64::new(0),
             resolver_node_cache_hits: std::sync::atomic::AtomicU64::new(0),
@@ -1572,14 +1522,6 @@ impl std::fmt::Debug for MetaProvenance {
             .field(
                 "evaluate_types_calls",
                 &self.evaluate_types_calls.load(Relaxed),
-            )
-            .field(
-                "raw_analysis_snapshot_cache_hits",
-                &self.raw_analysis_snapshot_cache_hits.load(Relaxed),
-            )
-            .field(
-                "raw_analysis_snapshot_cache_misses",
-                &self.raw_analysis_snapshot_cache_misses.load(Relaxed),
             )
             .field(
                 "resolved_external_type_cache_hits",
@@ -1667,10 +1609,6 @@ impl MetaProvenance {
                 .load(Relaxed),
             get_analysis_calls: self.get_analysis_calls.load(Relaxed),
             evaluate_types_calls: self.evaluate_types_calls.load(Relaxed),
-            raw_analysis_snapshot_cache_hits: self.raw_analysis_snapshot_cache_hits.load(Relaxed),
-            raw_analysis_snapshot_cache_misses: self
-                .raw_analysis_snapshot_cache_misses
-                .load(Relaxed),
             resolved_external_type_cache_hits: self.resolved_external_type_cache_hits.load(Relaxed),
             resolved_external_type_cache_misses: self
                 .resolved_external_type_cache_misses
@@ -1704,8 +1642,6 @@ impl MetaProvenance {
             .store(0, Relaxed);
         self.get_analysis_calls.store(0, Relaxed);
         self.evaluate_types_calls.store(0, Relaxed);
-        self.raw_analysis_snapshot_cache_hits.store(0, Relaxed);
-        self.raw_analysis_snapshot_cache_misses.store(0, Relaxed);
         self.resolved_external_type_cache_hits.store(0, Relaxed);
         self.resolved_external_type_cache_misses.store(0, Relaxed);
         self.resolver_node_cache_hits.store(0, Relaxed);
@@ -1760,8 +1696,6 @@ pub struct MetaProvenanceSnapshot {
     pub component_meta_resolved_state_recomputes: u64,
     pub get_analysis_calls: u64,
     pub evaluate_types_calls: u64,
-    pub raw_analysis_snapshot_cache_hits: u64,
-    pub raw_analysis_snapshot_cache_misses: u64,
     pub resolved_external_type_cache_hits: u64,
     pub resolved_external_type_cache_misses: u64,
     pub resolver_node_cache_hits: u64,

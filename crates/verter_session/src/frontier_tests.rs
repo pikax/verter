@@ -1480,62 +1480,6 @@ defineProps<Props>()
 }
 
 #[test]
-fn imported_dependency_cache_populates_prepared_decl_maps() {
-    let host = strict_host();
-
-    upsert_non_sfc(
-        &host,
-        "/src/types.ts",
-        r#"
-export interface Props { label: string }
-export const defaults: Props = { label: 'ok' }
-"#,
-    );
-    upsert_vue(
-        &host,
-        "/src/Consumer.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-    set_dep(&host, "/src/Consumer.vue", "./types", "/src/types.ts");
-
-    let _ = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
-    let prepared_type = host.prepared_type_decl_in_view("/src/types.ts", "Props", None);
-    let prepared_value = host.prepared_value_decl_in_view("/src/types.ts", "defaults", None);
-
-    assert!(
-        prepared_type.is_some(),
-        "prepared type decl should materialize on demand"
-    );
-    assert!(
-        prepared_value.is_some(),
-        "prepared value decl should materialize on demand"
-    );
-
-    assert!(
-        host.imported_dependency_cache
-            .lock()
-            .get("/src/types.ts")
-            .is_some(),
-        "imported dependency entry should exist"
-    );
-
-    assert!(
-        host.prepared_type_decl_in_view("/src/types.ts", "Props", None)
-            .is_some(),
-        "prepared type declarations should be available through the bundle cache"
-    );
-    assert!(
-        host.prepared_value_decl_in_view("/src/types.ts", "defaults", None)
-            .is_some(),
-        "prepared value declarations should be available through the bundle cache"
-    );
-}
-
-#[test]
 fn narrow_route_required_imports_follow_local_export_alias_and_cache_by_route() {
     let host = strict_host();
 
@@ -2197,10 +2141,11 @@ defineEmits<AccordionRootEmits>()
         "should produce evaluated types"
     );
     let reka_entry = host
-        .clone_current_imported_dependency_entry("/node_modules/reka-ui/types.d.ts", None)
+        .ensure_module_facts_in_view("/node_modules/reka-ui/types.d.ts", None)
         .expect("Accordion resolution should keep the imported reka-ui entry cached");
+    // snapshot is Arc<FileAnalysisSnapshot> (non-optional); check it's default/empty
     assert!(
-        reka_entry.snapshot.is_none(),
+        reka_entry.snapshot.bindings.is_empty() && reka_entry.snapshot.imports.is_empty(),
         "macro frontier warmup should keep imported declaration files on the shallow cache path",
     );
 }

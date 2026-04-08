@@ -83,19 +83,7 @@ impl HostStoreView {
                             hash_dependency_resolutions(&entry.dependency_resolutions),
                         );
                     }
-
-                    if let Some(registry) = entry.export_registry.as_ref() {
-                        view.derived_hashes.insert(
-                            (
-                                canonical_id.clone(),
-                                crate::resolver_core::DerivedFactKind::ExportRegistry,
-                            ),
-                            registry.source_hash,
-                        );
-                    }
                 }
-
-                view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
             }
         }
 
@@ -116,63 +104,28 @@ impl HostStoreView {
                         hash_dependency_resolutions(&entry.dependency_resolutions),
                     );
                 }
-
-                if let Some(registry) = entry.export_registry.as_ref() {
-                    view.derived_hashes.insert(
-                        (
-                            canonical_id.clone(),
-                            crate::resolver_core::DerivedFactKind::ExportRegistry,
-                        ),
-                        registry.source_hash,
-                    );
-                }
             }
             drop(files);
-
-            let mut canonical_ids: Vec<_> = view.whole_hashes.keys().cloned().collect();
-            canonical_ids.sort();
-            for canonical_id in canonical_ids {
-                view.snapshot_dependency_resolutions_if_missing(host, &canonical_id);
-            }
         }
 
-        let workspace_generation = host.ws().content_generation();
-        let imported_entries: Vec<_> = host
-            .imported_dependency_cache
-            .lock()
-            .iter()
-            .filter(|&(_canonical_id, entry)| entry.workspace_generation == workspace_generation)
-            .map(|(canonical_id, entry)| (canonical_id.clone(), entry.clone()))
-            .collect();
-        for (canonical_id, entry) in imported_entries {
+        // Snapshot ModuleFactsDb entries into the store view.
+        for (canonical_id, facts) in host.resolver.runtime.module_facts.snapshot_all() {
             view.whole_hashes
                 .entry(canonical_id.clone())
-                .or_insert(entry.whole_hash);
-            if !entry.dependency_resolutions.is_empty()
-                && !view.dependency_resolutions.contains_key(&canonical_id)
-            {
-                view.dependency_resolutions
-                    .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
-                view.derived_hashes.insert(
-                    (
-                        canonical_id.clone(),
-                        crate::resolver_core::DerivedFactKind::ExactResolution,
-                    ),
-                    hash_dependency_resolutions(&entry.dependency_resolutions),
-                );
-            }
-            // Insert Route fact for files that already have a shallow state.
-            if let Some(state) = entry.shallow_file_state.as_ref() {
+                .or_insert(facts.whole_hash);
+            // Insert Route fact from shallow state.
+            if !facts.shallow_state.symbols.is_empty() {
                 view.derived_hashes.insert(
                     (
                         canonical_id.clone(),
                         crate::resolver_core::DerivedFactKind::Route,
                     ),
-                    hash_route_surface(state),
+                    hash_route_surface(&facts.shallow_state),
                 );
             }
         }
 
+        view.fill_missing_dependency_resolutions(host);
         view.snapshot_transitive_dependency_targets(host);
         view.compat_token = view.compute_compat_token();
         view
@@ -327,100 +280,69 @@ impl HostStoreView {
         }
     }
 
-    fn snapshot_dependency_resolutions_if_missing(
-        &mut self,
-        host: &VerterHost,
-        canonical_id: &str,
-    ) {
-        if self
+    /// Fill dependency resolutions for files whose compile_cache/files entry
+    /// has empty resolutions. Uses the host's analysis snapshot to compute
+    /// resolutions from imports/reexports.
+    fn fill_missing_dependency_resolutions(&mut self, host: &VerterHost) {
+        let missing: Vec<String> = self
             .dependency_resolutions
-            .get(canonical_id)
-            .is_some_and(|resolutions| !resolutions.is_empty())
-        {
-            return;
-        }
+            .iter()
+            .filter(|(_, resolutions)| resolutions.is_empty())
+            .map(|(canonical_id, _)| canonical_id.clone())
+            .collect();
 
-        let Some(snapshot) = host.get_raw_analysis_snapshot_in_view(canonical_id, None) else {
-            return;
-        };
-
-        let mut resolutions = self
-            .dependency_resolutions
-            .remove(canonical_id)
-            .unwrap_or_default();
-
-        for import in &snapshot.imports {
-            resolutions.entry(import.source.clone()).or_insert_with(|| {
-                let resolved_canonical_id =
-                    if import.is_type_only || is_declaration_companion_source(canonical_id) {
-                        host.resolve_type_dependency_canonical(canonical_id, &import.source)
-                    } else {
-                        host.resolve_loaded_dependency_canonical(
-                            canonical_id,
-                            &import.source,
-                            verter_workspace::ResolveRequestKind::EsmImport,
-                        )
-                        .or_else(|| {
-                            host.resolve_type_dependency_canonical(canonical_id, &import.source)
-                        })
-                    };
-
-                crate::types::DependencyResolution {
-                    specifier: import.source.clone(),
-                    resolved_canonical_id,
-                    possible_canonical_ids: Vec::new(),
-                }
-            });
-        }
-
-        for sig in snapshot.export_signatures.iter() {
-            let Some(source) = sig.reexport_source.as_ref() else {
+        for canonical_id in missing {
+            let Some(snapshot) = host.get_raw_analysis_snapshot_in_view(&canonical_id, None) else {
                 continue;
             };
 
-            resolutions.entry(source.clone()).or_insert_with(|| {
-                let resolved_canonical_id = if sig.is_type {
-                    host.resolve_type_dependency_canonical(canonical_id, source)
-                } else {
-                    host.resolve_loaded_dependency_canonical(
-                        canonical_id,
-                        source,
-                        verter_workspace::ResolveRequestKind::EsmImport,
-                    )
-                    .or_else(|| host.resolve_type_dependency_canonical(canonical_id, source))
-                };
+            let declaration_file = canonical_id.ends_with(".d.ts")
+                || canonical_id.ends_with(".d.mts")
+                || canonical_id.ends_with(".d.cts");
 
-                crate::types::DependencyResolution {
-                    specifier: source.clone(),
-                    resolved_canonical_id,
-                    possible_canonical_ids: Vec::new(),
-                }
-            });
-        }
-
-        if !resolutions.is_empty() {
-            let exact_hash = hash_dependency_resolutions(&resolutions);
-            self.dependency_resolutions
-                .insert(canonical_id.to_string(), resolutions);
-            self.derived_hashes.insert(
-                (
-                    canonical_id.to_string(),
-                    crate::resolver_core::DerivedFactKind::ExactResolution,
-                ),
-                exact_hash,
+            let resolutions = host.dependency_resolutions_from_parts_in_view(
+                &canonical_id,
+                &snapshot.imports,
+                &snapshot.export_signatures,
+                None,
             );
+
+            // For declaration files, override runtime-resolved targets with
+            // declaration companion targets (e.g., ./inner.js -> inner.d.ts).
+            let resolutions = if declaration_file {
+                resolutions
+                    .into_iter()
+                    .map(|(specifier, mut resolution)| {
+                        if let Some(type_target) =
+                            host.resolve_type_dependency_canonical(&canonical_id, &specifier)
+                        {
+                            resolution.resolved_canonical_id = Some(type_target);
+                        }
+                        (specifier, resolution)
+                    })
+                    .collect()
+            } else {
+                resolutions
+            };
+
+            if !resolutions.is_empty() {
+                let exact_hash = hash_dependency_resolutions(&resolutions);
+                self.dependency_resolutions
+                    .insert(canonical_id.clone(), resolutions);
+                self.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        crate::resolver_core::DerivedFactKind::ExactResolution,
+                    ),
+                    exact_hash,
+                );
+            }
         }
     }
 
     fn compute_compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         crate::resolver_core::StoreViewCompatToken(self.mutation_epoch)
     }
-}
-
-fn is_declaration_companion_source(canonical_id: &str) -> bool {
-    canonical_id.ends_with(".d.ts")
-        || canonical_id.ends_with(".d.mts")
-        || canonical_id.ends_with(".d.cts")
 }
 
 pub(crate) fn hash_dependency_resolutions(
@@ -528,17 +450,17 @@ impl VerterHost {
         &self,
         store_view: Option<&HostStoreView>,
     ) -> crate::component_meta_audit::RustStoreAudit {
-        let imported_cache = self.imported_dependency_cache.lock();
-        let mut imported_dependency_entries = 0u32;
-        let mut imported_dependency_bytes = 0u64;
-
-        for (canonical_id, entry) in imported_cache.iter() {
-            imported_dependency_entries = imported_dependency_entries.saturating_add(1);
-            imported_dependency_bytes = imported_dependency_bytes.saturating_add(
-                imported_dependency_entry_bytes(canonical_id.as_str(), entry.as_ref()),
-            );
-        }
-        drop(imported_cache);
+        let module_facts_entries = self.resolver.runtime.module_facts.len() as u32;
+        let module_facts_bytes = self
+            .resolver
+            .runtime
+            .module_facts
+            .snapshot_all()
+            .iter()
+            .map(|(id, facts)| {
+                id.len() as u64 + facts.raw_source.len() as u64 + facts.eval_source.len() as u64
+            })
+            .sum::<u64>();
 
         let prepared_bundles = self
             .resolver_runtime()
@@ -555,20 +477,24 @@ impl VerterHost {
             store_view_hits: u32::from(store_view.is_some()),
             store_view_misses: u32::from(store_view.is_none()),
             structural_merges: 0,
-            imported_dependency_entries,
-            imported_dependency_bytes,
+            imported_dependency_entries: module_facts_entries,
+            imported_dependency_bytes: module_facts_bytes,
             prepared_type_decls,
             prepared_value_decls,
         }
     }
 
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
-        let imported_cache = self.imported_dependency_cache.lock();
-        let host_cache_bytes = imported_cache
+        let host_cache_bytes: u64 = self
+            .resolver
+            .runtime
+            .module_facts
+            .snapshot_all()
             .iter()
-            .map(|(canonical_id, entry)| imported_dependency_entry_bytes(canonical_id, entry))
+            .map(|(id, facts)| {
+                id.len() as u64 + facts.raw_source.len() as u64 + facts.eval_source.len() as u64
+            })
             .sum();
-        drop(imported_cache);
 
         let workspace = self.workspace();
         let workspace_snapshot = workspace.resource_snapshot();
@@ -576,38 +502,6 @@ impl VerterHost {
 
         (host_cache_bytes, workspace_bytes)
     }
-}
-
-fn imported_dependency_entry_bytes(
-    canonical_id: &str,
-    entry: &crate::ImportedDependencyCacheEntry,
-) -> u64 {
-    let mut total = canonical_id.len() as u64
-        + entry.resolved_canonical_id.len() as u64
-        + entry.raw_source.len() as u64;
-    if let Some(eval_source) = entry.eval_source.as_ref() {
-        total = total.saturating_add(eval_source.len() as u64);
-    }
-    total = total.saturating_add(
-        entry
-            .dependency_resolutions
-            .iter()
-            .map(|(specifier, resolution)| {
-                let mut bytes = specifier.len() as u64;
-                if let Some(resolved) = resolution.resolved_canonical_id.as_ref() {
-                    bytes = bytes.saturating_add(resolved.len() as u64);
-                }
-                bytes.saturating_add(
-                    resolution
-                        .possible_canonical_ids
-                        .iter()
-                        .map(|candidate| candidate.len() as u64)
-                        .sum::<u64>(),
-                )
-            })
-            .sum::<u64>(),
-    );
-    total
 }
 
 #[cfg(test)]

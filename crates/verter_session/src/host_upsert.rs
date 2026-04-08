@@ -544,7 +544,6 @@ impl VerterHost {
                     cached_resolved_meta: FxHashMap::default(),
                     cached_meta_payloads: FxHashMap::default(),
                     cached_fallthrough: None,
-                    export_registry: None,
                 });
 
             entry.file_kind = req.file_kind;

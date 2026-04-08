@@ -120,7 +120,6 @@ fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot)
         cached_resolved_meta: FxHashMap::default(),
         cached_meta_payloads: FxHashMap::default(),
         cached_fallthrough: None,
-        export_registry: None,
     }
 }
 
@@ -844,7 +843,6 @@ fn import_resolves_to_dep_non_relative_in_deps() {
         cached_resolved_meta: FxHashMap::default(),
         cached_meta_payloads: FxHashMap::default(),
         cached_fallthrough: None,
-        export_registry: None,
     };
     let exts = vec![".ts".to_string()];
     assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -891,7 +889,6 @@ fn import_resolves_to_dep_non_relative_not_in_deps() {
         cached_resolved_meta: FxHashMap::default(),
         cached_meta_payloads: FxHashMap::default(),
         cached_fallthrough: None,
-        export_registry: None,
     };
     let exts = vec![".ts".to_string()];
     assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
@@ -932,7 +929,6 @@ fn import_resolves_to_dep_relative_exact() {
         cached_resolved_meta: FxHashMap::default(),
         cached_meta_payloads: FxHashMap::default(),
         cached_fallthrough: None,
-        export_registry: None,
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
@@ -977,7 +973,6 @@ fn import_resolves_to_dep_relative_extension_strip() {
         cached_resolved_meta: FxHashMap::default(),
         cached_meta_payloads: FxHashMap::default(),
         cached_fallthrough: None,
-        export_registry: None,
     };
     let exts = vec![".ts".to_string(), ".js".to_string()];
     // ./types resolves to /src/types, dep is /src/types.ts

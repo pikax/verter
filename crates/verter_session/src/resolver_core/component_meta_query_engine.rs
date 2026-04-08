@@ -10,6 +10,8 @@
 //! `(scope_canonical_id, symbol_name)` to avoid re-solving the same imported
 //! type reference within one request.
 
+use std::collections::BTreeSet;
+
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::host::TypeSolverHost;
@@ -19,11 +21,18 @@ use verter_semantic::analysis::type_solver::result::SolverResult;
 use super::declaration_metadata::ResolvedTypeDeclaration;
 use super::route_demand::RouteDemand;
 use crate::resolver_core::solver_host::SessionSolverHost;
+use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
-/// Cached import route: (resolved_canonical_id, resolved_exported_name, prepared alias).
-type PreparedAliasEntry = Option<(String, String, super::CachedPreparedImportedTypeAlias)>;
+#[derive(Debug, Clone)]
+pub struct RoutedPreparedAlias {
+    pub body: TypeExpr,
+    pub canonical_dependencies: BTreeSet<String>,
+}
+
+/// Cached import route: (resolved_canonical_id, resolved_exported_name, routed prepared decl).
+type PreparedAliasEntry = Option<(String, String, RoutedPreparedAlias)>;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ScopedSolveKey {
@@ -58,6 +67,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Cached owner collection expressions.
     owner_collection_exprs:
         FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
+    fuse_budgets: FuseBudgets,
+    fuse_state: FuseState,
 }
 
 impl<'a> ComponentMetaQueryEngine<'a> {
@@ -75,6 +86,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
+            fuse_budgets: FuseBudgets::default(),
+            fuse_state: FuseState::default(),
         }
     }
 
@@ -92,6 +105,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
+            fuse_budgets: FuseBudgets::default(),
+            fuse_state: FuseState::default(),
         }
     }
 
@@ -145,13 +160,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.routes
             .entry(key)
             .or_insert_with_key(|_| {
-                self.host
-                    .resolve_prepared_symbol_dependency_alias_for_route_in_view(
-                        canonical_id,
-                        exported_name,
-                        route,
-                        self.store_view,
-                    )
+                let _ = route;
+                resolve_routed_prepared_alias(
+                    self.host,
+                    canonical_id,
+                    exported_name,
+                    self.store_view,
+                )
             })
             .clone()
     }
@@ -190,15 +205,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or(owner_canonical);
         let key = (source_key.to_string(), exported_name.to_string());
-        *self.resolvable.entry(key).or_insert_with_key(|_| {
-            can_resolve_ref(
-                self.host,
-                owner_canonical,
-                exported_name,
-                source_hint,
-                self.store_view,
-            )
-        })
+        if let Some(cached) = self.resolvable.get(&key) {
+            return *cached;
+        }
+        let resolved = if self
+            .host
+            .prepared_type_decl_in_view(source_key, exported_name, self.store_view)
+            .is_some()
+        {
+            true
+        } else {
+            self.resolve_prepared_alias(source_key, exported_name, &RouteDemand::Whole)
+                .is_some()
+        };
+        self.resolvable.insert(key, resolved);
+        resolved
     }
 
     /// Get the owner's collection expression for a name, cached per query.
@@ -310,6 +331,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.owner_engine.total_steps()
     }
 
+    pub fn enter_member_surface(&mut self) -> bool {
+        self.fuse_state.push_member_recursion();
+        !self
+            .fuse_state
+            .check_member_recursion_depth(&self.fuse_budgets)
+    }
+
+    pub fn exit_member_surface(&mut self) {
+        self.fuse_state.pop_member_recursion();
+    }
+
+    pub fn allow_structural_slow_lane(&mut self) -> bool {
+        !self
+            .fuse_state
+            .check_structural_slow_lane(&self.fuse_budgets)
+    }
+
     pub fn solve_count(&self) -> u32 {
         self.owner_engine.solve_count()
     }
@@ -330,12 +368,51 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// surface extraction. It builds a `SubjectKey::Decl` for the type,
     /// interns it, and calls `project_surface` to get all members and call
     /// signatures without full structural normalization.
+    ///
+    /// Results are write-through: stable projections are published to
+    /// `TypeSurfaceDb` and reused by later requests.
     pub fn project_type_surface(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface> {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
         use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+
+        let surface_key = TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        };
+        let op_key = TypeSurfaceOpKey::Surface(surface_key);
+
+        // L2: check shared TypeSurfaceDb.
+        if let Some(store_view) = self.store_view {
+            if let Some(cached) = self
+                .host
+                .resolver
+                .runtime
+                .type_surfaces
+                .get(&op_key, store_view)
+            {
+                if let Some(surface) = cached.as_surface() {
+                    return Some(surface.clone());
+                }
+                if cached.is_miss() {
+                    return None;
+                }
+            }
+        }
 
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
@@ -349,8 +426,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.store_view,
             scope_canonical_id,
         );
-        self.owner_engine
-            .project_surface(subject_id, &solver_host, scope_canonical_id)
+        let result =
+            self.owner_engine
+                .project_surface(subject_id, &solver_host, scope_canonical_id);
+
+        // Write-through: publish stable positive results only.
+        // Do NOT publish Miss — a None from the solver may be a budget
+        // exhaustion rather than a genuine semantic miss. Publishing a
+        // false miss to the shared DB would corrupt future lookups.
+        if self.store_view.is_some() {
+            if let Some(surface) = &result {
+                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
+                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                        op_key,
+                        TypeSurfaceOpResult::Surface(surface.clone()),
+                        facts,
+                    );
+                }
+            }
+        }
+
+        result
     }
 
     pub fn project_type_surface_expr(
@@ -371,13 +467,55 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Project a single member from a type expression in a declaration scope.
+    ///
+    /// Results are write-through: stable projections are published to
+    /// `TypeSurfaceDb` and reused by later requests.
     pub fn project_type_member(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
         member_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedMember> {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
         use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+
+        let surface_key = TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        };
+        let op_key = TypeSurfaceOpKey::Member {
+            subject: surface_key,
+            member_name: member_name.to_owned(),
+        };
+
+        // L2: check shared TypeSurfaceDb.
+        if let Some(store_view) = self.store_view {
+            if let Some(cached) = self
+                .host
+                .resolver
+                .runtime
+                .type_surfaces
+                .get(&op_key, store_view)
+            {
+                if let Some(member) = cached.as_member() {
+                    return Some(member.clone());
+                }
+                if cached.is_miss() {
+                    return None;
+                }
+            }
+        }
 
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
@@ -391,18 +529,76 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.store_view,
             scope_canonical_id,
         );
-        self.owner_engine
-            .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
+        let result = self.owner_engine.project_member(
+            subject_id,
+            member_name,
+            &solver_host,
+            scope_canonical_id,
+        );
+
+        // Write-through: publish stable positive results only.
+        if self.store_view.is_some() {
+            if let Some(member) = &result {
+                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
+                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                        op_key,
+                        TypeSurfaceOpResult::Member(member.clone()),
+                        facts,
+                    );
+                }
+            }
+        }
+
+        result
     }
 
     /// Project the keyspace (member names) from a type expression in a
     /// declaration scope.
+    ///
+    /// Results are write-through: stable projections are published to
+    /// `TypeSurfaceDb` and reused by later requests.
     pub fn project_type_keyspace(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedKeyspace> {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
         use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
+
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+
+        let surface_key = TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        };
+        let op_key = TypeSurfaceOpKey::Keyspace(surface_key);
+
+        // L2: check shared TypeSurfaceDb.
+        if let Some(store_view) = self.store_view {
+            if let Some(cached) = self
+                .host
+                .resolver
+                .runtime
+                .type_surfaces
+                .get(&op_key, store_view)
+            {
+                if let Some(keyspace) = cached.as_keyspace() {
+                    return Some(keyspace.clone());
+                }
+                if cached.is_miss() {
+                    return None;
+                }
+            }
+        }
 
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
@@ -416,8 +612,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.store_view,
             scope_canonical_id,
         );
-        self.owner_engine
-            .project_keyspace(subject_id, &solver_host, scope_canonical_id)
+        let result =
+            self.owner_engine
+                .project_keyspace(subject_id, &solver_host, scope_canonical_id);
+
+        // Write-through: publish stable positive results only.
+        if self.store_view.is_some() {
+            if let Some(keyspace) = &result {
+                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
+                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                        op_key,
+                        TypeSurfaceOpResult::Keyspace(keyspace.clone()),
+                        facts,
+                    );
+                }
+            }
+        }
+
+        result
     }
 
     pub fn project_expr_surface_expr(
@@ -425,6 +637,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> Option<TypeExpr> {
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
         let solver_host = SessionSolverHost::with_declaration_scope(
             self.host,
             self.store_view,
@@ -432,6 +650,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         );
         self.owner_engine
             .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
+    }
+
+    fn type_surface_facts(
+        &self,
+        scope_canonical_id: &str,
+    ) -> Option<Vec<crate::resolver_core::FactVersionRef>> {
+        let store_view = self.store_view?;
+        let mut facts = Vec::new();
+        if let Some(hash) = store_view
+            .whole_hash(scope_canonical_id)
+            .or_else(|| self.host.get_whole_hash(scope_canonical_id))
+        {
+            facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: scope_canonical_id.to_string(),
+                hash,
+            });
+        }
+        if let Some(hash) = store_view.derived_hash(
+            scope_canonical_id,
+            crate::resolver_core::DerivedFactKind::ExactResolution,
+        ) {
+            facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: scope_canonical_id.to_string(),
+                kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+                hash,
+            });
+        }
+        (!facts.is_empty()).then_some(facts)
     }
 }
 
@@ -476,40 +722,46 @@ fn is_builtin_name(name: &str) -> bool {
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
 }
 
-fn can_resolve_ref(
+fn resolve_routed_prepared_alias(
     host: &VerterHost,
-    owner_canonical: &str,
+    canonical_id: &str,
     exported_name: &str,
-    source_hint: Option<&str>,
     store_view: Option<&HostStoreView>,
-) -> bool {
-    let source = source_hint
-        .filter(|source| !source.is_empty())
-        .unwrap_or(owner_canonical);
-
-    if host
-        .prepared_type_decl_in_view(source, exported_name, store_view)
+) -> PreparedAliasEntry {
+    let (resolved_id, resolved_name) = if host
+        .prepared_type_decl_in_view(canonical_id, exported_name, store_view)
         .is_some()
     {
-        return true;
-    }
+        (canonical_id.to_string(), exported_name.to_string())
+    } else {
+        host.resolve_named_type_export_target_in_view(canonical_id, exported_name, store_view)?
+    };
 
-    if let Some((resolved_id, resolved_name, _)) = host
-        .resolve_prepared_symbol_dependency_alias_for_route_in_view(
-            source,
-            exported_name,
-            &crate::resolver_core::RouteDemand::Whole,
-            store_view,
-        )
-    {
-        if (resolved_id != source || resolved_name != exported_name)
-            && host
-                .prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)
-                .is_some()
-        {
-            return true;
+    let prepared = host.prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)?;
+    let mut canonical_dependencies = BTreeSet::from([resolved_id.clone()]);
+    if let Some((defining_file, _)) = prepared.cache_deps.defining_file.as_ref() {
+        canonical_dependencies.insert(defining_file.clone());
+    }
+    for (participant, _) in &prepared.cache_deps.barrel_participants {
+        canonical_dependencies.insert(participant.clone());
+    }
+    for dep in &prepared.external_deps {
+        if !dep.canonical_id.is_empty() {
+            canonical_dependencies.insert(dep.canonical_id.clone());
+        }
+    }
+    for identity in prepared.name_resolution.values() {
+        if !identity.canonical_id.is_empty() {
+            canonical_dependencies.insert(identity.canonical_id.clone());
         }
     }
 
-    false
+    Some((
+        resolved_id,
+        resolved_name,
+        RoutedPreparedAlias {
+            body: prepared.body.clone(),
+            canonical_dependencies,
+        },
+    ))
 }

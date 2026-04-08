@@ -509,26 +509,18 @@ export interface Button {
             Some(&env),
         ));
         let host = crate::VerterHost::new_standalone(Default::default());
-        host.imported_dependency_cache.lock().insert(
-            "/src/types.ts".into(),
-            Arc::new(crate::ImportedDependencyCacheEntry {
-                workspace_generation: host.ws().content_generation(),
-                whole_hash: Hash16::default(),
-                resolved_canonical_id: "/src/types.ts".into(),
-                raw_source: Arc::<str>::from(source),
-                cached_parse: None,
-                script_analysis: None,
-                export_signatures: None,
-                external_type_analysis: Some(analysis),
-                shallow_file_state: Some(Arc::clone(&state)),
-                snapshot: None,
-                eval_source: Some(Arc::<str>::from(source)),
-                required_owner_import_names: None,
-                resolved_type_roots: FxHashMap::default(),
-                resolved_type_declarations: FxHashMap::default(),
-
-                dependency_resolutions: FxHashMap::default(),
-            }),
+        host.seed_module_facts_for_test(
+            "/src/types.ts",
+            Hash16::default(),
+            Arc::<str>::from(source),
+            None,
+            None,
+            None,
+            analysis,
+            Arc::clone(&state),
+            None,
+            Some(Arc::<str>::from(source)),
+            FxHashMap::default(),
         );
 
         let mut macro_meta = make_resolved_macro();

@@ -229,7 +229,7 @@ pub struct PreparedDeclBundle {
     pub prepared_value_decls: FxHashMap<String, Arc<PreparedValueDecl>>,
     /// The dep_edges snapshot used to build this bundle.
     /// Stored so `SessionSolverHost::with_declaration_scope` can read it
-    /// instead of recomputing `dependency_resolutions_for_eval_in_view`.
+    /// instead of recomputing dependency resolutions from the store view.
     pub dep_edges: FxHashMap<String, String>,
     /// Resolved import bindings: local name → (canonical_id, exported_name).
     /// Built from the owner file's import targets + dep_edges during

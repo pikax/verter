@@ -154,67 +154,6 @@ pub trait FrontierHost {
     }
 }
 
-fn wildcard_source_stem(source: &str) -> &str {
-    let leaf = source.rsplit('/').next().unwrap_or(source);
-    leaf.strip_suffix(".d.ts")
-        .or_else(|| leaf.strip_suffix(".d.mts"))
-        .or_else(|| leaf.strip_suffix(".d.cts"))
-        .or_else(|| leaf.strip_suffix(".vue"))
-        .or_else(|| leaf.strip_suffix(".mts"))
-        .or_else(|| leaf.strip_suffix(".cts"))
-        .or_else(|| leaf.strip_suffix(".ts"))
-        .or_else(|| leaf.strip_suffix(".js"))
-        .unwrap_or(leaf)
-}
-
-fn pascalize_wildcard_source_stem(stem: &str) -> String {
-    let mut result = String::with_capacity(stem.len());
-    let mut uppercase_next = true;
-    for ch in stem.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if uppercase_next {
-                result.push(ch.to_ascii_uppercase());
-                uppercase_next = false;
-            } else {
-                result.push(ch);
-            }
-        } else {
-            uppercase_next = true;
-        }
-    }
-    result
-}
-
-fn wildcard_source_hint_prefix_len(source: &str, exported_name: &str) -> usize {
-    let stem = wildcard_source_stem(source);
-    let mut best = if exported_name.starts_with(stem) {
-        stem.len()
-    } else {
-        0
-    };
-    let pascal = pascalize_wildcard_source_stem(stem);
-    if !pascal.is_empty() && exported_name.starts_with(&pascal) {
-        best = best.max(pascal.len());
-    }
-    best
-}
-
-fn ordered_wildcard_sources<'a>(
-    exported_name: &str,
-    wildcard_sources: &'a [super::shallow_file_state::WildcardReexport],
-) -> Vec<(usize, &'a super::shallow_file_state::WildcardReexport)> {
-    let mut ordered: Vec<_> = wildcard_sources.iter().enumerate().collect();
-    ordered.sort_by(|(left_index, left_wc), (right_index, right_wc)| {
-        wildcard_source_hint_prefix_len(&right_wc.source_specifier, exported_name)
-            .cmp(&wildcard_source_hint_prefix_len(
-                &left_wc.source_specifier,
-                exported_name,
-            ))
-            .then_with(|| left_index.cmp(right_index))
-    });
-    ordered
-}
-
 impl ExternalTypeFrontier {
     /// Create a new frontier with default budgets.
     pub fn new() -> Self {
@@ -345,9 +284,7 @@ impl ExternalTypeFrontier {
 
         // Step 2: Try wildcard reexport routing using pre-canonicalized edges.
         // Fall back to host resolution for edges with empty canonical IDs.
-        for (order, wildcard) in
-            ordered_wildcard_sources(&pending.exported_name, type_view.wildcard_reexports())
-        {
+        for (order, wildcard) in type_view.wildcard_reexports().iter().enumerate() {
             let target_canonical_owned;
             let target_canonical = if !wildcard.canonical_id.is_empty() {
                 &wildcard.canonical_id

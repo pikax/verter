@@ -191,38 +191,6 @@ impl HostResolverState {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct RawAnalysisSnapshotCacheEntry {
-    pub whole_hash: Hash16,
-    pub snapshot: Arc<FileAnalysisSnapshot>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ImportedDependencyCacheEntry {
-    pub workspace_generation: u64,
-    pub whole_hash: Hash16,
-    pub resolved_canonical_id: String,
-    pub raw_source: Arc<str>,
-    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
-    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
-    pub external_type_analysis:
-        Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>,
-    /// Canonical shallow type file state â€” the authoritative symbol/export
-    /// surface for this imported file.  Populated through the shared host
-    /// ensure-path and reused by component-meta, LSP, MCP, and other
-    /// host-backed consumers.
-    pub shallow_file_state: Option<Arc<crate::resolver_core::ShallowFileState>>,
-    pub snapshot: Option<Arc<FileAnalysisSnapshot>>,
-    pub eval_source: Option<Arc<str>>,
-    pub required_owner_import_names: Option<Arc<rustc_hash::FxHashSet<String>>>,
-    /// Cached type root resolutions: imported_name → (canonical_source, resolved_name).
-    pub resolved_type_roots: rustc_hash::FxHashMap<String, (String, String)>,
-    pub resolved_type_declarations:
-        rustc_hash::FxHashMap<String, crate::resolver_core::ResolvedTypeDeclaration>,
-    pub dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
-}
-
 /// Central file store and compile cache for Vue SFC compilation.
 ///
 /// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
@@ -285,14 +253,6 @@ pub struct VerterHost {
     pub(crate) eval_env_cache: parking_lot::Mutex<
         rustc_hash::FxHashMap<String, (Hash16, Arc<verter_semantic::analysis::type_eval::EvalEnv>)>,
     >,
-    /// Cached finalized raw analysis snapshots for disk-backed fallback files.
-    /// Cleared whenever the host store-view epoch advances.
-    pub(crate) raw_analysis_snapshot_cache:
-        parking_lot::Mutex<rustc_hash::FxHashMap<String, RawAnalysisSnapshotCacheEntry>>,
-    /// Cached parsed imported dependency state keyed by canonical id.
-    /// Each entry is valid only for its exact whole_hash.
-    pub(crate) imported_dependency_cache:
-        parking_lot::Mutex<rustc_hash::FxHashMap<String, Arc<ImportedDependencyCacheEntry>>>,
     /// Semantic query database: revision-gated caches for component surfaces,
     /// binding facts, and reactivity provenance.
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
@@ -353,8 +313,6 @@ impl VerterHost {
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -382,8 +340,6 @@ impl VerterHost {
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            raw_analysis_snapshot_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            imported_dependency_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
         }
@@ -757,8 +713,6 @@ impl VerterHost {
     }
 
     pub(crate) fn bump_store_view_epoch(&self) -> u64 {
-        self.raw_analysis_snapshot_cache.lock().clear();
-        self.imported_dependency_cache.lock().clear();
         self.clear_thread_local_parsed_eval_program_cache();
         self.store_view_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -1023,13 +977,11 @@ impl VerterHost {
                 entry.cached_resolved_meta.clear();
                 entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
-                entry.export_registry = None;
             }
         }
         self.resolved_type_cache.lock().clear();
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
-        self.imported_dependency_cache.lock().clear();
         self.bump_store_view_epoch();
     }
 
@@ -1087,7 +1039,6 @@ impl VerterHost {
         self.resolved_type_cache.lock().clear();
         self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
-        self.imported_dependency_cache.lock().clear();
         self.provenance.reset();
         // Clear all semantic caches
         *self.semantic_db.lock() = verter_semantic::db::SemanticDb::new();
@@ -1577,6 +1528,56 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.0.read().realpath(canonical_id)
+    }
+}
+
+#[cfg(test)]
+impl VerterHost {
+    /// Seed ModuleFactsDb with pre-built data for tests.
+    /// Replaces the old `imported_dependency_cache.lock().insert(...)` pattern.
+    pub(crate) fn seed_module_facts_for_test(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        raw_source: Arc<str>,
+        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+        export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+        external_type_analysis: Arc<
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
+        >,
+        shallow_state: Arc<crate::resolver_core::ShallowFileState>,
+        snapshot: Option<Arc<FileAnalysisSnapshot>>,
+        eval_source: Option<Arc<str>>,
+        dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+    ) {
+        let snapshot = snapshot.unwrap_or_else(|| Arc::new(FileAnalysisSnapshot::default()));
+        let eval_source = eval_source.unwrap_or_else(|| Arc::clone(&raw_source));
+
+        // Insert dependency_resolutions into compile_cache if non-empty.
+        #[cfg(feature = "scheduler")]
+        if !dependency_resolutions.is_empty() {
+            self.compile_cache
+                .entry(canonical_id.to_string())
+                .or_insert_with(|| crate::CompileCacheEntry::default())
+                .dependency_resolutions = dependency_resolutions.clone();
+        }
+
+        let facts = crate::resolver_core::module_facts_db::ModuleFacts {
+            whole_hash,
+            raw_source,
+            cached_parse,
+            script_analysis,
+            export_signatures,
+            snapshot,
+            eval_source,
+            external_type_analysis,
+            shallow_state,
+        };
+        self.resolver
+            .runtime
+            .module_facts
+            .insert(canonical_id.to_owned(), facts);
     }
 }
 

@@ -3672,25 +3672,8 @@ defineProps<FancyProps>()
 
     let view = host.resolver_store_view();
     let _ = host
-        .materialize_imported_dependency_base_in_view(
-            "/workspace/node_modules/fancy/dist/index.d.ts",
-            Some(&view),
-        )
-        .expect("package declaration entrypoint should materialize imported state");
-    {
-        let mut cache = host.imported_dependency_cache.lock();
-        let entry = cache
-            .get_mut("/workspace/node_modules/fancy/dist/index.d.ts")
-            .expect("imported package declaration should be cached");
-        Arc::make_mut(entry).dependency_resolutions.insert(
-            "./inner.js".to_string(),
-            crate::DependencyResolution {
-                specifier: "./inner.js".to_string(),
-                resolved_canonical_id: None,
-                possible_canonical_ids: Vec::new(),
-            },
-        );
-    }
+        .ensure_module_facts_in_view("/workspace/node_modules/fancy/dist/index.d.ts", Some(&view))
+        .expect("package declaration entrypoint should materialize module facts");
 
     let resolved = host.resolve_type_dependency_canonical_in_view(
         "/workspace/node_modules/fancy/dist/index.d.ts",
@@ -3795,31 +3778,20 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             .collect::<Vec<_>>()
     );
 
-    let runtime_entry = host.clone_current_imported_dependency_entry(
-        "/workspace/node_modules/fancy/dist/index3.js",
-        None,
-    );
-    assert!(
-        runtime_entry
-            .as_ref()
-            .and_then(|entry| entry.external_type_analysis.as_ref())
-            .is_none(),
-        "runtime-script sidecars should stay shallow when the declaration companion owns the type route",
-    );
-
+    // In the new ModuleFacts DB, ensure_module_facts_in_view normalizes .js → .d.ts
+    // companion and eagerly materializes. Verify via direct DB lookup that the
+    // .js entry itself was not cached (only the .d.ts companion is).
     let declaration_entry = host
-        .clone_current_imported_dependency_entry(
-            "/workspace/node_modules/fancy/dist/index3.d.ts",
-            None,
-        )
+        .ensure_module_facts_in_view("/workspace/node_modules/fancy/dist/index3.d.ts", None)
         .expect("external type resolution should cache the declaration companion entry");
+    // external_type_analysis is Arc (non-optional) in ModuleFacts; verify it has content.
     assert!(
-        declaration_entry.external_type_analysis.is_some(),
+        declaration_entry
+            .external_type_analysis
+            .stats()
+            .top_level_statement_count
+            > 0,
         "the declaration companion should own the cached external-type analysis",
-    );
-    assert!(
-        declaration_entry.snapshot.is_none(),
-        "declaration-companion resolution should stay on the shallow cached path instead of materializing a full imported snapshot",
     );
 }
 

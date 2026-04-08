@@ -29,6 +29,18 @@ pub mod type_expansion_host;
 pub mod type_expansion_verter;
 pub mod type_text_parser;
 
+pub mod fuses;
+pub mod imported_root_db;
+pub mod module_facts_db;
+pub mod route_db;
+pub mod type_surface_db;
+
+pub use fuses::{FuseBudgets, FuseState, FuseTrip};
+pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
+pub use module_facts_db::{ModuleFacts, ModuleFactsDb};
+pub use route_db::{BarrelRouteSurface, RouteDb, RouteResult};
+pub use type_surface_db::{TypeSurfaceDb, TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
     collect_requested_binding_names, component_meta_resolved_macros, component_meta_type_registry,
@@ -71,7 +83,7 @@ pub use fallthrough::{
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use imported_type_alias::{
     choose_preferred_imported_type_body, imported_type_body_specificity_score,
-    CachedPreparedImportedTypeAlias, ComputedEvaluatedTypes, ImportedSymbolDependency,
+    ComputedEvaluatedTypes, ImportedSymbolDependency,
 };
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache, prepare_exported_type_decl,
@@ -131,7 +143,6 @@ pub struct ResolveRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DerivedFactKind {
-    ExportRegistry,
     /// Provider-owned export route surface hash.
     Route,
     ExactResolution,
@@ -383,6 +394,22 @@ where
 
     pub fn remove(&self, key: &K) {
         self.entries.lock().remove(key);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().is_empty()
+    }
+
+    pub fn snapshot_all(&self) -> Vec<(K, Arc<V>)> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|(k, entry)| (k.clone(), entry.value.clone()))
+            .collect()
     }
 }
 

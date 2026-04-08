@@ -317,11 +317,6 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
             possible_canonical_ids: Vec::new(),
         },
     );
-    entry.export_registry = Some(crate::types::FileExportRegistry {
-        source_hash: [1; 16],
-        named: rustc_hash::FxHashMap::default(),
-        wildcard_edges: Vec::new(),
-    });
     drop(entry);
 
     let exact_hash = {
@@ -336,11 +331,6 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     assert!(project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
-            hash: [1; 16],
-        },
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
             kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: exact_hash,
         },
@@ -349,7 +339,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     assert!(!project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
+            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
             hash: [9; 16],
         },
     ]));
@@ -514,11 +504,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
             possible_canonical_ids: Vec::new(),
         },
     );
-    entry.export_registry = Some(crate::types::FileExportRegistry {
-        source_hash: [3; 16],
-        named: rustc_hash::FxHashMap::default(),
-        wildcard_edges: Vec::new(),
-    });
     drop(entry);
 
     let facts = project
@@ -529,13 +514,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         facts.contains(&crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
-        })
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
-            hash: [3; 16],
         })
     );
     assert!(
@@ -578,11 +556,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
                 possible_canonical_ids: Vec::new(),
             },
         );
-        entry.export_registry = Some(crate::types::FileExportRegistry {
-            source_hash: [3; 16],
-            named: rustc_hash::FxHashMap::default(),
-            wildcard_edges: Vec::new(),
-        });
     }
 
     let facts = project
@@ -594,14 +567,6 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
         })
-    );
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExportRegistry,
-            hash: [3; 16],
-        }),
-        "non-scheduler store views must track export-registry facts"
     );
     assert!(
         facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {

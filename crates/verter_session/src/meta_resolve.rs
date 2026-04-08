@@ -144,8 +144,7 @@ impl ComponentMetaRequestHost for VerterHost {
         let owner_eval_source =
             VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
         let direct_import_started = audit_enabled.then(Instant::now);
-        let dep_resolutions =
-            self.dependency_resolutions_for_eval_in_view(canonical, Some(view))?;
+        let dep_resolutions = self.dependency_resolutions_in_view(canonical, Some(view));
         let direct_import_proof_ms = direct_import_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -401,51 +400,6 @@ fn enrich_missing_slot_bindings(
 }
 
 impl VerterHost {
-    fn clone_cached_raw_analysis_snapshot(
-        &self,
-        canonical: &str,
-        whole_hash: Hash16,
-    ) -> Option<Arc<FileAnalysisSnapshot>> {
-        self.raw_analysis_snapshot_cache
-            .lock()
-            .get(canonical)
-            .and_then(|entry| (entry.whole_hash == whole_hash).then(|| Arc::clone(&entry.snapshot)))
-    }
-
-    fn cache_raw_analysis_snapshot(
-        &self,
-        canonical: &str,
-        whole_hash: Hash16,
-        snapshot: FileAnalysisSnapshot,
-    ) -> Arc<FileAnalysisSnapshot> {
-        let mut cache = self.raw_analysis_snapshot_cache.lock();
-        if let Some(entry) = cache.get(canonical) {
-            if entry.whole_hash == whole_hash {
-                return Arc::clone(&entry.snapshot);
-            }
-        }
-        let snapshot = Arc::new(snapshot);
-        cache.insert(
-            canonical.to_string(),
-            crate::RawAnalysisSnapshotCacheEntry {
-                whole_hash,
-                snapshot: Arc::clone(&snapshot),
-            },
-        );
-        snapshot
-    }
-
-    #[cfg(test)]
-    pub(crate) fn raw_analysis_snapshot_cache_entry(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<FileAnalysisSnapshot>> {
-        self.raw_analysis_snapshot_cache
-            .lock()
-            .get(canonical)
-            .map(|entry| Arc::clone(&entry.snapshot))
-    }
-
     /// Single host-backed resolver API for cross-file component-meta enrichment.
     ///
     /// This is the ONLY entry point for cross-file component-meta resolution.
@@ -785,7 +739,7 @@ impl VerterHost {
         let append_elapsed = append_start.elapsed();
         let registry_after = parts.resolved_type_registry.len();
         if crate::host_manage::component_meta_debug_enabled() {
-            let dep_cache_size = self.imported_dependency_cache.lock().len();
+            let dep_cache_size = self.resolver.runtime.module_facts.len();
             crate::host_manage::component_meta_debug(format!(
                 "PROFILE owner={} registry_before={} registry_after={} registry_added={} dep_cache_entries={} append_ms={:.1}",
                 canonical,
@@ -892,7 +846,7 @@ impl VerterHost {
                     resolved_canonical_id.as_str(),
                     resolved_exported_name.as_str(),
                 )
-                .unwrap_or_else(|| prepared.decl.body.clone());
+                .unwrap_or_else(|| prepared.body.clone());
             entry.type_expr = choose_preferred_component_meta_registry_candidate(
                 Some(entry.type_expr.clone()),
                 Some(materialized),
@@ -1048,7 +1002,7 @@ impl VerterHost {
                             resolved_canonical_id.as_str(),
                             resolved_exported_name.as_str(),
                         )
-                        .unwrap_or_else(|| prepared.decl.body.clone());
+                        .unwrap_or_else(|| prepared.body.clone());
                     upsert_component_meta_registry_entry(
                         owner_canonical,
                         resolved_type_registry,
@@ -1202,10 +1156,6 @@ impl VerterHost {
 
         #[cfg(feature = "scheduler")]
         {
-            let mut fallback_whole_hash = None;
-            let mut fallback_source: Option<Arc<str>> = None;
-            let mut fallback_cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>> =
-                None;
             let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
             {
                 let whole_hash = store_view
@@ -1228,100 +1178,41 @@ impl VerterHost {
                 );
                 snapshot
             } else {
-                if let Some(imported_entry) =
-                    self.clone_current_imported_dependency_entry(canonical, store_view)
-                {
-                    if let Some(snapshot) = imported_entry.snapshot.clone() {
-                        if store_view.is_none() {
-                            self.provenance
-                                .raw_analysis_snapshot_cache_hits
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        component_meta_trace_event!(
-                            "get_raw_analysis_snapshot_imported_cache",
-                            format!(
-                                "owner={} hit=true imports={} macros={} bindings={} has_template={} whole_hash={:?}",
-                                canonical,
-                                snapshot.imports.len(),
-                                snapshot.macros.len(),
-                                snapshot.bindings.len(),
-                                snapshot.template.is_some(),
-                                imported_entry.whole_hash,
-                            ),
-                        );
-                        let mut snapshot = if store_view.is_none() {
-                            (*self.cache_raw_analysis_snapshot_arc(
-                                canonical,
-                                imported_entry.whole_hash,
-                                snapshot,
-                            ))
-                            .clone()
-                        } else {
-                            (*snapshot).clone()
-                        };
-                        if self.config.effective_scope().needs_template_analysis() {
-                            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-                        }
-                        component_meta_trace_event!(
-                            "get_raw_analysis_snapshot_result",
-                            format!(
-                                "owner={} imports={} macros={} bindings={} has_template={}",
-                                canonical,
-                                snapshot.imports.len(),
-                                snapshot.macros.len(),
-                                snapshot.bindings.len(),
-                                snapshot.template.is_some(),
-                            ),
-                        );
-                        return Some(snapshot);
+                // ModuleFactsDb path: covers both imported deps and own files.
+                if let Some(facts) = self.ensure_module_facts_in_view(canonical, store_view) {
+                    let mut snapshot = (*facts.snapshot).clone();
+                    self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+                    self.enrich_destructured_bindings(&mut snapshot);
+                    if self.config.effective_scope().needs_template_analysis() {
+                        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                     }
+                    component_meta_trace_event!(
+                        "get_raw_analysis_snapshot_result",
+                        format!(
+                            "owner={} imports={} macros={} bindings={} has_template={} source=module_facts",
+                            canonical,
+                            snapshot.imports.len(),
+                            snapshot.macros.len(),
+                            snapshot.bindings.len(),
+                            snapshot.template.is_some(),
+                        ),
+                    );
+                    return Some(snapshot);
                 }
 
-                let (source, whole_hash, cached_parse) = self
+                let (source, _whole_hash, cached_parse) = self
                     .current_eval_state_in_view(canonical, store_view)
                     .map(|(source, cached_parse, whole_hash)| (source, whole_hash, cached_parse))
                     .or_else(|| {
-                        self.seed_imported_dependency_base_in_view(canonical, store_view)
-                            .map(|entry| {
+                        self.ensure_module_facts_in_view(canonical, store_view)
+                            .map(|facts| {
                                 (
-                                    Arc::clone(&entry.raw_source),
-                                    entry.whole_hash,
-                                    entry.cached_parse.clone(),
+                                    Arc::clone(&facts.raw_source),
+                                    facts.whole_hash,
+                                    facts.cached_parse.clone(),
                                 )
                             })
                     })?;
-                fallback_whole_hash = Some(whole_hash);
-                fallback_source = Some(Arc::clone(&source));
-                fallback_cached_parse = cached_parse.clone();
-                if store_view.is_none() {
-                    if let Some(snapshot) =
-                        self.clone_cached_raw_analysis_snapshot(canonical, whole_hash)
-                    {
-                        self.provenance
-                            .raw_analysis_snapshot_cache_hits
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        component_meta_trace_event!(
-                            "get_raw_analysis_snapshot_host_cache",
-                            format!(
-                                "owner={} hit=true bytes={} whole_hash={whole_hash:?}",
-                                canonical,
-                                source.len(),
-                            ),
-                        );
-                        return Some((*snapshot).clone());
-                    }
-                    self.provenance
-                        .raw_analysis_snapshot_cache_misses
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    component_meta_trace_event!(
-                        "get_raw_analysis_snapshot_host_cache",
-                        format!(
-                            "owner={} hit=false bytes={} whole_hash={whole_hash:?}",
-                            canonical,
-                            source.len(),
-                        ),
-                    );
-                }
                 component_meta_trace_event!(
                     "get_raw_analysis_snapshot_build_from_source",
                     format!("owner={} source_len={}", canonical, source.len()),
@@ -1333,23 +1224,7 @@ impl VerterHost {
             if self.config.effective_scope().needs_template_analysis() {
                 self.compute_template_analysis_if_missing(canonical, &mut snapshot);
             }
-            if let (Some(whole_hash), Some(source)) = (
-                fallback_whole_hash,
-                fallback_source.as_ref().map(Arc::clone),
-            ) {
-                let dependency_resolutions =
-                    VerterHost::dependency_resolutions_from_snapshot(&snapshot);
-                let _ = self.cache_imported_dependency_state(
-                    canonical,
-                    whole_hash,
-                    source,
-                    fallback_cached_parse.clone(),
-                    Some(Arc::new(snapshot.clone())),
-                    None,
-                    None,
-                    dependency_resolutions,
-                );
-            }
+            // No separate cache write needed; ModuleFactsDb already owns the facts.
             component_meta_trace_event!(
                 "get_raw_analysis_snapshot_result",
                 format!(
@@ -1361,10 +1236,6 @@ impl VerterHost {
                     snapshot.template.is_some(),
                 ),
             );
-            if let Some(whole_hash) = fallback_whole_hash.filter(|_| store_view.is_none()) {
-                let cached = self.cache_raw_analysis_snapshot(canonical, whole_hash, snapshot);
-                return Some((*cached).clone());
-            }
             Some(snapshot)
         }
 
@@ -1668,7 +1539,6 @@ impl VerterHost {
         }
 
         for kind in [
-            crate::resolver_core::DerivedFactKind::ExportRegistry,
             crate::resolver_core::DerivedFactKind::Route,
             crate::resolver_core::DerivedFactKind::ExactResolution,
         ] {
@@ -1701,30 +1571,11 @@ impl VerterHost {
             crate::resolver_core::DerivedFactKind::DirectSource => {
                 self.get_whole_hash(canonical_id)
             }
-            crate::resolver_core::DerivedFactKind::ExportRegistry => {
-                #[cfg(feature = "scheduler")]
-                {
-                    self.compile_cache.get(canonical_id).and_then(|cc| {
-                        cc.export_registry
-                            .as_ref()
-                            .map(|registry| registry.source_hash)
-                    })
-                }
-                #[cfg(not(feature = "scheduler"))]
-                {
-                    crate::shared::read_lock(&self.files)
-                        .get(canonical_id)
-                        .and_then(|entry| entry.export_registry.as_ref())
-                        .map(|registry| registry.source_hash)
-                }
-            }
             crate::resolver_core::DerivedFactKind::Route => {
                 // Read-only: only compute Route hash if shallow state already exists.
                 // Do NOT call ensure_shallow_* here — fact validation must be side-effect-free.
-                let entry =
-                    self.clone_current_imported_dependency_entry(canonical_id, store_view)?;
-                let state = entry.shallow_file_state.as_ref()?;
-                Some(crate::resolver_store::hash_route_surface(state))
+                let state = self.shallow_file_state_in_view(canonical_id, store_view)?;
+                Some(crate::resolver_store::hash_route_surface(&state))
             }
             crate::resolver_core::DerivedFactKind::ExactResolution => {
                 if let Some(view) = store_view {
@@ -1737,12 +1588,9 @@ impl VerterHost {
                         });
                 }
 
-                self.dependency_resolutions_for_eval_in_view(canonical_id, None)
-                    .and_then(|resolutions| {
-                        (!resolutions.is_empty()).then(|| {
-                            crate::resolver_store::hash_dependency_resolutions(&resolutions)
-                        })
-                    })
+                // No store_view: read from compile_cache.
+                self.lookup_dependency_resolutions(canonical_id)
+                    .map(|r| crate::resolver_store::hash_dependency_resolutions(&r))
             }
         }
     }
@@ -2329,8 +2177,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             .map(|captured| captured.dep_resolutions.clone())
             .unwrap_or_else(|| {
                 self.host
-                    .dependency_resolutions_for_eval_in_view(owner_canonical, self.store_view)
-                    .unwrap_or_default()
+                    .dependency_resolutions_in_view(owner_canonical, self.store_view)
             });
         // Tracked dependencies: snapshot-level candidates + solver-discovered deps.
         // The legacy walker is no longer used for dependency tracking.

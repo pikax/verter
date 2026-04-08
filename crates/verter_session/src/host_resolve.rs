@@ -246,23 +246,8 @@ impl VerterHost {
             }
         }
 
-        if let Some(resolution) = self
-            .clone_current_imported_dependency_entry(owner_canonical, store_view)
-            .and_then(|entry| entry.dependency_resolutions.get(import_source).cloned())
-        {
-            component_meta_trace_event!(
-                "cached_dependency_resolution_in_view_result",
-                format!(
-                    "owner={} import={} source=imported_dependency_cache target={}",
-                    owner_canonical,
-                    import_source,
-                    Self::dependency_resolution_target(&resolution)
-                        .as_deref()
-                        .unwrap_or("<none>"),
-                ),
-            );
-            return Some(resolution);
-        }
+        // No additional legacy cache lookup needed; dependency resolutions
+        // are served from compile_cache and ModuleFactsDb.
 
         self.current_eval_state_in_view(owner_canonical, store_view)?;
 
@@ -416,7 +401,6 @@ impl VerterHost {
                     .dependency_resolutions
                     .insert(import_source.to_string(), resolution.clone());
                 entry.dependencies.insert(resolved_canonical_id.to_string());
-                return;
             }
         }
 
@@ -429,19 +413,6 @@ impl VerterHost {
                     .insert(import_source.to_string(), resolution.clone());
                 entry.dependencies.insert(resolved_canonical_id.to_string());
                 return;
-            }
-        }
-
-        let workspace_generation = self.ws().content_generation();
-        if let Some(entry) = self
-            .imported_dependency_cache
-            .lock()
-            .get_mut(owner_canonical)
-        {
-            if entry.workspace_generation == workspace_generation {
-                std::sync::Arc::make_mut(entry)
-                    .dependency_resolutions
-                    .insert(import_source.to_string(), resolution);
             }
         }
     }
@@ -1498,198 +1469,6 @@ impl VerterHost {
         resolved
     }
 
-    /// Ensure the export registry is populated for a file.
-    ///
-    /// For files in compile_cache with scheduler analysis data, builds the
-    /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
-    /// For files only on disk, reads the file and extracts export signatures
-    /// (one parse, cached for all future lookups).
-    #[cfg(test)]
-    #[cfg(not(feature = "scheduler"))]
-    pub(crate) fn ensure_export_registry_in_view(
-        &self,
-        canonical: &str,
-        _store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<crate::types::FileExportRegistry> {
-        if let Some(registry) = read_lock(&self.files).get(canonical).and_then(|entry| {
-            entry
-                .export_registry
-                .as_ref()
-                .filter(|registry| registry.source_hash == entry.whole_hash)
-                .cloned()
-        }) {
-            return Some(registry);
-        }
-
-        let registry = {
-            let entry = self.ensure_shallow_imported_dependency_state_in_view(canonical, None)?;
-            entry.external_type_analysis.as_ref().map(|analysis| {
-                Self::build_export_registry_from_external_type_analysis(
-                    analysis.as_ref(),
-                    entry.whole_hash,
-                )
-            })
-        };
-
-        if let Some(ref reg) = registry {
-            if let Some(file) = write_lock(&self.files).get_mut(canonical) {
-                file.export_registry = Some(reg.clone());
-            }
-        }
-
-        registry
-    }
-
-    /// Ensure the export registry is populated for a file.
-    ///
-    /// For files in compile_cache with scheduler analysis data, builds the
-    /// registry from `HostAnalysisData.export_signatures` (no OXC parsing).
-    /// For files only on disk, reads the file and extracts export signatures
-    /// (one parse, cached for all future lookups).
-    #[cfg(test)]
-    #[cfg(feature = "scheduler")]
-    pub(crate) fn ensure_export_registry_in_view(
-        &self,
-        canonical: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<crate::types::FileExportRegistry> {
-        // Check if already populated
-        if let Some(cc) = self.compile_cache.get(canonical) {
-            if let Some(ref registry) = cc.export_registry {
-                let current_hash = store_view
-                    .and_then(|view| view.whole_hash(canonical))
-                    .or_else(|| self.get_whole_hash(canonical))
-                    .unwrap_or_default();
-                if registry.source_hash == current_hash
-                    && self.store_view_allows_current_whole_hash(
-                        canonical,
-                        registry.source_hash,
-                        store_view,
-                    )
-                {
-                    return Some(registry.clone());
-                }
-            }
-        }
-
-        // Build from scheduler analysis data if available
-        let registry = {
-            use crate::host_executor::HostAnalysisData;
-
-            let analysis_snap = self.scheduler.try_get_analysis(canonical);
-            let scheduler_export_sigs = analysis_snap
-                .as_ref()
-                .and_then(|snap| snap.downcast_data::<HostAnalysisData>())
-                .map(|ad| ad.export_signatures.clone());
-            let imported_entry =
-                self.clone_current_imported_dependency_entry(canonical, store_view);
-            let imported_registry = imported_entry.as_ref().and_then(|entry| {
-                entry.external_type_analysis.as_ref().map(|analysis| {
-                    Self::build_export_registry_from_external_type_analysis(
-                        analysis.as_ref(),
-                        entry.whole_hash,
-                    )
-                })
-            });
-            let imported_whole_hash = imported_entry.as_ref().map(|entry| entry.whole_hash);
-
-            let source_hash = self
-                .get_whole_hash(canonical)
-                .or(imported_whole_hash)
-                .unwrap_or_default();
-
-            if let Some(export_sigs) = scheduler_export_sigs {
-                Some(Self::build_export_registry(&export_sigs, source_hash))
-            } else if let Some(registry) = imported_registry {
-                Some(registry)
-            } else {
-                let entry =
-                    self.ensure_shallow_imported_dependency_state_in_view(canonical, store_view)?;
-                entry.external_type_analysis.as_ref().map(|analysis| {
-                    Self::build_export_registry_from_external_type_analysis(
-                        analysis.as_ref(),
-                        entry.whole_hash,
-                    )
-                })
-            }
-        };
-
-        // Cache on compile_cache entry
-        if let Some(ref reg) = registry {
-            let mut cc = self.compile_cache.entry(canonical.to_string()).or_default();
-            cc.export_registry = Some(reg.clone());
-        }
-
-        registry
-    }
-
-    /// Build a `FileExportRegistry` from export signatures.
-    #[cfg(test)]
-    fn build_export_registry(
-        sigs: &[verter_semantic::analysis::ExportSignature],
-        source_hash: Hash16,
-    ) -> crate::types::FileExportRegistry {
-        let mut named = rustc_hash::FxHashMap::default();
-        let mut wildcard_edges = Vec::new();
-
-        for sig in sigs {
-            if sig.name == "*" {
-                if let Some(source) = &sig.reexport_source {
-                    wildcard_edges.push(source.clone());
-                }
-            } else if let Some(source) = &sig.reexport_source {
-                named.insert(
-                    sig.name.clone(),
-                    crate::types::ExportEntry::Alias {
-                        source_specifier: source.clone(),
-                        original_name: sig
-                            .reexport_local
-                            .as_deref()
-                            .unwrap_or(&sig.name)
-                            .to_string(),
-                    },
-                );
-            } else {
-                named.insert(sig.name.clone(), crate::types::ExportEntry::Defined);
-            }
-        }
-
-        crate::types::FileExportRegistry {
-            source_hash,
-            named,
-            wildcard_edges,
-        }
-    }
-
-    #[cfg(test)]
-    fn build_export_registry_from_external_type_analysis(
-        analysis: &verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource,
-        source_hash: Hash16,
-    ) -> crate::types::FileExportRegistry {
-        let mut named = rustc_hash::FxHashMap::default();
-        for name in analysis.exported_local_type_names() {
-            named.insert(name.to_string(), crate::types::ExportEntry::Defined);
-        }
-        for name in analysis.exported_local_symbol_names() {
-            named.insert(name.to_string(), crate::types::ExportEntry::Defined);
-        }
-        for (name, source_specifier, original_name) in analysis.direct_reexport_entries() {
-            named.insert(
-                name.to_string(),
-                crate::types::ExportEntry::Alias {
-                    source_specifier: source_specifier.to_string(),
-                    original_name: original_name.to_string(),
-                },
-            );
-        }
-
-        crate::types::FileExportRegistry {
-            source_hash,
-            named,
-            wildcard_edges: analysis.wildcard_reexport_sources().to_vec(),
-        }
-    }
-
     pub(crate) fn resolve_named_type_export_target_in_view(
         &self,
         dep_canonical: &str,
@@ -1699,10 +1478,24 @@ impl VerterHost {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
-        let _ = self.ensure_shallow_imported_dependency_state_in_view(
-            normalized_canonical.as_str(),
-            store_view,
-        );
+
+        // Check RouteDb first (shared validated cache).
+        if let Some(sv) = store_view {
+            if let Some(cached) = self.resolver.runtime.routes.get_route(
+                normalized_canonical.as_str(),
+                requested_name,
+                sv,
+            ) {
+                match cached.resolved() {
+                    Some((defining_canonical, defining_symbol)) => {
+                        return Some((defining_canonical.to_owned(), defining_symbol.to_owned()));
+                    }
+                    None => return None, // Cached miss.
+                }
+            }
+        }
+
+        let _ = self.ensure_module_facts_in_view(normalized_canonical.as_str(), store_view);
 
         let (frontier_result, _, _) = self
             .resolve_external_type_target_via_frontier_in_view(
@@ -1722,11 +1515,60 @@ impl VerterHost {
                 return None;
             }
             Some((canonical, exported_name))
-        })?;
-        let _ =
-            self.ensure_shallow_imported_dependency_state_in_view(result.0.as_str(), store_view);
-        #[cfg(test)]
-        let _ = self.ensure_export_registry_in_view(result.0.as_str(), store_view);
+        });
+
+        // Populate RouteDb with the result (hit or miss).
+        if let Some(sv) = store_view {
+            let mut facts = Vec::new();
+            if let Some(hash) = sv
+                .whole_hash(normalized_canonical.as_str())
+                .or_else(|| self.get_whole_hash(normalized_canonical.as_str()))
+            {
+                facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
+                    canonical_id: normalized_canonical.clone(),
+                    hash,
+                });
+            }
+            if let Some(hash) = sv.derived_hash(
+                normalized_canonical.as_str(),
+                crate::resolver_core::DerivedFactKind::ExactResolution,
+            ) {
+                facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    canonical_id: normalized_canonical.clone(),
+                    kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+                    hash,
+                });
+            }
+
+            let route_result = match &result {
+                Some((canonical, exported_name)) => {
+                    if let Some(hash) = sv
+                        .whole_hash(canonical.as_str())
+                        .or_else(|| self.get_whole_hash(canonical.as_str()))
+                    {
+                        facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
+                            canonical_id: canonical.clone(),
+                            hash,
+                        });
+                    }
+                    crate::resolver_core::RouteResult::Resolved {
+                        defining_canonical: canonical.clone(),
+                        defining_symbol: exported_name.clone(),
+                    }
+                }
+                None => crate::resolver_core::RouteResult::Miss,
+            };
+
+            self.resolver.runtime.routes.insert_route_with_facts(
+                normalized_canonical.clone(),
+                requested_name.to_owned(),
+                route_result,
+                facts,
+            );
+        }
+
+        let result = result?;
+        let _ = self.ensure_module_facts_in_view(result.0.as_str(), store_view);
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
@@ -1791,25 +1633,16 @@ impl VerterHost {
                 }
             }
         }
-        let entry =
-            self.ensure_shallow_imported_dependency_state_in_view(dep_canonical, store_view)?;
-        let eval_source = entry.eval_source.clone().unwrap_or_else(|| {
-            Arc::<str>::from(
-                extract_vue_script_content(
-                    entry.raw_source.as_ref(),
-                    entry.cached_parse.as_deref(),
-                )
-                .unwrap_or_else(|| entry.raw_source.to_string()),
-            )
-        });
+        let facts = self.ensure_module_facts_in_view(dep_canonical, store_view)?;
+        let eval_source = Arc::clone(&facts.eval_source);
         component_meta_trace_event!(
             "read_dep_source_for_type_resolution_result",
             format!(
-                "owner={} source=host-materialized-cache bytes={} has_cached_parse={} whole_hash={:?}",
+                "owner={} source=module-facts bytes={} has_cached_parse={} whole_hash={:?}",
                 dep_canonical,
                 eval_source.len(),
-                entry.cached_parse.is_some(),
-                entry.whole_hash,
+                facts.cached_parse.is_some(),
+                facts.whole_hash,
             )
         );
         Some(eval_source.to_string())
@@ -3354,55 +3187,98 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             .resolve_eval_dependency_canonical_in_view(canonical_id, self.store_view)
             .unwrap_or_else(|| canonical_id.to_string());
 
-        if !self.materialize_symbols {
-            if let Some(entry) = self
+        // ModuleFactsDb fast path.
+        if let Some(sv) = self.store_view {
+            if let Some(facts) = self
                 .host
-                .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
+                .resolver
+                .runtime
+                .module_facts
+                .get(canonical.as_str(), sv)
             {
-                if let Some(ref state) = entry.shallow_file_state {
-                    if state.has_wildcard_reexports() {
+                if !facts.shallow_state.symbols.is_empty() || !self.materialize_symbols {
+                    if facts.shallow_state.has_wildcard_reexports() {
                         self.host
                             .provenance
                             .resolver_barrel_fact_reuse
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    return Some(Arc::clone(state));
+                    return Some(facts.shallow_state.clone());
                 }
             }
-
-            return self
-                .host
-                .ensure_shallow_imported_dependency_state_in_view(
-                    canonical.as_str(),
-                    self.store_view,
-                )
-                .and_then(|entry| entry.shallow_file_state.clone());
         }
 
-        if let Some(entry) = self
+        // Materialize through ensure_module_facts_in_view.
+        let facts = self
             .host
-            .clone_current_imported_dependency_entry(canonical.as_str(), self.store_view)
-        {
-            if let Some(ref state) = entry.shallow_file_state {
-                if !state.symbols.is_empty() {
-                    if state.has_wildcard_reexports() {
-                        self.host
-                            .provenance
-                            .resolver_barrel_fact_reuse
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    return Some(Arc::clone(state));
-                }
+            .ensure_module_facts_in_view(canonical.as_str(), self.store_view)?;
+        if !facts.shallow_state.symbols.is_empty() || !self.materialize_symbols {
+            if facts.shallow_state.has_wildcard_reexports() {
+                self.host
+                    .provenance
+                    .resolver_barrel_fact_reuse
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            return Some(facts.shallow_state.clone());
         }
 
-        self.host
-            .symbol_shallow_file_state_in_view(canonical.as_str(), self.store_view)
+        None
     }
 
     fn resolve_import_canonical(&self, from_canonical: &str, specifier: &str) -> Option<String> {
+        let normalized = self
+            .host
+            .resolve_eval_dependency_canonical_in_view(from_canonical, self.store_view)
+            .unwrap_or_else(|| from_canonical.to_string());
+
+        if let Some(store_view) = self.store_view {
+            if let Some(state) = self.ensure_shallow_state(normalized.as_str()) {
+                if state.has_wildcard_reexports() {
+                    if let Some(surface) = self
+                        .host
+                        .resolver
+                        .runtime
+                        .routes
+                        .get_or_build_barrel_surface(normalized.as_str(), store_view, || {
+                            let state = self.ensure_shallow_state(normalized.as_str())?;
+                            let type_view = state.type_view();
+                            let mut wildcard_edges = rustc_hash::FxHashMap::default();
+                            let mut source_hashes = Vec::new();
+
+                            for wildcard in type_view.wildcard_reexports() {
+                                let resolved = self
+                                    .host
+                                    .resolve_type_dependency_canonical_shallow_in_view(
+                                        normalized.as_str(),
+                                        &wildcard.source_specifier,
+                                        self.store_view,
+                                    )?;
+                                let source_hash = store_view
+                                    .whole_hash(resolved.as_str())
+                                    .or_else(|| self.host.get_whole_hash(resolved.as_str()))?;
+                                wildcard_edges
+                                    .insert(wildcard.source_specifier.clone(), resolved.clone());
+                                source_hashes.push((resolved, source_hash));
+                            }
+
+                            Some(crate::resolver_core::BarrelRouteSurface {
+                                barrel_canonical: normalized.clone(),
+                                wildcard_edges,
+                                whole_hash: state.whole_hash,
+                                source_hashes,
+                            })
+                        })
+                    {
+                        if let Some(resolved) = surface.wildcard_edges.get(specifier) {
+                            return Some(resolved.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         self.host.resolve_type_dependency_canonical_shallow_in_view(
-            from_canonical,
+            normalized.as_str(),
             specifier,
             self.store_view,
         )

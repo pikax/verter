@@ -9,9 +9,11 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    fallthrough_resolver::FallthroughResolverState, prepared_decl::PreparedDeclBundle,
-    symbol_resolver::SymbolResolverState, FactVersionRef, FallthroughNodeKey, ResolutionNodeKey,
-    ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView, ValidatedFactCache,
+    fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
+    module_facts_db::ModuleFactsDb, prepared_decl::PreparedDeclBundle, route_db::RouteDb,
+    symbol_resolver::SymbolResolverState, type_surface_db::TypeSurfaceDb, FactVersionRef,
+    FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
+    StableExecutionValue, StoreView, ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -93,13 +95,23 @@ where
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
     /// Fact-validated prepared declaration bundles, keyed by canonical file ID.
     /// Replaces the entry-owned `prepared_type_decls` / `prepared_value_decls`
-    /// on `ImportedDependencyCacheEntry` with an atomic, fact-validated cache.
+    /// from the legacy dependency cache with an atomic, fact-validated cache.
     pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
     /// Top-level fallthrough singleflight, with runtime fallthrough nodes remaining the cache authority.
     pub top_level_fallthrough_singleflight:
         SingleflightGroup<FallthroughNodeKey, StableExecutionValue<Option<FallthroughV>>, ()>,
     /// Shared observability counters.
     pub counters: Arc<ResolverCounters>,
+
+    // -- Semantic DB layers --
+    /// Immutable per-file facts (raw source, parse, analysis, shallow state).
+    pub module_facts: ModuleFactsDb,
+    /// Canonical export routing facts (barrel surfaces, route results, misses).
+    pub routes: RouteDb,
+    /// Imported type-root proofs (positive and negative).
+    pub imported_roots: ImportedRootDb,
+    /// Shared projected type surfaces (write-through from projection operators).
+    pub type_surfaces: TypeSurfaceDb,
 }
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -117,6 +129,10 @@ where
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
+            module_facts: ModuleFactsDb::new(),
+            routes: RouteDb::new(),
+            imported_roots: ImportedRootDb::new(),
+            type_surfaces: TypeSurfaceDb::new(),
         }
     }
 
@@ -129,6 +145,10 @@ where
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
+            module_facts: ModuleFactsDb::new(),
+            routes: RouteDb::new(),
+            imported_roots: ImportedRootDb::new(),
+            type_surfaces: TypeSurfaceDb::new(),
         }
     }
 
@@ -139,6 +159,10 @@ where
         self.component_meta.clear();
         self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
+        self.module_facts.clear();
+        self.routes.clear();
+        self.imported_roots.clear();
+        self.type_surfaces.clear();
     }
 
     /// Take a snapshot of the current counter values.

@@ -3678,36 +3678,34 @@ fn resolve_mapped(
             call_signatures: vec![],
             construct_signatures: vec![],
         })
+    } else if should_eagerly_resolve_open_mapped_value(arena, source, parameter, value, name_type) {
+        let mut child_subst = subst.clone();
+        child_subst.bind(parameter, source);
+        let resolved_value = resolve_node(arena, value, host, state, &child_subst);
+        arena.object(ObjectNode {
+            properties: vec![],
+            index_signatures: vec![IndexSignatureNode {
+                key_type: source,
+                value_type: resolved_value,
+                readonly: matches!(readonly, MappedModifierKind::Add),
+            }],
+            call_signatures: vec![],
+            construct_signatures: vec![],
+        })
     } else {
-        if should_eagerly_resolve_open_mapped_value(arena, source, parameter, value, name_type) {
-            let mut child_subst = subst.clone();
-            child_subst.bind(parameter, source);
-            let resolved_value = resolve_node(arena, value, host, state, &child_subst);
-            arena.object(ObjectNode {
-                properties: vec![],
-                index_signatures: vec![IndexSignatureNode {
-                    key_type: source,
-                    value_type: resolved_value,
-                    readonly: matches!(readonly, MappedModifierKind::Add),
-                }],
-                call_signatures: vec![],
-                construct_signatures: vec![],
-            })
-        } else {
-            state.mark_symbolic();
-            let materialized_source = materialize_effective_arg(arena, source, subst);
-            let materialized_value = materialize_effective_arg(arena, value, subst);
-            let materialized_name_type =
-                name_type.map(|node| materialize_effective_arg(arena, node, subst));
-            arena.mapped(
-                parameter,
-                materialized_source,
-                materialized_value,
-                optional,
-                readonly,
-                materialized_name_type,
-            )
-        }
+        state.mark_symbolic();
+        let materialized_source = materialize_effective_arg(arena, source, subst);
+        let materialized_value = materialize_effective_arg(arena, value, subst);
+        let materialized_name_type =
+            name_type.map(|node| materialize_effective_arg(arena, node, subst));
+        arena.mapped(
+            parameter,
+            materialized_source,
+            materialized_value,
+            optional,
+            readonly,
+            materialized_name_type,
+        )
     }
 }
 
