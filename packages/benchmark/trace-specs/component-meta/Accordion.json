@@ -1,0 +1,47 @@
+{
+  "component": "Accordion",
+  "componentPath": "src/runtime/components/Accordion.vue",
+  "maxTotalDurationMs": 5000,
+  "required": [
+    {
+      "namePattern": "resolve_component_meta",
+      "detailPattern": "mode=Expanded",
+      "note": "must resolve component meta in Expanded mode"
+    },
+    {
+      "namePattern": "compute_evaluated_types_expand_macros",
+      "detailPattern": "macros=4",
+      "note": "Accordion has 4 macros (defineProps, defineEmits, defineSlots, withDefaults)"
+    },
+    {
+      "namePattern": "resolve_component_meta_result",
+      "detailPattern": "has_evaluated_types=true",
+      "note": "must produce evaluated types"
+    }
+  ],
+  "forbidden": [],
+  "maxCounts": [
+    {
+      "namePattern": "resolve_imported_type_root",
+      "maxCount": 12,
+      "note": "should resolve at most 6 imported type roots (start+end = 12 events); currently 4 roots"
+    }
+  ],
+  "maxDurations": [
+    {
+      "namePattern": "resolve_component_meta",
+      "maxDurationMs": 5000,
+      "note": "total component meta resolution should complete within 5s"
+    },
+    {
+      "namePattern": "compute_evaluated_types_expand_macros",
+      "maxDurationMs": 4000,
+      "note": "macro expansion should complete within 4s"
+    },
+    {
+      "namePattern": "resolve_imported_type_root",
+      "maxDurationMs": 500,
+      "note": "any single imported type root resolution should take under 500ms"
+    }
+  ]
+}

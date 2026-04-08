@@ -1,0 +1,37 @@
+{
+  "component": "App",
+  "componentPath": "src/runtime/components/App.vue",
+  "maxTotalDurationMs": 8000,
+  "required": [
+    {
+      "namePattern": "resolve_component_meta",
+      "detailPattern": "mode=Expanded",
+      "note": "must resolve component meta in Expanded mode"
+    },
+    {
+      "namePattern": "resolve_component_meta_result",
+      "detailPattern": "has_evaluated_types=true",
+      "note": "must produce evaluated types"
+    }
+  ],
+  "forbidden": [],
+  "maxCounts": [
+    {
+      "namePattern": "resolve_imported_type_root",
+      "maxCount": 15,
+      "note": "App resolves ~5 imported type roots (start+end = 10, +buffer)"
+    }
+  ],
+  "maxDurations": [
+    {
+      "namePattern": "resolve_component_meta",
+      "maxDurationMs": 8000,
+      "note": "total resolution should complete within 8s (App is the slowest)"
+    },
+    {
+      "namePattern": "resolve_imported_type_root",
+      "maxDurationMs": 500,
+      "note": "any single imported type root resolution should take under 500ms"
+    }
+  ]
+}
