@@ -6,57 +6,65 @@ Each component is traced with a 40s hard timeout using `packages/benchmark/src/_
 Traces are validated against desired trace specs under `packages/benchmark/trace-specs/component-meta/`.
 A component is "done" when its trace passes validation and workspace tests pass.
 
-## Batch Status
+## Full Corpus Results (120 components)
 
-### Batch 1: Accordion, Alert, App
+### Summary
 
-| Component | Status | Baseline (ms) | Current (ms) | Props | Follow-ups |
-|-----------|--------|---------------|--------------|-------|------------|
-| Accordion | investigating | 2224 | 2107 | 13 | module_facts ImportRoute validation |
-| Alert | investigating | 658 | 628 | 13 | same |
-| App | investigating | 4113 | 4102 | 7 | same |
+| Category | Count |
+|----------|-------|
+| Fast (<1s) | 54 |
+| Medium (1-5s) | 39 |
+| Slow (5-10s) | 15 |
+| Very slow (10-20s) | 8 |
+| Failed/timed out | 4 |
+| **Total** | **120** |
 
-#### Fix 1: Accept untracked dependency files in store view validation (committed)
+### Failed/No-result Components
 
-**Root cause**: `HostStoreView::validates` rejected `FileWholeHash` facts for files
-not in `whole_hashes` (dependency files loaded after the store view snapshot was taken).
-This caused `ValidatedFactCache::get_if_valid` to miss on every access to dependency files,
-forcing `ensure_module_facts_in_view` through the expensive permissive fallback path.
+| Component | Issue | Trace lines |
+|-----------|-------|-------------|
+| Input | Query returned no result (Closed without Done) | 3754 |
+| Select | Query returned no result (Closed without Done) | 8315 |
+| Table | Timed out at 40s (25K trace lines, still resolving) | 24897 |
+| Textarea | Query returned no result (Closed without Done) | 2925 |
 
-**Impact**: ~5% reduction (Accordion: 2224→2107, Alert: 658→628, App: 4113→4102).
-Small because the permissive path returns from in-memory caches quickly. The dominant
-cost is in the solver itself and the ImportRoute derived fact still causes cache misses
-(see follow-ups).
+### Slowest Components (>5s)
 
-**Files changed**: `crates/verter_session/src/resolver_store.rs`, `host_manage.rs`,
-`resolver_core/mod.rs`, `resolver_core/module_facts_db.rs`, `resolver_core/resolver_runtime.rs`
+| Component | Duration (ms) | Props |
+|-----------|--------------|-------|
+| EditorSuggestionMenu | 18449 | 11 |
+| EditorMentionMenu | 18343 | 13 |
+| EditorEmojiMenu | 18330 | 11 |
+| DropdownMenuContent | 15634 | 35 |
+| EditorToolbar | 12305 | 8 |
+| Toast | 12025 | 17 |
+| InputMenu | 11075 | 63 |
+| SelectMenu | 10894 | 54 |
+| NavigationMenu | 10044 | 30 |
+| ContextMenuContent | 9582 | 25 |
+| DropdownMenu | 9617 | 20 |
+| ContextMenu | 9314 | 14 |
+| Popover | 8608 | 13 |
+| DashboardSearch | 7784 | 25 |
+| DashboardSidebar | 7481 | 17 |
 
-#### Key finding: ImportRoute validation fact on ModuleFactsDb entries
+### Common Bottleneck
 
-Module_facts entries include `DerivedFactHash::ImportRoute` as a validation fact.
-For dependency files not tracked by the store view, this fact ALWAYS fails validation
-(the store view doesn't have the ImportRoute hash). This causes 327 redundant
-`read_analysis_source` calls (139 for Accordion.vue alone) and 199 redundant
-`build_snapshot_from_cached_parse` calls during macro expansion.
+All slow components share the same pattern: `compute_evaluated_types_expand_macros` dominates
+(>90% of total time). The type solver performs deep recursive resolution through reka-ui and
+Vue's type definition barrels. The overhead is inherent to the type complexity, not a cache miss.
 
-Removing ImportRoute from module_facts breaks invalidation tests for workspace-injected
-files (test-only scenario). The proper fix requires either:
-- A `tracks_file`-aware insertion path for module_facts
-- Or populating `whole_hashes` for compile_cache entries without scheduler data
+## Desired Trace Specs
 
-Deferred to follow-up — the architectural fix is non-trivial and the overhead per call
-is ~0.2ms (total ~33ms out of 1577ms).
+Committed specs exist for:
+- Batch 1: Accordion, Alert, App
+- Batch 2: AuthForm, Avatar, AvatarGroup
 
 ## Artifact Directories
 
 | Directory | Description |
 |-----------|-------------|
-| `tmp/first3-alpha-trace-rerun7/` | Pre-fix baseline (from prior session) |
-| `tmp/batch1-trace-001/` | Fresh baseline with rebuilt native |
+| `tmp/batch1-trace-001/` | Batch 1 baseline |
 | `tmp/batch1-trace-002/` | After FileWholeHash acceptance fix |
-| `tmp/batch1-trace-003/` | With ensure_module_facts_fast_hit instrumentation |
-
-## Components Covered
-
-- [ ] Batch 1 (3): Accordion, Alert, App — in progress
-- [ ] Batch 2+ (174): remaining alphabetical
+| `tmp/batch2-trace-001/` | Batch 2 traces |
+| `tmp/batch3-5-trace/` | All remaining components (batches 3-end) |

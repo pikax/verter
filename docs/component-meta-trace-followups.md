@@ -2,37 +2,39 @@
 
 Issues that are not simple implementation fixes and require deeper investigation.
 
-## Format
-
-Each entry includes:
-- **Component(s)**: affected components
-- **Latest trace path**: where to find the trace
-- **Current hot spans**: what's expensive
-- **Suspected root cause**: why it's expensive
-- **Why not a simple fix**: what makes it complex
-- **Likely next fix**: what to try next
-
----
-
 ## 1. ModuleFactsDb ImportRoute validation causes O(n) redundant materialization
 
-- **Component(s)**: ALL components (Accordion: 139 redundant builds, App: more)
+- **Component(s)**: ALL components
 - **Latest trace path**: `tmp/batch1-trace-003/`
-- **Current hot spans**: 199 `build_snapshot_from_cached_parse`, 327 `read_analysis_source` during `compute_evaluated_types_expand_macros`
-- **Suspected root cause**: `ModuleFactsDb.get_or_materialize` stores entries with `DerivedFactHash::ImportRoute` validation fact. For dependency files not tracked by the store view, this fact always fails `get_if_valid`, forcing re-materialization on every access.
-- **Why not a simple fix**: Removing ImportRoute from module_facts validation breaks invalidation for workspace-injected files that have `set_import_dependencies` routes. A `tracks_file`-aware insertion path requires new `StoreView` trait methods and careful interaction with `snapshot_module_fact_hashes` which invalidates freshly-materialized entries.
-- **Likely next fix**: Two options:
-  1. Add `tracks_file` to `StoreView`, skip ImportRoute fact for untracked files in `get_or_materialize`. Requires also populating `whole_hashes` from module_facts for compile_cache entries without scheduler data.
-  2. Have `ensure_module_facts_in_view` use a secondary lookup when the validated cache misses: check if the primary entries map has the key (regardless of validation) — if yes, the entry was just materialized in this session and can be returned directly.
+- **Current hot spans**: 199 `build_snapshot_from_cached_parse`, 327 `read_analysis_source` during expansion
+- **Suspected root cause**: Module_facts entries include `DerivedFactHash::ImportRoute` validation fact. For untracked dependency files, this always fails `get_if_valid`.
+- **Why not a simple fix**: Removing ImportRoute breaks invalidation for test-only workspace-injected files. Requires `tracks_file`-aware insertion or whole_hash population for compile_cache-only entries.
+- **Likely next fix**: Add `StoreView::tracks_file` and conditionally include ImportRoute fact in `get_or_materialize`.
+- **Impact**: ~33ms overhead (small relative to total)
 
 ## 2. Solver type resolution is the dominant cost (~95% of macro expansion)
 
-- **Component(s)**: ALL components (Accordion: 1577ms total, ~1350ms in solver after subtracting resolve_imported_type_root)
-- **Latest trace path**: `tmp/batch1-trace-002/`
-- **Current hot spans**: `compute_evaluated_types_expand_macros` (1577ms), `resolve_imported_type_root` (219ms), solver internal resolution (~1350ms)
-- **Suspected root cause**: The type solver performs deep recursive type resolution for each macro. For nuxt-ui's Accordion with 4 macros, it resolves ~129 prepared type declarations across 71 unique files. Each resolution involves multiple callbacks through `SessionSolverHost` into the host's module_facts and prepared_decl_bundle caches.
-- **Why not a simple fix**: This is the inherent cost of deep type resolution. Reducing it requires either:
-  - Caching fully-resolved type shapes (not just prepared declarations)
-  - Reducing the number of types that need resolution (better import graph pruning)
-  - Making the solver's type-expansion more incremental
-- **Likely next fix**: Profile the solver's internal resolve loop to find which types are most expensive to resolve, and whether any resolution is redundant across macros in the same file.
+- **Component(s)**: ALL slow components
+- **Latest trace path**: `tmp/batch3-5-trace/`
+- **Current hot spans**: `compute_evaluated_types_expand_macros` (1.5-18s)
+- **Suspected root cause**: Deep recursive type resolution through reka-ui and Vue barrel files. 127+ types resolved per component, ~10ms average per type.
+- **Why not a simple fix**: Inherent computation cost of type expansion. Requires solver-level caching or type-shape memoization.
+- **Likely next fix**: Profile solver internals to find redundant work across macros in the same file.
+
+## 3. Input, Select, Textarea return no component meta
+
+- **Component(s)**: Input.vue, Select.vue, Textarea.vue
+- **Latest trace path**: `tmp/batch3-5-trace/`
+- **Current hot spans**: Query completes (Closed) but no meta returned
+- **Suspected root cause**: These components may use patterns that the meta resolver doesn't handle (e.g., complex type intersections with HTML element types from `../types/html.ts`).
+- **Why not a simple fix**: Need to investigate what specific type pattern causes the resolver to return None.
+- **Likely next fix**: Check if these components use `defineProps<Props & HTMLInputElement['$props']>()` or similar patterns.
+
+## 4. Table.vue times out at 40s
+
+- **Component(s)**: Table.vue
+- **Latest trace path**: `tmp/batch3-5-trace/Table.trace.log` (24897 lines)
+- **Current hot spans**: Still resolving macro types after 40s, 18 macros in the component
+- **Suspected root cause**: Table.vue has 18 macros and imports from `@tanstack/vue-table` which has complex generic types (CoreOptions, etc.). The type solver may hit exponential expansion.
+- **Why not a simple fix**: Requires type expansion budgets or solver-level cycle detection for deeply generic types.
+- **Likely next fix**: Check `@tanstack/vue-table` type complexity and add budget limits for per-component type expansion.
