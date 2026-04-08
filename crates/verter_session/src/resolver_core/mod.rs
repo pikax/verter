@@ -431,6 +431,14 @@ where
         // prevents stale views from seeing facts for changed files.
     }
 
+    /// Hard-remove: clear from both primary and archive maps.
+    /// Used when a file is deleted — archived entries must not survive
+    /// because untracked-file acceptance in `validates` would accept them.
+    pub fn hard_remove(&self, key: &K) {
+        self.entries.lock().remove(key);
+        self.archived.lock().remove(key);
+    }
+
     /// Soft-invalidate: remove the entry from the primary map and move
     /// it to the archive. Stale store views can still find the archived
     /// entry through `get_if_valid` (which checks both maps), while
@@ -442,6 +450,14 @@ where
             drop(entries);
             self.archived.lock().insert(key.clone(), entry);
         }
+    }
+
+    /// Remove all entries whose key satisfies the predicate.
+    pub fn retain<F>(&self, mut predicate: F)
+    where
+        F: FnMut(&K) -> bool,
+    {
+        self.entries.lock().retain(|k, _| predicate(k));
     }
 
     pub fn len(&self) -> usize {

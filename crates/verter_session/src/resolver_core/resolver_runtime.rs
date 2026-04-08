@@ -61,6 +61,19 @@ where
         self.cache.remove(key);
     }
 
+    /// Hard-remove: clear from both primary and archive maps.
+    pub fn hard_remove(&self, key: &K) {
+        self.cache.hard_remove(key);
+    }
+
+    /// Remove all entries whose key satisfies the predicate.
+    pub fn retain<F>(&self, predicate: F)
+    where
+        F: FnMut(&K) -> bool,
+    {
+        self.cache.retain(predicate);
+    }
+
     pub fn singleflight(&self) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
         &self.singleflight
     }
@@ -172,6 +185,18 @@ where
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
         self.module_facts.evict(canonical_id);
+        self.routes.evict_provider(canonical_id);
+        self.imported_roots.evict_provider(canonical_id);
+        self.type_surfaces.evict_owner(canonical_id);
+    }
+
+    /// Hard-evict all artifacts for a deleted file, including archived entries.
+    /// Archived entries must be removed because untracked-file acceptance in
+    /// the store view's `validates` method would otherwise return stale facts.
+    pub fn hard_evict_canonical(&self, canonical_id: &str) {
+        self.prepared_decl_bundles
+            .hard_remove(&canonical_id.to_string());
+        self.module_facts.hard_evict(canonical_id);
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
         self.type_surfaces.evict_owner(canonical_id);

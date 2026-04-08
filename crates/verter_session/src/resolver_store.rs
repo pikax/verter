@@ -323,19 +323,31 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
         match fact {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => self
-                .whole_hashes
-                .get(canonical_id)
-                .is_some_and(|current| current == hash),
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                match self.whole_hashes.get(canonical_id) {
+                    Some(current) => current == hash,
+                    // File not tracked by this store view — it was loaded as a
+                    // dependency AFTER the view snapshot was taken. Accept it:
+                    // the facts were just materialized from current disk/workspace
+                    // state and are valid. This avoids forcing every dependency
+                    // access through the expensive permissive fallback path in
+                    // `ensure_module_facts_in_view`.
+                    None => true,
+                }
+            }
             crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
                 hash,
             } => match kind {
-                crate::resolver_core::DerivedFactKind::DirectSource => self
-                    .whole_hashes
-                    .get(canonical_id)
-                    .is_some_and(|current| current == hash),
+                crate::resolver_core::DerivedFactKind::DirectSource => {
+                    match self.whole_hashes.get(canonical_id) {
+                        Some(current) => current == hash,
+                        // Untracked dependency file — accept (same reasoning
+                        // as FileWholeHash above).
+                        None => true,
+                    }
+                }
                 _ => self
                     .derived_hashes
                     .get(&(canonical_id.clone(), *kind))
@@ -421,6 +433,80 @@ mod tests {
     use super::hash_import_route_targets;
     use crate::types::DependencyResolution;
     use rustc_hash::FxHashMap;
+
+    use crate::resolver_core::StoreView;
+
+    /// Files loaded as dependencies DURING resolution (after the store view
+    /// snapshot was taken) are not tracked in `whole_hashes`. The validated
+    /// cache must accept facts for these untracked files — otherwise every
+    /// access to a dependency falls through to the expensive permissive path.
+    #[test]
+    fn validates_accepts_untracked_file_whole_hash() {
+        let view = super::HostStoreView {
+            mutation_epoch: 1,
+            whole_hashes: FxHashMap::from_iter([("/src/Accordion.vue".to_string(), [1u8; 16])]),
+            ..Default::default()
+        };
+
+        // Tracked file with matching hash — should validate.
+        assert!(
+            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/src/Accordion.vue".to_string(),
+                hash: [1u8; 16],
+            })
+        );
+
+        // Tracked file with mismatching hash — should reject.
+        assert!(
+            !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/src/Accordion.vue".to_string(),
+                hash: [2u8; 16],
+            })
+        );
+
+        // Untracked dependency file — should accept (loaded after view snapshot).
+        assert!(
+            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }),
+            "untracked dependency files should be accepted by the store view"
+        );
+    }
+
+    /// DerivedFactHash::DirectSource for untracked files should be accepted
+    /// (same as FileWholeHash — it's a content-hash alias). Non-DirectSource
+    /// derived facts for untracked files should NOT be accepted — they are
+    /// invalidation signals (import routes, etc.) that must be explicitly
+    /// tracked to participate in validation.
+    #[test]
+    fn validates_derived_fact_hash_semantics() {
+        let view = super::HostStoreView {
+            mutation_epoch: 1,
+            whole_hashes: FxHashMap::default(),
+            ..Default::default()
+        };
+
+        // DirectSource for untracked file — should accept (content-hash alias).
+        assert!(
+            view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: crate::resolver_core::DerivedFactKind::DirectSource,
+                hash: [99u8; 16],
+            }),
+            "DirectSource for untracked file should be accepted"
+        );
+
+        // Route for untracked file — should NOT accept (invalidation signal).
+        assert!(
+            !view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                hash: [99u8; 16],
+            }),
+            "Route derived fact for untracked file should NOT be accepted"
+        );
+    }
 
     #[test]
     fn import_route_hash_ignores_lazy_promotion_to_same_effective_target() {

@@ -191,6 +191,14 @@ impl ModuleFactsDb {
         self.facts.remove(&canonical_id.to_owned());
     }
 
+    /// Hard-evict: clear from both primary and archive maps.
+    /// Used when a file is deleted — archived entries must not survive
+    /// because untracked-file acceptance in the store view's `validates`
+    /// would otherwise return stale facts for a deleted file.
+    pub fn hard_evict(&self, canonical_id: &str) {
+        self.facts.hard_remove(&canonical_id.to_owned());
+    }
+
     /// Soft-invalidate facts for a canonical file.
     ///
     /// The current entry becomes unreachable for new views, but the

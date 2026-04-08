@@ -6723,6 +6723,15 @@ impl VerterHost {
             self.ws().notify_delete(&canonical);
             self.compile_cache.remove(&canonical);
             self.scheduler.remove(&canonical);
+            // Evict all resolver caches so that untracked-file acceptance in
+            // the store view's `validates` method does not return stale facts
+            // for a deleted file.
+            self.resolver.runtime.hard_evict_canonical(&canonical);
+            // Also evict component_meta results keyed by this canonical.
+            self.resolver
+                .runtime
+                .component_meta
+                .retain(|key| key.symbol_id != canonical);
 
             self.bump_store_view_epoch();
             Some(HostRemoveResult {
