@@ -128,21 +128,19 @@ pub struct ExternalTypeFrontier {
 /// Trait for the host to provide file state to the frontier engine.
 ///
 /// The frontier engine never performs file I/O itself — all file state
-/// comes through this trait.  Cross-file edges are pre-canonicalized on
-/// the `ShallowFileState` when possible, so most traversal runs without
-/// calling `resolve_import_canonical`.  The fallback is only used for
-/// edges whose canonical ID could not be resolved at construction time.
+/// comes through this trait. Cross-file edges usually carry canonical
+/// target IDs on the `ShallowFileState`; when they do not, the host may
+/// lazily supply a type-route target for the missing edge.
 pub trait FrontierHost {
     /// Get or build the shallow type state for a canonical file.
     fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>>;
 
-    /// Fallback: resolve an import specifier to its canonical ID.
-    ///
-    /// Only called for edges whose `canonical_id` was empty at construction
-    /// time (e.g., files loaded before their dependency graph was fully
-    /// materialized).  Production hosts should ensure shallow states are
-    /// built with a resolver so this is rarely hit.
-    fn resolve_import_canonical(&self, _from_canonical: &str, _specifier: &str) -> Option<String> {
+    /// Resolve a missing type edge from an owner file to an import/reexport source.
+    fn resolve_type_edge_canonical(
+        &self,
+        _owner_canonical: &str,
+        _source_specifier: &str,
+    ) -> Option<String> {
         None
     }
 
@@ -220,17 +218,18 @@ impl ExternalTypeFrontier {
             let resolved = self.resolve_one(host, &pending);
 
             // Enqueue external refs from this symbol into next level.
-            // External refs carry pre-canonicalized target IDs when available.
-            // For edges that couldn't be canonicalized at construction time,
-            // fall back to the host's resolve_import_canonical.
+            // Prefer the pre-canonicalized edge, but ask the host for a
+            // type-route target when the shallow state left the edge empty.
             for ext_ref in &resolved.unresolved_external {
-                let target_canonical = if !ext_ref.canonical_id.is_empty() {
-                    ext_ref.canonical_id.clone()
-                } else if let Some(resolved_id) =
-                    host.resolve_import_canonical(&pending.canonical_id, &ext_ref.source_specifier)
-                {
-                    resolved_id
+                let target_canonical = if ext_ref.canonical_id.is_empty() {
+                    host.resolve_type_edge_canonical(
+                        &resolved.canonical_id,
+                        &ext_ref.source_specifier,
+                    )
                 } else {
+                    Some(ext_ref.canonical_id.clone())
+                };
+                let Some(target_canonical) = target_canonical else {
                     continue;
                 };
                 let next = PendingExternalSymbol {
@@ -282,18 +281,15 @@ impl ExternalTypeFrontier {
             return self.resolve_through_export(host, pending, &state, target);
         }
 
-        // Step 2: Try wildcard reexport routing using pre-canonicalized edges.
-        // Fall back to host resolution for edges with empty canonical IDs.
+        // Step 2: Try wildcard reexport routing using the shallow edge first,
+        // then lazily proving the missing type route through the host.
         for (order, wildcard) in type_view.wildcard_reexports().iter().enumerate() {
-            let target_canonical_owned;
-            let target_canonical = if !wildcard.canonical_id.is_empty() {
-                &wildcard.canonical_id
-            } else if let Some(resolved) =
-                host.resolve_import_canonical(&pending.canonical_id, &wildcard.source_specifier)
-            {
-                target_canonical_owned = resolved;
-                &target_canonical_owned
+            let target_canonical = if wildcard.canonical_id.is_empty() {
+                host.resolve_type_edge_canonical(&pending.canonical_id, &wildcard.source_specifier)
             } else {
+                Some(wildcard.canonical_id.clone())
+            };
+            let Some(target_canonical) = target_canonical else {
                 continue;
             };
 
@@ -323,7 +319,7 @@ impl ExternalTypeFrontier {
             }
 
             // Try resolving in the wildcard target
-            if let Some(wc_state) = host.ensure_shallow_state(target_canonical) {
+            if let Some(wc_state) = host.ensure_shallow_state(&target_canonical) {
                 if wc_state
                     .type_view()
                     .export_target(&pending.exported_name)
@@ -402,14 +398,14 @@ impl ExternalTypeFrontier {
             ExportTarget::Local { symbol_name } => {
                 if state.is_import_local(symbol_name) {
                     if let Some(import_target) = state.import_target(symbol_name) {
-                        let resolved_canonical = if !import_target.canonical_id.is_empty() {
-                            Some(import_target.canonical_id.clone())
-                        } else {
-                            host.resolve_import_canonical(
-                                &pending.canonical_id,
-                                &import_target.source_specifier,
-                            )
-                        };
+                        let resolved_canonical = (!import_target.canonical_id.is_empty())
+                            .then(|| import_target.canonical_id.clone())
+                            .or_else(|| {
+                                host.resolve_type_edge_canonical(
+                                    &pending.canonical_id,
+                                    &import_target.source_specifier,
+                                )
+                            });
                         if let Some(ref target_canonical) = resolved_canonical {
                             let next = PendingExternalSymbol {
                                 canonical_id: target_canonical.clone(),
@@ -523,12 +519,11 @@ impl ExternalTypeFrontier {
                 canonical_id: reexport_canonical,
                 ..
             } => {
-                // Follow the reexport using pre-canonicalized target, with fallback
-                let effective_canonical = if !reexport_canonical.is_empty() {
-                    Some(reexport_canonical.clone())
-                } else {
-                    host.resolve_import_canonical(&pending.canonical_id, source_specifier)
-                };
+                let effective_canonical = (!reexport_canonical.is_empty())
+                    .then(|| reexport_canonical.clone())
+                    .or_else(|| {
+                        host.resolve_type_edge_canonical(&pending.canonical_id, source_specifier)
+                    });
                 if let Some(ref reexport_canonical) = effective_canonical {
                     let next = PendingExternalSymbol {
                         canonical_id: reexport_canonical.clone(),
@@ -626,16 +621,16 @@ impl ExternalTypeFrontier {
             };
         }
 
-        // Fall back to wildcard reexport edges using canonical IDs
+        // Fall back to wildcard reexport edges using the shallow edge first,
+        // then lazily proving the missing type route through the host.
         let state = host.ensure_shallow_state(&current.0)?;
         for wildcard in state.type_view().wildcard_reexports() {
-            let wc_canonical = if !wildcard.canonical_id.is_empty() {
-                wildcard.canonical_id.clone()
-            } else if let Some(resolved) =
-                host.resolve_import_canonical(&current.0, &wildcard.source_specifier)
-            {
-                resolved
+            let wc_canonical = if wildcard.canonical_id.is_empty() {
+                host.resolve_type_edge_canonical(&current.0, &wildcard.source_specifier)
             } else {
+                Some(wildcard.canonical_id.clone())
+            };
+            let Some(wc_canonical) = wc_canonical else {
                 continue;
             };
 
@@ -710,6 +705,7 @@ mod tests {
     struct MockHost {
         files: FxHashMap<String, Arc<ShallowFileState>>,
         route_exports_only: bool,
+        missing_type_edges: FxHashMap<(String, String), String>,
     }
 
     impl MockHost {
@@ -717,17 +713,40 @@ mod tests {
             Self {
                 files: FxHashMap::default(),
                 route_exports_only: false,
+                missing_type_edges: FxHashMap::default(),
             }
         }
 
         fn add_file(&mut self, canonical_id: &str, state: ShallowFileState) {
             self.files.insert(canonical_id.to_string(), Arc::new(state));
         }
+
+        fn add_missing_type_edge(
+            &mut self,
+            owner_canonical: &str,
+            source_specifier: &str,
+            target_canonical: &str,
+        ) {
+            self.missing_type_edges.insert(
+                (owner_canonical.to_string(), source_specifier.to_string()),
+                target_canonical.to_string(),
+            );
+        }
     }
 
     impl FrontierHost for MockHost {
         fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
             self.files.get(canonical_id).cloned()
+        }
+
+        fn resolve_type_edge_canonical(
+            &self,
+            owner_canonical: &str,
+            source_specifier: &str,
+        ) -> Option<String> {
+            self.missing_type_edges
+                .get(&(owner_canonical.to_string(), source_specifier.to_string()))
+                .cloned()
         }
 
         fn route_exports_only(&self) -> bool {
@@ -1290,10 +1309,9 @@ mod tests {
 
     #[test]
     fn frontier_resolves_through_canonical_edges_without_host_callback() {
-        // The MockHost does NOT implement resolve_import_canonical (returns None).
-        // But the shallow states have canonical IDs pre-populated on their edges
+        // The shallow states have canonical IDs pre-populated on their edges
         // via the MapResolver at construction time. The frontier should resolve
-        // the entire chain without needing the fallback host callback.
+        // the entire chain without needing any second import-resolution step.
 
         let mut host = MockHost::new();
 
@@ -1349,10 +1367,40 @@ mod tests {
             "resolved local symbol should have a body"
         );
 
-        // Negative: the host's resolve_import_canonical was never called.
-        // Since MockHost does not override the default (returns None), if the
-        // frontier had needed it, the reexport would have been RouteNotFound.
-        // The fact that it resolved proves the canonical edges sufficed.
+        // Negative: canonical edges alone must suffice for the traversal.
+    }
+
+    #[test]
+    fn frontier_can_follow_missing_type_edges_via_host_callback() {
+        let mut host = MockHost::new();
+        host.add_file(
+            "/src/index.ts",
+            make_state("export { Props } from './types'"),
+        );
+        host.add_file(
+            "/src/types.ts",
+            make_state("import type { Base } from './base'\nexport interface Props extends Base { label: string }"),
+        );
+        host.add_file(
+            "/src/base.ts",
+            make_state("export interface Base { id: string }"),
+        );
+        host.add_missing_type_edge("/src/index.ts", "./types", "/src/types.ts");
+        host.add_missing_type_edge("/src/types.ts", "./base", "/src/base.ts");
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/index.ts".to_string(),
+            exported_name: "Props".to_string(),
+            route: None,
+        }]);
+
+        frontier.run(&host).unwrap();
+
+        assert_eq!(
+            frontier.final_target_for(&host, "/src/index.ts", "Props"),
+            Some(("/src/types.ts".to_string(), "Props".to_string())),
+        );
     }
 
     #[test]

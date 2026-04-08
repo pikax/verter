@@ -114,6 +114,24 @@ pub struct StoreViewCompatToken(pub u64);
 pub trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
     fn validates(&self, fact: &FactVersionRef) -> bool;
+    /// Whether this view should check the archive for soft-invalidated
+    /// entries. Only strict (non-permissive) views return true.
+    fn checks_archive(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PermissiveStoreView;
+
+impl StoreView for PermissiveStoreView {
+    fn compat_token(&self) -> StoreViewCompatToken {
+        StoreViewCompatToken(0)
+    }
+
+    fn validates(&self, _fact: &FactVersionRef) -> bool {
+        true
+    }
 }
 
 pub trait ResolverStore {
@@ -145,7 +163,8 @@ pub struct ResolveRequest {
 pub enum DerivedFactKind {
     /// Provider-owned export route surface hash.
     Route,
-    ExactResolution,
+    /// Importer-owned effective import-target surface hash.
+    ImportRoute,
     DirectSource,
 }
 
@@ -340,6 +359,10 @@ where
     K: Eq + Hash,
 {
     entries: Mutex<FxHashMap<K, ValidatedEntry<V>>>,
+    /// Soft-invalidated entries that are no longer reachable via `get_if_valid`
+    /// with a permissive view, but can still be found by store-view-validated
+    /// lookups via `get_if_valid_archived`.
+    archived: Mutex<FxHashMap<K, ValidatedEntry<V>>>,
 }
 
 impl<K, V> Default for ValidatedFactCache<K, V>
@@ -349,6 +372,7 @@ where
     fn default() -> Self {
         Self {
             entries: Mutex::new(FxHashMap::default()),
+            archived: Mutex::new(FxHashMap::default()),
         }
     }
 }
@@ -362,12 +386,24 @@ where
         TView: StoreView,
     {
         let entries = self.entries.lock();
-        let entry = entries.get(key)?;
-        if entry.facts.iter().all(|fact| view.validates(fact)) {
-            Some(entry.value.clone())
-        } else {
-            None
+        if let Some(entry) = entries.get(key) {
+            if entry.facts.iter().all(|fact| view.validates(fact)) {
+                return Some(entry.value.clone());
+            }
         }
+        drop(entries);
+
+        // Check the archive — stale store views may still validate against
+        // prior generations of facts that were soft-invalidated.
+        if view.checks_archive() {
+            let archived = self.archived.lock();
+            if let Some(entry) = archived.get(key) {
+                if entry.facts.iter().all(|fact| view.validates(fact)) {
+                    return Some(entry.value.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn insert(&self, key: K, value: V, facts: Vec<FactVersionRef>) {
@@ -390,10 +426,27 @@ where
 
     pub fn clear(&self) {
         self.entries.lock().clear();
+        self.archived.lock().clear();
     }
 
     pub fn remove(&self, key: &K) {
         self.entries.lock().remove(key);
+        // Archive entries are NOT removed here — stale store views may
+        // still need them. The validation mechanism (whole_hash mismatch)
+        // prevents stale views from seeing facts for changed files.
+    }
+
+    /// Soft-invalidate: remove the entry from the primary map and move
+    /// it to the archive. Stale store views can still find the archived
+    /// entry through `get_if_valid` (which checks both maps), while
+    /// production (permissive) lookups will see no entry since the
+    /// primary map no longer holds it.
+    pub fn invalidate(&self, key: &K) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.remove(key) {
+            drop(entries);
+            self.archived.lock().insert(key.clone(), entry);
+        }
     }
 
     pub fn len(&self) -> usize {

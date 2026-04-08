@@ -99,7 +99,7 @@ fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot)
         meta: snap.meta.clone(),
         aliases: BTreeSet::new(),
         dependencies: BTreeSet::new(),
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -822,7 +822,7 @@ fn import_resolves_to_dep_non_relative_in_deps() {
         meta: FileMeta::default(),
         aliases: BTreeSet::new(),
         dependencies: deps,
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -868,7 +868,7 @@ fn import_resolves_to_dep_non_relative_not_in_deps() {
         meta: FileMeta::default(),
         aliases: BTreeSet::new(),
         dependencies: BTreeSet::new(),
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -908,7 +908,7 @@ fn import_resolves_to_dep_relative_exact() {
         meta: FileMeta::default(),
         aliases: BTreeSet::new(),
         dependencies: BTreeSet::new(),
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -952,7 +952,7 @@ fn import_resolves_to_dep_relative_extension_strip() {
         },
         aliases: BTreeSet::new(),
         dependencies: BTreeSet::new(),
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -1001,7 +1001,7 @@ fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
 
     let mut view = DependentView {
         canonical_id: "/src/App.vue".to_string(),
-        dependency_resolutions: FxHashMap::default(),
+        import_routes: FxHashMap::default(),
         dependencies: BTreeSet::default(),
         script_lang: Some("ts".to_string()),
         macro_type_deps: Vec::new(),
@@ -1032,11 +1032,11 @@ fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
         "runtime invalidation should resolve aliased imports through the workspace when the cache is cold"
     );
     assert_eq!(
-        view.dependency_resolutions
+        view.import_routes
             .get("@/dep")
             .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
         Some("/src/dep.ts"),
-        "workspace-resolved alias routes should be promoted into dependency_resolutions for future checks"
+        "workspace-resolved alias routes should be promoted into import_routes for future checks"
     );
 
     let second = should_invalidate_dependent_view(
@@ -1051,7 +1051,7 @@ fn should_invalidate_dependent_promotes_workspace_resolution_into_cache() {
 
     assert!(
         second,
-        "once promoted into dependency_resolutions, the same invalidation check should succeed without a live workspace resolver"
+        "once promoted into import_routes, the same invalidation check should succeed without a live workspace resolver"
     );
 }
 
@@ -3363,7 +3363,7 @@ fn workspace_resolution_is_phase_0_primary() {
         })
         .unwrap();
 
-    // Set exact resolution on workspace ONLY (not on host's dependency_resolutions).
+    // Set exact resolution on workspace ONLY (not on host's import_routes).
     ws.set_exact_resolutions(
         "/src/App.vue",
         vec![verter_workspace::ExactResolution {
@@ -3376,7 +3376,7 @@ fn workspace_resolution_is_phase_0_primary() {
     );
 
     // Positive: workspace Phase 0 should resolve ./types -> /src/types.ts
-    // even though the host's legacy Phase 1 has no dependency_resolutions for it.
+    // even though the host's legacy Phase 1 has no import_routes for it.
     let result = host.resolve_import_via_workspace("/src/App.vue", "./types");
     assert_eq!(
         result.as_deref(),
@@ -3876,7 +3876,7 @@ mod phase1_structural_tests {
         assert_eq!(cc.diagnostics_generation, 0);
         assert!(cc.cached_tsc_extract.is_none());
         assert!(cc.raw_template_analysis.is_none());
-        assert!(cc.dependency_resolutions.is_empty());
+        assert!(cc.import_routes.is_empty());
         assert!(cc.dependencies.is_empty());
         assert!(cc.resolved_type_hashes.is_empty());
         assert!(cc.aliases.is_empty());

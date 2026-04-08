@@ -220,7 +220,7 @@ pub fn prepare_exported_value_decl(
 
 /// Atomic declaration-surface bundle for one canonical file.
 ///
-/// Valid as long as its `ExactResolution` and `FileWholeHash` facts match the
+/// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
 /// current store view. Never incrementally merged — rebuilt wholesale when the
 /// import graph or file content changes.
 #[derive(Clone)]

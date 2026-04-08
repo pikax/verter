@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
+use crate::resolver_core::{
+    FactVersionRef, PermissiveStoreView, SingleflightGroup, StoreView, ValidatedFactCache,
+};
 
 /// Result of resolving an imported type root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,17 +83,8 @@ impl ImportedRootDb {
         provider_canonical: &str,
         imported_name: &str,
     ) -> Option<Arc<ImportedRootResult>> {
-        struct PermissiveView;
-        impl crate::resolver_core::StoreView for PermissiveView {
-            fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-                crate::resolver_core::StoreViewCompatToken(0)
-            }
-            fn validates(&self, _fact: &FactVersionRef) -> bool {
-                true
-            }
-        }
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
-        self.roots.get_if_valid(&key, &PermissiveView)
+        self.roots.get_if_valid(&key, &PermissiveStoreView)
     }
 
     /// Look up or resolve a root for `(provider, imported_name)`.
@@ -106,6 +99,23 @@ impl ImportedRootDb {
         V: StoreView,
         F: FnOnce() -> Option<ImportedRootResult>,
     {
+        self.get_or_resolve_with_facts(provider_canonical, imported_name, view, || {
+            resolve().map(|result| (result, Vec::new()))
+        })
+    }
+
+    /// Look up or resolve a root for `(provider, imported_name)` with fact validation.
+    pub fn get_or_resolve_with_facts<V, F>(
+        &self,
+        provider_canonical: &str,
+        imported_name: &str,
+        view: &V,
+        resolve: F,
+    ) -> Option<Arc<ImportedRootResult>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
+    {
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
 
         if let Some(result) = self.roots.get_if_valid(&key, view) {
@@ -117,9 +127,9 @@ impl ImportedRootDb {
                 return Ok(result);
             }
             match resolve() {
-                Some(result) => {
+                Some((result, facts)) => {
                     let arc = Arc::new(result);
-                    self.roots.insert_arc(key.clone(), arc.clone(), Vec::new());
+                    self.roots.insert_arc(key.clone(), arc.clone(), facts);
                     Ok(arc)
                 }
                 None => Err(()),
@@ -177,9 +187,16 @@ impl ImportedRootDb {
 
     /// Evict all roots for a provider.
     pub fn evict_provider(&self, provider_canonical: &str) {
-        // ValidatedFactCache does not support prefix deletion.
-        // Stale entries are caught by fact-validation on next access.
-        let _ = provider_canonical;
+        let keys: Vec<_> = self
+            .roots
+            .snapshot_all()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|(provider, _)| provider == provider_canonical)
+            .collect();
+        for key in keys {
+            self.roots.remove(&key);
+        }
     }
 
     /// Clear all cached roots.

@@ -309,7 +309,7 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
         .compile_cache
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
-    entry.dependency_resolutions.insert(
+    entry.import_routes.insert(
         "./inner".to_string(),
         crate::types::DependencyResolution {
             specifier: "./inner".to_string(),
@@ -319,27 +319,27 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     );
     drop(entry);
 
-    let exact_hash = {
+    let import_route_hash = {
         let entry = project
             .host()
             .compile_cache
             .get("/index.ts")
             .expect("compile cache entry should exist");
-        crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
+        crate::resolver_store::hash_import_route_targets(&entry.import_routes)
     };
 
     assert!(project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
-            hash: exact_hash,
+            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+            hash: import_route_hash,
         },
     ]));
 
     assert!(!project.host().fact_versions_match(&[
         crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
             hash: [9; 16],
         },
     ]));
@@ -478,6 +478,45 @@ fn store_view_epoch_advances_on_clear_compile_cache() {
     );
 }
 
+#[test]
+fn clear_compile_cache_preserves_module_facts_db() {
+    let project = make_project();
+    project
+        .upsert_base("/index.ts", "export interface Props { label: string }")
+        .expect("upsert should succeed");
+
+    project
+        .host()
+        .ensure_module_facts_in_view("/index.ts", None)
+        .expect("module facts should materialize before clearing compile artifacts");
+
+    assert!(
+        project
+            .host()
+            .resolver
+            .runtime
+            .module_facts
+            .snapshot_all()
+            .iter()
+            .any(|(canonical_id, _)| canonical_id == "/index.ts"),
+        "sanity check: the module-facts DB should be warm before clear_compile_cache",
+    );
+
+    project.host().clear_compile_cache();
+
+    assert!(
+        project
+            .host()
+            .resolver
+            .runtime
+            .module_facts
+            .snapshot_all()
+            .iter()
+            .any(|(canonical_id, _)| canonical_id == "/index.ts"),
+        "clear_compile_cache should keep DB-owned module facts warm",
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn current_dependency_fact_versions_include_derived_resolver_facts() {
@@ -496,7 +535,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .compile_cache
         .get_mut("/index.ts")
         .expect("compile cache entry should exist");
-    entry.dependency_resolutions.insert(
+    entry.import_routes.insert(
         "./inner".to_string(),
         crate::types::DependencyResolution {
             specifier: "./inner".to_string(),
@@ -517,18 +556,27 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         })
     );
     assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
-            hash: {
-                let entry = project
-                    .host()
-                    .compile_cache
-                    .get("/index.ts")
-                    .expect("compile cache entry should exist");
-                crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
-            },
-        })
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                ..
+            } if canonical_id == "/index.ts"
+        )),
+        "dependency fact versions should include an ImportRoute fact for the file",
+    );
+    assert!(
+        facts.iter().all(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
+                | crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    kind: crate::resolver_core::DerivedFactKind::Route
+                        | crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ..
+                }
+        )),
+        "dependency fact versions should only publish file, route, and importer-route facts",
     );
 }
 
@@ -548,7 +596,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     {
         let mut files = crate::shared::write_lock(&project.host().files);
         let entry = files.get_mut("/index.ts").expect("file entry should exist");
-        entry.dependency_resolutions.insert(
+        entry.import_routes.insert(
             "./inner".to_string(),
             crate::types::DependencyResolution {
                 specifier: "./inner".to_string(),
@@ -571,14 +619,58 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     assert!(
         facts.contains(&crate::resolver_core::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
             hash: {
                 let files = crate::shared::read_lock(&project.host().files);
                 let entry = files.get("/index.ts").expect("file entry should exist");
-                crate::resolver_store::hash_dependency_resolutions(&entry.dependency_resolutions)
+                crate::resolver_store::hash_import_route_targets(&entry.import_routes)
             },
         }),
-        "non-scheduler store views must track exact-resolution facts"
+        "non-scheduler store views must track importer-route facts"
+    );
+    assert!(
+        facts.iter().all(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
+                | crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    kind: crate::resolver_core::DerivedFactKind::Route
+                        | crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ..
+                }
+        )),
+        "non-scheduler dependency fact versions should only publish file, route, and importer-route facts",
+    );
+}
+
+#[test]
+fn current_dependency_fact_versions_hash_empty_import_routes_under_store_view() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Comp.vue",
+            r#"<script setup lang="ts">
+import theme from './theme'
+defineProps<{ ui: typeof theme }>()
+</script>"#,
+        )
+        .expect("upsert should succeed");
+
+    let view = project.host().resolver_store_view();
+    let facts = project.host().current_dependency_fact_versions_in_view(
+        "/Comp.vue",
+        &std::collections::BTreeSet::new(),
+        Some(&view),
+    );
+
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                ..
+            }
+        )),
+        "tracked import-route surfaces should publish a stable ImportRoute fact hash even when compile-cache routes are empty",
     );
 }
 
@@ -1770,6 +1862,16 @@ defineProps<{
 }"#,
         )
         .unwrap();
+
+    let view = project.host().resolver_store_view();
+    assert_eq!(
+        project
+            .host()
+            .resolve_type_dependency_canonical_in_view("/Comp.vue", "./theme", Some(&view))
+            .as_deref(),
+        Some("/theme.ts"),
+        "fresh store views should reopen missing import routes after the dependency appears",
+    );
 
     let reevaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     match evaluated_prop_type(&reevaluated, "ui") {
@@ -7687,6 +7789,142 @@ defineSlots<ButtonSlots>()
 }
 
 #[test]
+fn resolve_component_meta_uses_db_projection_for_imported_registry_surfaces() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"type ButtonShape = {
+  variants: {
+    color: 'primary' | 'secondary'
+  }
+  slots: {
+    base?: string
+    label?: string
+  }
+  ui: {
+    base?: (props?: { active?: boolean }) => string
+    label?: (props?: { active?: boolean }) => string
+  }
+}
+
+export type Button = Pick<ButtonShape, 'variants' | 'slots' | 'ui'>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  ui?: Button['slots']
+}
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps, ButtonSlots } from './types'
+
+defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
+    let _guard =
+        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "imported Button helper should materialize as an object surface, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let variants_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a variants member");
+    let TypeExpr::Object(variants_shape) = variants_member else {
+        panic!(
+            "Button.variants should materialize as an object, got {:?}",
+            variants_member
+        );
+    };
+    let color_member = variants_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button.variants should keep a color member");
+    assert_union_string_literals(color_member, &["primary", "secondary"]);
+
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui should materialize as an object, got {:?}",
+            ui_member
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.ui should expose base, got {:?}",
+        ui_member
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "Button.ui should expose label, got {:?}",
+        ui_member
+    );
+
+    let store_view = project.host().resolver_store_view();
+    let cached_surface = project.host().resolver_runtime().type_surfaces.get(
+        &crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/types.ts".to_string(),
+            symbol_name: "Button".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        }),
+        &store_view,
+    );
+    assert!(
+        matches!(cached_surface.as_deref(), Some(result) if result.as_surface().is_some()),
+        "component-meta should warm TypeSurfaceDb for imported registry helpers, got {:?}",
+        cached_surface.map(|result| result.is_miss())
+    );
+}
+
+#[test]
 fn resolve_component_meta_materializes_bound_registry_members_despite_opaque_sibling_args() {
     let project = make_project();
     project
@@ -11039,26 +11277,27 @@ export interface ProjectClickEvent {
         .iter()
         .find(|event| event.name == "click")
         .expect("tag-specific listeners must still appear on the accepted event surface");
+    let project_payload = matches!(
+        &click.payload,
+        TypeExpr::Function(function)
+            if function.parameters.len() == 1
+                && match &function.parameters[0].ty {
+                    TypeExpr::Object(shape) => shape.properties.iter().any(|member| matches!(
+                        member,
+                        ObjectMember::Property(property)
+                            if property.name == "source"
+                                && matches!(
+                                    property.ty,
+                                    TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(ref value))
+                                        if value == "project"
+                                )
+                    )),
+                    TypeExpr::Ref { name, .. } => name.as_ref() == "ProjectClickEvent",
+                    _ => false,
+                }
+    );
     assert!(
-        matches!(
-            &click.payload,
-            TypeExpr::Function(function)
-                if function.parameters.len() == 1
-                    && matches!(
-                        &function.parameters[0].ty,
-                        TypeExpr::Object(shape)
-                            if shape.properties.iter().any(|member| matches!(
-                                member,
-                                ObjectMember::Property(property)
-                                    if property.name == "source"
-                                        && matches!(
-                                            property.ty,
-                                            TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(ref value))
-                                                if value == "project"
-                                        )
-                            ))
-                    )
-        ),
+        project_payload,
         "tag-specific listener payloads must override fallback listeners, got: {:?}",
         click.payload
     );

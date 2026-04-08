@@ -898,7 +898,7 @@ defineProps<{ x: T }>()
 /// This is the core fix: when `@/components/base` resolves to `/src/components/base/index.ts`,
 /// the host should find it via the exact record rather than failing on basename heuristics.
 #[test]
-fn exact_alias_resolves_via_dependency_resolution() {
+fn exact_alias_resolves_via_import_route() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/components/base'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
     upsert_vue(&host, "/src/App.vue", source);
@@ -2184,7 +2184,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn stale_store_view_keeps_external_type_resolution_on_captured_dependency_routes() {
+fn stale_store_view_keeps_external_type_resolution_on_captured_import_routes() {
     let host = strict_host();
 
     upsert_vue(
@@ -3346,7 +3346,7 @@ fn workspace_resolution_used_for_aliased_imports() {
         "<script setup lang=\"ts\">\nimport { helper } from '@/utils'\n</script>\n<template><div>{{ helper() }}</div></template>",
     );
 
-    // Now test resolution: the host's Phase 1 (dependency_resolutions) will miss
+    // Now test resolution: the host's Phase 1 (import_routes) will miss
     // because no set_import_dependencies was called. Phase 3 (project_resolver)
     // will also miss because configure_projects was not called. But the workspace
     // has the @/ alias configured, so workspace-backed resolution should find it.
@@ -3412,7 +3412,7 @@ fn workspace_resolution_does_not_override_exact_resolution() {
 }
 
 #[test]
-fn shallow_type_dependency_resolution_finds_loaded_overlay_relative_targets() {
+fn shallow_type_import_route_finds_loaded_overlay_relative_targets() {
     let host = strict_host();
 
     // Upsert the importer first so its cached dependency resolutions stay empty.
@@ -3530,8 +3530,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
 }
 
 #[test]
-fn type_dependency_resolution_in_view_prefers_package_declaration_entrypoint_over_cached_runtime_target(
-) {
+fn type_import_route_in_view_prefers_package_declaration_entrypoint_over_cached_runtime_target() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -3602,8 +3601,7 @@ defineProps<FancyProps>()
 }
 
 #[test]
-fn type_dependency_resolution_in_view_does_not_trust_imported_cache_miss_for_untracked_package_file(
-) {
+fn type_import_route_in_view_does_not_trust_imported_cache_miss_for_untracked_package_file() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));

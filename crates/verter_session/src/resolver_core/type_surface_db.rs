@@ -126,6 +126,22 @@ impl TypeSurfaceDb {
         V: StoreView,
         F: FnOnce() -> Option<TypeSurfaceOpResult>,
     {
+        self.get_or_project_with_facts(op_key, view, || {
+            compute().map(|result| (result, Vec::new()))
+        })
+    }
+
+    /// Look up or compute a projection result with fact validation.
+    pub fn get_or_project_with_facts<V, F>(
+        &self,
+        op_key: TypeSurfaceOpKey,
+        view: &V,
+        compute: F,
+    ) -> Option<Arc<TypeSurfaceOpResult>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(TypeSurfaceOpResult, Vec<FactVersionRef>)>,
+    {
         if let Some(result) = self.ops.get_if_valid(&op_key, view) {
             return Some(result);
         }
@@ -137,9 +153,9 @@ impl TypeSurfaceDb {
                     return Ok(result);
                 }
                 match compute() {
-                    Some(result) => {
+                    Some((result, facts)) => {
                         let arc = Arc::new(result);
-                        self.ops.insert_arc(op_key.clone(), arc.clone(), Vec::new());
+                        self.ops.insert_arc(op_key.clone(), arc.clone(), facts);
                         Ok(arc)
                     }
                     None => Err(()),
@@ -179,6 +195,20 @@ impl TypeSurfaceDb {
     pub fn clear(&self) {
         self.ops.clear();
         self.singleflight.clear();
+    }
+
+    /// Evict all cached projections owned by one canonical declaration file.
+    pub fn evict_owner(&self, canonical_owner: &str) {
+        let keys: Vec<_> = self
+            .ops
+            .snapshot_all()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| key.subject().canonical_owner == canonical_owner)
+            .collect();
+        for key in keys {
+            self.ops.remove(&key);
+        }
     }
 }
 

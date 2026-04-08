@@ -2782,7 +2782,7 @@ const value{i} = {i}
 /// continuously read TSX and analysis. No operation should deadlock or panic.
 #[test]
 fn multithread_interleaved_writes_and_reads() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let source = r#"<script setup lang="ts">
@@ -2806,16 +2806,26 @@ const count = 0
     });
 
     let done = Arc::new(AtomicBool::new(false));
+    let start_reads = Arc::new(AtomicBool::new(false));
+    let readers_started = Arc::new(AtomicUsize::new(0));
 
     // Reader thread 1: continuously read TSX until writes are done
     let reg_r1 = Arc::clone(&registry);
     let uri_r1 = uri.clone();
     let done_r1 = Arc::clone(&done);
+    let start_reads_r1 = Arc::clone(&start_reads);
+    let readers_started_r1 = Arc::clone(&readers_started);
     let reader1 = std::thread::spawn(move || {
         let mut read_count = 0u32;
-        while !done_r1.load(Ordering::Relaxed) {
+        while !start_reads_r1.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        while !done_r1.load(Ordering::Acquire) {
             let _ = reg_r1.get_ide(&uri_r1);
             read_count += 1;
+            if read_count == 1 {
+                readers_started_r1.fetch_add(1, Ordering::Release);
+            }
         }
         read_count
     });
@@ -2824,14 +2834,27 @@ const count = 0
     let reg_r2 = Arc::clone(&registry);
     let uri_r2 = uri.clone();
     let done_r2 = Arc::clone(&done);
+    let start_reads_r2 = Arc::clone(&start_reads);
+    let readers_started_r2 = Arc::clone(&readers_started);
     let reader2 = std::thread::spawn(move || {
         let mut read_count = 0u32;
-        while !done_r2.load(Ordering::Relaxed) {
+        while !start_reads_r2.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        while !done_r2.load(Ordering::Acquire) {
             let _ = reg_r2.get_analysis(&uri_r2);
             read_count += 1;
+            if read_count == 1 {
+                readers_started_r2.fetch_add(1, Ordering::Release);
+            }
         }
         read_count
     });
+
+    start_reads.store(true, Ordering::Release);
+    while readers_started.load(Ordering::Acquire) < 2 {
+        std::thread::yield_now();
+    }
 
     // Writer: 20 sequential edits while readers are running
     for i in 2..=21 {
@@ -2857,7 +2880,7 @@ const count = {i}
     }
 
     // Signal readers to stop
-    done.store(true, Ordering::Relaxed);
+    done.store(true, Ordering::Release);
 
     let reads1 = reader1.join().expect("reader1 panicked");
     let reads2 = reader2.join().expect("reader2 panicked");

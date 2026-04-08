@@ -173,6 +173,11 @@ impl VerterHost {
                 let old_aliases = cc.aliases.clone();
                 let old_deps = cc.dependencies.clone();
                 cc.evicted = false;
+                cc.compile_slots.clear();
+                cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
+                cc.cached_fallthrough = None;
+                cc.import_routes.clear();
                 cc.aliases = alias_set.clone();
                 cc.dependencies = new_deps.clone();
                 cc.generation = new_source_snap.generation;
@@ -180,7 +185,12 @@ impl VerterHost {
             };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
             self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
+            self.resolver.runtime.evict_canonical(&canonical_id);
+            self.resolved_type_cache.lock().clear();
+            self.eval_env_cache.lock().clear();
+            self.semantic_invalidate(&canonical_id);
             self.ws().notify_upsert(&canonical_id, req.source.clone());
+            self.bump_store_view_epoch();
             return Ok(HostUpdateResult {
                 canonical_id,
                 changed: false,
@@ -260,7 +270,7 @@ impl VerterHost {
             if whole_hash_changed || changes.semantic_changed {
                 cc.raw_template_analysis = None;
             }
-            cc.dependency_resolutions.clear();
+            cc.import_routes.clear();
             cc.dependencies = new_deps.clone();
             cc.aliases = alias_set.clone();
             cc.generation = cc.generation.saturating_add(1);
@@ -280,6 +290,12 @@ impl VerterHost {
         let new_export_signatures = parse.export_signatures.clone();
 
         // ── Post-commit housekeeping ──
+        // Hard-evict module facts so stale store views can't see the
+        // prior generation after a content change.
+        self.resolver.runtime.evict_canonical(&canonical_id);
+        self.resolved_type_cache.lock().clear();
+        self.semantic_invalidate(&canonical_id);
+
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
         self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
         self.smart_invalidate_dependents(
@@ -523,7 +539,7 @@ impl VerterHost {
                     meta: FileMeta::default(),
                     aliases: BTreeSet::new(),
                     dependencies: BTreeSet::new(),
-                    dependency_resolutions: FxHashMap::default(),
+                    import_routes: FxHashMap::default(),
                     external_requests: Vec::new(),
                     src_blocks: Vec::new(),
                     parse_diagnostics: DiagnosticsSnapshot::default(),
@@ -578,7 +594,7 @@ impl VerterHost {
             entry.generation = entry.generation.saturating_add(1);
             entry.aliases = alias_set.clone();
             entry.dependencies = new_deps.clone();
-            entry.dependency_resolutions.clear();
+            entry.import_routes.clear();
 
             if changes.changed && changes.semantic_changed {
                 entry.latest_diagnostics.clear();

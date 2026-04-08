@@ -57,7 +57,7 @@ pub(crate) fn strip_configured_extension<'a>(
 /// invalidation logic, enabling the `files` map to be gated to WASM-only.
 pub(crate) struct DependentView {
     pub(crate) canonical_id: String,
-    pub(crate) dependency_resolutions: rustc_hash::FxHashMap<String, DependencyResolution>,
+    pub(crate) import_routes: rustc_hash::FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: BTreeSet<String>,
     pub(crate) script_lang: Option<String>,
     pub(crate) macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
@@ -70,7 +70,7 @@ impl DependentView {
     pub(crate) fn from_file_entry(entry: &FileEntry) -> Self {
         Self {
             canonical_id: entry.canonical_id.clone(),
-            dependency_resolutions: entry.dependency_resolutions.clone(),
+            import_routes: entry.import_routes.clone(),
             dependencies: entry.dependencies.clone(),
             script_lang: entry.meta.script_lang.clone(),
             macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
@@ -84,7 +84,7 @@ impl DependentView {
 /// Handles both relative paths (resolved via resolve_external) and
 /// non-relative paths (matched via the file's registered dependencies).
 ///
-/// Checks structured `dependency_resolutions` first for exact matches,
+/// Checks structured `import_routes` first for exact matches,
 /// then falls back to heuristic resolution.
 fn import_resolves_to_dep_view(
     view: &DependentView,
@@ -92,7 +92,7 @@ fn import_resolves_to_dep_view(
     dependency_id: &str,
     resolve_extensions: &[String],
 ) -> bool {
-    if let Some(resolution) = view.dependency_resolutions.get(import_source) {
+    if let Some(resolution) = view.import_routes.get(import_source) {
         // Use effective_target() for TS-first single-candidate selection.
         // This matches only against the highest-priority candidate, not all possibles.
         if let Some(target) = resolution.effective_target() {
@@ -120,7 +120,7 @@ fn import_resolves_to_dep_view(
 
 fn import_resolves_to_dep_with_resolver_data(
     canonical_id: &str,
-    dependency_resolutions: &mut rustc_hash::FxHashMap<String, DependencyResolution>,
+    import_routes: &mut rustc_hash::FxHashMap<String, DependencyResolution>,
     dependencies: &mut BTreeSet<String>,
     script_lang: Option<&str>,
     import_source: &str,
@@ -130,7 +130,7 @@ fn import_resolves_to_dep_with_resolver_data(
 ) -> bool {
     let cached_view = DependentView {
         canonical_id: canonical_id.to_string(),
-        dependency_resolutions: dependency_resolutions.clone(),
+        import_routes: import_routes.clone(),
         dependencies: dependencies.clone(),
         script_lang: script_lang.map(str::to_string),
         macro_type_deps: Vec::new(),
@@ -153,7 +153,7 @@ fn import_resolves_to_dep_with_resolver_data(
         };
         if let Some(result) = ws.resolve_import(canonical_id, import_source, ctx) {
             dependencies.insert(result.source_id.clone());
-            dependency_resolutions.insert(
+            import_routes.insert(
                 import_source.to_string(),
                 DependencyResolution {
                     specifier: import_source.to_string(),
@@ -191,7 +191,7 @@ fn import_resolves_to_dep_with_resolver_view(
 ) -> bool {
     import_resolves_to_dep_with_resolver_data(
         &view.canonical_id,
-        &mut view.dependency_resolutions,
+        &mut view.import_routes,
         &mut view.dependencies,
         view.script_lang.as_deref(),
         import_source,
@@ -220,7 +220,7 @@ pub(crate) fn import_resolves_to_dep_with_resolver(
         resolve_extensions,
         workspace,
     );
-    file.dependency_resolutions = view.dependency_resolutions;
+    file.import_routes = view.import_routes;
     file.dependencies = view.dependencies;
     result
 }
@@ -383,7 +383,7 @@ pub(crate) fn should_invalidate_dependent(
     );
     // Write back updated type hashes
     file.resolved_type_hashes = view.resolved_type_hashes;
-    file.dependency_resolutions = view.dependency_resolutions;
+    file.import_routes = view.import_routes;
     file.dependencies = view.dependencies;
     result
 }
@@ -435,6 +435,9 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
 /// and dependency metadata from compile_cache. Clears compile_cache slots directly.
 #[cfg(feature = "scheduler")]
 #[allow(clippy::too_many_arguments)]
+/// Returns the set of owner canonical IDs that were actually invalidated
+/// (compile slots cleared). Callers can use this to evict other caches
+/// (e.g., ModuleFactsDb) only for affected dependents.
 pub(crate) fn smart_invalidate_dependents_via_scheduler(
     scheduler: &verter_scheduler::scheduler::Scheduler,
     compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
@@ -444,9 +447,9 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
     dependency_id: &str,
     old_export_signatures: &[verter_semantic::analysis::ExportSignature],
     new_export_signatures: &[verter_semantic::analysis::ExportSignature],
-) {
+) -> BTreeSet<String> {
     if owners.is_empty() {
-        return;
+        return BTreeSet::new();
     }
 
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
@@ -456,6 +459,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
         .try_get_source(dependency_id)
         .map(|s| s.source.clone());
 
+    let mut cleared = BTreeSet::new();
     for owner in owners {
         let Some(mut view) = build_dependent_view(scheduler, compile_cache, &owner) else {
             continue;
@@ -475,12 +479,14 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
                 cc.cached_resolved_meta.clear();
                 cc.cached_meta_payloads.clear();
                 cc.cached_fallthrough = None;
+                cleared.insert(owner.clone());
             }
             cc.resolved_type_hashes = view.resolved_type_hashes;
-            cc.dependency_resolutions = view.dependency_resolutions;
+            cc.import_routes = view.import_routes;
             cc.dependencies = view.dependencies;
         }
     }
+    cleared
 }
 
 /// Build a `DependentView` from scheduler analysis + compile_cache metadata.
@@ -503,10 +509,10 @@ fn build_dependent_view(
     let imports = ad.script_analysis.imports.clone();
     drop(analysis_snap);
 
-    let (dependency_resolutions, dependencies, resolved_type_hashes) =
+    let (import_routes, dependencies, resolved_type_hashes) =
         if let Some(cc) = compile_cache.get(canonical_id) {
             (
-                cc.dependency_resolutions.clone(),
+                cc.import_routes.clone(),
                 cc.dependencies.clone(),
                 cc.resolved_type_hashes.clone(),
             )
@@ -516,7 +522,7 @@ fn build_dependent_view(
 
     Some(DependentView {
         canonical_id: canonical_id.to_string(),
-        dependency_resolutions,
+        import_routes,
         dependencies,
         script_lang,
         macro_type_deps,

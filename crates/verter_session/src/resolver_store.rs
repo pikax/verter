@@ -14,8 +14,6 @@ pub struct HostStoreView {
     compat_token: crate::resolver_core::StoreViewCompatToken,
     mutation_epoch: u64,
     whole_hashes: FxHashMap<String, Hash16>,
-    dependency_resolutions:
-        FxHashMap<String, FxHashMap<String, crate::types::DependencyResolution>>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
 }
 
@@ -25,7 +23,6 @@ impl Default for HostStoreView {
             compat_token: crate::resolver_core::StoreViewCompatToken(0),
             mutation_epoch: 0,
             whole_hashes: FxHashMap::default(),
-            dependency_resolutions: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
         }
     }
@@ -70,20 +67,6 @@ impl HostStoreView {
                             .insert(canonical_id.clone(), state.whole_hash);
                     }
                 }
-
-                if let Some(entry) = host.compile_cache.get(&canonical_id) {
-                    view.dependency_resolutions
-                        .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
-                    if !entry.dependency_resolutions.is_empty() {
-                        view.derived_hashes.insert(
-                            (
-                                canonical_id.clone(),
-                                crate::resolver_core::DerivedFactKind::ExactResolution,
-                            ),
-                            hash_dependency_resolutions(&entry.dependency_resolutions),
-                        );
-                    }
-                }
             }
         }
 
@@ -93,17 +76,6 @@ impl HostStoreView {
             for (canonical_id, entry) in files.iter() {
                 view.whole_hashes
                     .insert(canonical_id.clone(), entry.whole_hash);
-                view.dependency_resolutions
-                    .insert(canonical_id.clone(), entry.dependency_resolutions.clone());
-                if !entry.dependency_resolutions.is_empty() {
-                    view.derived_hashes.insert(
-                        (
-                            canonical_id.clone(),
-                            crate::resolver_core::DerivedFactKind::ExactResolution,
-                        ),
-                        hash_dependency_resolutions(&entry.dependency_resolutions),
-                    );
-                }
             }
             drop(files);
         }
@@ -123,10 +95,18 @@ impl HostStoreView {
                     hash_route_surface(&facts.shallow_state),
                 );
             }
+            if let Some(hash) = facts.import_route_hash {
+                view.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ),
+                    hash,
+                );
+            }
         }
 
-        view.fill_missing_dependency_resolutions(host);
-        view.snapshot_transitive_dependency_targets(host);
+        view.snapshot_module_fact_hashes(host);
         view.compat_token = view.compute_compat_token();
         view
     }
@@ -142,35 +122,45 @@ impl HostStoreView {
         }
     }
 
-    fn snapshot_transitive_dependency_targets(&mut self, host: &VerterHost) {
-        let mut pending: Vec<String> = self
-            .dependency_resolutions
-            .values()
-            .flat_map(|resolutions| {
-                resolutions.values().filter_map(|resolution| {
-                    resolution
-                        .resolved_canonical_id
-                        .clone()
-                        .or_else(|| resolution.effective_target().map(str::to_string))
-                })
-            })
-            .collect();
-        let mut visited = rustc_hash::FxHashSet::default();
+    fn snapshot_module_fact_hashes(&mut self, host: &VerterHost) {
+        let canonical_ids: Vec<String> = self.whole_hashes.keys().cloned().collect();
 
-        while let Some(canonical_id) = pending.pop() {
-            if !visited.insert(canonical_id.clone()) {
+        for canonical_id in canonical_ids {
+            let cached_facts = host.resolver.runtime.module_facts.get_any(&canonical_id);
+            let had_cached_facts = cached_facts.is_some();
+            let Some(facts) =
+                cached_facts.or_else(|| host.ensure_module_facts_in_view(&canonical_id, None))
+            else {
                 continue;
+            };
+            self.snapshot_whole_hash_if_known(host, &canonical_id);
+            if facts.shallow_state.has_resolvable_surface() {
+                self.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        crate::resolver_core::DerivedFactKind::Route,
+                    ),
+                    hash_route_surface(&facts.shallow_state),
+                );
+            }
+            if let Some(import_route_hash) = facts.import_route_hash {
+                self.derived_hashes.insert(
+                    (
+                        canonical_id.clone(),
+                        crate::resolver_core::DerivedFactKind::ImportRoute,
+                    ),
+                    import_route_hash,
+                );
             }
 
-            let existing_resolutions = self.dependency_resolutions.get(&canonical_id).cloned();
-            self.snapshot_whole_hash_if_known(host, &canonical_id);
-            if let Some(resolutions) = existing_resolutions.as_ref() {
-                pending.extend(resolutions.values().filter_map(|resolution| {
-                    resolution
-                        .resolved_canonical_id
-                        .clone()
-                        .or_else(|| resolution.effective_target().map(str::to_string))
-                }));
+            if !had_cached_facts {
+                // Soft-invalidate (rather than hard-evict) so that these
+                // temporarily-materialized facts survive in the `previous`
+                // chain. Stale store views that captured the corresponding
+                // import_route_hash during this snapshot can still find them.
+                // The tombstone's impossible hash ensures no production
+                // (no-store-view) path returns these transient facts.
+                host.resolver.runtime.module_facts.invalidate(&canonical_id);
             }
         }
     }
@@ -202,23 +192,6 @@ impl HostStoreView {
         self.derived_hashes
             .get(&(canonical_id.to_string(), kind))
             .copied()
-    }
-
-    pub(crate) fn dependency_resolution(
-        &self,
-        canonical_id: &str,
-        import_source: &str,
-    ) -> Option<&crate::types::DependencyResolution> {
-        self.dependency_resolutions
-            .get(canonical_id)
-            .and_then(|resolutions| resolutions.get(import_source))
-    }
-
-    pub(crate) fn dependency_resolutions(
-        &self,
-        canonical_id: &str,
-    ) -> Option<&FxHashMap<String, crate::types::DependencyResolution>> {
-        self.dependency_resolutions.get(canonical_id)
     }
 
     /// Returns true if ALL fact versions are still valid in this view.
@@ -280,72 +253,12 @@ impl HostStoreView {
         }
     }
 
-    /// Fill dependency resolutions for files whose compile_cache/files entry
-    /// has empty resolutions. Uses the host's analysis snapshot to compute
-    /// resolutions from imports/reexports.
-    fn fill_missing_dependency_resolutions(&mut self, host: &VerterHost) {
-        let missing: Vec<String> = self
-            .dependency_resolutions
-            .iter()
-            .filter(|(_, resolutions)| resolutions.is_empty())
-            .map(|(canonical_id, _)| canonical_id.clone())
-            .collect();
-
-        for canonical_id in missing {
-            let Some(snapshot) = host.get_raw_analysis_snapshot_in_view(&canonical_id, None) else {
-                continue;
-            };
-
-            let declaration_file = canonical_id.ends_with(".d.ts")
-                || canonical_id.ends_with(".d.mts")
-                || canonical_id.ends_with(".d.cts");
-
-            let resolutions = host.dependency_resolutions_from_parts_in_view(
-                &canonical_id,
-                &snapshot.imports,
-                &snapshot.export_signatures,
-                None,
-            );
-
-            // For declaration files, override runtime-resolved targets with
-            // declaration companion targets (e.g., ./inner.js -> inner.d.ts).
-            let resolutions = if declaration_file {
-                resolutions
-                    .into_iter()
-                    .map(|(specifier, mut resolution)| {
-                        if let Some(type_target) =
-                            host.resolve_type_dependency_canonical(&canonical_id, &specifier)
-                        {
-                            resolution.resolved_canonical_id = Some(type_target);
-                        }
-                        (specifier, resolution)
-                    })
-                    .collect()
-            } else {
-                resolutions
-            };
-
-            if !resolutions.is_empty() {
-                let exact_hash = hash_dependency_resolutions(&resolutions);
-                self.dependency_resolutions
-                    .insert(canonical_id.clone(), resolutions);
-                self.derived_hashes.insert(
-                    (
-                        canonical_id.clone(),
-                        crate::resolver_core::DerivedFactKind::ExactResolution,
-                    ),
-                    exact_hash,
-                );
-            }
-        }
-    }
-
     fn compute_compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         crate::resolver_core::StoreViewCompatToken(self.mutation_epoch)
     }
 }
 
-pub(crate) fn hash_dependency_resolutions(
+pub(crate) fn hash_import_route_targets(
     resolutions: &FxHashMap<String, crate::types::DependencyResolution>,
 ) -> Hash16 {
     let mut entries: Vec<_> = resolutions.iter().collect();
@@ -355,16 +268,11 @@ pub(crate) fn hash_dependency_resolutions(
         for (specifier, resolution) in &entries {
             0u8.hash(hasher);
             specifier.hash(hasher);
-            resolution.specifier.hash(hasher);
-            let effective_target = resolution.effective_target().map(str::to_string);
-            effective_target.hash(hasher);
-            let mut candidates = resolution.possible_canonical_ids.clone();
-            candidates.sort();
-            candidates.dedup();
-            if let Some(ref effective_target) = effective_target {
-                candidates.retain(|candidate| candidate != effective_target);
-            }
-            candidates.hash(hasher);
+            resolution
+                .resolved_canonical_id
+                .clone()
+                .or_else(|| resolution.effective_target().map(str::to_string))
+                .hash(hasher);
         }
     })
 }
@@ -407,6 +315,10 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
 impl crate::resolver_core::StoreView for HostStoreView {
     fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
         self.compat_token
+    }
+
+    fn checks_archive(&self) -> bool {
+        true
     }
 
     fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
@@ -506,12 +418,12 @@ impl VerterHost {
 
 #[cfg(test)]
 mod tests {
-    use super::hash_dependency_resolutions;
+    use super::hash_import_route_targets;
     use crate::types::DependencyResolution;
     use rustc_hash::FxHashMap;
 
     #[test]
-    fn exact_resolution_hash_ignores_lazy_promotion_to_same_effective_target() {
+    fn import_route_hash_ignores_lazy_promotion_to_same_effective_target() {
         let lazy = FxHashMap::from_iter([(
             "./types".to_string(),
             DependencyResolution {
@@ -536,14 +448,14 @@ mod tests {
         )]);
 
         assert_eq!(
-            hash_dependency_resolutions(&lazy),
-            hash_dependency_resolutions(&promoted),
-            "lazy promotion to the same effective canonical target should not invalidate ExactResolution facts",
+            hash_import_route_targets(&lazy),
+            hash_import_route_targets(&promoted),
+            "lazy promotion to the same effective canonical target should not invalidate ImportRoute facts",
         );
     }
 
     #[test]
-    fn exact_resolution_hash_changes_when_effective_target_changes() {
+    fn import_route_hash_changes_when_effective_target_changes() {
         let before = FxHashMap::from_iter([(
             "./types".to_string(),
             DependencyResolution {
@@ -568,9 +480,9 @@ mod tests {
         )]);
 
         assert_ne!(
-            hash_dependency_resolutions(&before),
-            hash_dependency_resolutions(&after),
-            "changing the effective canonical target must still invalidate ExactResolution facts",
+            hash_import_route_targets(&before),
+            hash_import_route_targets(&after),
+            "changing the effective canonical target must still invalidate ImportRoute facts",
         );
     }
 }

@@ -186,7 +186,7 @@ impl HostResolverState {
         }
     }
 
-    fn clear_all(&self) {
+    fn reset_all(&self) {
         self.runtime.clear_caches();
     }
 }
@@ -980,7 +980,6 @@ impl VerterHost {
             }
         }
         self.resolved_type_cache.lock().clear();
-        self.resolver.clear_all();
         self.eval_env_cache.lock().clear();
         self.bump_store_view_epoch();
     }
@@ -1037,7 +1036,7 @@ impl VerterHost {
             self.scheduler.restart_driver();
         }
         self.resolved_type_cache.lock().clear();
-        self.resolver.clear_all();
+        self.resolver.reset_all();
         self.eval_env_cache.lock().clear();
         self.provenance.reset();
         // Clear all semantic caches
@@ -1064,7 +1063,7 @@ impl VerterHost {
         #[cfg(feature = "scheduler")]
         {
             for mut entry in self.compile_cache.iter_mut() {
-                entry.dependency_resolutions.clear();
+                entry.import_routes.clear();
                 entry.dependencies.clear();
             }
         }
@@ -1072,10 +1071,14 @@ impl VerterHost {
         {
             let mut files = crate::shared::write_lock(&self.files);
             for entry in files.values_mut() {
-                entry.dependency_resolutions.clear();
+                entry.import_routes.clear();
                 entry.dependencies.clear();
             }
         }
+        self.resolver.reset_all();
+        self.resolved_type_cache.lock().clear();
+        self.eval_env_cache.lock().clear();
+        self.semantic_invalidate_all();
         self.bump_store_view_epoch();
     }
 
@@ -1451,19 +1454,39 @@ impl VerterHost {
                 }
             }
 
+            // When a genuinely new dependency arrives (old signatures empty,
+            // new non-empty), dependents may have cached "miss" import routes
+            // for this dep. Evict their ModuleFactsDb entries unconditionally
+            // so fresh accesses re-resolve import routes. For existing deps
+            // where only the export surface changed, scope eviction to the
+            // owners that were actually invalidated.
+            let dep_is_newly_added =
+                old_export_signatures.is_empty() && !new_export_signatures.is_empty();
+
             #[cfg(feature = "scheduler")]
             {
                 let ws = self.workspace.read();
-                deps::smart_invalidate_dependents_via_scheduler(
+                let cleared = deps::smart_invalidate_dependents_via_scheduler(
                     &self.scheduler,
                     &self.compile_cache,
-                    owners,
+                    owners.clone(),
                     Some(ws.as_ref()),
                     &self.config,
                     dependency_id,
                     old_export_signatures,
                     new_export_signatures,
                 );
+                let evict_targets = if dep_is_newly_added {
+                    &owners
+                } else {
+                    &cleared
+                };
+                for owner in evict_targets {
+                    // Soft-invalidate rather than hard-evict so that stale
+                    // store views can still find the previous generation of
+                    // facts (with the old import routes) via the previous chain.
+                    self.resolver.runtime.module_facts.invalidate(owner);
+                }
             }
 
             #[cfg(not(feature = "scheduler"))]
@@ -1549,22 +1572,71 @@ impl VerterHost {
         shallow_state: Arc<crate::resolver_core::ShallowFileState>,
         snapshot: Option<Arc<FileAnalysisSnapshot>>,
         eval_source: Option<Arc<str>>,
-        dependency_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+        import_routes: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
     ) {
+        let effective_whole_hash = if whole_hash == Hash16::default() {
+            crate::hash::hash_16(raw_source.as_bytes())
+        } else {
+            whole_hash
+        };
         let snapshot = snapshot.unwrap_or_else(|| Arc::new(FileAnalysisSnapshot::default()));
         let eval_source = eval_source.unwrap_or_else(|| Arc::clone(&raw_source));
+        let mut shallow_state = (*shallow_state).clone();
+        shallow_state.whole_hash = effective_whole_hash;
 
-        // Insert dependency_resolutions into compile_cache if non-empty.
+        let route_target = |specifier: &str| {
+            import_routes.get(specifier).and_then(|resolution| {
+                resolution
+                    .resolved_canonical_id
+                    .clone()
+                    .or_else(|| resolution.effective_target().map(str::to_string))
+            })
+        };
+        for target in shallow_state.import_targets.values_mut() {
+            if target.canonical_id.is_empty() {
+                if let Some(resolved) = route_target(&target.source_specifier) {
+                    target.canonical_id = resolved;
+                }
+            }
+        }
+        for export in shallow_state.exports.values_mut() {
+            if let crate::resolver_core::ExportTarget::Reexport {
+                source_specifier,
+                canonical_id,
+                ..
+            } = export
+            {
+                if canonical_id.is_empty() {
+                    if let Some(resolved) = route_target(source_specifier) {
+                        *canonical_id = resolved;
+                    }
+                }
+            }
+        }
+        for wildcard in &mut shallow_state.wildcard_reexports {
+            if wildcard.canonical_id.is_empty() {
+                if let Some(resolved) = route_target(&wildcard.source_specifier) {
+                    wildcard.canonical_id = resolved;
+                }
+            }
+        }
+
+        // Insert import_routes into compile_cache if non-empty.
         #[cfg(feature = "scheduler")]
-        if !dependency_resolutions.is_empty() {
+        if !import_routes.is_empty() {
             self.compile_cache
                 .entry(canonical_id.to_string())
                 .or_insert_with(|| crate::CompileCacheEntry::default())
-                .dependency_resolutions = dependency_resolutions.clone();
+                .import_routes = import_routes.clone();
         }
 
+        let shallow_state = Arc::new(shallow_state);
+
         let facts = crate::resolver_core::module_facts_db::ModuleFacts {
-            whole_hash,
+            whole_hash: effective_whole_hash,
+            import_route_hash: (!import_routes.is_empty())
+                .then(|| crate::resolver_store::hash_import_route_targets(&import_routes)),
+            import_routes: Arc::new(import_routes.clone()),
             raw_source,
             cached_parse,
             script_analysis,
@@ -1572,12 +1644,67 @@ impl VerterHost {
             snapshot,
             eval_source,
             external_type_analysis,
-            shallow_state,
+            shallow_state: Arc::clone(&shallow_state),
         };
         self.resolver
             .runtime
             .module_facts
             .insert(canonical_id.to_owned(), facts);
+
+        let mut dep_edges = FxHashMap::default();
+        for target in shallow_state.import_targets.values() {
+            if !target.canonical_id.is_empty() {
+                dep_edges
+                    .entry(target.source_specifier.clone())
+                    .or_insert_with(|| target.canonical_id.clone());
+            }
+        }
+        for export in shallow_state.exports.values() {
+            if let crate::resolver_core::ExportTarget::Reexport {
+                source_specifier,
+                canonical_id,
+                ..
+            } = export
+            {
+                if !canonical_id.is_empty() {
+                    dep_edges
+                        .entry(source_specifier.clone())
+                        .or_insert_with(|| canonical_id.clone());
+                }
+            }
+        }
+        for wildcard in &shallow_state.wildcard_reexports {
+            if !wildcard.canonical_id.is_empty() {
+                dep_edges
+                    .entry(wildcard.source_specifier.clone())
+                    .or_insert_with(|| wildcard.canonical_id.clone());
+            }
+        }
+
+        let bundle = Arc::new(
+            crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
+                canonical_id,
+                shallow_state.as_ref(),
+                dep_edges,
+                FxHashMap::default(),
+            ),
+        );
+        let mut bundle_facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_id.to_string(),
+            hash: effective_whole_hash,
+        }];
+        if !import_routes.is_empty() {
+            bundle_facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: canonical_id.to_string(),
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                hash: crate::resolver_store::hash_import_route_targets(&import_routes),
+            });
+        }
+        self.resolver.runtime.prepared_decl_bundles.insert_arc(
+            canonical_id.to_owned(),
+            bundle,
+            bundle_facts,
+        );
     }
 }
 

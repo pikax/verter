@@ -589,7 +589,7 @@ fn stale_store_view_rejects_changed_dependency_eval_state() {
 }
 
 #[test]
-fn stale_store_view_rejects_changed_dependency_routes_and_reexports() {
+fn stale_store_view_rejects_changed_import_routes_and_reexports() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -663,7 +663,7 @@ defineProps<Props>();
 }
 
 #[test]
-fn stale_store_view_keeps_owner_dependency_route_when_workspace_candidates_change() {
+fn stale_store_view_keeps_owner_import_route_when_workspace_candidates_change() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -701,7 +701,7 @@ defineProps<Props>();
         )
         .as_deref(),
         Some("/src/types.js"),
-        "stale views must not switch owner dependency routes to newer workspace candidates",
+        "stale views must not switch owner import routes to newer workspace candidates",
     );
 }
 
@@ -754,7 +754,7 @@ fn provenance_snapshot_includes_vfs_dir_index_counters_from_workspace() {
 }
 
 #[test]
-fn stale_store_view_does_not_fallback_to_live_dependency_resolution_when_route_was_missing() {
+fn stale_store_view_does_not_fallback_to_live_import_route_when_route_was_missing() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -899,7 +899,7 @@ export type FancyProps = Prettify<{ open: boolean }>
 }
 
 #[test]
-fn prepared_type_decl_in_view_rebuilds_name_resolution_after_dependency_route_upgrade() {
+fn prepared_type_decl_in_view_rebuilds_name_resolution_after_import_route_upgrade() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -921,7 +921,7 @@ export interface CheckboxProps {
 
     let initial = host
         .prepared_type_decl_in_view("/workspace/Checkbox.vue", "CheckboxProps", None)
-        .expect("CheckboxProps should prepare before dependency routes are upgraded");
+        .expect("CheckboxProps should prepare before import routes are upgraded");
     assert_eq!(
         initial
             .name_resolution
@@ -942,7 +942,7 @@ export interface CheckboxProps {
 
     let rebuilt = host
         .prepared_type_decl_in_view("/workspace/Checkbox.vue", "CheckboxProps", None)
-        .expect("CheckboxProps should rebuild after dependency routes are upgraded");
+        .expect("CheckboxProps should rebuild after import routes are upgraded");
     assert_eq!(
         rebuilt
             .name_resolution
@@ -1143,7 +1143,7 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
         .expect("types file should have a compile cache entry");
     assert_eq!(
         compile_entry
-            .dependency_resolutions
+            .import_routes
             .get("./dep")
             .and_then(|dep| dep.resolved_canonical_id.as_deref()),
         Some("/workspace/dep.ts"),
@@ -1152,7 +1152,7 @@ fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolu
 }
 
 #[test]
-fn imported_dependency_route_upgrades_replace_cached_known_miss_entries() {
+fn imported_import_route_upgrades_replace_cached_known_miss_entries() {
     let host = make_host();
     let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
     upsert_non_sfc(
@@ -1199,6 +1199,78 @@ export type { FancyProps }"#,
             .map(|target| target.canonical_id.as_str()),
         Some("/workspace/node_modules/lib/dist/inner.d.ts"),
         "rebuilt imported cache entries must publish the upgraded declaration route",
+    );
+}
+
+#[test]
+fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
+    let host = make_host();
+    let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
+    upsert_non_sfc(
+        &host,
+        canonical_id,
+        "export interface PresentProps { open: boolean }\n",
+    );
+
+    host.ensure_module_facts_in_view(canonical_id, None)
+        .expect("module facts should seed the provider before capturing a store view");
+    let view = host.resolver_store_view();
+
+    let resolved =
+        host.resolve_imported_type_root_in_view(canonical_id, "MissingProps", Some(&view));
+    assert_eq!(
+        resolved,
+        (canonical_id.to_string(), "MissingProps".to_string()),
+        "legacy callers still observe the provider/name tuple on a miss",
+    );
+
+    let cached = host
+        .resolver
+        .runtime
+        .imported_roots
+        .get(canonical_id, "MissingProps", &view)
+        .expect("imported-root lookup should publish a stable miss to the shared DB");
+    assert!(
+        cached.is_miss(),
+        "missing imported roots must be cached as Miss, not as a fallback self-resolution: {:?}",
+        cached
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materialization() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "import type { Base } from './base'\nexport interface Props extends Base { label: string }\n",
+    );
+    ws.inject_file("/src/base.ts", "export interface Base { id: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
+    let prepared = host
+        .prepared_type_decl_in_view("/src/types.ts", "Props", None)
+        .expect("prepared decl should materialize without the legacy import-route shadow path");
+
+    let base = prepared
+        .name_resolution
+        .get("Base")
+        .expect("prepared decl should carry imported Base resolution");
+    assert_eq!(
+        base.canonical_id, "/src/base.ts",
+        "prepared decl name_resolution should point at the imported canonical owner",
+    );
+    assert_eq!(
+        base.symbol_name, "Base",
+        "prepared decl name_resolution should preserve the imported exported name",
     );
 }
 
@@ -1272,14 +1344,17 @@ defineProps<Props>()
         "captured store view should include transitive dependency whole hashes"
     );
     assert!(
-        view.dependency_resolution("/src/types.ts", "./dep")
-            .is_some(),
-        "captured store view should snapshot transitive dependency routes"
+        view.derived_hash(
+            "/src/types.ts",
+            crate::resolver_core::DerivedFactKind::ImportRoute,
+        )
+        .is_some(),
+        "captured store view should snapshot transitive import-route hashes"
     );
 }
 
 #[test]
-fn resolver_store_view_tracks_reexport_dependency_routes() {
+fn resolver_store_view_tracks_reexport_import_routes() {
     let host = strict_host();
 
     upsert_non_sfc(
@@ -1292,10 +1367,10 @@ fn resolver_store_view_tracks_reexport_dependency_routes() {
     let view = host.resolver_store_view();
 
     assert_eq!(
-        view.dependency_resolution("/src/index.ts", "./dep")
-            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_shallow_in_view("/src/index.ts", "./dep", Some(&view))
+            .as_deref(),
         Some("/src/dep.ts"),
-        "captured store view should snapshot re-export dependency routes"
+        "captured store views should resolve re-export import routes without requiring a synthesized import-route snapshot",
     );
 }
 
@@ -1318,10 +1393,10 @@ fn resolver_store_view_prefers_declaration_companion_routes_for_dts_imports() {
     let view = host.resolver_store_view();
 
     assert_eq!(
-        view.dependency_resolution("/src/index.d.ts", "./inner.js")
-            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        host.resolve_type_dependency_canonical_in_view("/src/index.d.ts", "./inner.js", Some(&view))
+            .as_deref(),
         Some("/src/inner.d.ts"),
-        "captured store view should resolve declaration-file imports through the declaration companion",
+        "captured store views should resolve declaration-file imports through the declaration companion",
     );
 }
 
@@ -1580,6 +1655,53 @@ fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
 }
 
 #[test]
+fn store_view_seeded_imported_barrel_backfills_wildcard_import_routes() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let barrel = "/workspace/node_modules/pkg/dist/index.d.ts";
+    let shared = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(barrel, "export * from './shared.js'\n");
+    ws.inject_file(shared, "export interface Shared { label?: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+
+    let facts = host
+        .ensure_module_facts_in_view(barrel, Some(&view))
+        .expect("explicit shallow seeding should materialize the barrel facts");
+    assert_eq!(
+        facts.shallow_state.wildcard_reexports.len(),
+        1,
+        "barrel should publish its wildcard reexport",
+    );
+    assert_eq!(
+        facts.shallow_state.wildcard_reexports[0].canonical_id,
+        shared,
+        "seeded ModuleFacts must backfill wildcard canonical IDs even when the store view had no exact-resolution snapshot",
+    );
+
+    ws.reset_resolves();
+    let resolved =
+        host.resolve_type_dependency_canonical_shallow_in_view(barrel, "./shared.js", Some(&view));
+    assert_eq!(
+        resolved.as_deref(),
+        Some(shared),
+        "shallow dependency lookup should reuse the seeded barrel route",
+    );
+    assert_eq!(
+        ws.resolve_count(barrel, "./shared.js"),
+        0,
+        "seeded wildcard routes should not bounce back to the live workspace resolver",
+    );
+}
+
+#[test]
 fn read_dep_source_for_type_resolution_promotes_eval_source_for_loaded_workspace_file() {
     let ws = Arc::new(CountingWorkspace::new());
     let host = VerterHost::new(
@@ -1787,7 +1909,7 @@ fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_
 }
 
 #[test]
-fn cached_dependency_resolution_is_reused_by_internal_and_public_import_lookups() {
+fn cached_import_route_is_reused_by_internal_and_public_import_lookups() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/workspace/src/dep.ts", "export const dep = 1");
     let host = VerterHost::new(
@@ -4237,9 +4359,9 @@ fn effective_target_prefers_dcts_over_cjs() {
 
 #[test]
 fn resolved_dependency_targets_uses_effective_target() {
-    let mut dep_resolutions = rustc_hash::FxHashMap::default();
+    let mut import_routes = rustc_hash::FxHashMap::default();
     // Resolved: should use resolved_canonical_id only
-    dep_resolutions.insert(
+    import_routes.insert(
         "./types".to_string(),
         crate::types::DependencyResolution {
             specifier: "./types".to_string(),
@@ -4248,7 +4370,7 @@ fn resolved_dependency_targets_uses_effective_target() {
         },
     );
     // Unresolved: should use highest-priority possible
-    dep_resolutions.insert(
+    import_routes.insert(
         "./utils".to_string(),
         crate::types::DependencyResolution {
             specifier: "./utils".to_string(),
@@ -4260,7 +4382,7 @@ fn resolved_dependency_targets_uses_effective_target() {
         },
     );
     // No resolution at all
-    dep_resolutions.insert(
+    import_routes.insert(
         "./missing".to_string(),
         crate::types::DependencyResolution {
             specifier: "./missing".to_string(),
@@ -4269,7 +4391,7 @@ fn resolved_dependency_targets_uses_effective_target() {
         },
     );
 
-    let targets = VerterHost::resolved_dependency_targets(&dep_resolutions);
+    let targets = VerterHost::resolved_dependency_targets(&import_routes);
 
     assert!(
         targets.contains("/src/types.ts"),
@@ -5128,6 +5250,41 @@ export type Props = {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn route_and_root_resolution_do_not_fall_back_through_frontier() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/index.ts", "export * from './types'\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
+    let _guard = crate::host_resolve::forbid_route_frontier_for_tests();
+    let route = host.resolve_named_type_export_target_in_view("/src/index.ts", "Props", None);
+    assert_eq!(
+        route,
+        Some(("/src/types.ts".to_string(), "Props".to_string())),
+        "named export routing should resolve through DB-owned shallow facts without frontier fallback",
+    );
+
+    let root = host.resolve_imported_type_root_in_view("/src/index.ts", "Props", None);
+    assert_eq!(
+        root,
+        ("/src/types.ts".to_string(), "Props".to_string()),
+        "imported-root proof should reuse the DB-owned route without frontier fallback",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn ensure_shallow_imported_dependency_state_for_vue_exports_stays_local() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -5835,13 +5992,10 @@ export type TargetEmits = { change: [value: string] }
         ),
         "TargetEmits should resolve through the cached shallow barrel route",
     );
-    // Wildcard siblings may be resolved multiple times (once during
-    // materialization, once during route lookup). The functional contract
-    // is that the resolved target is correct.
-    assert!(
-        ws.resolve_count("/src/types/index.ts", "./target") >= 1,
-        "barrel route for ./target should be resolved at least once, got {} resolves",
+    assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./target"),
+        0,
+        "once the barrel facts are seeded, root lookup should reuse the cached wildcard route without another workspace resolve",
     );
 }
 
@@ -5904,7 +6058,7 @@ fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_loca
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn current_dependency_fact_versions_in_view_keeps_imported_barrel_exact_resolution_shallow() {
+fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types/index.ts",
@@ -5946,28 +6100,28 @@ fn current_dependency_fact_versions_in_view_keeps_imported_barrel_exact_resoluti
     assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./a"),
         0,
-        "captured fact-version lookup must not resolve earlier wildcard siblings for exact-resolution hashing",
+        "captured fact-version lookup must not resolve earlier wildcard siblings for route hashing",
     );
     assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./b"),
         0,
-        "captured fact-version lookup must not resolve intermediate wildcard siblings for exact-resolution hashing",
+        "captured fact-version lookup must not resolve intermediate wildcard siblings for route hashing",
     );
     assert_eq!(
         ws.resolve_count("/src/types/index.ts", "./target"),
         0,
-        "captured fact-version lookup must not resolve the matched wildcard target for exact-resolution hashing",
+        "captured fact-version lookup must not resolve the matched wildcard target for route hashing",
     );
     assert!(
-        !facts.iter().any(|fact| matches!(
+        facts.iter().any(|fact| matches!(
             fact,
             crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+                kind: crate::resolver_core::DerivedFactKind::Route,
                 ..
             } if canonical_id == "/src/types/index.ts"
         )),
-        "captured fact-version lookup should not force an exact-resolution fact for a shallow imported barrel",
+        "captured fact-version lookup should reuse the snapshotted route fact for a shallow imported barrel without live wildcard replay",
     );
 }
 
@@ -6130,7 +6284,7 @@ export interface LinkProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn store_view_dependency_routes_do_not_depend_on_live_owner_state() {
+fn store_view_import_routes_do_not_depend_on_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/src/types/index.ts", "export * from './target'\n");
     ws.inject_file(
@@ -6150,6 +6304,16 @@ fn store_view_dependency_routes_do_not_depend_on_live_owner_state() {
         .expect("barrel should materialize shallow export state");
     let view = host.resolver_store_view();
 
+    assert!(
+        view.derived_hash(
+            "/src/types/index.ts",
+            crate::resolver_core::DerivedFactKind::ImportRoute,
+        )
+        .is_some(),
+        "captured store views should snapshot module-facts-backed import-route hashes without reconstructing the old structural shadow path",
+    );
+
+    ws.reset_resolves();
     ws.remove_file("/src/types/index.ts");
     // imported_dependency_cache reference removed
     host.compile_cache.remove("/src/types/index.ts");
@@ -6163,7 +6327,12 @@ fn store_view_dependency_routes_do_not_depend_on_live_owner_state() {
     assert_eq!(
         resolved.as_deref(),
         Some("/src/types/target.ts"),
-        "store-view dependency routes should resolve from the captured snapshot without reloading the live owner file",
+        "route resolution should continue to use cached module facts while the store view provides the validating import-route hash",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types/index.ts", "./target"),
+        0,
+        "captured store-view barrel routes should not fall back to a live workspace resolve",
     );
 }
 
@@ -6204,16 +6373,19 @@ export interface LinkProps extends SharedProps {
         entry.export_signatures.is_some(),
         "export-only shallow state should still capture export signatures",
     );
-    assert_eq!(
-        ws.resolve_count("/src/Link.vue", "./shared"),
-        0,
-        "export-only shallow state must not resolve ordinary imports that are irrelevant to the export surface",
+    // The import `./shared` provides `SharedProps` which is used by the
+    // exported `LinkProps` heritage clause.  Module-facts materializes all
+    // import routes eagerly (needed by the shallow state resolver and
+    // component-meta pipelines), so at most one workspace resolve is expected.
+    assert!(
+        ws.resolve_count("/src/Link.vue", "./shared") <= 1,
+        "module-facts should resolve the import at most once",
     );
 }
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn dependency_route_lookup_reuses_imported_dependency_cache_without_live_owner_state() {
+fn import_route_lookup_reuses_imported_dependency_cache_without_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -6247,7 +6419,7 @@ export interface UnusedProps {
     );
 
     host.ensure_module_facts_in_view("/src/types.ts", None)
-        .expect("barrel should seed shallow dependency routes");
+        .expect("barrel should seed shallow import routes");
 
     ws.remove_file("/src/types.ts");
     host.compile_cache.remove("/src/types.ts");
@@ -6261,7 +6433,7 @@ export interface UnusedProps {
     assert_eq!(
         resolved,
         Some("/src/Button.vue".to_string()),
-        "dependency lookup should reuse cached imported dependency routes",
+        "dependency lookup should reuse cached imported import routes",
     );
 }
 
@@ -7597,6 +7769,293 @@ fn regression_stale_prepared_decls_after_dep_resolution_change() {
             .map(|identity| identity.canonical_id.as_str()),
         Some("/types-a.ts"),
         "prepared decl must NOT retain the stale route to types-a",
+    );
+}
+
+#[test]
+fn unrelated_upsert_keeps_route_root_and_type_surface_dbs_warm() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface ButtonProps { label: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export { ButtonProps } from './types'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/unrelated.ts", "export const unrelated = 1\n");
+
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./index", "/src/index.ts")],
+    );
+
+    let view_before = host.resolver_store_view();
+    let route = host.resolve_named_type_export_target_in_view(
+        "/src/index.ts",
+        "ButtonProps",
+        Some(&view_before),
+    );
+    assert_eq!(
+        route,
+        Some(("/src/types.ts".to_string(), "ButtonProps".to_string())),
+        "barrel route should resolve to the defining type file before the unrelated mutation",
+    );
+    let root =
+        host.resolve_imported_type_root_in_view("/src/index.ts", "ButtonProps", Some(&view_before));
+    assert_eq!(
+        root,
+        ("/src/types.ts".to_string(), "ButtonProps".to_string()),
+        "barrel import should resolve to the defining type file before the unrelated mutation",
+    );
+
+    let solver_host = crate::resolver_core::SessionSolverHost::new(&host, Some(&view_before));
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        &host,
+        Some(&view_before),
+        &solver_host,
+    );
+    let projected = engine.project_type_surface("/src/types.ts", "ButtonProps");
+    assert!(
+        projected.is_some(),
+        "projection should warm TypeSurfaceDb before the unrelated mutation",
+    );
+
+    let type_surface_key =
+        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/types.ts".to_string(),
+            symbol_name: "ButtonProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .routes
+                .get_route_any("/src/index.ts", "ButtonProps")
+                .as_deref(),
+            Some(crate::resolver_core::RouteResult::Resolved {
+                defining_canonical,
+                defining_symbol,
+            }) if defining_canonical == "/src/types.ts" && defining_symbol == "ButtonProps"
+        ),
+        "RouteDb should be warm before the unrelated mutation",
+    );
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .imported_roots
+                .get_any("/src/index.ts", "ButtonProps")
+                .as_deref(),
+            Some(crate::resolver_core::ImportedRootResult::Resolved {
+                canonical_source,
+                resolved_symbol,
+            }) if canonical_source == "/src/types.ts" && resolved_symbol == "ButtonProps"
+        ),
+        "ImportedRootDb should be warm before the unrelated mutation",
+    );
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&type_surface_key, &view_before)
+                .as_deref(),
+            Some(crate::resolver_core::TypeSurfaceOpResult::Surface(_))
+        ),
+        "TypeSurfaceDb should be warm before the unrelated mutation",
+    );
+
+    upsert_non_sfc(&host, "/src/unrelated.ts", "export const unrelated = 1\n");
+
+    let view_after = host.resolver_store_view();
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .routes
+                .get_route_any("/src/index.ts", "ButtonProps")
+                .as_deref(),
+            Some(crate::resolver_core::RouteResult::Resolved {
+                defining_canonical,
+                defining_symbol,
+            }) if defining_canonical == "/src/types.ts" && defining_symbol == "ButtonProps"
+        ),
+        "byte-identical unrelated upserts must not clear warm RouteDb entries",
+    );
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .imported_roots
+                .get_any("/src/index.ts", "ButtonProps")
+                .as_deref(),
+            Some(crate::resolver_core::ImportedRootResult::Resolved {
+                canonical_source,
+                resolved_symbol,
+            }) if canonical_source == "/src/types.ts" && resolved_symbol == "ButtonProps"
+        ),
+        "byte-identical unrelated upserts must not clear warm ImportedRootDb entries",
+    );
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&type_surface_key, &view_after)
+                .as_deref(),
+            Some(crate::resolver_core::TypeSurfaceOpResult::Surface(_))
+        ),
+        "byte-identical unrelated upserts must not clear warm TypeSurfaceDb entries",
+    );
+}
+
+#[test]
+fn unrelated_set_import_dependencies_keeps_route_root_and_type_surface_dbs_warm() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface ButtonProps { label: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/index.ts",
+        "export { ButtonProps } from './types'\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Button.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './index'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/other-types.ts",
+        "export interface OtherProps { count: number }\n",
+    );
+    upsert_vue(
+        &host,
+        "/src/Other.vue",
+        r#"<script setup lang="ts">
+import type { OtherProps } from './other-types'
+
+defineProps<OtherProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./index", "/src/index.ts")],
+    );
+
+    let view_before = host.resolver_store_view();
+    let route = host.resolve_named_type_export_target_in_view(
+        "/src/index.ts",
+        "ButtonProps",
+        Some(&view_before),
+    );
+    assert_eq!(
+        route,
+        Some(("/src/types.ts".to_string(), "ButtonProps".to_string())),
+        "barrel route should resolve to the defining type file before the unrelated dependency update",
+    );
+    let root =
+        host.resolve_imported_type_root_in_view("/src/index.ts", "ButtonProps", Some(&view_before));
+    assert_eq!(
+        root,
+        ("/src/types.ts".to_string(), "ButtonProps".to_string()),
+        "barrel import should resolve to the defining type file before the unrelated dependency update",
+    );
+
+    let solver_host = crate::resolver_core::SessionSolverHost::new(&host, Some(&view_before));
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        &host,
+        Some(&view_before),
+        &solver_host,
+    );
+    let projected = engine.project_type_surface("/src/types.ts", "ButtonProps");
+    assert!(
+        projected.is_some(),
+        "projection should warm TypeSurfaceDb before the unrelated dependency update",
+    );
+
+    let type_surface_key =
+        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/types.ts".to_string(),
+            symbol_name: "ButtonProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+    assert!(
+        host.resolver_runtime()
+            .routes
+            .get_route_any("/src/index.ts", "ButtonProps")
+            .is_some(),
+        "RouteDb should be warm before the unrelated dependency update",
+    );
+    assert!(
+        host.resolver_runtime()
+            .imported_roots
+            .get_any("/src/index.ts", "ButtonProps")
+            .is_some(),
+        "ImportedRootDb should be warm before the unrelated dependency update",
+    );
+    assert!(
+        host.resolver_runtime()
+            .type_surfaces
+            .get(&type_surface_key, &view_before)
+            .is_some(),
+        "TypeSurfaceDb should be warm before the unrelated dependency update",
+    );
+
+    host.set_import_dependencies(
+        "/src/Other.vue",
+        vec![exact_dependency("./other-types", "/src/other-types.ts")],
+    );
+
+    let view_after = host.resolver_store_view();
+    assert!(
+        host.resolver_runtime()
+            .routes
+            .get_route_any("/src/index.ts", "ButtonProps")
+            .is_some(),
+        "unrelated dependency updates must not clear warm RouteDb entries",
+    );
+    assert!(
+        host.resolver_runtime()
+            .imported_roots
+            .get_any("/src/index.ts", "ButtonProps")
+            .is_some(),
+        "unrelated dependency updates must not clear warm ImportedRootDb entries",
+    );
+    assert!(
+        host.resolver_runtime()
+            .type_surfaces
+            .get(&type_surface_key, &view_after)
+            .is_some(),
+        "unrelated dependency updates must not clear warm TypeSurfaceDb entries",
     );
 }
 

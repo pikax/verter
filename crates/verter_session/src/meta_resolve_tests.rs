@@ -2749,6 +2749,29 @@ defineProps<DashboardSidebarCollapseProps>()
         )
         .unwrap();
 
+    let store_view = project.host().resolver_store_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
+        project.host(),
+        Some(&store_view),
+        "/components/Button.vue",
+    );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        project.host(),
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let button_projected = query_engine
+        .project_type_surface_expr("/components/Button.vue", "ButtonProps")
+        .expect("ButtonProps should project through the shared type-surface DB path");
+    let button_projected_debug = format!("{:?}", button_projected);
+    assert!(
+        button_projected_debug.contains("icon")
+            && button_projected_debug.contains("loading")
+            && button_projected_debug.contains("disabled"),
+        "ButtonProps projection should preserve imported inherited members: {}",
+        button_projected_debug,
+    );
+
     let meta = project
         .host()
         .get_component_meta("/App.vue")

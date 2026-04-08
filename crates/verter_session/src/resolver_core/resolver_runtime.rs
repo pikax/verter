@@ -165,6 +165,29 @@ where
         self.type_surfaces.clear();
     }
 
+    /// Evict artifacts owned by one canonical file without clearing unrelated
+    /// DB state. Cross-file node caches stay fact-validated and are rebuilt
+    /// lazily on next access when their owner facts change.
+    /// Hard-evict all artifacts for a canonical file (e.g. after content change).
+    pub fn evict_canonical(&self, canonical_id: &str) {
+        self.prepared_decl_bundles.remove(&canonical_id.to_string());
+        self.module_facts.evict(canonical_id);
+        self.routes.evict_provider(canonical_id);
+        self.imported_roots.evict_provider(canonical_id);
+        self.type_surfaces.evict_owner(canonical_id);
+    }
+
+    /// Soft-invalidate artifacts for a canonical file (e.g. after import
+    /// route change where file content is unchanged). Module facts are
+    /// archived so stale store views can still find the prior generation.
+    pub fn invalidate_canonical(&self, canonical_id: &str) {
+        self.prepared_decl_bundles.remove(&canonical_id.to_string());
+        self.module_facts.invalidate(canonical_id);
+        self.routes.evict_provider(canonical_id);
+        self.imported_roots.evict_provider(canonical_id);
+        self.type_surfaces.evict_owner(canonical_id);
+    }
+
     /// Take a snapshot of the current counter values.
     pub fn counter_snapshot(&self) -> crate::resolver_core::ResolverCountersSnapshot {
         self.counters.snapshot()

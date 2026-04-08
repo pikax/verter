@@ -71,7 +71,7 @@ pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
     snapshot: FileAnalysisSnapshot,
     owner_eval_source: Option<String>,
-    dep_resolutions: rustc_hash::FxHashMap<String, crate::types::DependencyResolution>,
+    direct_dependency_candidates: std::collections::BTreeSet<String>,
     audit_capture_inputs_ms: f64,
     audit_store_read_ms: f64,
     audit_direct_import_proof_ms: f64,
@@ -127,8 +127,8 @@ impl ComponentMetaRequestHost for VerterHost {
                 snapshot.template.is_some(),
             ),
         );
-        let (source, cached_parse, whole_hash) =
-            self.current_eval_state_in_view(canonical, Some(view))?;
+        let facts = self.ensure_module_facts_in_view(canonical, Some(view))?;
+        let whole_hash = facts.whole_hash;
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -137,14 +137,15 @@ impl ComponentMetaRequestHost for VerterHost {
             format!(
                 "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
                 canonical,
-                source.len(),
-                cached_parse.is_some(),
+                facts.raw_source.len(),
+                facts.cached_parse.is_some(),
             ),
         );
         let owner_eval_source =
-            VerterHost::build_eval_script_source(&source, cached_parse.as_deref());
+            VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
         let direct_import_started = audit_enabled.then(Instant::now);
-        let dep_resolutions = self.dependency_resolutions_in_view(canonical, Some(view));
+        let direct_dependency_candidates =
+            self.cache_dependency_candidates_from_snapshot(canonical, &snapshot, Some(view));
         let direct_import_proof_ms = direct_import_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -154,17 +155,17 @@ impl ComponentMetaRequestHost for VerterHost {
         component_meta_trace_event!(
             "capture_component_meta_inputs_result",
             format!(
-                "owner={} owner_eval_source_len={} dep_resolutions={}",
+                "owner={} owner_eval_source_len={} dependency_candidates={}",
                 canonical,
                 owner_eval_source.len(),
-                dep_resolutions.len(),
+                direct_dependency_candidates.len(),
             ),
         );
         Some(CapturedComponentMetaInputs {
             whole_hash,
             snapshot,
             owner_eval_source: Some(owner_eval_source),
-            dep_resolutions,
+            direct_dependency_candidates,
             audit_capture_inputs_ms: capture_inputs_ms,
             audit_store_read_ms: store_read_ms,
             audit_direct_import_proof_ms: direct_import_proof_ms,
@@ -395,6 +396,178 @@ fn enrich_missing_slot_bindings(
                     diagnostics: Vec::new(),
                 });
             }
+        }
+    }
+}
+
+fn projected_macro_shape_entry(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<
+    verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+> {
+    let projected = query_engine.project_expr_surface_expr(owner_canonical, lowered)?;
+    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
+    if shape.properties.is_empty()
+        && shape.index_signatures.is_empty()
+        && shape.call_signatures.is_empty()
+    {
+        return None;
+    }
+    Some(verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
+}
+
+fn macro_shape_surface_weight(
+    result: &verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+) -> usize {
+    result.value.properties.len()
+        + result.value.index_signatures.len()
+        + result.value.call_signatures.len()
+}
+
+fn projected_macro_shape_is_preferred(
+    existing: Option<
+        &verter_semantic::analysis::type_expand::ExpansionResult<
+            verter_semantic::analysis::type_expand::ExpandedObjectShape,
+        >,
+    >,
+    projected: &verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+) -> bool {
+    let Some(existing) = existing else {
+        return true;
+    };
+    macro_shape_surface_weight(projected) > macro_shape_surface_weight(existing)
+}
+
+fn upsert_projected_define_props_shape(
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    macro_index: usize,
+    projected: verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+) {
+    let existing = evaluated_types
+        .define_props
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)
+        .map(|entry| &entry.result);
+    if !projected_macro_shape_is_preferred(existing, &projected) {
+        return;
+    }
+    if let Some(entry) = evaluated_types
+        .define_props
+        .iter_mut()
+        .find(|entry| entry.macro_index == macro_index)
+    {
+        entry.result = projected;
+    } else {
+        evaluated_types.define_props.push(
+            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                macro_index,
+                result: projected,
+            },
+        );
+    }
+}
+
+fn upsert_projected_macro_object_shape(
+    entries: &mut Vec<verter_semantic::analysis::type_expand::ExpandedMacroObjectShape>,
+    macro_index: usize,
+    projected: verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+) {
+    let existing = entries
+        .iter()
+        .find(|entry| entry.macro_index == macro_index)
+        .map(|entry| &entry.result);
+    if !projected_macro_shape_is_preferred(existing, &projected) {
+        return;
+    }
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry.macro_index == macro_index)
+    {
+        entry.result = projected;
+    } else {
+        entries.push(
+            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                macro_index,
+                result: projected,
+            },
+        );
+    }
+}
+
+fn enrich_projected_macro_shapes(
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    eval_source: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    let params =
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
+
+    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+        if !mac.is_type_based {
+            continue;
+        }
+
+        match mac.kind {
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                if let Some(lowered) = params.define_props.get(define_props_index) {
+                    if let Some(projected) =
+                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
+                    {
+                        upsert_projected_define_props_shape(
+                            evaluated_types,
+                            macro_index,
+                            projected,
+                        );
+                    }
+                }
+                define_props_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                if let Some(lowered) = params.define_emits.get(define_emits_index) {
+                    if let Some(projected) =
+                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
+                    {
+                        upsert_projected_macro_object_shape(
+                            &mut evaluated_types.define_emits,
+                            macro_index,
+                            projected,
+                        );
+                    }
+                }
+                define_emits_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                if let Some(lowered) = params.define_slots.get(define_slots_index) {
+                    if let Some(projected) =
+                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
+                    {
+                        upsert_projected_macro_object_shape(
+                            &mut evaluated_types.define_slots,
+                            macro_index,
+                            projected,
+                        );
+                    }
+                }
+                define_slots_index += 1;
+            }
+            _ => {}
         }
     }
 }
@@ -691,6 +864,34 @@ impl VerterHost {
             store_view,
             &mut query_engine,
         );
+        if mode == ResolverMode::Expanded {
+            if let Some(eval_source) = captured
+                .and_then(|captured| captured.owner_eval_source.as_deref())
+                .map(str::to_string)
+                .or_else(|| {
+                    self.ensure_module_facts_in_view(canonical, store_view)
+                        .map(|facts| {
+                            VerterHost::build_eval_script_source(
+                                &facts.raw_source,
+                                facts.cached_parse.as_deref(),
+                            )
+                        })
+                })
+            {
+                let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+                enrich_projected_macro_shapes(
+                    canonical,
+                    &snapshot,
+                    &eval_source,
+                    &mut evaluated_types,
+                    &mut query_engine,
+                );
+                if !evaluated_types.is_empty() {
+                    enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
+                    parts.evaluated_types = Some(evaluated_types);
+                }
+            }
+        }
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         {
             let ts = query_engine.trace_summary();
@@ -801,6 +1002,35 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
+        fn materialize_component_meta_registry_candidate(
+            query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            symbol_name: &str,
+            raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+        ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+            query_engine
+                .project_type_surface_expr(scope_canonical_id, symbol_name)
+                .map(|materialized| {
+                    raw_body.map_or_else(
+                        || materialized.clone(),
+                        |raw| {
+                            preserve_package_backed_symbolic_refs(
+                                &materialized,
+                                raw,
+                                scope_canonical_id,
+                                query_engine,
+                            )
+                        },
+                    )
+                })
+                .or_else(|| {
+                    raw_body.and_then(|expr| {
+                        (!component_meta_registry_has_non_object_top_level_surface(expr))
+                            .then(|| expr.clone())
+                    })
+                })
+                .or_else(|| raw_body.cloned())
+        }
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
@@ -841,12 +1071,13 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved_canonical_id.clone();
-            let materialized = query_engine
-                .solve_scoped(
-                    resolved_canonical_id.as_str(),
-                    resolved_exported_name.as_str(),
-                )
-                .unwrap_or_else(|| prepared.body.clone());
+            let materialized = materialize_component_meta_registry_candidate(
+                query_engine,
+                resolved_canonical_id.as_str(),
+                resolved_exported_name.as_str(),
+                Some(&prepared.body),
+            )
+            .unwrap_or_else(|| prepared.body.clone());
             entry.type_expr = choose_preferred_component_meta_registry_candidate(
                 Some(entry.type_expr.clone()),
                 Some(materialized),
@@ -997,12 +1228,13 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
-                    let type_expr = query_engine
-                        .solve_scoped(
-                            resolved_canonical_id.as_str(),
-                            resolved_exported_name.as_str(),
-                        )
-                        .unwrap_or_else(|| prepared.body.clone());
+                    let type_expr = materialize_component_meta_registry_candidate(
+                        query_engine,
+                        resolved_canonical_id.as_str(),
+                        resolved_exported_name.as_str(),
+                        Some(&prepared.body),
+                    )
+                    .unwrap_or_else(|| prepared.body.clone());
                     upsert_component_meta_registry_entry(
                         owner_canonical,
                         resolved_type_registry,
@@ -1033,15 +1265,28 @@ impl VerterHost {
                 declaration =
                     query_engine.resolve_type_declaration(owner_canonical, type_name.as_str());
             }
+            let declaration_body =
+                query_engine.named_decl_body(declaration_owner, type_name.as_str());
             let mut materialized = if declaration_owner != owner_canonical {
-                query_engine.solve_scoped(declaration_owner, type_name.as_str())
+                materialize_component_meta_registry_candidate(
+                    query_engine,
+                    declaration_owner,
+                    type_name.as_str(),
+                    declaration_body.as_ref(),
+                )
             } else {
                 None
             };
             let owner_collection_expr =
                 query_engine.owner_collection_expr(owner_canonical, type_name.as_str());
-            materialized =
-                materialized.or_else(|| query_engine.solve_owner_named(type_name.as_str()));
+            materialized = materialized.or_else(|| {
+                materialize_component_meta_registry_candidate(
+                    query_engine,
+                    owner_canonical,
+                    type_name.as_str(),
+                    owner_collection_expr.as_ref(),
+                )
+            });
             if materialized.is_some() && declaration.canonical_source.is_empty() {
                 if let Some(import) = snapshot
                     .imports
@@ -1130,8 +1375,11 @@ impl VerterHost {
 
     /// Get a raw analysis snapshot without any enrichment.
     ///
-    /// This bypasses any legacy `get_analysis()` enrichment path, returning only the base snapshot
-    /// with resolved imports and destructured bindings.
+    /// For owner files in the scheduler, reads the scheduler's latest analysis
+    /// (which reflects post-recompile state). For imported deps and non-scheduler
+    /// files, reads from ModuleFactsDb (materializing on miss). Both paths enrich
+    /// the snapshot with resolved imports, destructured bindings, and template
+    /// analysis.
     pub(crate) fn get_raw_analysis_snapshot_in_view(
         &self,
         canonical: &str,
@@ -1144,7 +1392,7 @@ impl VerterHost {
         let normalized_canonical =
             self.normalized_analysis_canonical_in_view(canonical, store_view);
         let canonical = normalized_canonical.as_ref();
-        // Eviction gate (scheduler path)
+
         #[cfg(feature = "scheduler")]
         {
             if let Some(cc) = self.compile_cache.get(canonical) {
@@ -1152,12 +1400,13 @@ impl VerterHost {
                     return None;
                 }
             }
-        }
 
-        #[cfg(feature = "scheduler")]
-        {
-            let mut snapshot = if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical)
-            {
+            // Scheduler-first path for owner files: the scheduler has the
+            // latest analysis after recompile, including updated import
+            // routes for newly-added dependencies. ModuleFactsDb may hold
+            // stale import routes for owner files whose deps changed after
+            // materialization.
+            if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical) {
                 let whole_hash = store_view
                     .and_then(|view| view.whole_hash(canonical))
                     .or_else(|| self.get_whole_hash(canonical))
@@ -1165,10 +1414,16 @@ impl VerterHost {
                 if !self.store_view_allows_current_whole_hash(canonical, whole_hash, store_view) {
                     return None;
                 }
+                let mut snapshot = snapshot;
+                self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+                self.enrich_destructured_bindings(&mut snapshot);
+                if self.config.effective_scope().needs_template_analysis() {
+                    self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                }
                 component_meta_trace_event!(
-                    "get_raw_analysis_snapshot_scheduler_hit",
+                    "get_raw_analysis_snapshot_result",
                     format!(
-                        "owner={} imports={} macros={} bindings={} has_template={}",
+                        "owner={} imports={} macros={} bindings={} has_template={} source=scheduler",
                         canonical,
                         snapshot.imports.len(),
                         snapshot.macros.len(),
@@ -1176,111 +1431,30 @@ impl VerterHost {
                         snapshot.template.is_some(),
                     ),
                 );
-                snapshot
-            } else {
-                // ModuleFactsDb path: covers both imported deps and own files.
-                if let Some(facts) = self.ensure_module_facts_in_view(canonical, store_view) {
-                    let mut snapshot = (*facts.snapshot).clone();
-                    self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
-                    self.enrich_destructured_bindings(&mut snapshot);
-                    if self.config.effective_scope().needs_template_analysis() {
-                        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-                    }
-                    component_meta_trace_event!(
-                        "get_raw_analysis_snapshot_result",
-                        format!(
-                            "owner={} imports={} macros={} bindings={} has_template={} source=module_facts",
-                            canonical,
-                            snapshot.imports.len(),
-                            snapshot.macros.len(),
-                            snapshot.bindings.len(),
-                            snapshot.template.is_some(),
-                        ),
-                    );
-                    return Some(snapshot);
-                }
-
-                let (source, _whole_hash, cached_parse) = self
-                    .current_eval_state_in_view(canonical, store_view)
-                    .map(|(source, cached_parse, whole_hash)| (source, whole_hash, cached_parse))
-                    .or_else(|| {
-                        self.ensure_module_facts_in_view(canonical, store_view)
-                            .map(|facts| {
-                                (
-                                    Arc::clone(&facts.raw_source),
-                                    facts.whole_hash,
-                                    facts.cached_parse.clone(),
-                                )
-                            })
-                    })?;
-                component_meta_trace_event!(
-                    "get_raw_analysis_snapshot_build_from_source",
-                    format!("owner={} source_len={}", canonical, source.len()),
-                );
-                self.build_snapshot_from_source_state(canonical, &source, cached_parse.as_deref())
-            };
-            self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
-            self.enrich_destructured_bindings(&mut snapshot);
-            if self.config.effective_scope().needs_template_analysis() {
-                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                return Some(snapshot);
             }
-            // No separate cache write needed; ModuleFactsDb already owns the facts.
-            component_meta_trace_event!(
-                "get_raw_analysis_snapshot_result",
-                format!(
-                    "owner={} imports={} macros={} bindings={} has_template={}",
-                    canonical,
-                    snapshot.imports.len(),
-                    snapshot.macros.len(),
-                    snapshot.bindings.len(),
-                    snapshot.template.is_some(),
-                ),
-            );
-            Some(snapshot)
         }
 
-        #[cfg(not(feature = "scheduler"))]
-        {
-            use crate::shared::read_lock;
-
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical)?;
-            if !self.store_view_allows_current_whole_hash(canonical, entry.whole_hash, store_view) {
-                return None;
-            }
-            // Use build_snapshot_from_entry for Arc::clone pointer bumps
-            // instead of allocating new Arcs.
-            let mut snapshot = Self::build_snapshot_from_entry(entry);
-            component_meta_trace_event!(
-                "get_raw_analysis_snapshot_cache_hit",
-                format!(
-                    "owner={} imports={} macros={} bindings={} has_template={}",
-                    canonical,
-                    snapshot.imports.len(),
-                    snapshot.macros.len(),
-                    snapshot.bindings.len(),
-                    snapshot.template.is_some(),
-                ),
-            );
-            drop(files);
-            self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
-            self.enrich_destructured_bindings(&mut snapshot);
-            if self.config.effective_scope().needs_template_analysis() {
-                self.compute_template_analysis_if_missing(canonical, &mut snapshot);
-            }
-            component_meta_trace_event!(
-                "get_raw_analysis_snapshot_result",
-                format!(
-                    "owner={} imports={} macros={} bindings={} has_template={}",
-                    canonical,
-                    snapshot.imports.len(),
-                    snapshot.macros.len(),
-                    snapshot.bindings.len(),
-                    snapshot.template.is_some(),
-                ),
-            );
-            Some(snapshot)
+        // ModuleFactsDb path: covers imported deps and non-scheduler files.
+        let facts = self.ensure_module_facts_in_view(canonical, store_view)?;
+        let mut snapshot = (*facts.snapshot).clone();
+        self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+        self.enrich_destructured_bindings(&mut snapshot);
+        if self.config.effective_scope().needs_template_analysis() {
+            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
         }
+        component_meta_trace_event!(
+            "get_raw_analysis_snapshot_result",
+            format!(
+                "owner={} imports={} macros={} bindings={} has_template={} source=module_facts",
+                canonical,
+                snapshot.imports.len(),
+                snapshot.macros.len(),
+                snapshot.bindings.len(),
+                snapshot.template.is_some(),
+            ),
+        );
+        Some(snapshot)
     }
 
     pub(crate) fn try_get_cached_resolved_meta(
@@ -1540,7 +1714,7 @@ impl VerterHost {
 
         for kind in [
             crate::resolver_core::DerivedFactKind::Route,
-            crate::resolver_core::DerivedFactKind::ExactResolution,
+            crate::resolver_core::DerivedFactKind::ImportRoute,
         ] {
             if let Some(hash) = store_view
                 .and_then(|view| view.derived_hash(canonical, kind))
@@ -1577,21 +1751,16 @@ impl VerterHost {
                 let state = self.shallow_file_state_in_view(canonical_id, store_view)?;
                 Some(crate::resolver_store::hash_route_surface(&state))
             }
-            crate::resolver_core::DerivedFactKind::ExactResolution => {
-                if let Some(view) = store_view {
-                    return view
-                        .dependency_resolutions(canonical_id)
-                        .and_then(|resolutions| {
-                            (!resolutions.is_empty()).then(|| {
-                                crate::resolver_store::hash_dependency_resolutions(resolutions)
-                            })
-                        });
-                }
-
-                // No store_view: read from compile_cache.
-                self.lookup_dependency_resolutions(canonical_id)
-                    .map(|r| crate::resolver_store::hash_dependency_resolutions(&r))
-            }
+            crate::resolver_core::DerivedFactKind::ImportRoute => self
+                .resolver
+                .runtime
+                .module_facts
+                .get_any(canonical_id)
+                .and_then(|facts| facts.import_route_hash)
+                .or_else(|| {
+                    self.ensure_module_facts_in_view(canonical_id, store_view)
+                        .and_then(|facts| facts.import_route_hash)
+                }),
         }
     }
 }
@@ -1599,8 +1768,10 @@ impl VerterHost {
 use crate::resolver_core::component_meta_registry::{
     choose_preferred_component_meta_registry_candidate,
     collect_component_meta_registry_public_field_refs, collect_component_meta_registry_refs,
-    component_meta_registry_expr_references_name, owner_component_meta_registry_import_binding,
-    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
+    component_meta_registry_expr_references_name,
+    component_meta_registry_has_non_object_top_level_surface,
+    owner_component_meta_registry_import_binding, upsert_component_meta_registry_entry,
+    PendingComponentMetaRegistryRef,
 };
 
 fn materialize_component_meta_member_surface_expr(
@@ -1619,6 +1790,81 @@ fn materialize_component_meta_member_surface_expr(
     )
 }
 
+fn preserve_package_backed_symbolic_refs(
+    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
+    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match (materialized, raw) {
+        (TypeExpr::Object(materialized_object), TypeExpr::Object(raw_object)) => {
+            let mut object = materialized_object.as_ref().clone();
+            for member in &mut object.properties {
+                let ObjectMember::Property(property) = member else {
+                    continue;
+                };
+                let raw_property =
+                    raw_object
+                        .properties
+                        .iter()
+                        .find_map(|candidate| match candidate {
+                            ObjectMember::Property(raw_property)
+                                if raw_property.name == property.name =>
+                            {
+                                Some(raw_property)
+                            }
+                            _ => None,
+                        });
+                let Some(raw_property) = raw_property else {
+                    continue;
+                };
+                if let TypeExpr::Ref { name, .. } = &raw_property.ty {
+                    if component_meta_ref_resolves_to_package(
+                        scope_canonical_id,
+                        name.as_ref(),
+                        engine,
+                    ) {
+                        property.ty = raw_property.ty.clone();
+                        continue;
+                    }
+                }
+                property.ty = preserve_package_backed_symbolic_refs(
+                    &property.ty,
+                    &raw_property.ty,
+                    scope_canonical_id,
+                    engine,
+                );
+            }
+            TypeExpr::Object(Arc::new(object))
+        }
+        _ => materialized.clone(),
+    }
+}
+
+fn component_meta_ref_resolves_to_package(
+    scope_canonical_id: &str,
+    name: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    if engine
+        .resolve_prepared_alias(
+            scope_canonical_id,
+            name,
+            &crate::resolver_core::RouteDemand::Whole,
+        )
+        .is_some_and(|(resolved_canonical_id, _, _)| {
+            resolved_canonical_id.contains("/node_modules/")
+        })
+    {
+        return true;
+    }
+
+    let declaration = engine.resolve_type_declaration(scope_canonical_id, name);
+    declaration.canonical_source.contains("/node_modules/")
+}
+
 fn materialize_component_meta_member_surface_expr_with_active_stack(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -1633,7 +1879,21 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
     }
 
     if nested_surface {
-        if let Some(projected) = engine.project_expr_surface_expr(scope_canonical_id, expr) {
+        let projected = match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                if component_meta_ref_resolves_to_package(scope_canonical_id, name.as_ref(), engine)
+                {
+                    None
+                } else {
+                    engine.project_type_surface_expr(scope_canonical_id, name.as_ref())
+                }
+            }
+            _ => engine.project_expr_surface_expr(scope_canonical_id, expr),
+        };
+        if let Some(projected) = projected {
             if projected != *expr {
                 let result = materialize_component_meta_member_surface_expr_with_active_stack(
                     &projected,
@@ -1645,19 +1905,6 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 active.remove(expr);
                 return result;
             }
-        }
-
-        let solved = engine.solve_expr_in_scope(scope_canonical_id, expr);
-        if solved != *expr {
-            let result = materialize_component_meta_member_surface_expr_with_active_stack(
-                &solved,
-                scope_canonical_id,
-                engine,
-                true,
-                active,
-            );
-            active.remove(expr);
-            return result;
         }
     }
 
@@ -1690,9 +1937,21 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
             for member in &mut object.properties {
                 match member {
                     ObjectMember::Property(property) => {
-                        if nested_surface
+                        let should_materialize = nested_surface
                             || matches!(&property.ty, TypeExpr::Function(_) | TypeExpr::Object(_))
-                        {
+                            || matches!(
+                                &property.ty,
+                                TypeExpr::Ref {
+                                    name,
+                                    type_arguments,
+                                } if type_arguments.is_empty()
+                                    && !component_meta_ref_resolves_to_package(
+                                        scope_canonical_id,
+                                        name.as_ref(),
+                                        engine,
+                                    )
+                            );
+                        if should_materialize {
                             property.ty =
                                 materialize_component_meta_member_surface_expr_with_active_stack(
                                     &property.ty,
@@ -2173,20 +2432,20 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 snapshot.macro_type_deps.len(),
             ));
         }
-        let dep_resolutions = eval_context
-            .map(|captured| captured.dep_resolutions.clone())
-            .unwrap_or_else(|| {
-                self.host
-                    .dependency_resolutions_in_view(owner_canonical, self.store_view)
-            });
         // Tracked dependencies: snapshot-level candidates + solver-discovered deps.
         // The legacy walker is no longer used for dependency tracking.
         let mut tracked_dependencies = std::collections::BTreeSet::new();
-        tracked_dependencies.extend(self.host.cache_dependency_candidates_from_snapshot(
-            owner_canonical,
-            snapshot,
-            &dep_resolutions,
-        ));
+        tracked_dependencies.extend(
+            eval_context
+                .map(|captured| captured.direct_dependency_candidates.clone())
+                .unwrap_or_else(|| {
+                    self.host.cache_dependency_candidates_from_snapshot(
+                        owner_canonical,
+                        snapshot,
+                        self.store_view,
+                    )
+                }),
+        );
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
         // Always run the solver-host macro path. The solver resolves cross-file
         // types on demand from the host's prepared-decl cache.
@@ -2196,9 +2455,12 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 .map(str::to_string)
                 .or_else(|| {
                     self.host
-                        .current_eval_state_in_view(owner_canonical, self.store_view)
-                        .map(|(source, cached_parse, _)| {
-                            VerterHost::build_eval_script_source(&source, cached_parse.as_deref())
+                        .ensure_module_facts_in_view(owner_canonical, self.store_view)
+                        .map(|facts| {
+                            VerterHost::build_eval_script_source(
+                                &facts.raw_source,
+                                facts.cached_parse.as_deref(),
+                            )
                         })
                 });
             eval_source.and_then(|eval_source| {
@@ -2208,7 +2470,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                         owner_canonical,
                         snapshot,
                         &eval_source,
-                        &dep_resolutions,
                         self.store_view,
                         Some(&mut *engine),
                     )
@@ -2219,7 +2480,6 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     owner_canonical,
                     snapshot,
                     eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-                    &dep_resolutions,
                     self.store_view,
                 )
         };
@@ -2539,7 +2799,8 @@ fn resolve_jsdoc_tag_type(
         parsed
     };
 
-    let _snapshot = host.get_raw_analysis_snapshot_in_view(canonical_source, store_view)?;
+    // Ensure module facts are materialized so the solver host can resolve imports.
+    let _facts = host.ensure_module_facts_in_view(canonical_source, store_view)?;
     tracked_deps.extend(
         host.imported_symbol_dependencies_for_expr_in_view(canonical_source, &parsed, store_view)
             .into_iter()

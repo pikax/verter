@@ -1161,7 +1161,7 @@ pub(crate) struct FileEntry {
     /// Per-specifier resolution records from the last `set_import_dependencies` call.
     /// Keyed by raw import specifier. Used by `resolve_loaded_dependency_canonical`
     /// for exact lookup before falling back to heuristics.
-    pub(crate) dependency_resolutions: FxHashMap<String, DependencyResolution>,
+    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
@@ -1250,7 +1250,7 @@ impl FileEntry {
 /// - `cached_tsc_extract`, `raw_template_analysis`
 ///
 /// **DependencyState**: resolution metadata + invalidation hashes
-/// - `dependency_resolutions`, `dependencies`, `resolved_type_hashes`, `aliases`
+/// - `import_routes`, `dependencies`, `resolved_type_hashes`, `aliases`
 #[cfg(feature = "scheduler")]
 #[derive(Debug, Default)]
 #[allow(dead_code)] // Fields used progressively during Phase 2 migration
@@ -1283,7 +1283,7 @@ pub(crate) struct CompileCacheEntry {
         Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
 
     // ── DependencyState: resolution metadata + invalidation hashes ──
-    pub(crate) dependency_resolutions: FxHashMap<String, DependencyResolution>,
+    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
     pub(crate) dependencies: std::collections::BTreeSet<String>,
     pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
     pub(crate) aliases: std::collections::BTreeSet<String>,

@@ -5,7 +5,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -178,7 +179,7 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
 }
 
 /// Build a dep_edges map (import specifier → resolved canonical ID) from
-/// the host's `dependency_resolutions`. Used when building prepared
+/// the host's `import_routes`. Used when building prepared
 /// declarations so that `name_resolution` and `external_deps` contain
 /// resolved canonical IDs rather than raw import specifiers.
 fn dep_edges_from_resolutions(
@@ -186,11 +187,20 @@ fn dep_edges_from_resolutions(
 ) -> rustc_hash::FxHashMap<String, String> {
     let mut edges = rustc_hash::FxHashMap::default();
     for (specifier, res) in resolutions {
-        if let Some(target) = res
-            .resolved_canonical_id
-            .clone()
-            .or_else(|| res.effective_target().map(str::to_string))
-        {
+        // Prefer the highest-priority candidate from possible_canonical_ids
+        // (e.g. .d.ts over .js) when available, otherwise fall back to
+        // resolved_canonical_id / effective_target.
+        let target = if !res.possible_canonical_ids.is_empty() {
+            res.possible_canonical_ids
+                .iter()
+                .min_by_key(|c| crate::types::extension_priority(c))
+                .cloned()
+        } else {
+            res.resolved_canonical_id
+                .clone()
+                .or_else(|| res.effective_target().map(str::to_string))
+        };
+        if let Some(target) = target {
             edges.insert(specifier.clone(), target);
         }
     }
@@ -703,19 +713,12 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
     ) -> Option<String> {
         debug_assert_eq!(self.parent_canonical_id, parent_canonical);
-        let dep_canonical = if let Some(view) = self.store_view {
-            view.dependency_resolution(parent_canonical, import_source)
-                .and_then(|resolution| resolution.resolved_canonical_id.clone())
-        } else {
-            None
-        }
-        .or_else(|| {
-            self.host.resolve_loaded_dependency_canonical(
-                parent_canonical,
-                import_source,
-                verter_workspace::ResolveRequestKind::EsmImport,
-            )
-        })?;
+        let dep_canonical = self.host.resolve_loaded_dependency_canonical_in_view(
+            parent_canonical,
+            import_source,
+            verter_workspace::ResolveRequestKind::EsmImport,
+            self.store_view,
+        )?;
 
         let derived_import_binding = self
             .host
@@ -946,7 +949,7 @@ pub(crate) type ComputedEvaluatedTypes = crate::resolver_core::ComputedEvaluated
 /// Host-backed import resolver for `ShallowFileState` construction.
 ///
 /// Resolves import specifiers to canonical file IDs from already-cached
-/// dependency routes. Used during shallow state materialization to
+/// import routes. Used during shallow state materialization to
 /// pre-canonicalize cross-file edges without live workspace reads.
 struct HostShallowImportResolver<'a> {
     dep_edges: &'a rustc_hash::FxHashMap<String, String>,
@@ -968,8 +971,42 @@ struct HostExportGraphResolver<'a> {
     store_view: Option<&'a crate::resolver_store::HostStoreView>,
 }
 
+impl HostExportGraphResolver<'_> {
+    /// When a store_view is active, verify that the file's current whole_hash
+    /// matches the view. This prevents re-export chain traversal from returning
+    /// stale archived data for files that have been modified since the view was
+    /// captured. Without this check, `ensure_module_facts_in_view` can return
+    /// archived facts whose hash matches the view even though the file's live
+    /// content has diverged.
+    fn store_view_allows_current_file(&self, canonical_id: &str) -> bool {
+        let Some(view) = self.store_view else {
+            return true;
+        };
+        // If the file has a live whole_hash (in scheduler or module_facts),
+        // verify it matches the view. A mismatch means the file was modified
+        // after the view was captured — reject it so stale re-export chains
+        // don't return outdated data.
+        if let Some(current_hash) = self.host.get_whole_hash(canonical_id) {
+            if view.tracks_whole_hash(canonical_id) {
+                return view.accepts_whole_hash(canonical_id, current_hash);
+            }
+            // View doesn't track this file — use epoch-based check.
+            return self.host.current_store_view_epoch() == view.mutation_epoch();
+        }
+        // No live hash available — the file may have been transiently
+        // materialized during view construction and then invalidated.
+        // Allow it; the archived module_facts in the view are still valid
+        // and load_export_graph_analysis_in_view will validate via
+        // ensure_module_facts_in_view.
+        true
+    }
+}
+
 impl ExportGraphResolver for HostExportGraphResolver<'_> {
     fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
+        if !self.store_view_allows_current_file(canonical_id) {
+            return None;
+        }
         let (file_kind, _, export_signatures) = self
             .host
             .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
@@ -987,6 +1024,9 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         canonical_id: &str,
         binding_name: &str,
     ) -> Option<verter_span::Span> {
+        if !self.store_view_allows_current_file(canonical_id) {
+            return None;
+        }
         let (file_kind, script_analysis, export_signatures) = self
             .host
             .load_export_graph_analysis_in_view(canonical_id, self.store_view)?;
@@ -1023,25 +1063,19 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
             }
         }
 
-        self.store_view
-            .and_then(|sv| sv.dependency_resolution(canonical_id, source))
-            .and_then(VerterHost::eval_dependency_resolution_target)
+        self.host
+            .resolve_loaded_dependency_canonical_in_view(
+                canonical_id,
+                source,
+                verter_workspace::ResolveRequestKind::EsmImport,
+                self.store_view,
+            )
             .or_else(|| {
-                self.host
-                    .lookup_dependency_resolution_target(canonical_id, source)
-            })
-            .or_else(|| {
-                // Final fallback: live workspace resolution for relative specifiers.
-                self.host
-                    .resolve_loaded_dependency_canonical(
-                        canonical_id,
-                        source,
-                        verter_workspace::ResolveRequestKind::EsmImport,
-                    )
-                    .or_else(|| {
-                        self.host
-                            .resolve_type_dependency_canonical(canonical_id, source)
-                    })
+                self.host.resolve_type_dependency_canonical_in_view(
+                    canonical_id,
+                    source,
+                    self.store_view,
+                )
             })
     }
 }
@@ -1080,13 +1114,16 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
             }
         }
 
-        self.store_view
-            .and_then(|sv| sv.dependency_resolution(owner_canonical_id, &import.source))
-            .and_then(VerterHost::eval_dependency_resolution_target)
-            .or_else(|| {
-                self.host
-                    .lookup_dependency_resolution_target(owner_canonical_id, &import.source)
-            })
+        self.host.resolve_loaded_dependency_canonical_in_view(
+            owner_canonical_id,
+            &import.source,
+            if import.is_type_only {
+                verter_workspace::ResolveRequestKind::TypeImport
+            } else {
+                verter_workspace::ResolveRequestKind::EsmImport
+            },
+            self.store_view,
+        )
     }
 
     fn resolve_value_export_target(
@@ -2595,6 +2632,24 @@ impl VerterHost {
         let normalized_canonical_id =
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
+
+        if store_view.is_none() {
+            let facts = self.ensure_module_facts_in_view(canonical_id, None)?;
+            let state = &facts.shallow_state;
+            if !canonical_id.ends_with(".vue")
+                && state.symbols.is_empty()
+                && state.value_symbols.is_empty()
+                && state.exports.is_empty()
+                && state.import_targets.is_empty()
+                && state.wildcard_reexports.is_empty()
+            {
+                return None;
+            }
+            if self.read_analysis_source(canonical_id).is_none() {
+                return self.materialize_prepared_decl_bundle(canonical_id, None, false);
+            }
+        }
+
         let owned_view;
         let current_view = if let Some(view) = store_view {
             view
@@ -2661,53 +2716,24 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        publish_exact_resolutions: bool,
+        _publish_exact_resolutions: bool,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        let shallow_store_view = publish_exact_resolutions.then_some(store_view).flatten();
+        let shallow_store_view = store_view;
 
         // 1. Ensure source/shallow data exists.
         let facts = self.ensure_module_facts_in_view(canonical_id, shallow_store_view)?;
         let state = &facts.shallow_state;
-        if state.symbols.is_empty() && state.exports.is_empty() {
+        if state.symbols.is_empty()
+            && state.value_symbols.is_empty()
+            && state.exports.is_empty()
+            && state.import_targets.is_empty()
+        {
             return None;
         }
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
             || canonical_id.ends_with(".d.cts");
-
-        let direct_dependency_resolutions = store_view
-            .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-            .filter(|resolutions| !resolutions.is_empty())
-            .unwrap_or_default();
-
-        // 1b. Short-circuit: reuse exact targets already available via the
-        // current store view or imported entry before falling back to the full
-        // dependency-resolution path. That keeps shallow prepared-decl lookups
-        // snapshotless unless they truly need structural backfill.
-        let needs_dep_resolution = !state.import_targets.is_empty()
-            && state.import_targets.values().any(|target| {
-                direct_dependency_resolutions
-                    .get(&target.source_specifier)
-                    .and_then(|res| {
-                        self.derive_type_preferred_exact_target(res)
-                            .or_else(|| Self::eval_dependency_resolution_target(res))
-                    })
-                    .or_else(|| {
-                        (!(target.canonical_id.is_empty()
-                            || declaration_file && is_runtime_script_target(&target.canonical_id)))
-                        .then(|| target.canonical_id.clone())
-                    })
-                    .is_none()
-            });
-        let dependency_resolutions = if needs_dep_resolution {
-            // 2. Get dependency resolutions (called exactly once per materialization).
-            self.dependency_resolutions_in_view(canonical_id, store_view)
-        } else {
-            direct_dependency_resolutions
-        };
-        // Dependency resolutions are tracked in ModuleFactsDb; no separate cache needed.
-
-        // 3. Build dep_edges from resolutions + shallow state import_targets.
+        // 2. Build dep_edges from ModuleFacts-owned shallow import targets.
         // For declaration files, prefer .d.ts companions over .js targets so
         // that prepared-decl name_resolution entries point at the type surface.
         let mut dep_edges = rustc_hash::FxHashMap::default();
@@ -2716,17 +2742,22 @@ impl VerterHost {
             if !seen_sources.insert(target.source_specifier.clone()) {
                 continue;
             }
-            if let Some(resolved) = dependency_resolutions
-                .get(&target.source_specifier)
-                .and_then(|res| {
-                    self.derive_type_preferred_exact_target(res)
-                        .or_else(|| Self::eval_dependency_resolution_target(res))
-                })
-                .or_else(|| (!target.canonical_id.is_empty()).then(|| target.canonical_id.clone()))
-            {
+            let resolved = (!(target.canonical_id.is_empty()
+                || declaration_file && is_runtime_script_target(&target.canonical_id)))
+            .then(|| target.canonical_id.clone())
+            .or_else(|| {
+                self.resolve_route_type_edge_in_view(
+                    canonical_id,
+                    &target.source_specifier,
+                    store_view,
+                )
+            });
+            if let Some(resolved) = resolved {
                 dep_edges.insert(target.source_specifier.clone(), resolved);
             }
         }
+
+        let import_route_hash = facts.import_route_hash;
 
         // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
         // Non-Vue files get an empty map — zero cost.
@@ -2757,11 +2788,11 @@ impl VerterHost {
             canonical_id: canonical_id.to_string(),
             hash: whole_hash,
         }];
-        if !dependency_resolutions.is_empty() {
+        if let Some(import_route_hash) = import_route_hash {
             facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ExactResolution,
-                hash: crate::resolver_store::hash_dependency_resolutions(&dependency_resolutions),
+                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                hash: import_route_hash,
             });
         }
 
@@ -2796,7 +2827,14 @@ impl VerterHost {
         symbol_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
-        let bundle = self.prepared_decl_bundle_in_view(canonical_id, store_view)?;
+        let owned_view;
+        let current_view = if let Some(view) = store_view {
+            Some(view)
+        } else {
+            owned_view = self.resolver_store_view();
+            Some(&owned_view)
+        };
+        let bundle = self.prepared_decl_bundle_in_view(canonical_id, current_view)?;
         let result = bundle.prepared_type_decls.get(symbol_name).cloned();
         component_meta_trace_event!(
             "prepared_type_decl_in_view_result",
@@ -2817,7 +2855,14 @@ impl VerterHost {
         symbol_name: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let bundle = self.prepared_decl_bundle_in_view(canonical_id, store_view)?;
+        let owned_view;
+        let current_view = if let Some(view) = store_view {
+            Some(view)
+        } else {
+            owned_view = self.resolver_store_view();
+            Some(&owned_view)
+        };
+        let bundle = self.prepared_decl_bundle_in_view(canonical_id, current_view)?;
         bundle.prepared_value_decls.get(symbol_name).cloned()
     }
 
@@ -3167,119 +3212,303 @@ impl VerterHost {
             let current_hash = self
                 .read_analysis_source(canonical_id)
                 .map(|src| crate::hash::hash_16(src.as_bytes()));
-            if current_hash.is_some_and(|h| h == facts.whole_hash) {
+            if let Some(hash) = current_hash {
+                if hash == facts.whole_hash {
+                    return Some(facts);
+                }
+                self.resolver.runtime.module_facts.evict(canonical_id);
+            } else {
                 return Some(facts);
             }
             // File no longer exists — the cached facts are stale.
-            current_hash?;
             // Hash mismatch — fall through to re-materialize.
+        }
+
+        if store_view.is_some() {
+            if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical_id) {
+                if store_view
+                    .and_then(|view| view.whole_hash(canonical_id))
+                    .is_none()
+                    && self.read_analysis_source(canonical_id).is_none()
+                {
+                    return Some(facts);
+                }
+                if self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    facts.whole_hash,
+                    store_view,
+                ) {
+                    return Some(facts);
+                }
+            }
         }
 
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
             return None;
         }
 
-        // Materialize: read source, parse, build analysis, construct facts.
-        let raw_source = self.read_analysis_source(canonical_id)?;
-        let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-        if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-            return None;
-        }
+        let materialize = || -> Option<crate::resolver_core::ModuleFacts> {
+            // Materialize: read source, parse, build analysis, construct facts.
+            let raw_source = self.read_analysis_source(canonical_id)?;
+            let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+            if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
+                return None;
+            }
 
-        let cached_parse = canonical_id
-            .ends_with(".vue")
-            .then(|| Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None)));
+            let cached_parse = canonical_id
+                .ends_with(".vue")
+                .then(|| Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None)));
 
-        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-        ));
+            let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+                raw_source.as_ref(),
+                cached_parse.as_deref(),
+            ));
 
-        let external_type_analysis = self.build_external_type_analysis(
-            canonical_id,
-            whole_hash,
-            raw_source.as_ref(),
-            cached_parse.as_deref(),
-            &eval_source,
-        );
+            // Build snapshot without resolving imports. Import resolution
+            // happens when get_raw_analysis_snapshot_in_view reads the facts
+            // and applies resolve_snapshot_imports_in_view on the clone.
+            // This avoids eagerly resolving ordinary imports that are irrelevant
+            // to the export surface, and prevents recursive materialization.
+            let snapshot = self.build_snapshot_from_source_state(
+                canonical_id,
+                &raw_source,
+                cached_parse.as_deref(),
+            );
+            let snapshot = Arc::new(snapshot);
+            let declaration_file = canonical_id.ends_with(".d.ts")
+                || canonical_id.ends_with(".d.mts")
+                || canonical_id.ends_with(".d.cts");
 
-        // Use store_view dep resolutions if available; otherwise resolve
-        // specifiers via workspace (non-recursive — just path resolution).
-        // Use store_view dep resolutions if available; otherwise empty.
-        // The frontier adapter handles empty canonical_ids in
-        // ShallowFileState by falling back to resolve_import_canonical.
-        let dependency_resolutions = store_view
-            .and_then(|view| view.dependency_resolutions(canonical_id).cloned())
-            .unwrap_or_default();
+            // Canonicalize shallow import/reexport edges once during module-facts
+            // materialization. Later resolver stages read these facts instead of
+            // treating compile-cache/store-view import-route maps as truth.
+            //
+            // Seed import routes from compile_cache if present (set by
+            // `set_import_dependencies`). These are authoritative when the host
+            // caller has explicitly provided resolution targets.
+            let mut import_routes = rustc_hash::FxHashMap::default();
+            #[cfg(feature = "scheduler")]
+            {
+                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                    for (specifier, resolution) in cc.import_routes.iter() {
+                        import_routes.insert(specifier.clone(), resolution.clone());
+                    }
+                }
+            }
+            #[cfg(not(feature = "scheduler"))]
+            {
+                let files = read_lock(&self.files);
+                if let Some(entry) = files.get(canonical_id) {
+                    for (specifier, resolution) in entry.import_routes.iter() {
+                        import_routes.insert(specifier.clone(), resolution.clone());
+                    }
+                }
+            }
+            let mut required_import_sources = snapshot
+                .imports
+                .iter()
+                .map(|import| {
+                    (
+                        import.source.clone(),
+                        // In declaration files (.d.ts), all imports are
+                        // effectively type-only even without the `type`
+                        // keyword. This ensures the TypeImport resolution
+                        // path is used, which prefers .d.ts companions
+                        // over .js runtime files.
+                        if import.is_type_only || declaration_file {
+                            verter_workspace::ResolveRequestKind::TypeImport
+                        } else {
+                            verter_workspace::ResolveRequestKind::EsmImport
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            required_import_sources.extend(snapshot.export_signatures.iter().filter_map(
+                |export| {
+                    let source = export.reexport_source.clone()?;
+                    let kind = if declaration_file || export.is_type {
+                        verter_workspace::ResolveRequestKind::TypeImport
+                    } else {
+                        verter_workspace::ResolveRequestKind::EsmImport
+                    };
+                    Some((source, kind))
+                },
+            ));
+            required_import_sources.sort_by(
+                |(left_source, left_kind), (right_source, right_kind)| {
+                    left_source.cmp(right_source).then_with(|| {
+                        let kind_rank = |kind: verter_workspace::ResolveRequestKind| match kind {
+                            verter_workspace::ResolveRequestKind::TypeImport => 0u8,
+                            verter_workspace::ResolveRequestKind::EsmImport => 1u8,
+                            verter_workspace::ResolveRequestKind::RequireCall => 2u8,
+                            verter_workspace::ResolveRequestKind::SfcSrcAttr => 3u8,
+                        };
+                        kind_rank(*left_kind).cmp(&kind_rank(*right_kind))
+                    })
+                },
+            );
+            required_import_sources.dedup();
 
-        let dep_edges = dep_edges_from_resolutions(&dependency_resolutions);
-        let resolver = HostShallowImportResolver {
-            dep_edges: &dep_edges,
-        };
-        let shallow_state = Arc::new(
-            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
+            let mut resolve_memo: rustc_hash::FxHashMap<
+                (String, verter_workspace::ResolveRequestKind),
+                Option<String>,
+            > = rustc_hash::FxHashMap::default();
+            let mut resolve_missing =
+                |specifier: &str,
+                 kind: verter_workspace::ResolveRequestKind,
+                 prefer_live_fallback: bool| {
+                    if import_routes.contains_key(specifier) {
+                        return;
+                    }
+                    let primary = resolve_memo
+                        .entry((specifier.to_string(), kind))
+                        .or_insert_with(|| {
+                            self.ws()
+                                .resolve_import(
+                                    canonical_id,
+                                    specifier,
+                                    verter_workspace::ResolutionContext {
+                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                        kind,
+                                    },
+                                )
+                                .map(|resolution| {
+                                    if kind == verter_workspace::ResolveRequestKind::TypeImport {
+                                        self.normalize_live_type_dependency_target_in_view(
+                                            canonical_id,
+                                            specifier,
+                                            resolution.source_id.as_str(),
+                                            store_view,
+                                        )
+                                    } else {
+                                        resolution.source_id
+                                    }
+                                })
+                        })
+                        .clone();
+                    let resolved: Option<String> = if kind
+                        == verter_workspace::ResolveRequestKind::TypeImport
+                    {
+                        primary
+                            .or_else(|| {
+                                self.fallback_relative_type_companion_in_view(
+                                    canonical_id,
+                                    specifier,
+                                    store_view,
+                                )
+                            })
+                            .or_else(|| {
+                                if !prefer_live_fallback {
+                                    return None;
+                                }
+                                self.ws()
+                                    .resolve_import(
+                                        canonical_id,
+                                        specifier,
+                                        verter_workspace::ResolutionContext {
+                                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                            kind: verter_workspace::ResolveRequestKind::EsmImport,
+                                        },
+                                    )
+                                    .map(|resolution| resolution.source_id)
+                            })
+                    } else {
+                        primary
+                    };
+                    let mut resolution = DependencyResolution {
+                        specifier: specifier.to_string(),
+                        resolved_canonical_id: None,
+                        possible_canonical_ids: Vec::new(),
+                    };
+                    if let Some(resolved) = resolved {
+                        resolution.resolved_canonical_id = Some(resolved.clone());
+                        resolution.possible_canonical_ids.push(resolved);
+                    }
+                    import_routes.insert(specifier.to_string(), resolution);
+                };
+
+            for (source, kind) in &required_import_sources {
+                resolve_missing(source, *kind, true);
+            }
+
+            let external_type_analysis = self.build_external_type_analysis(
+                canonical_id,
                 whole_hash,
-                Arc::clone(&external_type_analysis),
-                Some(eval_source.as_ref()),
-                None,
-                &resolver,
-            ),
-        );
+                raw_source.as_ref(),
+                cached_parse.as_deref(),
+                &eval_source,
+            );
 
-        // Build snapshot without resolving imports. Import resolution
-        // happens when get_raw_analysis_snapshot_in_view reads the facts
-        // and applies resolve_snapshot_imports_in_view on the clone.
-        // This avoids eagerly resolving ordinary imports that are irrelevant
-        // to the export surface, and prevents recursive materialization.
-        let snapshot = self.build_snapshot_from_source_state(
-            canonical_id,
-            &raw_source,
-            cached_parse.as_deref(),
-        );
-        let snapshot = Arc::new(snapshot);
+            let import_route_hash = (!import_routes.is_empty())
+                .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
+            let dep_edges = dep_edges_from_resolutions(&import_routes);
+            let resolver = HostShallowImportResolver {
+                dep_edges: &dep_edges,
+            };
+            let shallow_state = Arc::new(
+                crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
+                    whole_hash,
+                    Arc::clone(&external_type_analysis),
+                    Some(eval_source.as_ref()),
+                    None,
+                    &resolver,
+                ),
+            );
 
-        // Prefer the scheduler's file state for script_analysis (it may have
-        // richer compilation context), but fall back to the snapshot's data
-        // for workspace-only files that are not in the scheduler.
-        let script_analysis = self
-            .effective_file_state(canonical_id, None)
-            .filter(|state| state.whole_hash == whole_hash)
-            .map(|state| Arc::new(state.script_analysis))
-            .or_else(|| {
-                Some(Arc::new(
-                    verter_semantic::analysis::ScriptAnalysisSnapshot {
-                        imports: snapshot.imports.clone(),
-                        module_references: snapshot.module_references.as_ref().clone(),
-                        bindings: snapshot.bindings.clone(),
-                        macros: snapshot.macros.as_ref().clone(),
-                        macro_type_deps: snapshot.macro_type_deps.as_ref().clone(),
-                        flags: verter_semantic::analysis::AnalysisFlags::from_bits_truncate(
-                            snapshot.script_flags,
-                        ),
-                        ..Default::default()
-                    },
-                ))
-            });
-        let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
+            // Prefer the scheduler's file state for script_analysis (it may have
+            // richer compilation context), but fall back to the snapshot's data
+            // for workspace-only files that are not in the scheduler.
+            let script_analysis = self
+                .effective_file_state(canonical_id, None)
+                .filter(|state| state.whole_hash == whole_hash)
+                .map(|state| Arc::new(state.script_analysis))
+                .or_else(|| {
+                    Some(Arc::new(
+                        verter_semantic::analysis::ScriptAnalysisSnapshot {
+                            imports: snapshot.imports.clone(),
+                            module_references: snapshot.module_references.as_ref().clone(),
+                            bindings: snapshot.bindings.clone(),
+                            macros: snapshot.macros.as_ref().clone(),
+                            macro_type_deps: snapshot.macro_type_deps.as_ref().clone(),
+                            flags: verter_semantic::analysis::AnalysisFlags::from_bits_truncate(
+                                snapshot.script_flags,
+                            ),
+                            ..Default::default()
+                        },
+                    ))
+                });
+            let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
 
-        let facts = crate::resolver_core::ModuleFacts {
-            whole_hash,
-            raw_source: Arc::clone(&raw_source),
-            cached_parse,
-            script_analysis,
-            export_signatures,
-            snapshot,
-            eval_source,
-            external_type_analysis,
-            shallow_state,
+            let import_routes = Arc::new(import_routes);
+
+            Some(crate::resolver_core::ModuleFacts {
+                whole_hash,
+                import_route_hash,
+                import_routes,
+                raw_source: Arc::clone(&raw_source),
+                cached_parse,
+                script_analysis,
+                export_signatures,
+                snapshot,
+                eval_source,
+                external_type_analysis,
+                shallow_state,
+            })
         };
 
-        let arc = Arc::new(facts);
-        self.resolver
-            .runtime
-            .module_facts
-            .insert_arc(canonical_id.to_owned(), Arc::clone(&arc));
-        Some(arc)
+        if let Some(view) = store_view {
+            self.resolver
+                .runtime
+                .module_facts
+                .get_or_materialize(canonical_id, view, materialize)
+        } else {
+            let permissive_view = crate::resolver_core::PermissiveStoreView;
+            self.resolver.runtime.module_facts.get_or_materialize(
+                canonical_id,
+                &permissive_view,
+                materialize,
+            )
+        }
     }
 
     pub(crate) fn resolve_external_type_from_cached_dependency_state_in_view(
@@ -3373,12 +3602,7 @@ impl VerterHost {
             return None;
         };
         let next_canonical = if canonical_id.is_empty() {
-            store_view
-                .and_then(|sv| sv.dependency_resolution(dep_canonical, source_specifier))
-                .and_then(Self::eval_dependency_resolution_target)
-                .or_else(|| {
-                    self.lookup_dependency_resolution_target(dep_canonical, source_specifier)
-                })?
+            self.resolve_route_type_edge_in_view(dep_canonical, source_specifier, store_view)?
         } else {
             canonical_id.clone()
         };
@@ -3405,17 +3629,11 @@ impl VerterHost {
         let shallow = self.shallow_file_state_in_view(dep_canonical, store_view)?;
         let import_target = shallow.import_target(resolved_name)?;
         let next_canonical = if import_target.canonical_id.is_empty() {
-            store_view
-                .and_then(|sv| {
-                    sv.dependency_resolution(dep_canonical, &import_target.source_specifier)
-                })
-                .and_then(Self::eval_dependency_resolution_target)
-                .or_else(|| {
-                    self.lookup_dependency_resolution_target(
-                        dep_canonical,
-                        &import_target.source_specifier,
-                    )
-                })?
+            self.resolve_route_type_edge_in_view(
+                dep_canonical,
+                &import_target.source_specifier,
+                store_view,
+            )?
         } else {
             import_target.canonical_id.clone()
         };
@@ -3474,50 +3692,61 @@ impl VerterHost {
         let normalized_canonical = self
             .resolve_eval_dependency_canonical_in_view(dep_canonical, store_view)
             .unwrap_or_else(|| dep_canonical.to_string());
-
-        // Check ImportedRootDb first (shared validated cache).
-        let cached_root = if let Some(sv) = store_view {
-            self.resolver.runtime.imported_roots.get(
-                normalized_canonical.as_str(),
-                imported_name,
-                sv,
-            )
+        let owned_view;
+        let current_view = if let Some(view) = store_view {
+            view
         } else {
-            self.resolver
-                .runtime
-                .imported_roots
-                .get_any(normalized_canonical.as_str(), imported_name)
+            owned_view = self.resolver_store_view();
+            &owned_view
         };
-        if let Some(cached) = cached_root {
-            if let Some(tuple) = cached.as_tuple() {
-                return tuple;
-            }
-            return (normalized_canonical, imported_name.to_string());
-        }
 
-        let _ = self.ensure_module_facts_in_view(normalized_canonical.as_str(), store_view);
-
-        let (resolved, source_kind) = self
-            .resolve_named_type_export_target_in_view(
+        let cached_root = self
+            .resolver
+            .runtime
+            .imported_roots
+            .get_or_resolve_with_facts(
                 normalized_canonical.as_str(),
                 imported_name,
-                store_view,
-            )
-            .map(|(canonical, exported_name)| {
-                let canonical = self
-                    .resolve_eval_dependency_canonical_in_view(canonical.as_str(), store_view)
-                    .unwrap_or(canonical);
-                ((canonical, exported_name), "named_export_target")
-            })
-            .unwrap_or_else(|| {
-                let canonical = self
-                    .resolve_eval_dependency_canonical_in_view(
+                current_view,
+                || {
+                    let (route_result, facts) = self.build_named_type_export_route_entry_in_view(
                         normalized_canonical.as_str(),
-                        store_view,
-                    )
-                    .unwrap_or(normalized_canonical.clone());
-                ((canonical, imported_name.to_string()), "fallback_self")
-            });
+                        imported_name,
+                        Some(current_view),
+                    )?;
+                    let root_result = match route_result {
+                        crate::resolver_core::RouteResult::Resolved {
+                            defining_canonical,
+                            defining_symbol,
+                        } => crate::resolver_core::ImportedRootResult::Resolved {
+                            canonical_source: self
+                                .resolve_eval_dependency_canonical_in_view(
+                                    defining_canonical.as_str(),
+                                    Some(current_view),
+                                )
+                                .unwrap_or(defining_canonical),
+                            resolved_symbol: defining_symbol,
+                        },
+                        crate::resolver_core::RouteResult::Miss => {
+                            crate::resolver_core::ImportedRootResult::Miss
+                        }
+                    };
+                    Some((root_result, facts))
+                },
+            );
+        let (resolved, source_kind) = match cached_root {
+            Some(cached) => match cached.as_tuple() {
+                Some(tuple) => (tuple, "named_export_target"),
+                None => (
+                    (normalized_canonical.clone(), imported_name.to_string()),
+                    "miss",
+                ),
+            },
+            None => (
+                (normalized_canonical.clone(), imported_name.to_string()),
+                "miss",
+            ),
+        };
 
         component_meta_trace_event!(
             "resolve_imported_type_root_result",
@@ -3536,48 +3765,6 @@ impl VerterHost {
         if let Some(started) = audit_started {
             crate::component_meta_audit::record_imported_root_proof_ms(
                 started.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-
-        // Populate ImportedRootDb with the resolved proof.
-        if let Some(sv) = store_view {
-            let mut facts = Vec::new();
-            if let Some(hash) = sv
-                .whole_hash(normalized_canonical.as_str())
-                .or_else(|| self.get_whole_hash(normalized_canonical.as_str()))
-            {
-                facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: normalized_canonical.clone(),
-                    hash,
-                });
-            }
-            if let Some(hash) = sv.derived_hash(
-                normalized_canonical.as_str(),
-                crate::resolver_core::DerivedFactKind::ExactResolution,
-            ) {
-                facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    canonical_id: normalized_canonical.clone(),
-                    kind: crate::resolver_core::DerivedFactKind::ExactResolution,
-                    hash,
-                });
-            }
-            if let Some(hash) = sv
-                .whole_hash(resolved.0.as_str())
-                .or_else(|| self.get_whole_hash(resolved.0.as_str()))
-            {
-                facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: resolved.0.clone(),
-                    hash,
-                });
-            }
-            self.resolver.runtime.imported_roots.insert_with_facts(
-                normalized_canonical.to_owned(),
-                imported_name.to_owned(),
-                crate::resolver_core::ImportedRootResult::Resolved {
-                    canonical_source: resolved.0.clone(),
-                    resolved_symbol: resolved.1.clone(),
-                },
-                facts,
             );
         }
 
@@ -3622,18 +3809,8 @@ impl VerterHost {
         } else {
             vec![canonical_id.to_string(), resolved_canonical_id.clone()]
         };
-        let (raw_source, cached_parse, whole_hash) = self
-            .current_eval_state_in_view(resolved_canonical_id.as_str(), store_view)
-            .or_else(|| {
-                self.ensure_module_facts_in_view(resolved_canonical_id.as_str(), store_view)
-                    .map(|facts| {
-                        (
-                            Arc::clone(&facts.raw_source),
-                            facts.cached_parse.clone(),
-                            facts.whole_hash,
-                        )
-                    })
-            })?;
+        let (raw_source, cached_parse, whole_hash) =
+            self.current_eval_state_in_view(resolved_canonical_id.as_str(), store_view)?;
         if let Some(cached_env) = self
             .clone_cached_eval_env_arc(canonical_id, whole_hash)
             .or_else(|| {
@@ -3802,256 +3979,6 @@ impl VerterHost {
         }
     }
 
-    /// Read dependency resolutions: store_view first, then cached data, then
-    /// snapshot-derived resolution. Replaces the deleted
-    /// `dependency_resolutions_for_eval_in_view` with a simpler fallback chain.
-    pub(crate) fn dependency_resolutions_in_view(
-        &self,
-        canonical_id: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
-        // 1. Store view (authoritative when present).
-        if let Some(view) = store_view {
-            if let Some(resolutions) = view.dependency_resolutions(canonical_id) {
-                if !resolutions.is_empty() {
-                    return resolutions.clone();
-                }
-            }
-        }
-
-        // 2. Cached data (compile_cache).
-        if let Some(resolutions) = self.lookup_dependency_resolutions(canonical_id) {
-            return resolutions;
-        }
-
-        // 3. Snapshot-derived resolution.
-        if let Some(snapshot) = self.get_raw_analysis_snapshot_in_view(canonical_id, store_view) {
-            return self.dependency_resolutions_from_parts_in_view(
-                canonical_id,
-                &snapshot.imports,
-                &snapshot.export_signatures,
-                store_view,
-            );
-        }
-
-        rustc_hash::FxHashMap::default()
-    }
-
-    fn eval_dependency_resolution_target(resolution: &DependencyResolution) -> Option<String> {
-        resolution
-            .resolved_canonical_id
-            .clone()
-            .or_else(|| resolution.effective_target().map(str::to_string))
-    }
-
-    /// Look up the full dependency resolutions map from compile_cache.
-    /// Used as fallback when no store_view is available.
-    pub(crate) fn lookup_dependency_resolutions(
-        &self,
-        canonical_id: &str,
-    ) -> Option<rustc_hash::FxHashMap<String, DependencyResolution>> {
-        #[cfg(feature = "scheduler")]
-        {
-            let resolutions = self
-                .compile_cache
-                .get(canonical_id)
-                .map(|entry| entry.dependency_resolutions.clone())
-                .filter(|r| !r.is_empty());
-            if resolutions.is_some() {
-                return resolutions;
-            }
-        }
-
-        #[cfg(not(feature = "scheduler"))]
-        {
-            use crate::shared::read_lock;
-            let files = read_lock(&self.files);
-            if let Some(entry) = files.get(canonical_id) {
-                if !entry.dependency_resolutions.is_empty() {
-                    return Some(entry.dependency_resolutions.clone());
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Look up a specific dependency resolution target from compile_cache.
-    /// Used as fallback when no store_view is available.
-    pub(crate) fn lookup_dependency_resolution_target(
-        &self,
-        canonical_id: &str,
-        specifier: &str,
-    ) -> Option<String> {
-        #[cfg(feature = "scheduler")]
-        if let Some(entry) = self.compile_cache.get(canonical_id) {
-            if let Some(resolution) = entry.dependency_resolutions.get(specifier) {
-                if let Some(target) = Self::eval_dependency_resolution_target(resolution) {
-                    return Some(target);
-                }
-            }
-        }
-
-        #[cfg(not(feature = "scheduler"))]
-        {
-            use crate::shared::read_lock;
-            let files = read_lock(&self.files);
-            if let Some(entry) = files.get(canonical_id) {
-                if let Some(resolution) = entry.dependency_resolutions.get(specifier) {
-                    if let Some(target) = Self::eval_dependency_resolution_target(resolution) {
-                        return Some(target);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    pub(crate) fn dependency_resolutions_from_parts_in_view(
-        &self,
-        canonical_id: &str,
-        imports: &[verter_semantic::analysis::AnalyzedImport],
-        export_signatures: &[verter_semantic::analysis::ExportSignature],
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> rustc_hash::FxHashMap<String, DependencyResolution> {
-        fn runtime_like_dependency_target(path: &str) -> bool {
-            path.ends_with(".js")
-                || path.ends_with(".jsx")
-                || path.ends_with(".mjs")
-                || path.ends_with(".cjs")
-        }
-
-        let mut resolutions: rustc_hash::FxHashMap<String, DependencyResolution> = imports
-            .iter()
-            .map(|import| {
-                (
-                    import.source.clone(),
-                    DependencyResolution {
-                        specifier: import.source.clone(),
-                        resolved_canonical_id: import.resolved_canonical_id.clone(),
-                        possible_canonical_ids: Vec::new(),
-                    },
-                )
-            })
-            .collect();
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-
-        // Per-request memo for resolver helper calls. Avoids duplicate
-        // resolution when the same specifier appears in both imports and
-        // re-export signatures. Keyed by (specifier, kind, is_fallback).
-        let mut resolve_memo: rustc_hash::FxHashMap<
-            (String, verter_workspace::ResolveRequestKind, bool),
-            Option<String>,
-        > = rustc_hash::FxHashMap::default();
-
-        let mut upsert_resolution =
-            |specifier: &str,
-             kind: verter_workspace::ResolveRequestKind,
-             prefer_live_fallback: bool| {
-                let existing = resolutions.get(specifier).cloned();
-                let existing_target = existing
-                    .as_ref()
-                    .and_then(Self::eval_dependency_resolution_target);
-                let primary_memo_key = (specifier.to_string(), kind, false);
-                let resolved: Option<String> = match kind {
-                    // Type routes must prefer the shallow declaration target even when the
-                    // current snapshot/store view still carries a stale JS companion route.
-                    verter_workspace::ResolveRequestKind::TypeImport => {
-                        let should_upgrade_snapshot_target = existing_target
-                            .as_deref()
-                            .is_none_or(runtime_like_dependency_target);
-                        if should_upgrade_snapshot_target {
-                            resolve_memo
-                                .entry(primary_memo_key)
-                                .or_insert_with(|| {
-                                    self.resolve_type_dependency_canonical_shallow_in_view(
-                                        canonical_id,
-                                        specifier,
-                                        store_view,
-                                    )
-                                })
-                                .clone()
-                                .or(existing_target)
-                        } else {
-                            existing_target
-                        }
-                    }
-                    _ => existing_target.or_else(|| {
-                        resolve_memo
-                            .entry(primary_memo_key)
-                            .or_insert_with(|| {
-                                self.resolve_loaded_dependency_canonical_in_view(
-                                    canonical_id,
-                                    specifier,
-                                    kind,
-                                    store_view,
-                                )
-                            })
-                            .clone()
-                    }),
-                }
-                .or_else(|| {
-                    if !prefer_live_fallback {
-                        return None;
-                    }
-                    let fallback_key = (specifier.to_string(), kind, true);
-                    resolve_memo
-                        .entry(fallback_key)
-                        .or_insert_with(|| match kind {
-                            verter_workspace::ResolveRequestKind::TypeImport => {
-                                self.resolve_type_dependency_canonical(canonical_id, specifier)
-                            }
-                            _ => self.resolve_loaded_dependency_canonical(
-                                canonical_id,
-                                specifier,
-                                kind,
-                            ),
-                        })
-                        .clone()
-                });
-
-                let entry = resolutions.entry(specifier.to_string()).or_insert_with(|| {
-                    DependencyResolution {
-                        specifier: specifier.to_string(),
-                        resolved_canonical_id: None,
-                        possible_canonical_ids: Vec::new(),
-                    }
-                });
-                if let Some(resolved) = resolved {
-                    entry.resolved_canonical_id = Some(resolved.clone());
-                    if entry.possible_canonical_ids.is_empty() {
-                        entry.possible_canonical_ids.push(resolved);
-                    }
-                }
-            };
-
-        for import in imports {
-            let kind = if declaration_file || import.is_type_only {
-                verter_workspace::ResolveRequestKind::TypeImport
-            } else {
-                verter_workspace::ResolveRequestKind::EsmImport
-            };
-            upsert_resolution(import.source.as_str(), kind, false);
-        }
-
-        for sig in export_signatures {
-            let Some(source) = sig.reexport_source.as_deref() else {
-                continue;
-            };
-            let kind = if sig.is_type || declaration_file {
-                verter_workspace::ResolveRequestKind::TypeImport
-            } else {
-                verter_workspace::ResolveRequestKind::EsmImport
-            };
-            upsert_resolution(source, kind, true);
-        }
-
-        resolutions
-    }
-
     pub(crate) fn build_snapshot_from_source(
         &self,
         canonical: &str,
@@ -4193,6 +4120,17 @@ impl VerterHost {
             self.resolver.runtime.module_facts.get_any(canonical_id)
         };
         if let Some(facts) = cached_facts {
+            // When a store_view is provided, verify the facts' hash matches
+            // the current file content. Archived facts may have an old hash
+            // from a prior version — reject them for eval state purposes
+            // (route resolution handles archived facts separately).
+            if store_view.is_some() {
+                if let Some(current) = self.get_whole_hash(canonical_id) {
+                    if current != facts.whole_hash {
+                        return None;
+                    }
+                }
+            }
             return Some((
                 Arc::clone(&facts.raw_source),
                 facts.cached_parse.clone(),
@@ -4200,6 +4138,10 @@ impl VerterHost {
             ));
         }
 
+        // Scheduler source path: for owner files that are in the scheduler
+        // but not yet materialized into ModuleFactsDb, read from the scheduler
+        // directly. This covers files after recompilation where ModuleFactsDb
+        // may hold stale facts from a prior materialization epoch.
         #[cfg(feature = "scheduler")]
         {
             if let Some(state) = self.effective_file_state(canonical_id, None) {
@@ -4224,80 +4166,52 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
-        {
-            let files = read_lock(&self.files);
-            if let Some(entry) = files.get(canonical_id) {
-                if !self.store_view_allows_current_whole_hash(
-                    canonical_id,
-                    entry.whole_hash,
-                    store_view,
-                ) {
-                    return None;
-                }
-                component_meta_trace_event!(
-                    "current_eval_state_cache_hit",
-                    format!(
-                        "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
-                        canonical_id,
-                        entry.source.len(),
-                        entry.cached_parse.is_some(),
-                        entry.whole_hash,
-                    ),
-                );
-                return Some((
-                    Arc::clone(&entry.source),
-                    entry.cached_parse.clone(),
-                    entry.whole_hash,
-                ));
+        // Fallback: materialize via ModuleFactsDb (reads from disk on miss).
+        // When a store_view is provided, the file is not tracked by the view,
+        // and no cached facts exist in ModuleFactsDb, the file was never loaded.
+        // Do not auto-materialize from the workspace — that would seed
+        // unloaded imported dependencies.
+        if let Some(sv) = store_view {
+            if !sv.tracks_whole_hash(canonical_id)
+                && self
+                    .resolver
+                    .runtime
+                    .module_facts
+                    .get_any(canonical_id)
+                    .is_none()
+            {
+                return None;
             }
         }
-
-        // ModuleFactsDb permissive path (no store_view).
-        if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical_id) {
-            component_meta_trace_event!(
-                "current_eval_state_module_facts_hit",
-                format!(
-                    "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
-                    canonical_id,
-                    facts.raw_source.len(),
-                    facts.cached_parse.is_some(),
-                    facts.whole_hash,
-                ),
-            );
-            return Some((
-                Arc::clone(&facts.raw_source),
-                facts.cached_parse.clone(),
-                facts.whole_hash,
-            ));
-        }
-
+        let facts = self.ensure_module_facts_in_view(canonical_id, store_view)?;
+        // When a store_view is provided and the file has been re-upserted
+        // (current hash differs from the facts' hash), the facts are from
+        // a prior version retrieved via the archive. For eval state purposes,
+        // reject stale-content facts — route resolution is handled separately
+        // by ensure_module_facts_in_view callers.
         if store_view.is_some() {
-            component_meta_trace_event!(
-                "current_eval_state_miss",
-                format!("owner={} store_view=true", canonical_id),
-            );
-            return None;
+            let current_hash = self.get_whole_hash(canonical_id);
+            if let Some(current) = current_hash {
+                if current != facts.whole_hash {
+                    return None;
+                }
+            }
         }
-
-        // Fallback: read from disk and populate ModuleFactsDb.
-        let source = self.read_analysis_source_in_view(canonical_id, store_view)?;
-        let cached_parse = canonical_id
-            .ends_with(".vue")
-            .then(|| Arc::new(verter_compiler::compile::parse_sfc(&source, None, None)));
-        let whole_hash = crate::hash::hash_16(source.as_bytes());
-        // Populate ModuleFactsDb via ensure_module_facts_in_view.
-        let _ = self.ensure_module_facts_in_view(canonical_id, store_view);
         component_meta_trace_event!(
-            "current_eval_state_fallback_load",
+            "current_eval_state_module_facts_hit",
             format!(
-                "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
+                "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
                 canonical_id,
-                source.len(),
-                cached_parse.is_some(),
+                facts.raw_source.len(),
+                facts.cached_parse.is_some(),
+                facts.whole_hash,
             ),
         );
-        Some((source.clone(), cached_parse, whole_hash))
+        Some((
+            Arc::clone(&facts.raw_source),
+            facts.cached_parse.clone(),
+            facts.whole_hash,
+        ))
     }
 
     pub(crate) fn resolve_eval_dependency_canonical_in_view(
@@ -4328,9 +4242,56 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> std::collections::BTreeSet<String> {
         let mut candidates = std::collections::BTreeSet::new();
+
+        if let Some(facts) = self.ensure_module_facts_in_view(owner_canonical_id, store_view) {
+            for target in facts.shallow_state.import_targets.values() {
+                if !target.canonical_id.is_empty() {
+                    candidates.insert(target.canonical_id.clone());
+                    continue;
+                }
+                if let Some(resolved) = self.resolve_route_type_edge_in_view(
+                    owner_canonical_id,
+                    &target.source_specifier,
+                    store_view,
+                ) {
+                    candidates.insert(resolved);
+                }
+            }
+
+            for export in facts.shallow_state.exports.values() {
+                if let crate::resolver_core::ExportTarget::Reexport {
+                    canonical_id,
+                    source_specifier,
+                    ..
+                } = export
+                {
+                    if !canonical_id.is_empty() {
+                        candidates.insert(canonical_id.clone());
+                    } else if let Some(resolved) = self.resolve_route_type_edge_in_view(
+                        owner_canonical_id,
+                        source_specifier,
+                        store_view,
+                    ) {
+                        candidates.insert(resolved);
+                    }
+                }
+            }
+
+            for wildcard in &facts.shallow_state.wildcard_reexports {
+                if !wildcard.canonical_id.is_empty() {
+                    candidates.insert(wildcard.canonical_id.clone());
+                } else if let Some(resolved) = self.resolve_route_type_edge_in_view(
+                    owner_canonical_id,
+                    &wildcard.source_specifier,
+                    store_view,
+                ) {
+                    candidates.insert(resolved);
+                }
+            }
+        }
 
         for import in &snapshot.imports {
             if let Some(resolved) = import.resolved_canonical_id.as_deref() {
@@ -4338,11 +4299,10 @@ impl VerterHost {
                 continue;
             }
 
-            if let Some(target) = dep_resolutions
-                .get(&import.source)
-                .and_then(DependencyResolution::effective_target)
+            if let Some(target) =
+                self.resolve_route_type_edge_in_view(owner_canonical_id, &import.source, store_view)
             {
-                candidates.insert(target.to_string());
+                candidates.insert(target);
                 continue;
             }
 
@@ -4360,7 +4320,6 @@ impl VerterHost {
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         owner_eval_source: Option<&str>,
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ComputedEvaluatedTypes> {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
@@ -4374,7 +4333,6 @@ impl VerterHost {
             canonical,
             snapshot,
             &eval_source,
-            dep_resolutions,
             store_view,
             None,
         )
@@ -4406,7 +4364,6 @@ impl VerterHost {
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
-        _dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
         external_engine: Option<
             &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
@@ -5551,9 +5508,9 @@ impl VerterHost {
     }
 
     fn resolved_dependency_targets(
-        dep_resolutions: &rustc_hash::FxHashMap<String, DependencyResolution>,
+        import_routes: &rustc_hash::FxHashMap<String, DependencyResolution>,
     ) -> std::collections::BTreeSet<String> {
-        dep_resolutions
+        import_routes
             .values()
             .filter_map(|res| res.effective_target().map(|s| s.to_string()))
             .collect()
@@ -5573,9 +5530,7 @@ impl VerterHost {
                 .entry(canonical_id.to_string())
                 .or_default();
             let cc = cc_ref.value_mut();
-            new_deps.extend(Self::resolved_dependency_targets(
-                &cc.dependency_resolutions,
-            ));
+            new_deps.extend(Self::resolved_dependency_targets(&cc.import_routes));
             new_deps.extend(transitive_deps.iter().cloned());
             let old_deps = cc.dependencies.clone();
             cc.dependencies = new_deps.clone();
@@ -5588,9 +5543,7 @@ impl VerterHost {
             let Some(entry) = files.get_mut(canonical_id) else {
                 return;
             };
-            new_deps.extend(Self::resolved_dependency_targets(
-                &entry.dependency_resolutions,
-            ));
+            new_deps.extend(Self::resolved_dependency_targets(&entry.import_routes));
             new_deps.extend(transitive_deps.iter().cloned());
             let old_deps = entry.dependencies.clone();
             entry.dependencies = new_deps.clone();
@@ -6527,25 +6480,29 @@ impl VerterHost {
     ) {
         for import in &mut snapshot.imports {
             if import.resolved_canonical_id.is_none() {
-                import.resolved_canonical_id = if let Some(view) = store_view {
-                    view.dependency_resolution(parent_canonical_id, &import.source)
-                        .and_then(|resolution| {
-                            resolution
-                                .resolved_canonical_id
-                                .clone()
-                                .or_else(|| resolution.effective_target().map(str::to_string))
-                        })
-                } else {
-                    let ctx = verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                        kind: if import.is_type_only {
-                            verter_workspace::ResolveRequestKind::TypeImport
-                        } else {
-                            verter_workspace::ResolveRequestKind::EsmImport
-                        },
-                    };
-                    self.resolve_via_vfs(parent_canonical_id, &import.source, ctx)
-                };
+                import.resolved_canonical_id = self
+                    .authoritative_import_route_in_view(
+                        parent_canonical_id,
+                        &import.source,
+                        store_view,
+                    )
+                    .and_then(|resolution| {
+                        resolution
+                            .resolved_canonical_id
+                            .clone()
+                            .or_else(|| resolution.effective_target().map(str::to_string))
+                    })
+                    .or_else(|| {
+                        let ctx = verter_workspace::ResolutionContext {
+                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                            kind: if import.is_type_only {
+                                verter_workspace::ResolveRequestKind::TypeImport
+                            } else {
+                                verter_workspace::ResolveRequestKind::EsmImport
+                            },
+                        };
+                        self.resolve_via_vfs(parent_canonical_id, &import.source, ctx)
+                    });
             }
         }
     }
@@ -6889,7 +6846,7 @@ impl VerterHost {
     /// Each record maps a raw import specifier to its resolved canonical ID
     /// (or a list of candidate canonical IDs).
     ///
-    /// Records are merged into the file's `dependency_resolutions` map (keyed by
+    /// Records are merged into the file's `import_routes` map (keyed by
     /// specifier). The flat `dependencies` set is updated in parallel for
     /// reverse-dependency tracking.
     pub fn set_import_dependencies(
@@ -6975,7 +6932,7 @@ impl VerterHost {
         }
 
         // Normalize resolutions and persist direct import resolutions.
-        let mut dep_resolutions = rustc_hash::FxHashMap::default();
+        let mut import_routes = rustc_hash::FxHashMap::default();
         for mut res in resolutions {
             if let Some(ref mut id) = res.resolved_canonical_id {
                 let norm = canonicalize_id(id);
@@ -6989,7 +6946,7 @@ impl VerterHost {
                     *candidate = norm.into_owned();
                 }
             }
-            dep_resolutions.insert(res.specifier.clone(), res);
+            import_routes.insert(res.specifier.clone(), res);
         }
 
         // Preserve already-discovered transitive macro-type deps; compilation
@@ -7001,12 +6958,10 @@ impl VerterHost {
             let old_deps = cc.dependencies.clone();
             let old_direct_deps = {
                 let mut deps = parse_deps.clone();
-                deps.extend(Self::resolved_dependency_targets(
-                    &cc.dependency_resolutions,
-                ));
+                deps.extend(Self::resolved_dependency_targets(&cc.import_routes));
                 deps
             };
-            cc.dependency_resolutions = dep_resolutions.clone();
+            cc.import_routes = import_routes.clone();
             old_deps
                 .difference(&old_direct_deps)
                 .cloned()
@@ -7019,12 +6974,10 @@ impl VerterHost {
                 let old_deps = entry.dependencies.clone();
                 let old_direct_deps = {
                     let mut deps = parse_deps.clone();
-                    deps.extend(Self::resolved_dependency_targets(
-                        &entry.dependency_resolutions,
-                    ));
+                    deps.extend(Self::resolved_dependency_targets(&entry.import_routes));
                     deps
                 };
-                entry.dependency_resolutions = dep_resolutions;
+                entry.import_routes = import_routes;
                 old_deps
                     .difference(&old_direct_deps)
                     .cloned()
@@ -7038,9 +6991,10 @@ impl VerterHost {
 
         // Sync exact resolutions to workspace.
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
-        self.resolver.runtime.module_facts.evict(&canonical);
+        // Soft-invalidate: file content didn't change, only import routes.
+        // Module facts are archived for stale store views.
+        self.resolver.runtime.invalidate_canonical(&canonical);
         self.resolved_type_cache.lock().clear();
-        self.resolver.clear_all();
         self.semantic_invalidate(&canonical);
         self.bump_store_view_epoch();
     }

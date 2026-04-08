@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::host::TypeSolverHost;
-use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
+use verter_semantic::analysis::type_solver::query_engine::{ProjectedSurface, TypeQueryEngine};
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::ResolvedTypeDeclaration;
@@ -24,6 +24,9 @@ use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct RoutedPreparedAlias {
@@ -70,6 +73,36 @@ pub struct ComponentMetaQueryEngine<'a> {
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
 }
+
+#[cfg(test)]
+static FORBID_STRUCTURAL_SLOW_LANE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) struct StructuralSlowLaneGuard;
+
+#[cfg(test)]
+impl Drop for StructuralSlowLaneGuard {
+    fn drop(&mut self) {
+        FORBID_STRUCTURAL_SLOW_LANE.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn forbid_structural_slow_lane_for_tests() -> StructuralSlowLaneGuard {
+    FORBID_STRUCTURAL_SLOW_LANE.store(true, Ordering::SeqCst);
+    StructuralSlowLaneGuard
+}
+
+#[cfg(test)]
+fn assert_structural_slow_lane_allowed() {
+    assert!(
+        !FORBID_STRUCTURAL_SLOW_LANE.load(Ordering::SeqCst),
+        "component-meta structural slow lane should not be used on the DB-backed production path",
+    );
+}
+
+#[cfg(not(test))]
+fn assert_structural_slow_lane_allowed() {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn new(
@@ -119,6 +152,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     pub fn solve_owner_named(&mut self, requested_name: &str) -> Option<TypeExpr> {
+        assert_structural_slow_lane_allowed();
         let expr = TypeExpr::named(requested_name);
         let result = self.owner_engine.solve(&expr);
         filter_identity_ref(&result, requested_name)
@@ -238,11 +272,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .clone()
     }
 
+    pub fn named_decl_body(&self, canonical_id: &str, name: &str) -> Option<TypeExpr> {
+        self.host
+            .prepared_type_decl_in_view(canonical_id, name, self.store_view)
+            .map(|prepared| prepared.body.clone())
+    }
+
     pub fn solve_scoped(
         &mut self,
         scope_canonical_id: &str,
         requested_name: &str,
     ) -> Option<TypeExpr> {
+        assert_structural_slow_lane_allowed();
         let key = ScopedSolveKey {
             scope_canonical_id: scope_canonical_id.to_string(),
             symbol_name: requested_name.to_string(),
@@ -288,11 +329,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.host
             .shallow_file_state_in_view(scope_canonical_id, self.store_view)?;
 
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            self.store_view,
-            scope_canonical_id,
-        );
+        let owned_view;
+        let store_view = if let Some(view) = self.store_view {
+            Some(view)
+        } else {
+            owned_view = self.host.resolver_store_view();
+            Some(&owned_view)
+        };
+        let solver_host =
+            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
         let type_ref = TypeExpr::named(requested_name);
         let (result, _trace) =
             self.owner_engine
@@ -308,11 +353,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// that repeated solves within one component-meta request benefit from
     /// the shared projection and instantiation caches.
     pub fn solve_expr_in_scope(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            self.store_view,
-            scope_canonical_id,
-        );
+        assert_structural_slow_lane_allowed();
+        let owned_view;
+        let store_view = if let Some(view) = self.store_view {
+            Some(view)
+        } else {
+            owned_view = self.host.resolver_store_view();
+            Some(&owned_view)
+        };
+        let solver_host =
+            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
         let (result, _trace) =
             self.owner_engine
                 .solve_scoped(&solver_host, scope_canonical_id, expr);
@@ -395,25 +445,47 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             context_hash: 0,
         };
         let op_key = TypeSurfaceOpKey::Surface(surface_key);
-
-        // L2: check shared TypeSurfaceDb.
         if let Some(store_view) = self.store_view {
-            if let Some(cached) = self
-                .host
+            let host = self.host;
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            let owner_engine = &mut self.owner_engine;
+            let cached = host
                 .resolver
                 .runtime
                 .type_surfaces
-                .get(&op_key, store_view)
-            {
-                if let Some(surface) = cached.as_surface() {
-                    return Some(surface.clone());
-                }
-                if cached.is_miss() {
-                    return None;
-                }
-            }
+                .get_or_project_with_facts(op_key, store_view, || {
+                    if host
+                        .prepared_type_decl_in_view(
+                            scope_canonical_id,
+                            symbol_name,
+                            Some(store_view),
+                        )
+                        .is_none()
+                    {
+                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                    }
+                    let subject_key = SubjectKey::Decl {
+                        canonical_id: scope_canonical_id.to_string(),
+                        symbol_name: symbol_name.to_string(),
+                        args_hash: 0,
+                        conditional_ctx_hash: 0,
+                    };
+                    let subject_id = owner_engine.intern_subject(subject_key);
+                    let solver_host = SessionSolverHost::with_declaration_scope(
+                        host,
+                        Some(store_view),
+                        scope_canonical_id,
+                    );
+                    owner_engine
+                        .project_surface(subject_id, &solver_host, scope_canonical_id)
+                        .map(|surface| (TypeSurfaceOpResult::Surface(surface), facts.clone()))
+                })?;
+            return cached.as_surface().cloned();
         }
 
+        let owned_view = self.host.resolver_store_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -423,30 +495,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let subject_id = self.owner_engine.intern_subject(subject_key);
         let solver_host = SessionSolverHost::with_declaration_scope(
             self.host,
-            self.store_view,
+            Some(&owned_view),
             scope_canonical_id,
         );
-        let result =
-            self.owner_engine
-                .project_surface(subject_id, &solver_host, scope_canonical_id);
-
-        // Write-through: publish stable positive results only.
-        // Do NOT publish Miss — a None from the solver may be a budget
-        // exhaustion rather than a genuine semantic miss. Publishing a
-        // false miss to the shared DB would corrupt future lookups.
-        if self.store_view.is_some() {
-            if let Some(surface) = &result {
-                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
-                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                        op_key,
-                        TypeSurfaceOpResult::Surface(surface.clone()),
-                        facts,
-                    );
-                }
-            }
-        }
-
-        result
+        self.owner_engine
+            .project_surface(subject_id, &solver_host, scope_canonical_id)
     }
 
     pub fn project_type_surface_expr(
@@ -454,16 +507,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<TypeExpr> {
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            self.store_view,
-            scope_canonical_id,
-        );
-        self.owner_engine.project_expr_surface_as_type_expr(
-            &solver_host,
-            scope_canonical_id,
-            &TypeExpr::named(symbol_name),
-        )
+        self.project_type_surface(scope_canonical_id, symbol_name)
+            .and_then(|surface| projected_surface_to_type_expr(&surface))
     }
 
     /// Project a single member from a type expression in a declaration scope.
@@ -498,25 +543,47 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             subject: surface_key,
             member_name: member_name.to_owned(),
         };
-
-        // L2: check shared TypeSurfaceDb.
         if let Some(store_view) = self.store_view {
-            if let Some(cached) = self
-                .host
+            let host = self.host;
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            let owner_engine = &mut self.owner_engine;
+            let cached = host
                 .resolver
                 .runtime
                 .type_surfaces
-                .get(&op_key, store_view)
-            {
-                if let Some(member) = cached.as_member() {
-                    return Some(member.clone());
-                }
-                if cached.is_miss() {
-                    return None;
-                }
-            }
+                .get_or_project_with_facts(op_key, store_view, || {
+                    if host
+                        .prepared_type_decl_in_view(
+                            scope_canonical_id,
+                            symbol_name,
+                            Some(store_view),
+                        )
+                        .is_none()
+                    {
+                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                    }
+                    let subject_key = SubjectKey::Decl {
+                        canonical_id: scope_canonical_id.to_string(),
+                        symbol_name: symbol_name.to_string(),
+                        args_hash: 0,
+                        conditional_ctx_hash: 0,
+                    };
+                    let subject_id = owner_engine.intern_subject(subject_key);
+                    let solver_host = SessionSolverHost::with_declaration_scope(
+                        host,
+                        Some(store_view),
+                        scope_canonical_id,
+                    );
+                    owner_engine
+                        .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
+                        .map(|member| (TypeSurfaceOpResult::Member(member), facts.clone()))
+                })?;
+            return cached.as_member().cloned();
         }
 
+        let owned_view = self.host.resolver_store_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -526,30 +593,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let subject_id = self.owner_engine.intern_subject(subject_key);
         let solver_host = SessionSolverHost::with_declaration_scope(
             self.host,
-            self.store_view,
+            Some(&owned_view),
             scope_canonical_id,
         );
-        let result = self.owner_engine.project_member(
-            subject_id,
-            member_name,
-            &solver_host,
-            scope_canonical_id,
-        );
-
-        // Write-through: publish stable positive results only.
-        if self.store_view.is_some() {
-            if let Some(member) = &result {
-                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
-                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                        op_key,
-                        TypeSurfaceOpResult::Member(member.clone()),
-                        facts,
-                    );
-                }
-            }
-        }
-
-        result
+        self.owner_engine
+            .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
     }
 
     /// Project the keyspace (member names) from a type expression in a
@@ -581,25 +629,47 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             context_hash: 0,
         };
         let op_key = TypeSurfaceOpKey::Keyspace(surface_key);
-
-        // L2: check shared TypeSurfaceDb.
         if let Some(store_view) = self.store_view {
-            if let Some(cached) = self
-                .host
+            let host = self.host;
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            let owner_engine = &mut self.owner_engine;
+            let cached = host
                 .resolver
                 .runtime
                 .type_surfaces
-                .get(&op_key, store_view)
-            {
-                if let Some(keyspace) = cached.as_keyspace() {
-                    return Some(keyspace.clone());
-                }
-                if cached.is_miss() {
-                    return None;
-                }
-            }
+                .get_or_project_with_facts(op_key, store_view, || {
+                    if host
+                        .prepared_type_decl_in_view(
+                            scope_canonical_id,
+                            symbol_name,
+                            Some(store_view),
+                        )
+                        .is_none()
+                    {
+                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                    }
+                    let subject_key = SubjectKey::Decl {
+                        canonical_id: scope_canonical_id.to_string(),
+                        symbol_name: symbol_name.to_string(),
+                        args_hash: 0,
+                        conditional_ctx_hash: 0,
+                    };
+                    let subject_id = owner_engine.intern_subject(subject_key);
+                    let solver_host = SessionSolverHost::with_declaration_scope(
+                        host,
+                        Some(store_view),
+                        scope_canonical_id,
+                    );
+                    owner_engine
+                        .project_keyspace(subject_id, &solver_host, scope_canonical_id)
+                        .map(|keyspace| (TypeSurfaceOpResult::Keyspace(keyspace), facts.clone()))
+                })?;
+            return cached.as_keyspace().cloned();
         }
 
+        let owned_view = self.host.resolver_store_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -609,27 +679,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let subject_id = self.owner_engine.intern_subject(subject_key);
         let solver_host = SessionSolverHost::with_declaration_scope(
             self.host,
-            self.store_view,
+            Some(&owned_view),
             scope_canonical_id,
         );
-        let result =
-            self.owner_engine
-                .project_keyspace(subject_id, &solver_host, scope_canonical_id);
-
-        // Write-through: publish stable positive results only.
-        if self.store_view.is_some() {
-            if let Some(keyspace) = &result {
-                if let Some(facts) = self.type_surface_facts(scope_canonical_id) {
-                    self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                        op_key,
-                        TypeSurfaceOpResult::Keyspace(keyspace.clone()),
-                        facts,
-                    );
-                }
-            }
-        }
-
-        result
+        self.owner_engine
+            .project_keyspace(subject_id, &solver_host, scope_canonical_id)
     }
 
     pub fn project_expr_surface_expr(
@@ -643,11 +697,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             return None;
         }
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            self.store_view,
-            scope_canonical_id,
-        );
+        let owned_view;
+        let store_view = if let Some(view) = self.store_view {
+            Some(view)
+        } else {
+            owned_view = self.host.resolver_store_view();
+            Some(&owned_view)
+        };
+        let solver_host =
+            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
         self.owner_engine
             .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
     }
@@ -669,16 +727,96 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         if let Some(hash) = store_view.derived_hash(
             scope_canonical_id,
-            crate::resolver_core::DerivedFactKind::ExactResolution,
+            crate::resolver_core::DerivedFactKind::Route,
         ) {
             facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
                 canonical_id: scope_canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ExactResolution,
+                kind: crate::resolver_core::DerivedFactKind::Route,
                 hash,
             });
         }
         (!facts.is_empty()).then_some(facts)
     }
+}
+
+fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expr::{
+        FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
+        PrimitiveName,
+    };
+
+    if surface.members.is_empty()
+        && surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && !surface.has_index_signature
+    {
+        return None;
+    }
+
+    if surface.members.is_empty()
+        && surface.construct_signatures.is_empty()
+        && !surface.has_index_signature
+        && surface.call_signatures.len() == 1
+    {
+        return surface.call_signatures.first().cloned();
+    }
+
+    let mut properties = surface
+        .members
+        .iter()
+        .map(|member| {
+            if member.is_method {
+                if let TypeExpr::Function(function) = &member.ty {
+                    return ObjectMember::Method(MethodSignature {
+                        name: member.name.clone(),
+                        function: (**function).clone(),
+                        optional: member.optional,
+                    });
+                }
+            }
+
+            ObjectMember::Property(ObjectProperty {
+                name: member.name.clone(),
+                ty: member.ty.clone(),
+                optional: member.optional,
+                readonly: member.readonly,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for signature in &surface.call_signatures {
+        if let TypeExpr::Function(function) = signature {
+            properties.push(ObjectMember::CallSignature(FunctionExpr {
+                parameters: function.parameters.clone(),
+                return_type: function.return_type.clone(),
+                type_parameters: function.type_parameters.clone(),
+            }));
+        }
+    }
+
+    for signature in &surface.construct_signatures {
+        if let TypeExpr::Function(function) = signature {
+            properties.push(ObjectMember::ConstructSignature(FunctionExpr {
+                parameters: function.parameters.clone(),
+                return_type: function.return_type.clone(),
+                type_parameters: function.type_parameters.clone(),
+            }));
+        }
+    }
+
+    if surface.has_index_signature {
+        properties.push(ObjectMember::IndexSignature(IndexSignature {
+            key_name: "key".to_string(),
+            key_type: TypeExpr::Primitive(PrimitiveName::String),
+            value_type: TypeExpr::Unknown {
+                raw: "projectedOpenSurface".to_string(),
+            },
+            readonly: false,
+        }));
+    }
+
+    Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
 }
 
 fn filter_identity_ref(result: &SolverResult<TypeExpr>, requested_name: &str) -> Option<TypeExpr> {

@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
+use crate::resolver_core::{
+    FactVersionRef, PermissiveStoreView, SingleflightGroup, StoreView, ValidatedFactCache,
+};
 use crate::types::Hash16;
 
 /// Result of resolving a named export route.
@@ -101,17 +103,8 @@ impl RouteDb {
         provider_canonical: &str,
         exported_name: &str,
     ) -> Option<Arc<RouteResult>> {
-        struct PermissiveView;
-        impl StoreView for PermissiveView {
-            fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-                crate::resolver_core::StoreViewCompatToken(0)
-            }
-            fn validates(&self, _fact: &FactVersionRef) -> bool {
-                true
-            }
-        }
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
-        self.routes.get_if_valid(&key, &PermissiveView)
+        self.routes.get_if_valid(&key, &PermissiveStoreView)
     }
 
     /// Look up or materialize a route for `(provider, name)`.
@@ -126,6 +119,23 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<RouteResult>,
     {
+        self.get_or_resolve_route_with_facts(provider_canonical, exported_name, view, || {
+            resolve().map(|result| (result, Vec::new()))
+        })
+    }
+
+    /// Look up or materialize a route for `(provider, name)` with fact validation.
+    pub fn get_or_resolve_route_with_facts<V, F>(
+        &self,
+        provider_canonical: &str,
+        exported_name: &str,
+        view: &V,
+        resolve: F,
+    ) -> Option<Arc<RouteResult>>
+    where
+        V: StoreView,
+        F: FnOnce() -> Option<(RouteResult, Vec<FactVersionRef>)>,
+    {
         let key = (provider_canonical.to_owned(), exported_name.to_owned());
 
         if let Some(result) = self.routes.get_if_valid(&key, view) {
@@ -139,9 +149,9 @@ impl RouteDb {
                     return Ok(result);
                 }
                 match resolve() {
-                    Some(result) => {
+                    Some((result, facts)) => {
                         let arc = Arc::new(result);
-                        self.routes.insert_arc(key.clone(), arc.clone(), Vec::new());
+                        self.routes.insert_arc(key.clone(), arc.clone(), facts);
                         Ok(arc)
                     }
                     None => Err(()),
@@ -178,11 +188,19 @@ impl RouteDb {
     }
 
     /// Evict all routes for a provider.
-    pub fn evict_provider(&self, _provider_canonical: &str) {
-        // ValidatedFactCache does not support prefix deletion, so we clear
-        // and let fact-validation lazily rebuild. For targeted eviction,
-        // the view-based validation already handles staleness.
-        // Individual route entries will fail validation on next access.
+    pub fn evict_provider(&self, provider_canonical: &str) {
+        let route_keys: Vec<_> = self
+            .routes
+            .snapshot_all()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|(provider, _)| provider == provider_canonical)
+            .collect();
+        for key in route_keys {
+            self.routes.remove(&key);
+        }
+
+        self.barrel_surfaces.remove(&provider_canonical.to_owned());
     }
 
     // -----------------------------------------------------------------------

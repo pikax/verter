@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use crate::resolver_core::shallow_file_state::ShallowFileState;
 use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
-use crate::types::{FileAnalysisSnapshot, Hash16};
+use crate::types::{DependencyResolution, FileAnalysisSnapshot, Hash16};
+use rustc_hash::FxHashMap;
 
 /// Immutable per-file module facts.
 ///
@@ -23,6 +24,8 @@ use crate::types::{FileAnalysisSnapshot, Hash16};
 #[derive(Debug, Clone)]
 pub struct ModuleFacts {
     pub whole_hash: Hash16,
+    pub import_route_hash: Option<Hash16>,
+    pub import_routes: Arc<FxHashMap<String, DependencyResolution>>,
     pub raw_source: Arc<str>,
     pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
@@ -75,6 +78,10 @@ impl ModuleFactsDb {
             .get_if_valid(&canonical_id.to_owned(), &PermissiveView)
     }
 
+    pub fn values(&self) -> Vec<Arc<ModuleFacts>> {
+        self.facts.values()
+    }
+
     /// Look up or materialize facts for `canonical_id`.
     ///
     /// If cached facts exist and are valid, returns them. Otherwise, runs
@@ -114,6 +121,11 @@ impl ModuleFactsDb {
                         canonical_id: key.clone(),
                         hash: arc.whole_hash,
                     }];
+                    let validation_facts = append_import_route_validation_fact(
+                        validation_facts,
+                        &key,
+                        arc.import_route_hash,
+                    );
                     self.facts
                         .insert_arc(key.clone(), arc.clone(), validation_facts);
                     Ok(arc)
@@ -136,6 +148,11 @@ impl ModuleFactsDb {
             canonical_id: canonical_id.clone(),
             hash,
         }];
+        let validation_facts = append_import_route_validation_fact(
+            validation_facts,
+            &canonical_id,
+            facts.import_route_hash,
+        );
         self.facts.insert(canonical_id, facts, validation_facts);
     }
 
@@ -146,6 +163,11 @@ impl ModuleFactsDb {
             canonical_id: canonical_id.clone(),
             hash,
         }];
+        let validation_facts = append_import_route_validation_fact(
+            validation_facts,
+            &canonical_id,
+            facts.import_route_hash,
+        );
         self.facts.insert_arc(canonical_id, facts, validation_facts);
     }
 
@@ -164,9 +186,18 @@ impl ModuleFactsDb {
         self.facts.snapshot_all()
     }
 
-    /// Evict facts for a canonical file.
+    /// Evict facts for a canonical file (hard removal).
     pub fn evict(&self, canonical_id: &str) {
         self.facts.remove(&canonical_id.to_owned());
+    }
+
+    /// Soft-invalidate facts for a canonical file.
+    ///
+    /// The current entry becomes unreachable for new views, but the
+    /// previous generation remains accessible to stale store views
+    /// via the `previous` chain in `ValidatedFactCache`.
+    pub fn invalidate(&self, canonical_id: &str) {
+        self.facts.invalidate(&canonical_id.to_owned());
     }
 
     /// Clear all cached facts.
@@ -180,6 +211,21 @@ impl Default for ModuleFactsDb {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn append_import_route_validation_fact(
+    mut facts: Vec<FactVersionRef>,
+    canonical_id: &str,
+    import_route_hash: Option<Hash16>,
+) -> Vec<FactVersionRef> {
+    if let Some(hash) = import_route_hash {
+        facts.push(FactVersionRef::DerivedFactHash {
+            canonical_id: canonical_id.to_string(),
+            kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+            hash,
+        });
+    }
+    facts
 }
 
 #[cfg(test)]
@@ -229,6 +275,8 @@ mod tests {
         );
         ModuleFacts {
             whole_hash: hash,
+            import_route_hash: None,
+            import_routes: Arc::new(FxHashMap::default()),
             raw_source: Arc::from(""),
             cached_parse: None,
             script_analysis: None,

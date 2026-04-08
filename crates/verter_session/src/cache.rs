@@ -251,7 +251,7 @@ mod tests {
             meta: FileMeta::default(),
             aliases: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            dependency_resolutions: FxHashMap::default(),
+            import_routes: FxHashMap::default(),
             external_requests: Vec::new(),
             src_blocks: Vec::new(),
             parse_diagnostics: DiagnosticsSnapshot::default(),
