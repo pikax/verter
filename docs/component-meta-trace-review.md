@@ -1,5 +1,85 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T10:39:44.3076960+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest local trace artifact directory: `tmp/batch1-gate-004` (`2026-04-09 09:28`, predates the latest executor commit)
+- Latest committed full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review:
+  - `8a1b7d41` `perf(verter_session): use route cache for imported type root resolution`
+- Executor head reviewed: `8a1b7d41` `perf(verter_session): use route cache for imported type root resolution`
+- Review scope for this pass:
+  - full component-meta hot-path code audit (`host_manage`, `host_resolve`, `resolver_core`, solver host, prepared decl, module facts)
+  - latest local batch artifact inspection
+- Judgment: `FAIL`
+
+### Findings
+
+1. The component-meta hot path still violates the demand-only rule by materializing whole-file cross-file import bindings into the stable prepared-decl bundle.
+   - `crates/verter_session/src/host_manage.rs` still builds `dep_edges` by iterating every `state.import_targets` entry and resolving each specifier during `materialize_prepared_decl_bundle()`.
+   - `crates/verter_session/src/resolver_core/prepared_decl.rs` still stores both `dep_edges` and `import_bindings` on `PreparedDeclBundle`.
+   - `crates/verter_session/src/resolver_core/solver_host.rs` still clones `bundle.import_bindings` into every declaration-scoped `SessionSolverHost`.
+   - That means the stable cache still owns a whole-file imported binding map and every scope entry still copies it, even when the active query only needs one imported symbol. That is the opposite of:
+     - shallow once per file
+     - deepen only the demanded symbol/type path
+     - keep cross-file bindings query-local instead of stable whole-file state
+   - Trace evidence from the newer local `tmp/batch1-gate-004` run shows the hot path is still paying for this shape:
+     - `current_eval_state`: `38 / 34 / 24`
+     - `materialize_prepared_decl_bundle`: `11 / 14 / 11`
+     - `authoritative_import_route_in_view_result`: `47 / 42 / 27`
+   - Existing tests currently validate the eager bundle path (`with_declaration_scope_parity_via_component_meta`) instead of guarding against it. I still do not see a negative test proving that unused owner imports are not route-resolved during bundle materialization.
+
+2. The codebase still has overlapping route authorities, and the newer symbol-node route layer is not on the production component-meta path.
+   - `crates/verter_session/src/resolver_core/resolver_runtime.rs` still keeps all three of these alive at once:
+     - `symbol: SymbolResolverState`
+     - `routes: RouteDb`
+     - `imported_roots: ImportedRootDb`
+   - The active component-meta path still uses the old layered caches:
+     - `crates/verter_session/src/host_resolve.rs` resolves named exports through `runtime.routes.get_or_resolve_route_with_facts(...)`
+     - `crates/verter_session/src/host_manage.rs` resolves imported roots through `runtime.imported_roots.get_or_resolve_with_facts(...)`
+   - I did not find production call sites for `provider_export_route_node_key` or `importer_edge_node_key`; `rg` only found them in `symbol_resolver.rs` and its tests.
+   - This breaks the single-route-authority rule and keeps performance sensitive to cache layering rather than one demand-scoped route owner.
+
+3. The new `8a1b7d41` optimization narrows imported-root invalidation too aggressively and can preserve stale roots across intermediate barrel edits.
+   - `crates/verter_session/src/host_manage.rs` now reuses `resolve_named_type_export_target_in_view()` inside `resolve_imported_type_root_in_view()`, which is directionally good because it avoids redundant barrel walks.
+   - But the newly cached imported-root facts now include only:
+     - the normalized provider file whole hash
+     - the final target file whole hash
+   - They no longer carry the full route-participant / route-surface fact set that `build_named_type_export_route_entry_in_view()` already knows how to collect.
+   - That means an intermediate barrel can change the route while both the top-level provider file and the old leaf file stay text-identical, leaving the imported-root cache stale.
+   - I did not find a regression test for:
+     - nested barrel participant changes invalidating imported-root cache entries
+     - miss caching invalidating on route-surface changes rather than only provider-file changes
+   - This is a blocking correctness risk for the new perf win.
+
+4. The latest perf commit is not yet protected by a post-commit workspace test run or a post-commit trace capture.
+   - The newest executor-owned workspace log I found is `tmp/executor-workspace-tests-2026-04-09.log` with timestamp `2026-04-09 10:01`.
+   - The reviewed perf commit `8a1b7d41` was created at `2026-04-09 10:36`.
+   - So there is still no executor-owned `cargo test --workspace --tests --verbose` evidence on the relevant committed state.
+   - The newer green local artifact `tmp/batch1-gate-004` also predates the commit, so it is not a post-commit proof artifact either.
+
+### Missing Tests / Missing Validation
+
+- Add a negative regression test proving that prepared-decl bundle materialization does not resolve unrelated owner imports just to populate stable `import_bindings`.
+- Add a regression test where an intermediate barrel route changes while the top-level provider and old leaf file contents do not; imported-root cache must invalidate and follow the new route.
+- Re-run and record:
+  - `cargo test --workspace --tests --verbose`
+  - `pnpm exec tsx packages/benchmark/src/trace-check.ts <fresh-trace-dir> --batch "Accordion,Alert,App" --strict --check-expected`
+  on the committed state that contains the perf change.
+- If the intended architecture is the symbol-node route authority, add production-path coverage that proves component-meta actually exercises it. If that is not the intended architecture, document the surviving route authority explicitly and remove the dead parallel route layer instead of keeping both.
+
+### Notes
+
+- `8a1b7d41` is a real directional improvement: reusing the route cache for imported type root resolution is better than re-walking the barrel for every imported-root lookup.
+- The newer local `tmp/batch1-gate-004` artifact is green across Batch 1 and shows better timings, but it does not close the review because:
+  - it predates the reviewed commit
+  - the stable bundle path still eagerly owns whole-file cross-file bindings
+  - the new imported-root invalidation story is still too weak
+  - post-commit workspace verification is still missing
+
 ## 2026-04-09T10:27:24.6264462+01:00 - Batch 1
 
 - Active batch:
