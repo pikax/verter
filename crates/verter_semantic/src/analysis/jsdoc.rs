@@ -149,7 +149,10 @@ pub fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
             if !line.is_empty() {
                 text_parts.push((*line).to_string());
             }
-        } else if !line.is_empty() {
+        } else if description_parts.is_empty() && line.is_empty() {
+            // Skip leading blank lines before any description text.
+        } else {
+            // Preserve blank lines as empty strings for paragraph breaks.
             description_parts.push(*line);
         }
     }
@@ -162,10 +165,21 @@ pub fn parse_jsdoc(raw: &str) -> (Option<String>, Vec<JsdocTag>) {
         });
     }
 
+    // Join description lines with newlines to preserve multi-line formatting.
+    // Blank lines between paragraphs become "\n\n".
     let description = if description_parts.is_empty() {
         None
     } else {
-        Some(description_parts.join(" "))
+        // Trim trailing blank lines.
+        while description_parts.last() == Some(&"") {
+            description_parts.pop();
+        }
+        let joined = description_parts.join("\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
     };
 
     (description, tags)
@@ -234,5 +248,39 @@ export declare abstract class Value {}
             Some("Description of the Value class.")
         );
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn parse_jsdoc_preserves_newlines_between_description_lines() {
+        let raw = r#"/**
+         * When type is "single", allows closing content when clicking trigger for an open item.
+         * When type is "multiple", this prop has no effect.
+         */"#;
+        let (description, _) = super::parse_jsdoc(raw);
+        assert_eq!(
+            description.as_deref(),
+            Some("When type is \"single\", allows closing content when clicking trigger for an open item.\nWhen type is \"multiple\", this prop has no effect.")
+        );
+    }
+
+    #[test]
+    fn parse_jsdoc_preserves_paragraph_breaks() {
+        let raw = r#"/**
+         * The default active value of the item(s).
+         *
+         * Use when you do not need to control the state of the item(s).
+         */"#;
+        let (description, _) = super::parse_jsdoc(raw);
+        assert_eq!(
+            description.as_deref(),
+            Some("The default active value of the item(s).\n\nUse when you do not need to control the state of the item(s).")
+        );
+    }
+
+    #[test]
+    fn parse_jsdoc_single_line_unchanged() {
+        let raw = "/** Simple description. */";
+        let (description, _) = super::parse_jsdoc(raw);
+        assert_eq!(description.as_deref(), Some("Simple description."));
     }
 }
