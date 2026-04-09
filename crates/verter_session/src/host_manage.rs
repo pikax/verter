@@ -3187,6 +3187,13 @@ impl VerterHost {
         if let Some(facts) = cached {
             if store_view.is_some() {
                 // Store-view validated — the cache is authoritative.
+                component_meta_trace_event!(
+                    "ensure_module_facts_fast_hit",
+                    format!(
+                        "owner={} store_view=true whole_hash={:?}",
+                        canonical_id, facts.whole_hash
+                    ),
+                );
                 return Some(facts);
             }
             // Without a store_view the permissive cache does not check
@@ -3206,6 +3213,11 @@ impl VerterHost {
             }
             // File no longer exists — the cached facts are stale.
             // Hash mismatch — fall through to re-materialize.
+        } else if store_view.is_some() {
+            component_meta_trace_event!(
+                "ensure_module_facts_validated_miss",
+                format!("owner={} store_view=true", canonical_id,),
+            );
         }
 
         if store_view.is_some() {
