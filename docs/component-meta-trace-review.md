@@ -1,5 +1,69 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T05:55:33.6402026+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/reviewer-check-expected-accordion`
+- Full-batch trace evidence: `tmp/batch1-trace-002`
+- Judgment: `FAIL`
+
+### Findings
+
+1. The new expected-artifact gate is now committed, and it immediately proves Batch 1 is still not correct.
+   - `feat(benchmark): gate trace results against expected meta` is committed as `0a955035`.
+   - A fresh reviewer rerun for `Accordion` was generated at `tmp/reviewer-check-expected-accordion`.
+   - Running:
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/reviewer-check-expected-accordion --batch Accordion --strict --check-expected`
+     now fails on correctness even though the trace-shape assertions pass.
+   - The mismatch is substantive, not cosmetic. The checker reports:
+     - extra prop `class`
+     - `componentName` drift (`null` expected vs `"Accordion"` actual)
+     - event signature/schema drift for `update:modelValue`
+     - slot payload drift (`body`, `content`, `default`)
+     - multiple prop/schema mismatches, including `as`, `collapsible`, `defaultValue`, `disabled`, and `labelKey`
+   - This is a blocking correctness finding: performance cannot be counted as progress while the returned component-meta artifact diverges from the pinned expected output.
+
+2. Batch 1 still lacks a fresh full-batch rerun under the committed correctness gate.
+   - `tmp/reviewer-check-expected-accordion` only refreshes `Accordion`.
+   - `Alert` and `App` still do not have fresh result artifacts validated by `--check-expected`.
+   - Batch 1 cannot pass until all three components are rerun from current `HEAD` with result artifacts present and the expected-output gate passing.
+
+3. The progress docs are ahead of the proof.
+   - `docs/component-meta-trace-progress.md` currently says traces are validated against desired specs and lists full-corpus results.
+   - That document does not yet reflect the stronger expected-artifact gate that is now part of the batch acceptance criteria.
+   - With the new gate in place, current Batch 1 is still failing, so progress reporting should not imply that correctness is already locked.
+
+4. Follow-up tracking is still incomplete.
+   - I did not find `docs/component-meta-trace-follow-ups.md`.
+   - If the executor wants to defer expected-artifact mismatches while clearing easier wins, those deferrals need a committed follow-up ledger instead of staying implicit.
+
+5. Workspace verification is current from the reviewer side.
+   - Reviewer reran `cargo test --workspace --tests --verbose` on current code during the expected-gate work.
+   - Test bodies passed on this host.
+   - The historical Windows `verter_napi` `GetProcAddress failed` noise remains a host-runtime issue rather than a failing Rust test body.
+
+6. Commit discipline is acceptable right now.
+   - Recent progress is protected by conventional commits:
+     - `77eb2ce8` `fix(component-meta): batch-scoped trace gate and store_view=false guard`
+     - `b8327133` `feat(component-meta): add result correctness to trace validation`
+     - `0a955035` `feat(benchmark): gate trace results against expected meta`
+   - The worktree is clean.
+
+### Missing Validation Before Batch 1 Can Pass
+
+- Regenerate Batch 1 from current `HEAD` into a fresh artifact directory that includes:
+  - trace logs
+  - stdout/stderr
+  - normalized result artifacts under `results/`
+- Run the committed gate per component:
+  - `pnpm exec tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch Accordion,Alert,App --strict --check-expected`
+- Fix the `Accordion` expected-output mismatches rather than relaxing the pinned artifact without justification.
+- Refresh `Alert` and `App` under the same gate and record whether they also diverge.
+- Add a committed follow-up ledger if any correctness mismatches are intentionally deferred.
+
 ## 2026-04-09T04:47:09.7218947+01:00 - Batch 1
 
 - Active batch:
