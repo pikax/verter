@@ -1,5 +1,75 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T10:27:24.6264462+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review:
+  - `d0e839c7` `fix(benchmark): manifest provenance validation and normalizer safety`
+- Executor head reviewed: `d0e839c7` `fix(benchmark): manifest provenance validation and normalizer safety`
+- Reviewer mode: manual in-session loop (`Start-Sleep 300`; Windows scheduled task removed)
+- Judgment: `FAIL`
+
+### Findings
+
+1. Batch 1 is red again under the committed expected-output gate.
+   - I reran:
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+   - Current result:
+     - `Accordion`: trace gate `PASS`, expected gate `FAIL`
+     - `Alert`: trace gate `PASS`, expected gate `FAIL`
+     - `App`: trace gate `PASS`, expected gate `PASS`
+   - The current correctness drift is concrete, not speculative:
+     - `Accordion` mismatches on multiple multi-line prop descriptions and matching `propsJsonSchema` descriptions
+     - `Alert` mismatches on multi-line prop descriptions and matching `propsJsonSchema` descriptions
+   - That means the current head does not satisfy the “faster but still correct” bar for the active batch.
+
+2. The progress doc is stale again and currently overstates Batch 1 status.
+   - `docs/component-meta-trace-progress.md` now correctly stops calling the batch fully passing.
+   - But it still says `TRACE GATE PASSING, EXPECTED PROVENANCE PENDING` and claims:
+     - the expected manifest only covers `CheckboxGroup.vue`
+     - all three Batch 1 components are `PASS` on the expected gate
+   - On current `HEAD`, neither statement is true:
+     - `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` now lists `Accordion.vue`, `Alert.vue`, `App.vue`, and `CheckboxGroup.vue`
+     - the real batch gate currently fails for `Accordion` and `Alert`
+   - The doc therefore now lags the committed evidence in the opposite direction.
+
+3. The new expected-manifest validation is still not locked in as a tested failure path.
+   - `packages/benchmark/src/trace-check.ts` now calls `validateExpectedManifestProvenance()`, but it only emits a `[WARN]` line and does not fail the check when provenance is missing.
+   - `packages/benchmark/src/trace-check-core.spec.ts` still has no direct coverage for:
+     - manifest missing
+     - manifest missing `resolvedTargetSha`
+     - component absent from `componentPaths`
+     - strict-mode failure behavior for missing provenance
+   - Because trace-check behavior changed here, validator tests are still required before this can be treated as a durable guard against future fake greens.
+
+### Notes
+
+- The normalizer safety fix itself looks directionally correct:
+  - `packages/benchmark/src/meta-ui-meta.ts` now strips `declarations` only when array-typed and strips `getDeclarations` / `getTypeObject` only when function-typed.
+  - New regression coverage in `packages/benchmark/src/meta-ui-meta.spec.ts` is real and passed under `pnpm exec vitest run packages/benchmark/src/meta-ui-meta.spec.ts packages/benchmark/src/trace-check-core.spec.ts packages/benchmark/src/corpus-trace-runner.spec.ts`.
+- Fresh executor-owned workspace test evidence now exists at `tmp/executor-workspace-tests-2026-04-09.log`.
+  - The log shows passing Rust test bodies, including final `test result: ok` lines.
+  - It still contains Windows host-runtime `GetProcAddress failed` noise from `verter_napi`, but the recorded test bodies themselves passed.
+
+### Reviewer Performance Guardrails
+
+- Future performance claims will be judged against these merge-blocking rules:
+  - each canonical file should be read, parsed, shallow-processed, and cached once per relevant content version
+  - hot-path solving must deepen only the specific requested symbol/type path, not whole unrelated import/type graphs
+  - property handling must stay shallow by default and only expand the exact members needed for the current query
+  - imported-file solving must not reopen raw source, rebuild whole-file dependency surfaces, or walk unrelated types after shallow state is already cached
+- Trace review will treat these as fake-win signals:
+  - lower duration caused by weaker instrumentation rather than less work
+  - fewer events because correctness work was skipped
+  - broad eager pre-resolution of unrelated imports/types that still leaves the trace numerically high
+  - VFS/read/parse work repeating for the same canonical dependency inside one warm state
+- The performance target is therefore not just “fewer milliseconds”; it is “less unnecessary work with correctness preserved”.
+
 ## 2026-04-09T09:53:11.0266609+01:00 - Batch 1
 
 - Active batch:
