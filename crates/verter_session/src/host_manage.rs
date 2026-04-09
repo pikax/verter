@@ -2775,17 +2775,23 @@ impl VerterHost {
         );
 
         // 6. Compute fact versions.
+        // Only include ImportRoute for tracked files — untracked dependency
+        // files never have set_import_dependencies called, so their route
+        // facts are safe to omit (same rationale as ModuleFactsDb).
         let whole_hash = facts.whole_hash;
+        let is_tracked = store_view.is_some_and(|sv| sv.tracks_file(canonical_id));
         let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
             hash: whole_hash,
         }];
-        if let Some(import_route_hash) = import_route_hash {
-            facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::ImportRoute,
-                hash: import_route_hash,
-            });
+        if is_tracked {
+            if let Some(import_route_hash) = import_route_hash {
+                facts.push(crate::resolver_core::FactVersionRef::DerivedFactHash {
+                    canonical_id: canonical_id.to_string(),
+                    kind: crate::resolver_core::DerivedFactKind::ImportRoute,
+                    hash: import_route_hash,
+                });
+            }
         }
 
         // 7. Insert into the stable cache.
