@@ -121,7 +121,9 @@ const SAMPLE_TRACE = [
   `[verter-meta-trace] event=end trace=1 span=3 parent=2 request=1 subrequest=3 caller=2 depth=2 thread=ThreadId(1) name="resolve_imported_type_root" detail="canonical=types/index.ts imported=FooProps" dur_ms=50.0`,
   `[verter-meta-trace] event=end trace=1 span=2 parent=1 request=1 subrequest=2 caller=1 depth=1 thread=ThreadId(1) name="compute_evaluated_types_expand_macros" detail="owner=src/Test.vue macros=2 bindings=0 store_view=true" dur_ms=200.0`,
   `core_event name=core_named_resolution file=<unknown> kind=missing cache=miss name=ComponentConfig bindings=0 companions=0`,
+  `[verter-meta-trace] event=point trace=1 span=4 parent=1 request=1 subrequest=4 caller=1 depth=1 thread=ThreadId(1) name="resolve_component_meta_result" detail="owner=src/Test.vue mode=Expanded source=flight:leader attempts=1 macros=2 resolved_types=2 has_evaluated_types=true fact_versions=10"`,
   `[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded" dur_ms=300.0`,
+  `[verter-meta-trace] event=point trace=2 span=5 parent=2 request=2 subrequest=5 caller=2 depth=1 thread=ThreadId(1) name="extract_component_meta_declared_surface" detail="owner=src/Test.vue props=5 events=2 slots=3"`,
 ].join("\n");
 
 describe("validateTrace", () => {
@@ -284,6 +286,85 @@ describe("validateTrace", () => {
     );
     expect(result.passed).toBe(true);
   });
+
+  it("fails when expectedResult minProps is not met", () => {
+    const { events, coreEvents } = parseTraceLog(SAMPLE_TRACE);
+    const result = validateTrace(
+      makeMinimalSpec({
+        expectedResult: {
+          minProps: 10,
+          requireEvaluatedTypes: true,
+          note: "should have at least 10 props",
+        },
+      }),
+      events,
+      coreEvents,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.some((f) => f.kind === "result_incorrect")).toBe(true);
+    expect(result.failures[0].actual).toContain("5 props");
+  });
+
+  it("passes when expectedResult is satisfied", () => {
+    const { events, coreEvents } = parseTraceLog(SAMPLE_TRACE);
+    const result = validateTrace(
+      makeMinimalSpec({
+        expectedResult: {
+          minProps: 5,
+          minEvents: 2,
+          minSlots: 3,
+          requireEvaluatedTypes: true,
+          note: "exact match for sample trace",
+        },
+      }),
+      events,
+      coreEvents,
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails when requireEvaluatedTypes but has_evaluated_types missing", () => {
+    // Trace without resolve_component_meta_result has_evaluated_types=true
+    const noEvalTrace = [
+      `[verter-meta-trace] event=start trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded"`,
+      `[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded" dur_ms=100.0`,
+      `[verter-meta-trace] event=point trace=2 span=5 parent=2 request=2 subrequest=5 caller=2 depth=1 thread=ThreadId(1) name="extract_component_meta_declared_surface" detail="owner=src/Test.vue props=5 events=0 slots=0"`,
+    ].join("\n");
+    const { events, coreEvents } = parseTraceLog(noEvalTrace);
+    const result = validateTrace(
+      makeMinimalSpec({
+        expectedResult: {
+          minProps: 1,
+          requireEvaluatedTypes: true,
+          note: "must have evaluated types",
+        },
+      }),
+      events,
+      coreEvents,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.some((f) => f.assertion.includes("requireEvaluatedTypes"))).toBe(true);
+  });
+
+  it("fails when no declared surface event exists", () => {
+    const noSurfaceTrace = [
+      `[verter-meta-trace] event=start trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded"`,
+      `[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded" dur_ms=100.0`,
+    ].join("\n");
+    const { events, coreEvents } = parseTraceLog(noSurfaceTrace);
+    const result = validateTrace(
+      makeMinimalSpec({
+        expectedResult: {
+          minProps: 1,
+          note: "must have declared surface",
+        },
+      }),
+      events,
+      coreEvents,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures[0].actual).toContain("no declared surface event");
+  });
 });
 
 describe("buildSummary", () => {
@@ -294,6 +375,13 @@ describe("buildSummary", () => {
     expect(summary.eventCounts.get("resolve_component_meta")).toBe(2); // start + end
     expect(summary.maxDurations.get("resolve_component_meta")).toBeCloseTo(300);
     expect(summary.eventCounts.get("core:core_named_resolution")).toBe(1);
+  });
+
+  it("extracts declared surface from trace", () => {
+    const { events, coreEvents } = parseTraceLog(SAMPLE_TRACE);
+    const summary = buildSummary(events, coreEvents);
+    expect(summary.declaredSurface).toEqual({ props: 5, events: 2, slots: 3 });
+    expect(summary.hasEvaluatedTypes).toBe(true);
   });
 });
 

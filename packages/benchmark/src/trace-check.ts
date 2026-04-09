@@ -119,7 +119,6 @@ for (const specFile of specFiles.sort()) {
 
   if (!traceContent || !tracePath) {
     if (batchComponents) {
-      // In batch mode, missing traces are FAILURES, not skips.
       console.log(`[FAIL] ${componentName} — no trace file found in ${absTraceDir}`);
       failed++;
     } else {

@@ -57,5 +57,12 @@
       "maxDurationMs": 500,
       "note": "any single imported type root resolution should take under 500ms"
     }
-  ]
+  ],
+  "expectedResult": {
+    "minProps": 13,
+    "minEvents": 1,
+    "minSlots": 5,
+    "requireEvaluatedTypes": true,
+    "note": "Alert must return 13 props, 1 event, 5 slots with evaluated types"
+  }
 }

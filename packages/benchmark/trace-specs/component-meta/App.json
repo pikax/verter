@@ -57,5 +57,11 @@
       "maxDurationMs": 500,
       "note": "any single imported type root resolution should take under 500ms"
     }
-  ]
+  ],
+  "expectedResult": {
+    "minProps": 7,
+    "minSlots": 1,
+    "requireEvaluatedTypes": true,
+    "note": "App must return 7 props, 1 slot with evaluated types"
+  }
 }

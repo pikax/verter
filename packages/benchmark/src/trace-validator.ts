@@ -27,6 +27,21 @@ export interface TraceSpec {
   maxCounts: TraceCountAssertion[];
   /** Max duration thresholds per event name */
   maxDurations: TraceDurationAssertion[];
+  /** Result correctness assertions — extracted from extract_component_meta_declared_surface */
+  expectedResult?: TraceResultAssertion;
+}
+
+export interface TraceResultAssertion {
+  /** Minimum expected props count. Fails if actual < this. */
+  minProps: number;
+  /** Minimum expected events count. Fails if actual < this. */
+  minEvents?: number;
+  /** Minimum expected slots count. Fails if actual < this. */
+  minSlots?: number;
+  /** require has_evaluated_types=true in resolve_component_meta_result */
+  requireEvaluatedTypes?: boolean;
+  /** Why these thresholds exist */
+  note: string;
 }
 
 export interface TraceAssertion {
@@ -96,7 +111,8 @@ export interface ValidationFailure {
     | "forbidden_present"
     | "count_exceeded"
     | "duration_exceeded"
-    | "total_duration_exceeded";
+    | "total_duration_exceeded"
+    | "result_incorrect";
   assertion: string;
   note: string;
   actual?: string;
@@ -107,6 +123,10 @@ export interface TraceSummary {
   eventCounts: Map<string, number>;
   maxDurations: Map<string, number>;
   uniqueFiles: Set<string>;
+  /** Extracted from extract_component_meta_declared_surface event */
+  declaredSurface?: { props: number; events: number; slots: number };
+  /** Whether resolve_component_meta_result has has_evaluated_types=true */
+  hasEvaluatedTypes: boolean;
 }
 
 // ── Parser ────────────────────────────────────────────────────────────
@@ -239,7 +259,42 @@ export function buildSummary(events: ParsedTraceEvent[], coreEvents: CoreEvent[]
     }
   }
 
-  return { totalDurationMs, eventCounts, maxDurations, uniqueFiles };
+  // Extract declared surface from extract_component_meta_declared_surface
+  let declaredSurface: { props: number; events: number; slots: number } | undefined;
+  for (const e of events) {
+    if (e.name === "extract_component_meta_declared_surface") {
+      const propsMatch = e.detail.match(/props=(\d+)/);
+      const eventsMatch = e.detail.match(/events=(\d+)/);
+      const slotsMatch = e.detail.match(/slots=(\d+)/);
+      if (propsMatch) {
+        declaredSurface = {
+          props: parseInt(propsMatch[1], 10),
+          events: eventsMatch ? parseInt(eventsMatch[1], 10) : 0,
+          slots: slotsMatch ? parseInt(slotsMatch[1], 10) : 0,
+        };
+      }
+    }
+  }
+
+  // Check for has_evaluated_types in resolve_component_meta_result
+  let hasEvaluatedTypes = false;
+  for (const e of events) {
+    if (
+      e.name === "resolve_component_meta_result" &&
+      e.detail.includes("has_evaluated_types=true")
+    ) {
+      hasEvaluatedTypes = true;
+    }
+  }
+
+  return {
+    totalDurationMs,
+    eventCounts,
+    maxDurations,
+    uniqueFiles,
+    declaredSurface,
+    hasEvaluatedTypes,
+  };
 }
 
 export function validateTrace(
@@ -324,6 +379,52 @@ export function validateTrace(
     }
   }
 
+  // Check result correctness
+  if (spec.expectedResult) {
+    const er = spec.expectedResult;
+    if (!summary.declaredSurface) {
+      failures.push({
+        kind: "result_incorrect",
+        assertion: "expectedResult: extract_component_meta_declared_surface must appear",
+        note: er.note,
+        actual: "no declared surface event found — component meta extraction may have failed",
+      });
+    } else {
+      if (summary.declaredSurface.props < er.minProps) {
+        failures.push({
+          kind: "result_incorrect",
+          assertion: `expectedResult: minProps=${er.minProps}`,
+          note: er.note,
+          actual: `${summary.declaredSurface.props} props (expected >= ${er.minProps})`,
+        });
+      }
+      if (er.minEvents !== undefined && summary.declaredSurface.events < er.minEvents) {
+        failures.push({
+          kind: "result_incorrect",
+          assertion: `expectedResult: minEvents=${er.minEvents}`,
+          note: er.note,
+          actual: `${summary.declaredSurface.events} events (expected >= ${er.minEvents})`,
+        });
+      }
+      if (er.minSlots !== undefined && summary.declaredSurface.slots < er.minSlots) {
+        failures.push({
+          kind: "result_incorrect",
+          assertion: `expectedResult: minSlots=${er.minSlots}`,
+          note: er.note,
+          actual: `${summary.declaredSurface.slots} slots (expected >= ${er.minSlots})`,
+        });
+      }
+    }
+    if (er.requireEvaluatedTypes && !summary.hasEvaluatedTypes) {
+      failures.push({
+        kind: "result_incorrect",
+        assertion: "expectedResult: requireEvaluatedTypes=true",
+        note: er.note,
+        actual: "has_evaluated_types=false — type expansion may have failed or been skipped",
+      });
+    }
+  }
+
   return {
     component: spec.component,
     passed: failures.length === 0,
@@ -356,6 +457,7 @@ export function loadTraceSpec(jsonContent: string, options?: LoadTraceSpecOption
     forbidden: raw.forbidden ?? [],
     maxCounts: raw.maxCounts ?? [],
     maxDurations: raw.maxDurations ?? [],
+    expectedResult: raw.expectedResult ?? undefined,
   };
   if (options?.requireForbidden && spec.forbidden.length === 0) {
     throw new Error(
@@ -379,6 +481,10 @@ export function formatValidationResult(result: ValidationResult): string {
   const status = result.passed ? "PASS" : "FAIL";
   lines.push(`[${status}] ${result.component}`);
   lines.push(`  Total duration: ${result.summary.totalDurationMs.toFixed(1)}ms`);
+  if (result.summary.declaredSurface) {
+    const s = result.summary.declaredSurface;
+    lines.push(`  Result: ${s.props} props, ${s.events} events, ${s.slots} slots`);
+  }
   lines.push(`  Unique files touched: ${result.summary.uniqueFiles.size}`);
 
   if (result.failures.length > 0) {
