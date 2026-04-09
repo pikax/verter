@@ -19,7 +19,7 @@ use verter_semantic::analysis::type_solver::query_engine::{ProjectedSurface, Typ
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::ResolvedTypeDeclaration;
-use crate::resolver_core::solver_host::SessionSolverHost;
+use crate::resolver_core::solver_host::{DeclarationScopePayload, SessionSolverHost};
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
@@ -66,6 +66,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Cached owner collection expressions.
     owner_collection_exprs:
         FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
+    /// Request-local cache of declaration-scope payloads per scope canonical id.
+    /// The prepared bundle stays authoritative; this cache only reuses the
+    /// bundle-derived names/bindings within one request so repeated projections
+    /// do not keep recloning them.
+    scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
 }
@@ -114,6 +119,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
+            scope_payloads: FxHashMap::default(),
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -132,6 +138,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
+            scope_payloads: FxHashMap::default(),
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -143,6 +150,46 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn into_owner_engine(self) -> TypeQueryEngine<'a> {
         self.owner_engine
+    }
+
+    fn scope_payload_for_scope(
+        &mut self,
+        scope_canonical_id: &str,
+    ) -> Option<std::sync::Arc<DeclarationScopePayload>> {
+        let host = self.host;
+        let store_view = self.store_view;
+        self.scope_payloads
+            .entry(scope_canonical_id.to_string())
+            .or_insert_with(|| {
+                host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
+                    .map(|bundle| {
+                        std::sync::Arc::new(DeclarationScopePayload::from_bundle(&bundle))
+                    })
+            })
+            .clone()
+    }
+
+    /// Create a `SessionSolverHost` for the given declaration scope, reusing a
+    /// previously-fetched declaration-scope payload when available.
+    fn solver_host_for_scope(&mut self, scope_canonical_id: &str) -> SessionSolverHost<'a> {
+        if let Some(scope_payload) = self.scope_payload_for_scope(scope_canonical_id) {
+            SessionSolverHost::from_scope_payload(
+                self.host,
+                self.store_view,
+                scope_canonical_id,
+                scope_payload,
+            )
+        } else {
+            SessionSolverHost::new(self.host, self.store_view)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_solver_host_for_scope(
+        &mut self,
+        scope_canonical_id: &str,
+    ) -> SessionSolverHost<'a> {
+        self.solver_host_for_scope(scope_canonical_id)
     }
 
     pub fn solve_owner_named(&mut self, requested_name: &str) -> Option<TypeExpr> {
@@ -290,15 +337,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.host
             .shallow_file_state_in_view(scope_canonical_id, self.store_view)?;
 
-        let owned_view;
-        let store_view = if let Some(view) = self.store_view {
-            Some(view)
-        } else {
-            owned_view = self.host.resolver_store_view();
-            Some(&owned_view)
-        };
-        let solver_host =
-            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
+        let solver_host = self.solver_host_for_scope(scope_canonical_id);
         let type_ref = TypeExpr::named(requested_name);
         let (result, _trace) =
             self.owner_engine
@@ -424,6 +463,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             context_hash: 0,
         };
         let op_key = TypeSurfaceOpKey::Surface(surface_key);
+        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
         if let Some(store_view) = self.store_view {
             let host = self.host;
             let facts = self
@@ -452,11 +492,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         conditional_ctx_hash: 0,
                     };
                     let subject_id = owner_engine.intern_subject(subject_key);
-                    let solver_host = SessionSolverHost::with_declaration_scope(
-                        host,
-                        Some(store_view),
-                        scope_canonical_id,
-                    );
+                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                        SessionSolverHost::from_scope_payload(
+                            host,
+                            Some(store_view),
+                            scope_canonical_id,
+                            scope_payload.clone(),
+                        )
+                    } else {
+                        SessionSolverHost::new(host, Some(store_view))
+                    };
                     owner_engine
                         .project_surface(subject_id, &solver_host, scope_canonical_id)
                         .map(|surface| (TypeSurfaceOpResult::Surface(surface), facts.clone()))
@@ -472,11 +517,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             conditional_ctx_hash: 0,
         };
         let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            Some(&owned_view),
-            scope_canonical_id,
-        );
+        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+            SessionSolverHost::from_scope_payload(
+                self.host,
+                Some(&owned_view),
+                scope_canonical_id,
+                scope_payload.clone(),
+            )
+        } else {
+            SessionSolverHost::new(self.host, Some(&owned_view))
+        };
         self.owner_engine
             .project_surface(subject_id, &solver_host, scope_canonical_id)
     }
@@ -522,6 +572,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             subject: surface_key,
             member_name: member_name.to_owned(),
         };
+        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
         if let Some(store_view) = self.store_view {
             let host = self.host;
             let facts = self
@@ -550,11 +601,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         conditional_ctx_hash: 0,
                     };
                     let subject_id = owner_engine.intern_subject(subject_key);
-                    let solver_host = SessionSolverHost::with_declaration_scope(
-                        host,
-                        Some(store_view),
-                        scope_canonical_id,
-                    );
+                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                        SessionSolverHost::from_scope_payload(
+                            host,
+                            Some(store_view),
+                            scope_canonical_id,
+                            scope_payload.clone(),
+                        )
+                    } else {
+                        SessionSolverHost::new(host, Some(store_view))
+                    };
                     owner_engine
                         .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
                         .map(|member| (TypeSurfaceOpResult::Member(member), facts.clone()))
@@ -570,11 +626,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             conditional_ctx_hash: 0,
         };
         let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            Some(&owned_view),
-            scope_canonical_id,
-        );
+        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+            SessionSolverHost::from_scope_payload(
+                self.host,
+                Some(&owned_view),
+                scope_canonical_id,
+                scope_payload.clone(),
+            )
+        } else {
+            SessionSolverHost::new(self.host, Some(&owned_view))
+        };
         self.owner_engine
             .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
     }
@@ -608,6 +669,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             context_hash: 0,
         };
         let op_key = TypeSurfaceOpKey::Keyspace(surface_key);
+        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
         if let Some(store_view) = self.store_view {
             let host = self.host;
             let facts = self
@@ -636,11 +698,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         conditional_ctx_hash: 0,
                     };
                     let subject_id = owner_engine.intern_subject(subject_key);
-                    let solver_host = SessionSolverHost::with_declaration_scope(
-                        host,
-                        Some(store_view),
-                        scope_canonical_id,
-                    );
+                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                        SessionSolverHost::from_scope_payload(
+                            host,
+                            Some(store_view),
+                            scope_canonical_id,
+                            scope_payload.clone(),
+                        )
+                    } else {
+                        SessionSolverHost::new(host, Some(store_view))
+                    };
                     owner_engine
                         .project_keyspace(subject_id, &solver_host, scope_canonical_id)
                         .map(|keyspace| (TypeSurfaceOpResult::Keyspace(keyspace), facts.clone()))
@@ -656,11 +723,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             conditional_ctx_hash: 0,
         };
         let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = SessionSolverHost::with_declaration_scope(
-            self.host,
-            Some(&owned_view),
-            scope_canonical_id,
-        );
+        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+            SessionSolverHost::from_scope_payload(
+                self.host,
+                Some(&owned_view),
+                scope_canonical_id,
+                scope_payload.clone(),
+            )
+        } else {
+            SessionSolverHost::new(self.host, Some(&owned_view))
+        };
         self.owner_engine
             .project_keyspace(subject_id, &solver_host, scope_canonical_id)
     }
@@ -676,15 +748,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             return None;
         }
-        let owned_view;
-        let store_view = if let Some(view) = self.store_view {
-            Some(view)
-        } else {
-            owned_view = self.host.resolver_store_view();
-            Some(&owned_view)
-        };
-        let solver_host =
-            SessionSolverHost::with_declaration_scope(self.host, store_view, scope_canonical_id);
+        let solver_host = self.solver_host_for_scope(scope_canonical_id);
         self.owner_engine
             .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
     }

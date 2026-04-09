@@ -95,19 +95,6 @@ fn log_expand_stage_start(log: &ExpandStageLog<'_>) {
     });
 }
 
-fn log_expand_skip(
-    macro_index: usize,
-    macro_kind: crate::analysis::types::AnalyzedMacroKind,
-    reason: &str,
-) {
-    type_expand_debug(|| {
-        format!(
-            "expand_macro_types:skip macro_index={} macro_kind={:?} reason={}",
-            macro_index, macro_kind, reason
-        )
-    });
-}
-
 /// Build an evaluation environment from an OXC program AST.
 ///
 /// Extracts:
@@ -1350,13 +1337,17 @@ pub fn expand_macro_types(
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     let binding_entries = collect_binding_entries_from_env(env, local_binding_names);
     let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
-    expand_macro_types_impl(
+    let mut result = expand_macro_types_impl(
         macros,
         source,
         binding_entries.as_slice(),
         Some(env),
         &mut engine,
-    )
+    );
+    // Standalone path: produce object shapes via the solver directly.
+    // The session path uses the projection-first pipeline in meta_resolve.rs instead.
+    expand_standalone_macro_object_shapes(macros, source, &mut result, &mut engine);
+    result
 }
 
 /// Expand macro-backed type annotations using only pre-collected binding type
@@ -1410,35 +1401,23 @@ fn expand_macro_types_impl(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
-    mut debug_env: Option<&mut EvalEnv>,
+    debug_env: Option<&mut EvalEnv>,
     engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
-        solver_result_to_normalized_expansion, solver_result_to_object_expansion,
-        ExpandedComponentTypes, ExpandedField, ExpandedMacroObjectShape, ExpandedMacroProps,
-        ExpandedNormalizedExpr, ExpandedObjectShape, ExpansionResult,
+        solver_result_to_normalized_expansion, ExpandedComponentTypes, ExpandedField,
+        ExpandedNormalizedExpr, ExpansionResult,
     };
     use crate::analysis::type_expr_lower::parse_type_annotation;
     use crate::analysis::type_solver::result::SolverResult;
 
-    // Shared solver-result → expansion-result conversion (replaces local ad hoc mapping)
     fn solver_to_expr_result(
         result: SolverResult<TypeExpr>,
     ) -> ExpansionResult<ExpandedNormalizedExpr> {
         solver_result_to_normalized_expansion(result)
     }
 
-    fn solver_to_object_shape_result(
-        result: SolverResult<TypeExpr>,
-    ) -> ExpansionResult<ExpandedObjectShape> {
-        solver_result_to_object_expansion(result)
-    }
-
     let mut result = ExpandedComponentTypes::default();
-    let macro_type_params = source.map(collect_define_macro_type_params);
-    let mut define_props_index = 0usize;
-    let mut define_emits_index = 0usize;
-    let mut define_slots_index = 0usize;
     let started = Instant::now();
     let start_steps = debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0);
 
@@ -1490,80 +1469,9 @@ fn expand_macro_types_impl(
             }
         }
 
-        // Expand defineProps<T>() type parameter into object shape
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_props)
-            {
-                if let Some(lowered) = type_params.get(define_props_index) {
-                    let item_started = Instant::now();
-                    let stage_log = ExpandStageLog {
-                        macro_index,
-                        macro_kind: m.kind,
-                        stage: "define_props",
-                        target: "type_param",
-                        started: item_started,
-                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
-                    };
-                    log_expand_stage_start(&stage_log);
-                    let solved = engine.solve(lowered);
-                    let shape_result = solver_to_object_shape_result(solved);
-                    log_expand_stage(
-                        stage_log,
-                        shape_result.exactness,
-                        shape_result.execution_status,
-                        &shape_result.diagnostics,
-                        debug_env.as_deref(),
-                    );
-                    if !shape_result.value.properties.is_empty()
-                        || !shape_result.value.index_signatures.is_empty()
-                    {
-                        result.define_props.push(ExpandedMacroProps {
-                            macro_index,
-                            result: shape_result,
-                        });
-                    }
-                }
-            }
-            define_props_index += 1;
-        }
-
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineEmits && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_emits)
-            {
-                if let Some(lowered) = type_params.get(define_emits_index) {
-                    let item_started = Instant::now();
-                    let stage_log = ExpandStageLog {
-                        macro_index,
-                        macro_kind: m.kind,
-                        stage: "define_emits",
-                        target: "type_param",
-                        started: item_started,
-                        start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
-                    };
-                    log_expand_stage_start(&stage_log);
-                    let solved = engine.solve(lowered);
-                    let shape_result = solver_to_object_shape_result(solved);
-                    log_expand_stage(
-                        stage_log,
-                        shape_result.exactness,
-                        shape_result.execution_status,
-                        &shape_result.diagnostics,
-                        debug_env.as_deref(),
-                    );
-                    if has_named_shape_surface(&shape_result.value) {
-                        result.define_emits.push(ExpandedMacroObjectShape {
-                            macro_index,
-                            result: shape_result,
-                        });
-                    }
-                }
-            }
-            define_emits_index += 1;
-        }
+        // NOTE: defineProps<T>(), defineEmits<T>(), defineSlots<T>() object-shape
+        // production is owned by the query-engine phase in meta_resolve.rs.
+        // This function handles field-level work only.
 
         // Expand emit payload types
         for field in &m.emit_fields {
@@ -1600,66 +1508,6 @@ fn expand_macro_types_impl(
                     });
                 }
             }
-        }
-
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineSlots && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_slots)
-            {
-                if let Some(lowered) = type_params.get(define_slots_index) {
-                    if m.slot_fields.is_empty() {
-                        let item_started = Instant::now();
-                        let stage_log = ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "define_slots",
-                            target: "type_param",
-                            started: item_started,
-                            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
-                        };
-                        log_expand_stage_start(&stage_log);
-                        let previous_slot_return_mode = debug_env
-                            .as_deref()
-                            .map(|env| env.preserve_canonical_vue_vnode_slot_returns);
-                        if let Some(env) = debug_env.as_deref_mut() {
-                            env.preserve_canonical_vue_vnode_slot_returns = true;
-                        }
-                        let mut solved = engine.solve(lowered);
-                        if let (Some(previous), Some(env)) =
-                            (previous_slot_return_mode, debug_env.as_deref_mut())
-                        {
-                            env.preserve_canonical_vue_vnode_slot_returns = previous;
-                        }
-                        // The solver keeps function signatures shallow (only
-                        // substitutions, no ref resolution). For defineSlots we
-                        // need refs inside slot function return types (e.g.
-                        // Array<VNode>) fully expanded, so deep-resolve them.
-                        solved.value = deep_resolve_slot_function_refs(&solved.value, engine);
-                        let shape_result = solver_to_object_shape_result(solved);
-                        log_expand_stage(
-                            stage_log,
-                            shape_result.exactness,
-                            shape_result.execution_status,
-                            &shape_result.diagnostics,
-                            debug_env.as_deref(),
-                        );
-                        if !shape_result.value.properties.is_empty() {
-                            result.define_slots.push(ExpandedMacroObjectShape {
-                                macro_index,
-                                result: shape_result,
-                            });
-                        }
-                    } else {
-                        log_expand_skip(
-                            macro_index,
-                            m.kind,
-                            "define_slots_shape_already_available_from_slot_fields",
-                        );
-                    }
-                }
-            }
-            define_slots_index += 1;
         }
 
         // Expand slot binding types (no skip heuristic — expander handles complexity)
@@ -1760,7 +1608,93 @@ fn expand_macro_types_impl(
     result
 }
 
-fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
+/// Solver-based macro object-shape production for the **standalone** path only
+/// (WASM, playground, EvalEnv-backed tests).
+///
+/// The session path (`verter_session`) uses the projection-first pipeline in
+/// `meta_resolve::produce_macro_object_shapes` instead. This function must NOT
+/// be called from the session path.
+fn expand_standalone_macro_object_shapes(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    result: &mut crate::analysis::type_expand::ExpandedComponentTypes,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+) {
+    use crate::analysis::type_expand::{
+        solver_result_to_object_expansion, ExpandedMacroObjectShape, ExpandedMacroProps,
+    };
+
+    let macro_type_params = source.map(collect_define_macro_type_params);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
+
+    for (macro_index, m) in macros.iter().enumerate() {
+        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_props)
+            {
+                if let Some(lowered) = type_params.get(define_props_index) {
+                    let solved = engine.solve(lowered);
+                    let shape_result = solver_result_to_object_expansion(solved);
+                    if !shape_result.value.properties.is_empty()
+                        || !shape_result.value.index_signatures.is_empty()
+                    {
+                        result.define_props.push(ExpandedMacroProps {
+                            macro_index,
+                            result: shape_result,
+                        });
+                    }
+                }
+            }
+            define_props_index += 1;
+        }
+
+        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineEmits && m.is_type_based {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_emits)
+            {
+                if let Some(lowered) = type_params.get(define_emits_index) {
+                    let solved = engine.solve(lowered);
+                    let shape_result = solver_result_to_object_expansion(solved);
+                    if has_named_shape_surface(&shape_result.value) {
+                        result.define_emits.push(ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape_result,
+                        });
+                    }
+                }
+            }
+            define_emits_index += 1;
+        }
+
+        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineSlots && m.is_type_based {
+            if let Some(type_params) = macro_type_params
+                .as_ref()
+                .map(|params| &params.define_slots)
+            {
+                if let Some(lowered) = type_params.get(define_slots_index) {
+                    if m.slot_fields.is_empty() {
+                        let mut solved = engine.solve(lowered);
+                        solved.value = deep_resolve_slot_function_refs(&solved.value, engine);
+                        let shape_result = solver_result_to_object_expansion(solved);
+                        if !shape_result.value.properties.is_empty() {
+                            result.define_slots.push(ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape_result,
+                            });
+                        }
+                    }
+                }
+            }
+            define_slots_index += 1;
+        }
+    }
+}
+
+pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
 }
 
@@ -1768,7 +1702,7 @@ fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectS
 /// slot object.  The solver intentionally keeps function parameter and return
 /// types shallow (substitutions only, no ref expansion).  For `defineSlots`
 /// results we need refs like `VNode` fully resolved to their object bodies.
-fn deep_resolve_slot_function_refs(
+pub fn deep_resolve_slot_function_refs(
     expr: &TypeExpr,
     engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> TypeExpr {

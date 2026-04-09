@@ -400,113 +400,15 @@ fn enrich_missing_slot_bindings(
     }
 }
 
-fn projected_macro_shape_entry(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    owner_canonical: &str,
-    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> Option<
-    verter_semantic::analysis::type_expand::ExpansionResult<
-        verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    >,
-> {
-    let projected = query_engine.project_expr_surface_expr(owner_canonical, lowered)?;
-    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
-    if shape.properties.is_empty()
-        && shape.index_signatures.is_empty()
-        && shape.call_signatures.is_empty()
-    {
-        return None;
-    }
-    Some(verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape))
-}
-
-fn macro_shape_surface_weight(
-    result: &verter_semantic::analysis::type_expand::ExpansionResult<
-        verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    >,
-) -> usize {
-    result.value.properties.len()
-        + result.value.index_signatures.len()
-        + result.value.call_signatures.len()
-}
-
-fn projected_macro_shape_is_preferred(
-    existing: Option<
-        &verter_semantic::analysis::type_expand::ExpansionResult<
-            verter_semantic::analysis::type_expand::ExpandedObjectShape,
-        >,
-    >,
-    projected: &verter_semantic::analysis::type_expand::ExpansionResult<
-        verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    >,
-) -> bool {
-    let Some(existing) = existing else {
-        return true;
-    };
-    macro_shape_surface_weight(projected) > macro_shape_surface_weight(existing)
-}
-
-fn upsert_projected_define_props_shape(
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
-    macro_index: usize,
-    projected: verter_semantic::analysis::type_expand::ExpansionResult<
-        verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    >,
-) {
-    let existing = evaluated_types
-        .define_props
-        .iter()
-        .find(|entry| entry.macro_index == macro_index)
-        .map(|entry| &entry.result);
-    if !projected_macro_shape_is_preferred(existing, &projected) {
-        return;
-    }
-    if let Some(entry) = evaluated_types
-        .define_props
-        .iter_mut()
-        .find(|entry| entry.macro_index == macro_index)
-    {
-        entry.result = projected;
-    } else {
-        evaluated_types.define_props.push(
-            verter_semantic::analysis::type_expand::ExpandedMacroProps {
-                macro_index,
-                result: projected,
-            },
-        );
-    }
-}
-
-fn upsert_projected_macro_object_shape(
-    entries: &mut Vec<verter_semantic::analysis::type_expand::ExpandedMacroObjectShape>,
-    macro_index: usize,
-    projected: verter_semantic::analysis::type_expand::ExpansionResult<
-        verter_semantic::analysis::type_expand::ExpandedObjectShape,
-    >,
-) {
-    let existing = entries
-        .iter()
-        .find(|entry| entry.macro_index == macro_index)
-        .map(|entry| &entry.result);
-    if !projected_macro_shape_is_preferred(existing, &projected) {
-        return;
-    }
-    if let Some(entry) = entries
-        .iter_mut()
-        .find(|entry| entry.macro_index == macro_index)
-    {
-        entry.result = projected;
-    } else {
-        entries.push(
-            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
-                macro_index,
-                result: projected,
-            },
-        );
-    }
-}
-
-fn enrich_projected_macro_shapes(
+/// Sole-authority producer for type-based macro object shapes.
+///
+/// This is the ONE place that produces `define_props`, `define_emits`, and
+/// `define_slots` object shapes for `ExpandedComponentTypes`.
+///
+/// The production pipeline is projection-first so one phase owns object-shape
+/// materialization. The solver is used only as the terminal fallback when
+/// projection cannot produce a usable shape.
+fn produce_macro_object_shapes(
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     eval_source: &str,
@@ -527,48 +429,199 @@ fn enrich_projected_macro_shapes(
         match mac.kind {
             verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
                 if let Some(lowered) = params.define_props.get(define_props_index) {
-                    if let Some(projected) =
-                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
-                    {
-                        upsert_projected_define_props_shape(
-                            evaluated_types,
-                            macro_index,
-                            projected,
-                        );
+                    if let Some(shape) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        has_prop_shape_surface,
+                    ) {
+                        if has_prop_shape_surface(&shape.value) {
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
                     }
                 }
                 define_props_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
                 if let Some(lowered) = params.define_emits.get(define_emits_index) {
-                    if let Some(projected) =
-                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
-                    {
-                        upsert_projected_macro_object_shape(
-                            &mut evaluated_types.define_emits,
-                            macro_index,
-                            projected,
-                        );
+                    if let Some(shape) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                    ) {
+                        if verter_semantic::analysis::type_eval_build::has_named_shape_surface(
+                            &shape.value,
+                        ) {
+                            evaluated_types.define_emits.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
                     }
                 }
                 define_emits_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
                 if let Some(lowered) = params.define_slots.get(define_slots_index) {
-                    if let Some(projected) =
-                        projected_macro_shape_entry(query_engine, owner_canonical, lowered)
-                    {
-                        upsert_projected_macro_object_shape(
-                            &mut evaluated_types.define_slots,
-                            macro_index,
-                            projected,
-                        );
+                    if mac.slot_fields.is_empty() {
+                        if let Some(shape) = produce_one_macro_object_shape_for_slots(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                        ) {
+                            if !shape.value.properties.is_empty() {
+                                evaluated_types.define_slots.push(
+                                    verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                        macro_index,
+                                        result: shape,
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
                 define_slots_index += 1;
             }
             _ => {}
         }
+    }
+}
+
+/// Produce the macro object shape for defineProps/defineEmits.
+///
+/// Projection owns the production path. Solver is the terminal fallback when
+/// projection cannot produce a usable shape.
+fn produce_one_macro_object_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> Option<
+    verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+> {
+    if let Some(projected) = project_macro_type_expr(query_engine, owner_canonical, lowered) {
+        let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
+        if shape_is_usable(&shape) {
+            return Some(
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+            );
+        }
+    }
+
+    let solved = query_engine.owner_engine_mut().solve(lowered);
+    let solver_result =
+        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
+    shape_is_usable(&solver_result.value).then_some(solver_result)
+}
+
+/// Like `produce_one_macro_object_shape` but applies `deep_resolve_slot_function_refs`
+/// on the solver fallback path for defineSlots.
+fn produce_one_macro_object_shape_for_slots(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<
+    verter_semantic::analysis::type_expand::ExpansionResult<
+        verter_semantic::analysis::type_expand::ExpandedObjectShape,
+    >,
+> {
+    if let Some(projected) = project_macro_type_expr(query_engine, owner_canonical, lowered) {
+        let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
+        if !shape.properties.is_empty()
+            || !shape.index_signatures.is_empty()
+            || !shape.call_signatures.is_empty()
+        {
+            return Some(
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+            );
+        }
+    }
+
+    let mut solved = query_engine.owner_engine_mut().solve(lowered);
+    solved.value = verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
+        &solved.value,
+        query_engine.owner_engine_mut(),
+    );
+    let solver_result =
+        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
+    has_shape_surface(&solver_result.value).then_some(solver_result)
+}
+
+fn has_shape_surface(shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool {
+    !shape.properties.is_empty()
+        || !shape.index_signatures.is_empty()
+        || !shape.call_signatures.is_empty()
+}
+
+fn has_prop_shape_surface(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> bool {
+    !shape.properties.is_empty() || !shape.index_signatures.is_empty()
+}
+
+/// Project a macro type expression, preferring the DB-backed
+/// `project_type_surface_expr` for zero-arg named refs.
+fn project_macro_type_expr(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    // Zero-arg named ref: try DB-backed projection first (reusable across
+    // requests), then fall back to request-scoped expression projection for
+    // cases the DB path can't handle (e.g. typeof bodies).
+    if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    {
+        if type_arguments.is_empty() {
+            if !zero_arg_named_ref_projection_is_safe(query_engine, owner_canonical, name) {
+                return None;
+            }
+            if let Some(projected) = query_engine.project_type_surface_expr(owner_canonical, name) {
+                return Some(projected);
+            }
+        }
+    }
+    // Request-scoped expression projection (handles typeof, indexed access, etc.).
+    query_engine.project_expr_surface_expr(owner_canonical, lowered)
+}
+
+fn zero_arg_named_ref_projection_is_safe(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    name: &str,
+) -> bool {
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let Some(body) = query_engine.named_decl_body(
+        declaration.canonical_source.as_str(),
+        declaration.resolved_name.as_str(),
+    ) else {
+        return false;
+    };
+    type_expr_is_projection_safe_for_macro_named_ref(&body)
+}
+
+fn type_expr_is_projection_safe_for_macro_named_ref(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    match expr {
+        verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+        | verter_semantic::analysis::type_expr::TypeExpr::Ref { .. } => true,
+        verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+            type_expr_is_projection_safe_for_macro_named_ref(inner)
+        }
+        _ => false,
     }
 }
 
@@ -877,7 +930,7 @@ impl VerterHost {
                 })
             {
                 let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-                enrich_projected_macro_shapes(
+                produce_macro_object_shapes(
                     canonical,
                     &snapshot,
                     &eval_source,

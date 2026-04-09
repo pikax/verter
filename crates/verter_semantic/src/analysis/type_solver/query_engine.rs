@@ -502,7 +502,13 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 let type_ref = TypeExpr::named(symbol_name);
                 let resolved =
                     self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
+                if !resolved.exactness.is_exact() {
+                    return None;
+                }
                 let surface = project::project_surface(&self.arena, resolved.node);
+                if !surface.exactness.is_exact() {
+                    return None;
+                }
                 if let Some(member) = surface
                     .value
                     .properties
@@ -524,6 +530,9 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                     resolved.node,
                     member_name,
                 );
+                if !projected.exactness.is_exact() {
+                    return None;
+                }
                 projected.value.map(|ty| ProjectedMember {
                     name: member_name.to_string(),
                     ty: project_to_type_expr(&self.arena, ty),
@@ -554,8 +563,14 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 let type_ref = TypeExpr::named(symbol_name);
                 let resolved =
                     self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
+                if !resolved.exactness.is_exact() {
+                    return None;
+                }
                 let projected =
                     project::project_keyspace(&self.arena, &mut self.caches, resolved.node);
+                if !projected.exactness.is_exact() {
+                    return None;
+                }
                 Some(projected_keyspace_from_result(&projected.value))
             }
             _ => None,
@@ -591,7 +606,13 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         expr: &TypeExpr,
     ) -> Option<ProjectedSurface> {
         let resolved = self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, expr);
+        if !resolved.exactness.is_exact() {
+            return None;
+        }
         let projected = project::project_surface(&self.arena, resolved.node);
+        if !projected.exactness.is_exact() {
+            return None;
+        }
         projected_surface_from_shape(&self.arena, &projected.value)
     }
 

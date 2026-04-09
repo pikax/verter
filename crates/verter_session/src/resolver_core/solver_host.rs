@@ -18,25 +18,45 @@ use crate::VerterHost;
 
 use super::prepared_decl::ImportBinding;
 
+#[derive(Debug)]
+pub(crate) struct DeclarationScopePayload {
+    scope_type_names: FxHashSet<String>,
+    scope_value_names: FxHashSet<String>,
+    scope_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
+    import_bindings: FxHashMap<String, ImportBinding>,
+}
+
+impl DeclarationScopePayload {
+    pub(crate) fn from_bundle(
+        bundle: &crate::resolver_core::prepared_decl::PreparedDeclBundle,
+    ) -> Self {
+        // Include script-setup generic param names in type_names so the
+        // solver recognises them as in-scope.
+        let mut scope_type_names = bundle.scope_type_names.clone();
+        for param_name in bundle.script_setup_type_bindings.keys() {
+            scope_type_names.insert(param_name.clone());
+        }
+
+        Self {
+            scope_type_names,
+            scope_value_names: bundle.scope_value_names.clone(),
+            scope_type_bindings: bundle.script_setup_type_bindings.clone(),
+            import_bindings: bundle.import_bindings.clone(),
+        }
+    }
+}
+
 /// Host-backed `TypeSolverHost` that resolves from:
 /// 1. Declaration-scoped same-file prepared declarations (via `PreparedDeclBundle`)
 /// 2. Import bindings (local name -> canonical_id + exported name)
-/// 3. Host-owned prepared decl caches for cross-file lookups, with
-///    `ModuleFactsDb` as the shallow fallback
+/// 3. Host-owned prepared decl caches for cross-file lookups
 pub struct SessionSolverHost<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
     /// Canonical file scope for declaration-scoped solving.
     scope_canonical_id: Option<String>,
-    /// Same-file type names visible in the active declaration scope.
-    scope_type_names: FxHashSet<String>,
-    /// Same-file value names visible in the active declaration scope.
-    scope_value_names: FxHashSet<String>,
-    /// Script-setup generic bindings visible in the active declaration scope.
-    scope_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
-    /// Import bindings: local name -> (canonical_id, exported_name).
-    /// Read from the host-owned `PreparedDeclBundle`.
-    import_bindings: FxHashMap<String, ImportBinding>,
+    /// Shared declaration-scope payload derived from the host-owned prepared bundle.
+    scope_payload: Option<Arc<DeclarationScopePayload>>,
 }
 
 impl<'a> SessionSolverHost<'a> {
@@ -45,10 +65,7 @@ impl<'a> SessionSolverHost<'a> {
             host,
             store_view,
             scope_canonical_id: None,
-            scope_type_names: FxHashSet::default(),
-            scope_value_names: FxHashSet::default(),
-            scope_type_bindings: FxHashMap::default(),
-            import_bindings: FxHashMap::default(),
+            scope_payload: None,
         }
     }
 
@@ -56,99 +73,63 @@ impl<'a> SessionSolverHost<'a> {
     /// `PreparedDeclBundle`.
     ///
     /// All declaration-scope data (symbol names, import bindings, script-setup
-    /// generics) is read from the host-owned bundle on the normal path. If a
-    /// stable bundle has not been materialized yet, fall back to cached module
-    /// facts without reopening VFS state.
+    /// generics) is read from the host-owned bundle — the single authority for
+    /// declaration-scope bundle materialization and reuse.
     pub fn with_declaration_scope(
         host: &'a VerterHost,
         store_view: Option<&'a HostStoreView>,
         declaration_canonical_id: &str,
     ) -> Self {
-        if let Some(bundle) = host
-            .prepared_decl_bundle_in_view(declaration_canonical_id, store_view)
-            .or_else(|| {
-                Self::prepared_decl_bundle_from_cached_facts(
-                    host,
-                    store_view,
-                    declaration_canonical_id,
-                )
-            })
+        if let Some(bundle) =
+            host.prepared_decl_bundle_in_view(declaration_canonical_id, store_view)
         {
-            // Include script-setup generic param names in type_names so the
-            // solver recognises them as in-scope.
-            let mut scope_type_names = bundle.scope_type_names.clone();
-            for param_name in bundle.script_setup_type_bindings.keys() {
-                scope_type_names.insert(param_name.clone());
-            }
-
-            Self {
+            Self::from_scope_payload(
                 host,
                 store_view,
-                scope_canonical_id: Some(declaration_canonical_id.to_string()),
-                scope_type_names,
-                scope_value_names: bundle.scope_value_names.clone(),
-                scope_type_bindings: bundle.script_setup_type_bindings.clone(),
-                import_bindings: bundle.import_bindings.clone(),
-            }
+                declaration_canonical_id,
+                Arc::new(DeclarationScopePayload::from_bundle(&bundle)),
+            )
         } else {
             Self::new(host, store_view)
         }
     }
 
-    fn prepared_decl_bundle_from_cached_facts(
+    /// Build a solver host from a pre-fetched `PreparedDeclBundle`, avoiding
+    /// a repeated bundle lookup when the caller already has the bundle cached.
+    pub fn from_bundle(
         host: &'a VerterHost,
         store_view: Option<&'a HostStoreView>,
-        canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
-        let facts = host.ensure_module_facts_in_view(canonical_id, store_view)?;
-        let state = facts.shallow_state.as_ref();
-        if state.symbols.is_empty()
-            && state.value_symbols.is_empty()
-            && state.import_targets.is_empty()
-            && state.exports.is_empty()
-            && state.wildcard_reexports.is_empty()
-        {
-            return None;
-        }
+        declaration_canonical_id: &str,
+        bundle: &crate::resolver_core::prepared_decl::PreparedDeclBundle,
+    ) -> Self {
+        Self::from_scope_payload(
+            host,
+            store_view,
+            declaration_canonical_id,
+            Arc::new(DeclarationScopePayload::from_bundle(bundle)),
+        )
+    }
 
-        let mut dep_edges = FxHashMap::default();
-        for target in state.import_targets.values() {
-            if !target.canonical_id.is_empty() {
-                dep_edges
-                    .entry(target.source_specifier.clone())
-                    .or_insert_with(|| target.canonical_id.clone());
-            }
+    pub(crate) fn from_scope_payload(
+        host: &'a VerterHost,
+        store_view: Option<&'a HostStoreView>,
+        declaration_canonical_id: &str,
+        scope_payload: Arc<DeclarationScopePayload>,
+    ) -> Self {
+        Self {
+            host,
+            store_view,
+            scope_canonical_id: Some(declaration_canonical_id.to_string()),
+            scope_payload: Some(scope_payload),
         }
-        for export in state.exports.values() {
-            if let crate::resolver_core::ExportTarget::Reexport {
-                source_specifier,
-                canonical_id,
-                ..
-            } = export
-            {
-                if !canonical_id.is_empty() {
-                    dep_edges
-                        .entry(source_specifier.clone())
-                        .or_insert_with(|| canonical_id.clone());
-                }
-            }
-        }
-        for wildcard in &state.wildcard_reexports {
-            if !wildcard.canonical_id.is_empty() {
-                dep_edges
-                    .entry(wildcard.source_specifier.clone())
-                    .or_insert_with(|| wildcard.canonical_id.clone());
-            }
-        }
+    }
 
-        Some(Arc::new(
-            crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
-                canonical_id,
-                state,
-                dep_edges,
-                FxHashMap::default(),
-            ),
-        ))
+    #[cfg(test)]
+    pub(crate) fn debug_scope_storage_ptr(&self) -> usize {
+        self.scope_payload
+            .as_ref()
+            .map(|payload| Arc::as_ptr(payload) as usize)
+            .unwrap_or(0)
     }
 
     fn cached_module_facts(
@@ -192,12 +173,9 @@ impl<'a> SessionSolverHost<'a> {
             }
         }
 
-        let bundle =
-            Self::prepared_decl_bundle_from_cached_facts(self.host, self.store_view, canonical_id)
-                .or_else(|| {
-                    self.host
-                        .prepared_decl_bundle_in_view(canonical_id, self.store_view)
-                })?;
+        let bundle = self
+            .host
+            .prepared_decl_bundle_in_view(canonical_id, self.store_view)?;
         let binding = bundle.import_bindings.get(local_name)?;
         Some(ResolvedRootIdentity::new(
             &binding.canonical_id,
@@ -235,9 +213,15 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         &self,
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedTypeDecl>> {
-        if let Some(scope_canonical_id) = self.scope_canonical_id.as_deref() {
+        if let (Some(scope_canonical_id), Some(scope_payload)) = (
+            self.scope_canonical_id.as_deref(),
+            self.scope_payload.as_ref(),
+        ) {
             if root_identity.canonical_id == scope_canonical_id {
-                if let Some(bound) = self.scope_type_bindings.get(&root_identity.symbol_name) {
+                if let Some(bound) = scope_payload
+                    .scope_type_bindings
+                    .get(&root_identity.symbol_name)
+                {
                     component_meta_trace_event!(
                         "solver_resolve_prepared_type_decl_result",
                         format!(
@@ -268,25 +252,6 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 ),
             );
             return Some(prepared);
-        }
-
-        if let Some(bundle) = Self::prepared_decl_bundle_from_cached_facts(
-            self.host,
-            self.store_view,
-            &root_identity.canonical_id,
-        ) {
-            if let Some(prepared) = bundle.prepared_type_decls.get(&root_identity.symbol_name) {
-                component_meta_trace_event!(
-                    "solver_resolve_prepared_type_decl_result",
-                    format!(
-                        "root={}::{} source=rebuilt_cached_scope_bundle hit=true store_view={}",
-                        root_identity.canonical_id,
-                        root_identity.symbol_name,
-                        self.store_view.is_some()
-                    ),
-                );
-                return Some(Arc::clone(prepared));
-            }
         }
 
         // Declaration-scoped name resolution and import bindings may point at
@@ -385,8 +350,12 @@ impl TypeSolverHost for SessionSolverHost<'_> {
     }
 
     fn utility_source(&self, name: &str) -> UtilitySource {
-        if self.scope_type_names.contains(name) || self.scope_type_bindings.contains_key(name) {
-            return UtilitySource::Shadowed;
+        if let Some(scope_payload) = self.scope_payload.as_ref() {
+            if scope_payload.scope_type_names.contains(name)
+                || scope_payload.scope_type_bindings.contains_key(name)
+            {
+                return UtilitySource::Shadowed;
+            }
         }
         if BuiltinUtility::from_name(name).is_some() {
             UtilitySource::Builtin
@@ -396,10 +365,13 @@ impl TypeSolverHost for SessionSolverHost<'_> {
     }
 
     fn root_identity(&self, canonical_id: &str, symbol_name: &str) -> Option<ResolvedRootIdentity> {
-        if let Some(scope_canonical_id) = self.scope_canonical_id.as_deref() {
-            if self.scope_type_bindings.contains_key(symbol_name)
-                || self.scope_type_names.contains(symbol_name)
-                || self.scope_value_names.contains(symbol_name)
+        if let (Some(scope_canonical_id), Some(scope_payload)) = (
+            self.scope_canonical_id.as_deref(),
+            self.scope_payload.as_ref(),
+        ) {
+            if scope_payload.scope_type_bindings.contains_key(symbol_name)
+                || scope_payload.scope_type_names.contains(symbol_name)
+                || scope_payload.scope_value_names.contains(symbol_name)
             {
                 let resolved = ResolvedRootIdentity::new(scope_canonical_id, symbol_name);
                 component_meta_trace_event!(
@@ -531,20 +503,23 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         // This is the targeted resolution path for the owner file's direct imports.
         // It handles renamed and default imports where the local name differs
         // from the exported name.
-        if let Some(binding) = self.import_bindings.get(symbol_name) {
-            let resolved = ResolvedRootIdentity::new(&binding.canonical_id, &binding.exported_name);
-            component_meta_trace_event!(
-                "solver_root_identity_result",
-                format!(
-                    "requested_canonical={} requested_symbol={} source=import_binding result={}::{} hit=true store_view={}",
-                    canonical_id,
-                    symbol_name,
-                    resolved.canonical_id,
-                    resolved.symbol_name,
-                    self.store_view.is_some()
-                ),
-            );
-            return Some(resolved);
+        if let Some(scope_payload) = self.scope_payload.as_ref() {
+            if let Some(binding) = scope_payload.import_bindings.get(symbol_name) {
+                let resolved =
+                    ResolvedRootIdentity::new(&binding.canonical_id, &binding.exported_name);
+                component_meta_trace_event!(
+                    "solver_root_identity_result",
+                    format!(
+                        "requested_canonical={} requested_symbol={} source=import_binding result={}::{} hit=true store_view={}",
+                        canonical_id,
+                        symbol_name,
+                        resolved.canonical_id,
+                        resolved.symbol_name,
+                        self.store_view.is_some()
+                    ),
+                );
+                return Some(resolved);
+            }
         }
 
         // 4. Handle namespace-qualified names: `Ns.Member` -> split on first dot,
@@ -552,7 +527,11 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         if let Some(dot_pos) = symbol_name.find('.') {
             let prefix = &symbol_name[..dot_pos];
             let member = &symbol_name[dot_pos + 1..];
-            if let Some(binding) = self.import_bindings.get(prefix) {
+            if let Some(binding) = self
+                .scope_payload
+                .as_ref()
+                .and_then(|scope_payload| scope_payload.import_bindings.get(prefix))
+            {
                 if self
                     .host
                     .prepared_type_decl_in_view(&binding.canonical_id, member, self.store_view)
