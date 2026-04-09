@@ -321,11 +321,18 @@ impl QueryArena {
     }
 
     /// Get a node by ID.
+    ///
+    /// Returns `Node::Primitive(PrimitiveKind::Unknown)` for `UNRESOLVED`
+    /// node IDs instead of panicking. This handles the case where a type
+    /// parameter has no explicit argument and no default — the solver
+    /// produces `NodeId::UNRESOLVED` which must be safely dereferenced
+    /// during subsequent type expansion.
     pub fn get(&self, id: NodeId) -> &Node {
-        debug_assert!(
-            !id.is_unresolved(),
-            "attempted to dereference UNRESOLVED node"
-        );
+        if id.is_unresolved() {
+            // Static sentinel — avoids allocation for the common UNRESOLVED case.
+            static UNKNOWN: Node = Node::Primitive(PrimitiveKind::Unknown);
+            return &UNKNOWN;
+        }
         &self.nodes[id.index()]
     }
 

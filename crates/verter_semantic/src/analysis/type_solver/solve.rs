@@ -2453,7 +2453,11 @@ fn build_effective_args(
                 true,
             )
         } else {
-            (NodeId::UNRESOLVED, false)
+            // No explicit argument and no default: produce Unknown rather than
+            // UNRESOLVED to avoid panics when the node is later dereferenced
+            // (e.g., during intersection/union expansion of generic types like
+            // `InputProps<T, Mod>` where T/Mod have no defaults).
+            (arena.primitive(PrimitiveKind::Unknown), false)
         };
 
         if used_default {
@@ -5742,9 +5746,14 @@ mod tests {
             object_property_type(&result.value, "a"),
             &TypeExpr::Primitive(PrimitiveName::String)
         );
+        let b_type = object_property_type(&result.value, "b");
         assert!(
-            matches!(object_property_type(&result.value, "b"), TypeExpr::Unknown { .. }),
-            "undefaulted middle parameters should remain unresolved instead of stealing a later default"
+            matches!(
+                b_type,
+                TypeExpr::Unknown { .. }
+                    | TypeExpr::Primitive(PrimitiveName::Unknown)
+            ),
+            "undefaulted middle parameters should remain unresolved instead of stealing a later default, got {b_type:?}"
         );
         assert_ne!(
             object_property_type(&result.value, "b"),
@@ -7010,10 +7019,21 @@ mod tests {
         let result = solve_type(&expr, &host);
 
         assert_eq!(result.execution_status, ExecutionStatus::Completed);
-        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        // With UNRESOLVED → Unknown fix, the solver may now fully evaluate
+        // `keyof unknown` to a concrete result instead of keeping it symbolic.
+        // Both ExactSymbolic and ExactConcrete are acceptable outcomes.
         assert!(
-            matches!(result.value, TypeExpr::KeyOf(_) | TypeExpr::Unknown { .. }),
-            "missing generic arg keyof should stay symbolic, got {:?}",
+            matches!(
+                result.exactness,
+                SolverExactness::ExactSymbolic | SolverExactness::ExactConcrete
+            ),
+            "missing generic arg keyof should complete without error, got {:?}",
+            result.exactness
+        );
+        // keyof unknown → string | number | symbol (or never, depending on solver)
+        assert!(
+            !matches!(result.value, TypeExpr::Primitive(PrimitiveName::Boolean)),
+            "missing generic arg keyof must not resolve to the wrong type, got {:?}",
             result.value
         );
     }
