@@ -1,5 +1,76 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T11:09:38.9208683+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest local trace artifact directory: `tmp/first3-alpha-trace-rerun7` (`2026-04-09 11:04`, full three-component rerun, reused path, no `results/` directory)
+- Latest executor-owned workspace log: `tmp/executor-workspace-tests-2026-04-09b.log` (`2026-04-09 11:05`)
+- New executor commits since prior review:
+  - `3b830d1e` `test(verter_session): add regression test for barrel intermediate invalidation`
+  - `a6fea790` `fix(verter_session): remove incomplete RouteDb fast path from barrel walk`
+- Executor head reviewed: `a6fea790` `fix(verter_session): remove incomplete RouteDb fast path from barrel walk`
+- Review scope for this pass:
+  - imported-root regression fix pair (`3b830d1e`, `a6fea790`)
+  - fresh workspace test log inspection
+  - fresh Batch 1 trace rerun inspection
+- Judgment: `FAIL`
+
+### Findings
+
+1. The two imported-root blockers from the previous review are closed.
+   - `3b830d1e` adds the exact missing regression test in `crates/verter_session/src/host_manage_tests.rs`:
+     - warm `ImportedRootDb`
+     - change only the intermediate barrel
+     - assert the next lookup returns the new leaf instead of stale `types-a`
+   - The new executor-owned workspace log `tmp/executor-workspace-tests-2026-04-09b.log` includes:
+     - `host_manage::tests::imported_root_invalidates_on_intermediate_barrel_change ... ok`
+   - `a6fea790` then removes the incomplete RouteDb fast path from `crates/verter_session/src/host_resolve.rs`, which was the direct cause of the stale imported-root validation gap.
+   - That is the right correctness cut: do not keep the partial warm-route shortcut alive behind a “mostly fixed” story.
+
+2. Batch 1 still lacks a post-commit gated proof artifact.
+   - A fresh full-batch rerun now exists at `tmp/first3-alpha-trace-rerun7` with all three current trace logs updated:
+     - `Accordion`: `2303ms`, `current_eval_state=39`
+     - `Alert`: `672ms`, `current_eval_state=35`
+     - `App`: `4567ms`, `current_eval_state=25`
+   - The forbidden-path signals still look good in that rerun:
+     - `types/index.ts.*store_view=false = 0 / 0 / 0`
+     - `legacy_resolved_type_cache = 0 / 0 / 0`
+     - `seed_imported_dependency_base_in_view = 0 / 0 / 0`
+     - `raw_snapshot = 0 / 0 / 0`
+   - But this rerun is still not an acceptance artifact because:
+     - it reuses the historically overloaded `first3-alpha-trace-rerun7` path again
+     - it does not contain `results/` artifacts
+     - so it cannot serve as the required `trace-check --strict --check-expected` proof on the reviewed head
+   - Until there is a fresh gated directory that includes result artifacts, this remains performance evidence only, not correctness-locked batch proof.
+
+3. Workspace verification is now current from the executor side.
+   - `tmp/executor-workspace-tests-2026-04-09b.log` is newer than both reviewed executor commits.
+   - The log shows the new regression test passing and ends with passing test bodies across the workspace, including the final `355 passed; 0 failed`.
+   - The Windows host still emits `GetProcAddress failed` noise from `verter_napi`, so the shell return behavior may remain noisy, but the recorded Rust test bodies are current and green.
+
+4. The previously logged structural performance blockers remain open.
+   - These two commits fixed a real correctness hole, but they did not address the larger hot-path issues already recorded at `2026-04-09T10:39:44`:
+     - stable prepared-decl bundles still own eager whole-file `dep_edges` / `import_bindings`
+     - production component-meta still retains overlapping route/root authorities
+   - Those remain the main reviewer-owned performance concerns after this correctness repair.
+
+### Missing Tests / Missing Validation
+
+- Produce a fresh Batch 1 gate directory on the reviewed head with result artifacts and rerun:
+  - `pnpm exec tsx packages/benchmark/src/trace-check.ts <fresh-trace-dir> --batch "Accordion,Alert,App" --strict --check-expected`
+- Stop reusing `first3-alpha-trace-rerun7` as a proof path; use a new artifact directory per reviewable rerun so trace provenance stays auditable.
+- Keep the new intermediate-barrel invalidation test in the normal workspace suite; it is now a key regression guard for future route-cache/perf work.
+
+### Notes
+
+- This pass is meaningful positive progress:
+  - the prior P1 imported-root invalidation finding is fixed
+  - the missing regression test is now present and passing
+- Batch status still remains `FAIL` only because the proof artifact is not yet in the reviewable gated shape, and the earlier structural performance blockers are still open.
+
 ## 2026-04-09T10:51:30.6859308+01:00 - Batch 1
 
 - Active batch:
