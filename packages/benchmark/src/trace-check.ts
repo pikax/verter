@@ -2,19 +2,20 @@
  * CLI harness: validates trace artifacts against desired trace specs.
  *
  * Usage:
- *   npx tsx packages/benchmark/src/trace-check.ts <trace-dir> [--strict]
+ *   npx tsx packages/benchmark/src/trace-check.ts <trace-dir> [options]
  *
- * Example:
- *   npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-trace-002 --strict
+ * Options:
+ *   --strict          Require each spec to have forbidden and maxCount assertions
+ *   --batch <names>   Comma-separated component names to check. Only these specs
+ *                     are loaded, and missing traces within the batch are FAILURES
+ *                     (not skips). This is the campaign's "is this batch done?" gate.
  *
- * --strict: requires each spec to have forbidden and maxCount assertions
+ * Examples:
+ *   # Check all specs (skips missing traces)
+ *   npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-trace-002
  *
- * The script:
- * 1. Discovers all *.json spec files under packages/benchmark/trace-specs/component-meta/
- * 2. For each spec, finds the matching trace log in <trace-dir>
- * 3. Validates the trace against the spec
- * 4. Reports pass/fail for each component
- * 5. Exits non-zero if any component fails
+ *   # Batch gate: only check Accordion,Alert,App — fail if any are missing
+ *   npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-trace-002 --batch Accordion,Alert,App --strict
  */
 
 import * as fs from "node:fs";
@@ -27,11 +28,18 @@ import {
   validateTrace,
 } from "./trace-validator.js";
 
-const traceDir = process.argv[2];
-const strict = process.argv.includes("--strict");
+const args = process.argv.slice(2);
+const traceDir = args.find((a) => !a.startsWith("--"));
+const strict = args.includes("--strict");
+
+let batchComponents: Set<string> | null = null;
+const batchIdx = args.indexOf("--batch");
+if (batchIdx !== -1 && args[batchIdx + 1]) {
+  batchComponents = new Set(args[batchIdx + 1].split(",").map((s) => s.trim()));
+}
 
 if (!traceDir) {
-  console.error("Usage: tsx src/trace-check.ts <trace-dir> [--strict]");
+  console.error("Usage: tsx src/trace-check.ts <trace-dir> [--strict] [--batch Name1,Name2,...]");
   process.exit(1);
 }
 
@@ -41,10 +49,29 @@ if (!fs.existsSync(specsDir)) {
   process.exit(1);
 }
 
-const specFiles = fs.readdirSync(specsDir).filter((f) => f.endsWith(".json"));
+let specFiles = fs.readdirSync(specsDir).filter((f) => f.endsWith(".json"));
 if (specFiles.length === 0) {
   console.error(`No spec files found in ${specsDir}`);
   process.exit(1);
+}
+
+// If --batch is set, filter specs to only the requested components.
+if (batchComponents) {
+  specFiles = specFiles.filter((f) => {
+    const name = f.replace(".json", "");
+    return batchComponents!.has(name);
+  });
+  // Check that all requested batch components have specs.
+  let missingSpecs = false;
+  for (const name of batchComponents) {
+    if (!specFiles.includes(`${name}.json`)) {
+      console.error(`[FAIL] ${name} — no spec file found in ${specsDir}`);
+      missingSpecs = true;
+    }
+  }
+  if (missingSpecs) {
+    process.exit(1);
+  }
 }
 
 const absTraceDir = path.resolve(traceDir);
@@ -91,15 +118,26 @@ for (const specFile of specFiles.sort()) {
   }
 
   if (!traceContent || !tracePath) {
-    console.log(`[SKIP] ${componentName} — no trace file found in ${absTraceDir}`);
-    skipped++;
+    if (batchComponents) {
+      // In batch mode, missing traces are FAILURES, not skips.
+      console.log(`[FAIL] ${componentName} — no trace file found in ${absTraceDir}`);
+      failed++;
+    } else {
+      console.log(`[SKIP] ${componentName} — no trace file found in ${absTraceDir}`);
+      skipped++;
+    }
     continue;
   }
 
   const { events, coreEvents } = parseTraceLog(traceContent);
   if (events.length === 0) {
-    console.log(`[SKIP] ${componentName} — trace file is empty or unparseable`);
-    skipped++;
+    if (batchComponents) {
+      console.log(`[FAIL] ${componentName} — trace file is empty or unparseable`);
+      failed++;
+    } else {
+      console.log(`[SKIP] ${componentName} — trace file is empty or unparseable`);
+      skipped++;
+    }
     continue;
   }
 
@@ -115,8 +153,9 @@ for (const specFile of specFiles.sort()) {
 }
 
 console.log("---");
+const total = batchComponents ? batchComponents.size : specFiles.length;
 console.log(
-  `Results: ${passed} passed, ${failed} failed, ${skipped} skipped out of ${specFiles.length} specs`,
+  `Results: ${passed} passed, ${failed} failed, ${skipped} skipped out of ${total} specs`,
 );
 
 if (failed > 0) {

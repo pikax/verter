@@ -34,8 +34,8 @@
       "note": "legacy resolved type cache must not be populated — all type resolution goes through the semantic DB path"
     },
     {
-      "namePattern": "/store_view=false/",
-      "detailPattern": "types/index.ts",
+      "namePattern": "current_eval_state",
+      "detailPattern": "/types/index\\.ts.*store_view=false/",
       "note": "types/index.ts barrel must not be accessed without a store view — indicates fallback to permissive reopening path"
     }
   ],

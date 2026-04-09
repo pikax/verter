@@ -29,8 +29,8 @@
       "note": "legacy resolved type cache must not be populated"
     },
     {
-      "namePattern": "/store_view=false/",
-      "detailPattern": "types/index.ts",
+      "namePattern": "current_eval_state",
+      "detailPattern": "/types/index\\.ts.*store_view=false/",
       "note": "types/index.ts barrel must not be accessed without a store view"
     }
   ],
