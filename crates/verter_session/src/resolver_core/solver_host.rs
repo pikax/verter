@@ -1,7 +1,7 @@
 //! `TypeSolverHost` implementation for `verter_session`.
 //!
 //! Bridges the solver's prepared declaration queries to the host-owned
-//! ModuleFactsDb caches.
+//! prepared-declaration bundles and module-facts caches.
 
 use std::sync::Arc;
 
@@ -20,8 +20,9 @@ use super::prepared_decl::ImportBinding;
 
 /// Host-backed `TypeSolverHost` that resolves from:
 /// 1. Declaration-scoped same-file prepared declarations (via `PreparedDeclBundle`)
-/// 2. Import bindings (local name → canonical_id + exported name)
-/// 3. Host's ModuleFactsDb prepared decl caches (cross-file)
+/// 2. Import bindings (local name -> canonical_id + exported name)
+/// 3. Host-owned prepared decl caches for cross-file lookups, with
+///    `ModuleFactsDb` as the shallow fallback
 pub struct SessionSolverHost<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
@@ -33,7 +34,7 @@ pub struct SessionSolverHost<'a> {
     scope_value_names: FxHashSet<String>,
     /// Script-setup generic bindings visible in the active declaration scope.
     scope_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
-    /// Import bindings: local name → (canonical_id, exported_name).
+    /// Import bindings: local name -> (canonical_id, exported_name).
     /// Read from the host-owned `PreparedDeclBundle`.
     import_bindings: FxHashMap<String, ImportBinding>,
 }
@@ -55,9 +56,9 @@ impl<'a> SessionSolverHost<'a> {
     /// `PreparedDeclBundle`.
     ///
     /// All declaration-scope data (symbol names, import bindings, script-setup
-    /// generics) is read from the host-owned bundle — no inline reconstruction
-    /// or `ensure_module_facts_in_view` probing. This keeps the solver hot path
-    /// on a single cached read per declaration scope.
+    /// generics) is read from the host-owned bundle on the normal path. If a
+    /// stable bundle has not been materialized yet, fall back to cached module
+    /// facts without reopening VFS state.
     pub fn with_declaration_scope(
         host: &'a VerterHost,
         store_view: Option<&'a HostStoreView>,
@@ -526,7 +527,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             return None;
         }
 
-        // 3. Check import bindings: local name → (canonical_id, exported_name).
+        // 3. Check import bindings: local name -> (canonical_id, exported_name).
         // This is the targeted resolution path for the owner file's direct imports.
         // It handles renamed and default imports where the local name differs
         // from the exported name.
@@ -546,7 +547,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             return Some(resolved);
         }
 
-        // 4. Handle namespace-qualified names: `Ns.Member` → split on first dot,
+        // 4. Handle namespace-qualified names: `Ns.Member` -> split on first dot,
         // resolve prefix as namespace import, look up member in the target file.
         if let Some(dot_pos) = symbol_name.find('.') {
             let prefix = &symbol_name[..dot_pos];
@@ -636,7 +637,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         // Unresolved bare-name: the solver encountered a reference that is not
         // in the owner env, not at a known canonical_id, and not in the import
         // bindings. This is expected for transitive same-file deps inside
-        // imported prepared decl bodies — the solver does not yet propagate
+        // imported prepared decl bodies -- the solver does not yet propagate
         // the defining file's canonical_id through resolution context.
         component_meta_trace_event!(
             "solver_root_identity_result",
@@ -656,506 +657,5 @@ impl TypeSolverHost for SessionSolverHost<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rustc_hash::FxHashMap;
-    use std::sync::Arc;
-    use verter_semantic::analysis::type_solver::host::NoopSolverHost;
-    use verter_semantic::analysis::Hash16;
-
-    #[test]
-    fn noop_host_returns_none() {
-        let host = NoopSolverHost;
-        let id = ResolvedRootIdentity::new("/t.ts", "T");
-        assert!(host.resolve_prepared_type_decl(&id).is_none());
-    }
-
-    #[test]
-    fn session_host_without_env() {
-        let host = VerterHost::new_standalone(Default::default());
-        let solver_host = SessionSolverHost::new(&host, None);
-        let id = ResolvedRootIdentity::new("/t.ts", "T");
-        assert!(solver_host.resolve_prepared_type_decl(&id).is_none());
-    }
-
-    #[test]
-    fn declaration_scope_prefers_cached_prepared_decl_shape() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let source = r#"
-import type { Inner } from "./dep"
-export interface Props { child: Inner }
-"#;
-        let allocator = oxc_allocator::Allocator::new();
-        let analysis = Arc::new(analyze_external_type_source(source, &allocator));
-        let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
-        let state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&analysis),
-            Some(&env),
-        ));
-        host.seed_module_facts_for_test(
-            "/decl.ts",
-            Hash16::default(),
-            Arc::<str>::from(source),
-            None,
-            None,
-            None,
-            analysis,
-            state,
-            None,
-            Some(Arc::<str>::from(source)),
-            FxHashMap::from_iter([(
-                "./dep".to_string(),
-                crate::types::DependencyResolution {
-                    specifier: "./dep".to_string(),
-                    resolved_canonical_id: Some("/dep.ts".to_string()),
-                    possible_canonical_ids: vec!["/dep.ts".to_string()],
-                },
-            )]),
-        );
-
-        let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/decl.ts");
-        let id = ResolvedRootIdentity::new("/decl.ts", "Props");
-        let decl = solver_host
-            .resolve_prepared_type_decl(&id)
-            .expect("declaration-scoped host should use cached prepared decls");
-        assert_eq!(
-            decl.name_resolution
-                .get("Inner")
-                .map(|identity| identity.canonical_id.as_str()),
-            Some("/dep.ts"),
-            "declaration-scoped solving should preserve cached name-resolution instead of rebuilding a local decl from EvalEnv",
-        );
-    }
-
-    #[test]
-    fn declaration_scope_root_identity_resolves_same_file_symbols_and_imports() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-        use verter_semantic::analysis::Hash16;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let source = r#"
-import type { Theme } from "./theme"
-export interface Props { theme: Theme }
-export const defaults: Props = {} as Props
-"#;
-        let allocator = oxc_allocator::Allocator::new();
-        let analysis = Arc::new(analyze_external_type_source(source, &allocator));
-        let env = verter_semantic::analysis::type_eval_build::parse_and_build_env(source);
-        let state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&analysis),
-            Some(&env),
-        ));
-        host.seed_module_facts_for_test(
-            "/decl.ts",
-            Hash16::default(),
-            Arc::<str>::from(source),
-            None,
-            None,
-            None,
-            analysis,
-            state,
-            None,
-            Some(Arc::<str>::from(source)),
-            FxHashMap::from_iter([(
-                "./theme".to_string(),
-                crate::types::DependencyResolution {
-                    specifier: "./theme".to_string(),
-                    resolved_canonical_id: Some("/theme.ts".to_string()),
-                    possible_canonical_ids: vec!["/theme.ts".to_string()],
-                },
-            )]),
-        );
-
-        let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/decl.ts");
-
-        let props = solver_host
-            .root_identity("", "Props")
-            .expect("same-file type should resolve in declaration scope");
-        assert_eq!(props.canonical_id, "/decl.ts");
-
-        let defaults = solver_host
-            .root_identity("", "defaults")
-            .expect("same-file value should resolve in declaration scope");
-        assert_eq!(defaults.canonical_id, "/decl.ts");
-
-        let theme = solver_host
-            .root_identity("", "Theme")
-            .expect("import binding should resolve from declaration scope");
-        assert_eq!(theme.canonical_id, "/theme.ts");
-        assert_eq!(theme.symbol_name, "Theme");
-    }
-
-    #[test]
-    fn explicit_canonical_root_identity_resolves_import_bindings_from_shallow_state() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-        use verter_semantic::analysis::Hash16;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let allocator = oxc_allocator::Allocator::new();
-
-        let helper_source = "export type Prettify<T> = { [K in keyof T]: T[K] }";
-        let helper_analysis = Arc::new(analyze_external_type_source(helper_source, &allocator));
-        let helper_env = parse_and_build_env(helper_source);
-        let helper_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&helper_analysis),
-            Some(&helper_env),
-        ));
-        host.seed_module_facts_for_test(
-            "/helper.d.ts",
-            Hash16::default(),
-            Arc::<str>::from(helper_source),
-            None,
-            None,
-            None,
-            helper_analysis,
-            helper_state,
-            None,
-            Some(Arc::<str>::from(helper_source)),
-            FxHashMap::default(),
-        );
-
-        let decl_source = r#"
-import { Prettify } from "./helper"
-export type FancyProps = Prettify<{ open: boolean }>
-"#;
-        let decl_analysis = Arc::new(analyze_external_type_source(decl_source, &allocator));
-        let decl_env = parse_and_build_env(decl_source);
-        let decl_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&decl_analysis),
-            Some(&decl_env),
-        ));
-
-        host.seed_module_facts_for_test(
-            "/decl.d.ts",
-            Hash16::default(),
-            Arc::<str>::from(decl_source),
-            None,
-            None,
-            None,
-            decl_analysis,
-            decl_state,
-            None,
-            Some(Arc::<str>::from(decl_source)),
-            FxHashMap::from_iter([(
-                "./helper".to_string(),
-                crate::types::DependencyResolution {
-                    specifier: "./helper".to_string(),
-                    resolved_canonical_id: Some("/helper.d.ts".to_string()),
-                    possible_canonical_ids: vec!["/helper.d.ts".to_string()],
-                },
-            )]),
-        );
-
-        let solver_host = SessionSolverHost::new(&host, None);
-        let prettify = solver_host.root_identity("/decl.d.ts", "Prettify").expect(
-            "explicit canonical lookups should resolve import bindings from cached shallow state",
-        );
-
-        assert_eq!(prettify.canonical_id, "/helper.d.ts");
-        assert_eq!(prettify.symbol_name, "Prettify");
-    }
-
-    #[test]
-    fn explicit_canonical_root_identity_does_not_follow_uncached_import_bindings() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-        use verter_semantic::analysis::Hash16;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let allocator = oxc_allocator::Allocator::new();
-
-        let helper_source = "export type Prettify<T> = { [K in keyof T]: T[K] }";
-        let helper_analysis = Arc::new(analyze_external_type_source(helper_source, &allocator));
-        let helper_env = parse_and_build_env(helper_source);
-        let helper_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&helper_analysis),
-            Some(&helper_env),
-        ));
-        host.seed_module_facts_for_test(
-            "/helper.d.ts",
-            Hash16::default(),
-            Arc::<str>::from(helper_source),
-            None,
-            None,
-            None,
-            helper_analysis,
-            helper_state,
-            None,
-            Some(Arc::<str>::from(helper_source)),
-            FxHashMap::default(),
-        );
-
-        let decl_source = r#"
-import { Prettify } from "./helper"
-export type FancyProps = Prettify<{ open: boolean }>
-"#;
-        let decl_analysis = Arc::new(analyze_external_type_source(decl_source, &allocator));
-        let decl_env = parse_and_build_env(decl_source);
-        let decl_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&decl_analysis),
-            Some(&decl_env),
-        ));
-
-        host.seed_module_facts_for_test(
-            "/decl.d.ts",
-            Hash16::default(),
-            Arc::<str>::from(decl_source),
-            None,
-            None,
-            None,
-            decl_analysis,
-            decl_state,
-            None,
-            Some(Arc::<str>::from(decl_source)),
-            FxHashMap::default(),
-        );
-
-        let solver_host = SessionSolverHost::new(&host, None);
-        assert!(
-            solver_host
-                .root_identity("/decl.d.ts", "Prettify")
-                .is_none(),
-            "canonical-scoped root lookups must stay cache-only and refuse uncached import routing",
-        );
-    }
-
-    #[test]
-    fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-        use verter_semantic::analysis::Hash16;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let allocator = oxc_allocator::Allocator::new();
-
-        let barrel_source = "export { Props } from './props'";
-        let barrel_analysis = Arc::new(analyze_external_type_source(barrel_source, &allocator));
-        let barrel_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&barrel_analysis),
-            None,
-        ));
-
-        host.seed_module_facts_for_test(
-            "/types/index.ts",
-            Hash16::default(),
-            Arc::<str>::from(barrel_source),
-            None,
-            None,
-            None,
-            barrel_analysis,
-            barrel_state,
-            None,
-            Some(Arc::<str>::from(barrel_source)),
-            FxHashMap::from_iter([(
-                "./props".to_string(),
-                crate::types::DependencyResolution {
-                    specifier: "./props".to_string(),
-                    resolved_canonical_id: Some("/types/props.ts".to_string()),
-                    possible_canonical_ids: vec!["/types/props.ts".to_string()],
-                },
-            )]),
-        );
-
-        let props_source = "export interface Props { label: string }";
-        let props_analysis = Arc::new(analyze_external_type_source(props_source, &allocator));
-        let props_env = parse_and_build_env(props_source);
-        let props_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&props_analysis),
-            Some(&props_env),
-        ));
-        host.seed_module_facts_for_test(
-            "/types/props.ts",
-            Hash16::default(),
-            Arc::<str>::from(props_source),
-            None,
-            None,
-            None,
-            props_analysis,
-            props_state,
-            None,
-            Some(Arc::<str>::from(props_source)),
-            FxHashMap::default(),
-        );
-
-        let root = host.resolve_imported_type_root_in_view("/types/index.ts", "Props", None);
-        assert_eq!(
-            root,
-            ("/types/props.ts".to_string(), "Props".to_string()),
-            "barrel root resolution should route to the defining declaration target",
-        );
-        assert!(
-            host.prepared_type_decl_in_view("/types/props.ts", "Props", None)
-                .is_some(),
-            "the defining prepared decl should be available directly once the root resolves",
-        );
-
-        let solver_host = SessionSolverHost::new(&host, None);
-        let prepared = solver_host
-            .resolve_prepared_type_decl(&ResolvedRootIdentity::new("/types/index.ts", "Props"))
-            .expect("barrel lookup should route to the defining prepared type decl");
-        assert_eq!(prepared.root_identity.canonical_id, "/types/props.ts");
-        assert_eq!(prepared.root_identity.symbol_name, "Props");
-    }
-
-    #[test]
-    fn prepared_value_decl_lookup_routes_barrel_targets_before_cache_lookup() {
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/theme/index.ts".to_string(),
-            Arc::from("export { theme } from './theme'"),
-        );
-        ws.inject_file(
-            "/theme/theme.ts".to_string(),
-            Arc::from("export const theme: { color: string } = { color: 'blue' }"),
-        );
-
-        let host = VerterHost::new(crate::HostConfig::default(), ws);
-        host.set_import_dependencies(
-            "/theme/index.ts",
-            vec![crate::types::DependencyResolution {
-                specifier: "./theme".to_string(),
-                resolved_canonical_id: Some("/theme/theme.ts".to_string()),
-                possible_canonical_ids: vec!["/theme/theme.ts".to_string()],
-            }],
-        );
-
-        let solver_host = SessionSolverHost::new(&host, None);
-        let prepared = solver_host
-            .resolve_prepared_value_decl(&ResolvedRootIdentity::new("/theme/index.ts", "theme"))
-            .expect("barrel lookup should route to the defining prepared value decl");
-        assert_eq!(prepared.root_identity.canonical_id, "/theme/theme.ts");
-        assert_eq!(prepared.root_identity.symbol_name, "theme");
-    }
-
-    #[test]
-    fn member_projection_chases_generic_alias_slots_through_helper_context() {
-        use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
-        use verter_semantic::analysis::type_eval_build::parse_and_build_env;
-        use verter_semantic::analysis::type_expr::{
-            LiteralValue, ObjectMember, PrimitiveName, TypeExpr,
-        };
-        use verter_semantic::analysis::type_solver::solve::solve_type_with_trace;
-        use verter_semantic::analysis::Hash16;
-
-        let host = VerterHost::new_standalone(Default::default());
-        let allocator = oxc_allocator::Allocator::new();
-
-        let config_source = r#"
-export type Id<T> = {} & { [P in keyof T]: T[P] }
-export type Theme = {
-  slots: {
-    item: string
-  }
-}
-export type Noise = {
-  boom: string
-}
-export type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<T['slots']>
-export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
-  slots: ComponentSlots<T>
-}
-"#;
-        let config_analysis = Arc::new(analyze_external_type_source(config_source, &allocator));
-        let config_env = parse_and_build_env(config_source);
-        let config_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&config_analysis),
-            Some(&config_env),
-        ));
-        host.seed_module_facts_for_test(
-            "/types/config.ts",
-            Hash16::default(),
-            Arc::<str>::from(config_source),
-            None,
-            None,
-            None,
-            config_analysis,
-            config_state,
-            None,
-            Some(Arc::<str>::from(config_source)),
-            FxHashMap::default(),
-        );
-
-        let consumer_source = r#"
-import type { ComponentConfig, Theme } from './config'
-export type CheckboxGroup = ComponentConfig<Theme>
-"#;
-        let consumer_analysis = Arc::new(analyze_external_type_source(consumer_source, &allocator));
-        let consumer_env = parse_and_build_env(consumer_source);
-        let consumer_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
-            Hash16::default(),
-            Arc::clone(&consumer_analysis),
-            Some(&consumer_env),
-        ));
-        host.seed_module_facts_for_test(
-            "/types/consumer.ts",
-            Hash16::default(),
-            Arc::<str>::from(consumer_source),
-            None,
-            None,
-            None,
-            consumer_analysis,
-            consumer_state,
-            None,
-            Some(Arc::<str>::from(consumer_source)),
-            FxHashMap::from_iter([(
-                "./config".to_string(),
-                crate::types::DependencyResolution {
-                    specifier: "./config".to_string(),
-                    resolved_canonical_id: Some("/types/config.ts".to_string()),
-                    possible_canonical_ids: vec!["/types/config.ts".to_string()],
-                },
-            )]),
-        );
-
-        let solver_host =
-            SessionSolverHost::with_declaration_scope(&host, None, "/types/consumer.ts");
-
-        let (solved, trace) = solve_type_with_trace(
-            &TypeExpr::IndexedAccess {
-                object: Arc::new(TypeExpr::named("CheckboxGroup")),
-                index: Arc::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
-            },
-            &solver_host,
-        );
-
-        let TypeExpr::Object(slots) = solved.value else {
-            panic!("expected object slots projection, got {:?}", solved.value);
-        };
-        let item = slots
-            .properties
-            .iter()
-            .find_map(|member| match member {
-                ObjectMember::Property(prop) if prop.name == "item" => Some(prop),
-                _ => None,
-            })
-            .expect("slots projection should contain item");
-        assert!(
-            !item.optional,
-            "fixture keeps the projected slot member required"
-        );
-        assert!(matches!(
-            item.ty,
-            TypeExpr::Primitive(PrimitiveName::String)
-        ));
-        assert!(
-            !trace.iter().any(|identity| {
-                identity.canonical_id == "/types/config.ts" && identity.symbol_name == "Noise"
-            }),
-            "solving CheckboxGroup['slots'] should stay on-route and never visit Noise"
-        );
-    }
-}
+#[path = "solver_host_tests.rs"]
+mod solver_host_tests;

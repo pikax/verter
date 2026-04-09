@@ -1137,9 +1137,8 @@ export type FancyProps = Local
     assert_eq!(prepared.root_identity.symbol_name, "Local");
 }
 
-// NOTE: ensure_shallow_imported_dependency_state_replaces_stale_prepared_type_decls was removed
-// because prepared_type_decls no longer lives on ModuleFacts — prepared decls
-// are managed through the bundle cache path.
+// NOTE: stale prepared-decl replacement test was removed — prepared decls
+// are managed through the host-owned bundle cache path, not ModuleFacts.
 
 #[test]
 fn resolver_store_view_tracks_transitive_dependency_targets() {
@@ -1603,7 +1602,7 @@ const answer: string = '42'
 }
 
 #[test]
-fn materialize_imported_dependency_state_in_view_reuses_cached_vue_entry_arc() {
+fn ensure_module_facts_reuses_cached_vue_entry_arc() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -1655,7 +1654,7 @@ export interface Props extends Base {
 }
 
 #[test]
-fn materialize_imported_dependency_state_in_view_populates_external_type_analysis_for_non_sfc() {
+fn ensure_module_facts_populates_external_type_analysis_for_non_sfc() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -4725,8 +4724,7 @@ export interface Props extends Base {
 }
 
 #[test]
-fn resolve_external_type_from_cached_dependency_state_in_view_keeps_local_type_resolution_shallow()
-{
+fn resolve_external_type_from_module_facts_in_view_keeps_local_type_resolution_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -4752,7 +4750,7 @@ fn resolve_external_type_from_cached_dependency_state_in_view_keeps_local_type_r
 
     ws.reset_reads();
     let resolved = host
-        .resolve_external_type_from_cached_dependency_state_in_view(
+        .resolve_external_type_from_module_facts_in_view(
             "/src/types.ts",
             "Props",
             &rustc_hash::FxHashMap::default(),
@@ -5130,7 +5128,7 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn ensure_shallow_imported_dependency_state_for_vue_exports_stays_local() {
+fn ensure_module_facts_for_vue_exports_stays_local() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -5194,7 +5192,7 @@ export interface UnusedProps {
 }
 
 #[test]
-fn ensure_shallow_imported_dependency_state_defers_prepared_decl_materialization_until_lookup() {
+fn ensure_module_facts_defers_prepared_decl_materialization_until_lookup() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -6160,7 +6158,6 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
 
     ws.reset_resolves();
     ws.remove_file("/src/types/index.ts");
-    // imported_dependency_cache reference removed
     host.compile_cache.remove("/src/types/index.ts");
 
     let resolved = host.resolve_type_dependency_canonical_shallow_in_view(
@@ -6230,7 +6227,7 @@ export interface LinkProps extends SharedProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn import_route_lookup_reuses_imported_dependency_cache_without_live_owner_state() {
+fn import_route_lookup_reuses_module_facts_without_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",

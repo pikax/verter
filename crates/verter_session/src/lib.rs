@@ -1557,7 +1557,6 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 #[cfg(test)]
 impl VerterHost {
     /// Seed ModuleFactsDb with pre-built data for tests.
-    /// Replaces the old `imported_dependency_cache.lock().insert(...)` pattern.
     pub(crate) fn seed_module_facts_for_test(
         &self,
         canonical_id: &str,
@@ -1626,7 +1625,7 @@ impl VerterHost {
         if !import_routes.is_empty() {
             self.compile_cache
                 .entry(canonical_id.to_string())
-                .or_insert_with(|| crate::CompileCacheEntry::default())
+                .or_insert_with(crate::CompileCacheEntry::default)
                 .import_routes = import_routes.clone();
         }
 

@@ -106,9 +106,8 @@ where
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
     pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
-    /// Fact-validated prepared declaration bundles, keyed by canonical file ID.
-    /// Replaces the entry-owned `prepared_type_decls` / `prepared_value_decls`
-    /// from the legacy dependency cache with an atomic, fact-validated cache.
+    /// Host-owned prepared declaration bundles, keyed by canonical file ID.
+    /// Validated by file whole hash and import-route facts.
     pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
     /// Top-level fallthrough singleflight, with runtime fallthrough nodes remaining the cache authority.
     pub top_level_fallthrough_singleflight:
@@ -117,13 +116,15 @@ where
     pub counters: Arc<ResolverCounters>,
 
     // -- Semantic DB layers --
-    /// Immutable per-file facts (raw source, parse, analysis, shallow state).
+    /// Sole long-lived owner of per-file immutable facts (raw source, parse,
+    /// analysis, shallow state). Keyed by `(canonical_id, whole_hash)`.
     pub module_facts: ModuleFactsDb,
-    /// Canonical export routing facts (barrel surfaces, route results, misses).
+    /// Host-owned cross-file route subsystem: barrel surfaces, route results,
+    /// and stable negative answers.
     pub routes: RouteDb,
-    /// Imported type-root proofs (positive and negative).
+    /// Host-owned imported-root proof cache (positive and negative).
     pub imported_roots: ImportedRootDb,
-    /// Shared projected type surfaces (write-through from projection operators).
+    /// Shared projected type surfaces for cross-request reuse.
     pub type_surfaces: TypeSurfaceDb,
 }
 

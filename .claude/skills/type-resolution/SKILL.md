@@ -26,7 +26,7 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - A changed imported dependency may be reparsed once for its new hash, even if several owners or several later queries need it. That single refreshed canonical file state must then be shared across all of those requests.
 - Concurrent cold requests that reach the same canonical imported file must collapse onto one host-owned materialization path. `Promise.all([MetaA, MetaB, MetaC])` is not allowed to produce three separate read/parse/shallow passes for the same `type.ts`.
 - Prepared declarations are also host-owned warm artifacts. Once `(canonical_id, symbol_name, whole_hash)` has been prepared, later lookups from other owners and from later distinct queries on the same host must reuse that prepared declaration until invalidation.
-- Reuse the current host-owned route/barrel cache path. Today that means `ImportTypeRouteEntry` on the importer side plus `BarrelResolutionState` on the imported-file side; do not add a second route-cache subsystem for the same work without explicit proof it is needed.
+- Reuse the current host-owned route/barrel cache path. Today that means `RouteDb` for barrel/export route facts and `ImportedRootDb` for imported-root proofs; do not add a second route-cache subsystem for the same work without explicit proof it is needed.
 - Route discovery must stay lazy and demand-driven. First-hit discovery may follow barrel/reexport hops only until the requested symbol is found (or proven absent under the current negative-cache policy). Do not require a full scan of all barrel exports on every first hit.
 - Warm same-owner lookups should reuse the existing valid importer-local route entry rather than replaying the full barrel chain.
 - Cross-owner reuse in the current architecture should come primarily from shared imported-file state, shared barrel/export surfaces, and prepared declarations. Do not assume canonical cross-owner route-fact backfill exists unless a later change explicitly adds it.
@@ -61,7 +61,7 @@ Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.)
 - `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
 - `import_locals` / `import_targets` (import classification for closure)
 
-Populated once through the shared host ensure-path and cached on `ImportedDependencyCacheEntry.shallow_file_state`. Invalidated when the file's whole-hash changes.
+Populated once through the shared host ensure-path and cached in `ModuleFactsDb`. Invalidated when the file's whole-hash changes.
 
 **ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
 1. Seed with initial `(canonical_id, exported_name)` pairs
@@ -79,7 +79,7 @@ Populated once through the shared host ensure-path and cached on `ImportedDepend
 
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 
-**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through compile_cache deps, imported_dependency_cache deps, then workspace fallback. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
+**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through `ModuleFactsDb` for per-file facts, `RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback for cold misses. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
 
 **Key files:**
 

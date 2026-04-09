@@ -2630,7 +2630,7 @@ impl VerterHost {
                 return None;
             }
             if self.read_analysis_source(canonical_id).is_none() {
-                return self.materialize_prepared_decl_bundle(canonical_id, None, false);
+                return self.materialize_prepared_decl_bundle(canonical_id, None);
             }
         }
 
@@ -2677,11 +2677,7 @@ impl VerterHost {
                     stable: true,
                 });
             }
-            let result = self.materialize_prepared_decl_bundle(
-                canonical_id,
-                Some(current_view),
-                store_view.is_some(),
-            );
+            let result = self.materialize_prepared_decl_bundle(canonical_id, Some(current_view));
             let stable = result.is_some();
             Ok(crate::resolver_core::StableExecutionValue {
                 value: result.map(|arc| (*arc).clone()),
@@ -2700,7 +2696,6 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-        _publish_exact_resolutions: bool,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         let shallow_store_view = store_view;
 
@@ -3521,7 +3516,7 @@ impl VerterHost {
         }
     }
 
-    pub(crate) fn resolve_external_type_from_cached_dependency_state_in_view(
+    pub(crate) fn resolve_external_type_from_module_facts_in_view(
         &self,
         dep_canonical: &str,
         type_name: &str,
@@ -3532,7 +3527,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let _trace = component_meta_trace_scope!(
-            "resolve_external_type_from_cached_dependency_state_in_view",
+            "resolve_external_type_from_module_facts_in_view",
             format!(
                 "owner={} type={} store_view={}",
                 dep_canonical,
@@ -3558,7 +3553,7 @@ impl VerterHost {
             source_type,
         ) else {
             component_meta_trace_event!(
-                "resolve_external_type_from_cached_dependency_state_in_view_result",
+                "resolve_external_type_from_module_facts_in_view_result",
                 format!(
                     "owner={} type={} hit=false local_symbol_target={} parse_failed_or_missing_type_context=true",
                     dep_canonical,
@@ -3579,7 +3574,7 @@ impl VerterHost {
             imported_companions,
         );
         component_meta_trace_event!(
-            "resolve_external_type_from_cached_dependency_state_in_view_result",
+            "resolve_external_type_from_module_facts_in_view_result",
             format!(
                 "owner={} type={} hit={} local_symbol_target={} parse_failed=false",
                 dep_canonical,

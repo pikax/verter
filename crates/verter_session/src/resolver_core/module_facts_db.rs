@@ -1,13 +1,12 @@
 //! Immutable per-file facts keyed by `(canonical_id, whole_hash)`.
 //!
-//! Replaces the raw/parse/analysis/snapshot/eval-source portions of
-//! the legacy dependency cache and the imported-file current-eval/snapshot
-//! fallback paths.
+//! `ModuleFactsDb` is the sole long-lived owner of raw source, parse,
+//! analysis, snapshot, eval source, and shallow state for imported files.
+//! `RouteDb` owns resolved routing separately.
 //!
 //! Facts are immutable once built. `ShallowFileState` is never mutated after
-//! construction — `RouteDb` owns resolved routing separately. Concurrent cold
-//! requests for the same `(canonical_id, whole_hash)` coalesce onto one
-//! materialization path through singleflight.
+//! construction. Concurrent cold requests for the same `(canonical_id,
+//! whole_hash)` coalesce onto one materialization path through singleflight.
 
 use std::sync::Arc;
 
@@ -104,7 +103,6 @@ impl ModuleFactsDb {
             return Some(facts);
         }
 
-        // Singleflight: coalesce concurrent cold loads.
         // Singleflight: coalesce concurrent cold loads.
         // The singleflight wraps the result in an outer Arc, so we use
         // Arc<ModuleFacts> as the flight value type to avoid double-Arc.

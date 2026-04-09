@@ -1037,7 +1037,7 @@ impl VerterHost {
                 store_view,
             )
             .or_else(|| {
-                self.resolve_external_type_from_cached_dependency_state_in_view(
+                self.resolve_external_type_from_module_facts_in_view(
                     effective_dep_canonical.as_str(),
                     effective_type_name.as_str(),
                     &ResolvedExternalTypes::default(),
@@ -1185,7 +1185,7 @@ impl VerterHost {
                 store_view,
             )
             .or_else(|| {
-                self.resolve_external_type_from_cached_dependency_state_in_view(
+                self.resolve_external_type_from_module_facts_in_view(
                     effective_dep_canonical.as_str(),
                     effective_type_name.as_str(),
                     &ResolvedExternalTypes::default(),
@@ -1604,7 +1604,7 @@ impl VerterHost {
                 }
             }
 
-            self.resolve_external_type_from_cached_dependency_state_in_view(
+            self.resolve_external_type_from_module_facts_in_view(
                 canonical_id,
                 exported_name,
                 &companion_types,
