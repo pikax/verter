@@ -334,14 +334,21 @@ export function validateTrace(
 
 // ── Spec loader ───────────────────────────────────────────────────────
 
-export function loadTraceSpec(jsonContent: string): TraceSpec {
+export interface LoadTraceSpecOptions {
+  /** Require at least one forbidden assertion (default: false). */
+  requireForbidden?: boolean;
+  /** Require at least one maxCount assertion (default: false). */
+  requireMaxCounts?: boolean;
+}
+
+export function loadTraceSpec(jsonContent: string, options?: LoadTraceSpecOptions): TraceSpec {
   const raw = JSON.parse(jsonContent);
   if (!raw.component || !raw.componentPath || !raw.maxTotalDurationMs) {
     throw new Error(
       "Invalid trace spec: missing required fields (component, componentPath, maxTotalDurationMs)",
     );
   }
-  return {
+  const spec: TraceSpec = {
     component: raw.component,
     componentPath: raw.componentPath,
     maxTotalDurationMs: raw.maxTotalDurationMs,
@@ -350,6 +357,19 @@ export function loadTraceSpec(jsonContent: string): TraceSpec {
     maxCounts: raw.maxCounts ?? [],
     maxDurations: raw.maxDurations ?? [],
   };
+  if (options?.requireForbidden && spec.forbidden.length === 0) {
+    throw new Error(
+      `Trace spec for ${spec.component} has no forbidden assertions. ` +
+        `Negative assertions are required to guard against legacy fallback paths.`,
+    );
+  }
+  if (options?.requireMaxCounts && spec.maxCounts.length === 0) {
+    throw new Error(
+      `Trace spec for ${spec.component} has no maxCount assertions. ` +
+        `Count thresholds are required to detect performance regressions.`,
+    );
+  }
+  return spec;
 }
 
 // ── Report formatter ──────────────────────────────────────────────────

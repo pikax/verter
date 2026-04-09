@@ -17,14 +17,38 @@
       "namePattern": "resolve_component_meta_result",
       "detailPattern": "has_evaluated_types=true",
       "note": "must produce evaluated types"
+    },
+    {
+      "namePattern": "compute_evaluated_types_expand_macros",
+      "detailPattern": "store_view=true",
+      "note": "macro expansion must run with a valid store view"
     }
   ],
-  "forbidden": [],
+  "forbidden": [
+    {
+      "namePattern": "seed_imported_dependency_base_in_view",
+      "note": "legacy imported-dependency seeding path must not execute — semantic DB owns all dependency resolution"
+    },
+    {
+      "namePattern": "legacy_resolved_type_cache",
+      "note": "legacy resolved type cache must not be populated — all type resolution goes through the semantic DB path"
+    },
+    {
+      "namePattern": "/store_view=false/",
+      "detailPattern": "types/index.ts",
+      "note": "types/index.ts barrel must not be accessed without a store view — indicates fallback to permissive reopening path"
+    }
+  ],
   "maxCounts": [
     {
       "namePattern": "resolve_imported_type_root",
       "maxCount": 12,
       "note": "should resolve at most 6 imported type roots (start+end = 12 events); currently 4 roots"
+    },
+    {
+      "namePattern": "current_eval_state",
+      "maxCount": 70,
+      "note": "current_eval_state calls should be bounded; baseline is 38-53 across runs, allow headroom for variance"
     }
   ],
   "maxDurations": [

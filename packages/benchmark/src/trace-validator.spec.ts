@@ -317,6 +317,42 @@ describe("loadTraceSpec", () => {
     expect(() => loadTraceSpec(JSON.stringify({}))).toThrow("Invalid trace spec");
   });
 
+  it("rejects under-specified specs when requireForbidden is set", () => {
+    const json = JSON.stringify({
+      component: "Weak",
+      componentPath: "src/Weak.vue",
+      maxTotalDurationMs: 1000,
+      forbidden: [],
+    });
+    expect(() => loadTraceSpec(json, { requireForbidden: true })).toThrow(
+      "no forbidden assertions",
+    );
+  });
+
+  it("rejects under-specified specs when requireMaxCounts is set", () => {
+    const json = JSON.stringify({
+      component: "Weak",
+      componentPath: "src/Weak.vue",
+      maxTotalDurationMs: 1000,
+      forbidden: [{ namePattern: "legacy", note: "guard" }],
+      maxCounts: [],
+    });
+    expect(() => loadTraceSpec(json, { requireMaxCounts: true })).toThrow("no maxCount assertions");
+  });
+
+  it("accepts well-specified specs with requireForbidden", () => {
+    const json = JSON.stringify({
+      component: "Strong",
+      componentPath: "src/Strong.vue",
+      maxTotalDurationMs: 1000,
+      forbidden: [{ namePattern: "legacy_path", note: "must not use legacy" }],
+      maxCounts: [{ namePattern: "expensive_op", maxCount: 10, note: "bounded" }],
+    });
+    const spec = loadTraceSpec(json, { requireForbidden: true, requireMaxCounts: true });
+    expect(spec.forbidden).toHaveLength(1);
+    expect(spec.maxCounts).toHaveLength(1);
+  });
+
   it("defaults optional arrays to empty", () => {
     const json = JSON.stringify({
       component: "Test",
