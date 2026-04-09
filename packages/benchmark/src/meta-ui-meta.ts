@@ -9,8 +9,12 @@ export function refineMetaForBenchmark(meta: any) {
   const eventProps = new Set(
     (meta?.events ?? []).map((event: any) => camelCase(`on_${event.name}`)),
   );
+  // Vue built-in attrs that vue-component-meta excludes via global flag
+  const vueBuiltinAttrs = new Set(["class", "style", "key", "ref"]);
   const props = (meta?.props ?? [])
-    .filter((prop: any) => !prop.global && !eventProps.has(prop.name))
+    .filter(
+      (prop: any) => !prop.global && !eventProps.has(prop.name) && !vueBuiltinAttrs.has(prop.name),
+    )
     .sort((left: any, right: any) => {
       if (!left.required && right.required) {
         return 1;
@@ -31,7 +35,10 @@ export function refineMetaForBenchmark(meta: any) {
   const sourceMeta = meta?._verter;
 
   return {
-    componentName: sourceMeta?.componentName ?? meta?.componentName ?? null,
+    // Use the compat-layer componentName (null for VolarComponentMeta)
+    // rather than digging into _verter.componentName which is a verter
+    // extension not present in vue-component-meta output.
+    componentName: meta?.componentName ?? null,
     props,
     events: (meta?.events ?? []).map((event: any) => stripInternalSchemaNoise(event)),
     slots: (meta?.slots ?? []).map((slot: any) => stripInternalSchemaNoise(slot)),
