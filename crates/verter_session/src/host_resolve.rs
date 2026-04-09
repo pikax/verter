@@ -1803,42 +1803,6 @@ impl VerterHost {
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
         let _ = self.ensure_module_facts_in_view(dep_canonical, store_view);
-
-        // Check the RouteDb first to avoid redundant barrel walks. If the route
-        // has already been resolved (e.g., by a prior query for a different
-        // imported type from the same barrel), reuse it.
-        let owned_view;
-        let route_view = if let Some(sv) = store_view {
-            sv
-        } else {
-            owned_view = self.resolver_store_view();
-            &owned_view
-        };
-        if let Some(cached_route) =
-            self.resolver
-                .runtime
-                .routes
-                .get_route(dep_canonical, requested_name, route_view)
-        {
-            // Route is cached — collect participant facts from the provider +
-            // resolved target (the full participant set was already validated
-            // when the route was first cached).
-            let mut facts = Vec::new();
-            let mut seen = rustc_hash::FxHashSet::default();
-            self.append_route_participant_fact_versions_in_view(
-                dep_canonical,
-                &mut facts,
-                &mut seen,
-                store_view,
-            );
-            if let Some((target, _)) = cached_route.resolved() {
-                self.append_route_participant_fact_versions_in_view(
-                    target, &mut facts, &mut seen, store_view,
-                );
-            }
-            return Some(((*cached_route).clone(), facts));
-        }
-
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
         let route_result = self.resolve_named_type_export_route_uncached_in_view(
