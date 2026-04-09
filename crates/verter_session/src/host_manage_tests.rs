@@ -8035,3 +8035,66 @@ fn archived_module_facts_rejected_when_workspace_dep_changes_content() {
          mismatched content hash to pass validation.",
     );
 }
+
+/// Regression: intermediate barrel re-export changes must invalidate
+/// ImportedRootDb entries, even when the top-level provider and the
+/// original leaf file remain text-identical.
+///
+/// Chain: /src/index.ts -> /src/barrel.ts -> /src/types-a.ts
+/// After: /src/index.ts -> /src/barrel.ts -> /src/types-b.ts
+/// (only /src/barrel.ts changes)
+#[test]
+fn imported_root_invalidates_on_intermediate_barrel_change() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/types-a.ts", "export interface Props { version: 1 }\n");
+    ws.inject_file("/src/types-b.ts", "export interface Props { version: 2 }\n");
+    // Barrel re-exports Props from types-a
+    ws.inject_file("/src/barrel.ts", "export { Props } from './types-a'\n");
+    // Index re-exports everything from barrel
+    ws.inject_file("/src/index.ts", "export { Props } from './barrel'\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // Set up import dependencies so the route chain resolves
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./barrel", "/src/barrel.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./types-a", "/src/types-a.ts")],
+    );
+
+    // Warm: resolve Props through the chain
+    let view1 = host.resolver_store_view();
+    let root1 = host.resolve_imported_type_root_in_view("/src/index.ts", "Props", Some(&view1));
+    assert_eq!(
+        root1.0.as_str(),
+        "/src/types-a.ts",
+        "initial root should point to types-a",
+    );
+
+    // Change barrel to point to types-b instead
+    ws.inject_file("/src/barrel.ts", "export { Props } from './types-b'\n");
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![exact_dependency("./types-b", "/src/types-b.ts")],
+    );
+
+    // The provider (/src/index.ts) and the old leaf (/src/types-a.ts)
+    // are unchanged. Only the barrel changed.
+    let view2 = host.resolver_store_view();
+    let root2 = host.resolve_imported_type_root_in_view("/src/index.ts", "Props", Some(&view2));
+    assert_eq!(
+        root2.0.as_str(),
+        "/src/types-b.ts",
+        "after intermediate barrel change, root must point to types-b, \
+         not stale types-a from the cached imported root",
+    );
+}
