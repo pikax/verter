@@ -1,5 +1,58 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T04:11:23.7033435+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-trace-003`
+- Full-batch trace evidence: `tmp/batch1-trace-002`
+- Judgment: `FAIL`
+
+### Findings
+
+1. `fix(verter_session): accept untracked dependency files in store view validation` introduces a stale-cache correctness risk for edited dependency files.
+   - `crates/verter_session/src/resolver_store.rs` now accepts untracked `FileWholeHash` and untracked `DerivedFactKind::DirectSource` facts with `None => true`.
+   - `HostStoreView::checks_archive()` is still `true`, so archived entries remain visible to store-view lookups.
+   - On file edits, `crates/verter_session/src/host_upsert.rs` still calls `self.resolver.runtime.evict_canonical(&canonical_id)`, which only soft-evicts provider-owned caches.
+   - `ValidatedFactCache::remove()` explicitly leaves archived entries in place under the assumption that whole-hash mismatch will block stale reuse.
+   - That assumption is no longer valid for untracked dependency files. After an edit, stale archived module facts, routes, imported roots, and type surfaces can validate and be reused because the new store view does not track that file and now treats the missing whole hash as valid.
+   - This needs a regression test that edits an untracked dependency file between requests and proves stale archived facts are not returned.
+
+2. Batch 1 desired-trace specs are still too weak to protect against the known bad path.
+   - `packages/benchmark/trace-specs/component-meta/Accordion.json`
+   - `packages/benchmark/trace-specs/component-meta/Alert.json`
+   - `packages/benchmark/trace-specs/component-meta/App.json`
+   - All three specs still set `forbidden` to `[]`, which leaves no committed negative assertions for legacy fallback or reopened slow-path behavior.
+   - The current Batch 1 traces already provide concrete signals that should be guarded:
+     - exact `current_eval_state` counts are `38` / `34` / `24`
+     - exact `types/index.ts store_view=false` counts are `0` / `0` / `0`
+     - exact `seed_imported_dependency_base_in_view` counts are `0` / `0` / `0`
+     - exact `legacy_resolved_type_cache` counts are `0` / `0` / `0`
+   - Without forbidden assertions or count thresholds on those regression signals, the new specs do not satisfy the campaign requirement for intentional negative validation.
+
+3. I did not find any committed repo path that actually runs the new validator against the batch artifacts.
+   - `packages/benchmark/src/trace-validator.ts` and its unit tests are committed.
+   - Repo search only finds validator references in the validator module, its tests, and the progress/review docs.
+   - `docs/component-meta-trace-progress.md` says traces are validated against desired specs, but I did not find a committed harness or command in the repo that loads the specs and checks the real `tmp/batch1-trace-*` artifacts.
+   - Until that exists, spec coverage remains advisory rather than enforced.
+
+4. The latest Batch 1 artifact directory is incomplete.
+   - `tmp/batch1-trace-003` contains only `Accordion`.
+   - `Alert` and `App` still rely on `tmp/batch1-trace-002` for the current proof set.
+   - The Batch 1 thresholds in the committed specs are plausible against `tmp/batch1-trace-002`, but the latest rerun did not refresh the full active batch.
+
+5. Workspace verification is current from the reviewer side, but still missing from the executor side.
+   - Reviewer reran `cargo test --workspace --tests --verbose` on current `HEAD` and captured the output in `tmp/reviewer-workspace-tests-2026-04-09.log`.
+   - The log tail shows passing test bodies, including `355 passed; 0 failed`.
+   - The command still returned non-zero on this Windows host because `verter_napi` emitted host-runtime `GetProcAddress failed` lines before its tests passed.
+   - I still did not find an executor-owned workspace test run recorded after the latest Batch 1 commits.
+
+6. Commit protection is acceptable on this pass.
+   - Progress is committed frequently with conventional messages after the earlier `interim` commit.
+   - The worktree is clean.
+
 ## 2026-04-08T22:18:00.9567383+01:00 - Batch 1
 
 - Active batch:
