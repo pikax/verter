@@ -1,5 +1,88 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T11:47:16.8674407+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest local gated artifact directory: `tmp/batch1-gate-005` (`2026-04-09 11:11`, predates the latest executor commits)
+- Latest executor-owned workspace log: `tmp/executor-workspace-tests-2026-04-09b.log` (`2026-04-09 11:05`, predates the latest executor commits)
+- New executor commits since prior review:
+  - `445ca9dd` `perf(verter_session): skip eager VFS resolution for unresolved import targets`
+  - `dd1ef8a4` `perf(verter_session): omit ImportRoute from untracked bundle cache facts`
+- Executor head reviewed: `dd1ef8a4` `perf(verter_session): omit ImportRoute from untracked bundle cache facts`
+- Review scope for this pass:
+  - prepared-bundle perf pair review
+  - external reviewer claim cross-check against current hot path
+  - post-commit proof artifact audit
+- Judgment: `FAIL`
+
+### Findings
+
+1. `dd1ef8a4` makes prepared-decl bundles route-stale for untracked dependency files.
+   - `crates/verter_session/src/host_manage.rs:2777-2795` now omits `DerivedFactKind::ImportRoute` from prepared-bundle facts whenever `store_view.tracks_file(canonical_id)` is false.
+   - But these bundles still cache route-sensitive state built from resolved import edges:
+     - `dep_edges`
+     - `import_bindings`
+     - prepared declaration `name_resolution`
+   - `crates/verter_session/src/resolver_core/prepared_decl.rs:254-289` shows the bundle is still built from resolved `dep_edges`, and the type-resolution rules explicitly state that route invalidation is not file-hash-only:
+     - tsconfig path changes
+     - workspace graph changes
+     - package target changes
+     - other route-surface changes
+     can all change routing without changing the owner file text.
+   - That means an untracked dependency file can keep a valid `FileWholeHash` while its cached prepared bundle still points at old resolved canonical targets.
+   - This is the same class of stale-route bug the campaign is supposed to catch, just moved into the prepared-bundle layer.
+   - Suggested fix direction:
+     - either keep `ImportRoute` facts on any bundle that stores resolved external canonical IDs
+     - or stop storing route-sensitive resolved import bindings / dep edges in those untracked bundles
+
+2. `445ca9dd` is directionally good but still unprotected by the exact regression tests this cut needs.
+   - `crates/verter_session/src/host_manage.rs:2720-2749` now skips eager `resolve_route_type_edge_in_view()` for import targets with empty `canonical_id`.
+   - That matches the desired shallow-once / deepen-on-demand rule.
+   - I did not find a new targeted regression test proving both sides of that change:
+     - negative: unused unresolved imports are not route-resolved during bundle materialization
+     - positive: declaration-scoped solving still resolves the import correctly when it is actually demanded later
+   - Without those tests, this is still a process gap on a hot-path change.
+
+3. The external review is directionally right about the hot loop, but one part of it is stale and another part needs tightening.
+   - Accurate:
+     - the registry BFS in `meta_resolve.rs` still materializes too many discovered symbols
+     - each projection still creates a fresh declaration-scoped `SessionSolverHost`
+     - that repeated scoped-host setup is still expensive
+   - Not accurate as written:
+     - `TypeSurfaceDb` is already on the projection hot path in `ComponentMetaQueryEngine::project_type_surface*`
+     - `PreparedDeclBundle` already has a stable cache in `prepared_decl_bundle_in_view`
+   - The more precise remaining architectural issue is:
+     - repeated creation/cloning of declaration-scope host data per projection
+     - plus too-broad BFS materialization in `append_component_meta_registry_entries`
+   - So the implementer should not spend time “adding TypeSurfaceDb write-through” again; that part already exists. The next real cut is reusing declaration-scope host payload per request and pruning the BFS to demanded output surfaces.
+
+4. There is still no post-commit proof for these two new perf commits.
+   - `tmp/batch1-gate-005` predates both reviewed commits.
+   - `tmp/executor-workspace-tests-2026-04-09b.log` also predates both reviewed commits.
+   - So there is still no executor-owned:
+     - `cargo test --workspace --tests --verbose`
+     - fresh Batch 1 gate artifact with `results/` checked under `--strict --check-expected`
+     on the committed state that contains `445ca9dd` / `dd1ef8a4`.
+
+### Missing Tests / Missing Validation
+
+- Add a regression test for prepared-bundle invalidation on route changes affecting an untracked dependency file without changing that file’s text hash.
+- Add the paired regression tests for `445ca9dd`:
+  - unused unresolved imports stay unresolved during bundle materialization
+  - later demanded declaration-scoped solve still resolves correctly
+- Re-run and record on current `HEAD`:
+  - `cargo test --workspace --tests --verbose`
+  - `pnpm exec tsx packages/benchmark/src/trace-check.ts <fresh-trace-dir> --batch "Accordion,Alert,App" --strict --check-expected`
+
+### Notes
+
+- The external reviewer’s high-level conclusion is useful: the remaining work is in the solver/projection hot loop, not in the old fallback path.
+- But the immediate blocking issue on current `HEAD` is the new prepared-bundle invalidation hole introduced by `dd1ef8a4`.
+- After that correctness issue is repaired, the next highest-value performance cut should be request-scoped reuse of declaration-scope host payload and narrower BFS materialization, not another round of route-cache tweaking.
+
 ## 2026-04-09T11:09:38.9208683+01:00 - Batch 1
 
 - Active batch:
