@@ -150,7 +150,7 @@ The component-meta trace workflow can now validate correctness against those sam
 ```bash
 npx tsx packages/benchmark/src/trace-check.ts \
   tmp/batch1-trace-002 \
-  --batch Accordion,Alert,App \
+  --batch "Accordion,Alert,App" \
   --strict \
   --check-expected
 ```
