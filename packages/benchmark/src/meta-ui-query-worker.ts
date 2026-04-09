@@ -1,12 +1,11 @@
 import { createRequire } from "node:module";
 
 import {
-  normalizeForBenchmark,
   type MetaUiBackend,
   type MetaUiOutcomeBucket,
   type NormalizedMetaArtifact,
 } from "./meta-ui-core.js";
-import { propsToJsonSchema, refineMetaForBenchmark } from "./meta-ui-meta.js";
+import { normalizeComponentMetaArtifact } from "./component-meta-artifact.js";
 import { loadVerterCompatModule } from "./verter-compat.js";
 
 interface PreparedComponentSnapshot {
@@ -112,15 +111,7 @@ async function executeMeasuredQuery(
 ): Promise<MeasuredQueryResult> {
   const startedAt = performance.now();
   const raw = await checker.getComponentMeta(component.absolutePath);
-  const refined = refineMetaForBenchmark(raw);
-  const propsJsonSchema = propsToJsonSchema(refined.props);
-  const diagnostics = collectDiagnostics(raw, refined);
-  const artifact = normalizeForBenchmark(
-    component.relativePath,
-    refined,
-    propsJsonSchema,
-    diagnostics,
-  );
+  const artifact = normalizeComponentMetaArtifact(component.relativePath, raw);
   const latencyMs = performance.now() - startedAt;
   const outcome: MetaUiOutcomeBucket = artifact.diagnostics.length > 0 ? "degraded" : "success";
   return {
@@ -128,27 +119,4 @@ async function executeMeasuredQuery(
     latencyMs,
     outcome,
   };
-}
-
-function collectDiagnostics(raw: any, refined: any) {
-  const diagnostics = [];
-  if (!raw) {
-    diagnostics.push({
-      level: "error" as const,
-      code: "meta_ui_empty_meta",
-      message: "Backend returned no metadata.",
-    });
-  }
-  if (
-    !Array.isArray(refined?.props) ||
-    !Array.isArray(refined?.events) ||
-    !Array.isArray(refined?.slots)
-  ) {
-    diagnostics.push({
-      level: "warning" as const,
-      code: "meta_ui_incomplete_surface",
-      message: "Backend returned an incomplete metadata surface.",
-    });
-  }
-  return diagnostics;
 }

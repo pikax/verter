@@ -34,6 +34,7 @@ export interface CorpusTraceResult {
   stdout_path: string;
   stderr_path: string;
   trace_path: string;
+  result_path: string;
   saw_done_line: boolean;
   saw_closed_line: boolean;
   js_audit_path: string | null;
@@ -157,6 +158,7 @@ export async function runComponentInIsolation(
   const stdoutPath = resolve(options.outputDir, `${sanitized}.stdout.txt`);
   const stderrPath = resolve(options.outputDir, `${sanitized}.stderr.txt`);
   const tracePath = resolve(options.outputDir, `${sanitized}.trace.log`);
+  const resultPath = resolve(options.outputDir, `${sanitized}.result.json`);
 
   mkdirSync(dirname(stdoutPath), { recursive: true });
 
@@ -166,7 +168,8 @@ export async function runComponentInIsolation(
 
   const startMs = performance.now();
 
-  const child = spawn(options.command, options.args, {
+  const command = process.platform === "win32" ? `"${options.command}"` : options.command;
+  const child = spawn(command, options.args, {
     cwd: process.cwd(),
     shell: process.platform === "win32",
     detached: process.platform !== "win32",
@@ -177,6 +180,7 @@ export async function runComponentInIsolation(
       FORCE_COLOR: "0",
       ...(options.env ?? {}),
       VERTER_COMPONENT_META_TRACE_PATH: tracePath,
+      VERTER_COMPONENT_META_RESULT_PATH: resultPath,
     },
   });
 
@@ -220,6 +224,7 @@ export async function runComponentInIsolation(
     sawDoneLine: stdoutFields.sawDoneLine,
     sawClosedLine: stdoutFields.sawClosedLine,
   });
+  const normalizedExitCode = timedOut ? null : exitCode;
 
   return {
     component: options.component,
@@ -227,11 +232,12 @@ export async function runComponentInIsolation(
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
     trace_resolve_ms: null, // Populated by trace log parsing if needed
-    exit_code: exitCode,
+    exit_code: normalizedExitCode,
     signal,
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
     trace_path: tracePath,
+    result_path: resultPath,
     saw_done_line: stdoutFields.sawDoneLine,
     saw_closed_line: stdoutFields.sawClosedLine,
     js_audit_path: null,

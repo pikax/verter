@@ -26,6 +26,9 @@ import { pathToFileURL } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "../..");
+const benchmarkRequire = createRequire(
+  pathToFileURL(resolve(repoRoot, "packages", "benchmark", "package.json")).href,
+);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -156,10 +159,12 @@ async function runComponent(componentRelPath, componentToken, config) {
   const stdoutPath = resolve(config.outputDir, "stdout", `${sanitized}.stdout.txt`);
   const stderrPath = resolve(config.outputDir, "stderr", `${sanitized}.stderr.txt`);
   const tracePath = resolve(config.outputDir, "traces", `${sanitized}.trace.log`);
+  const resultPath = resolve(config.outputDir, "results", `${componentRelPath}.json`);
 
   mkdirSync(dirname(stdoutPath), { recursive: true });
   mkdirSync(dirname(stderrPath), { recursive: true });
   mkdirSync(dirname(tracePath), { recursive: true });
+  mkdirSync(dirname(resultPath), { recursive: true });
 
   const traceComponentPath = resolve(
     repoRoot,
@@ -168,7 +173,7 @@ async function runComponent(componentRelPath, componentToken, config) {
     "src",
     "_trace-component.ts",
   );
-  const tsxLoaderPath = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  const tsxLoaderPath = pathToFileURL(benchmarkRequire.resolve("tsx")).href;
 
   const env = {
     ...process.env,
@@ -179,6 +184,7 @@ async function runComponent(componentRelPath, componentToken, config) {
     env.VERTER_COMPONENT_META_TRACE = "1";
     env.VERTER_COMPONENT_META_TRACE_PATH = tracePath;
   }
+  env.VERTER_COMPONENT_META_RESULT_PATH = resultPath;
 
   const stdoutStream = createWriteStream(stdoutPath);
   const stderrStream = createWriteStream(stderrPath);
@@ -251,6 +257,7 @@ async function runComponent(componentRelPath, componentToken, config) {
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
     trace_path: tracePath,
+    result_path: resultPath,
     saw_done_line: stdoutFields.sawDoneLine,
     saw_closed_line: stdoutFields.sawClosedLine,
     js_audit_path: null,

@@ -1,5 +1,10 @@
+import { relative } from "node:path";
 import { performance } from "node:perf_hooks";
 
+import {
+  normalizeComponentMetaArtifact,
+  writeNormalizedComponentMetaArtifact,
+} from "./component-meta-artifact.js";
 import {
   getDefaultUiRoot,
   readComponentSourceForTrace,
@@ -97,6 +102,12 @@ try {
   const start = performance.now();
 
   const meta = await checker.getComponentMeta(file);
+  const resultPath = process.env.VERTER_COMPONENT_META_RESULT_PATH;
+  if (resultPath) {
+    const componentPath = relative(uiRoot, file).replace(/\\/g, "/");
+    const artifact = normalizeComponentMetaArtifact(componentPath, meta);
+    writeNormalizedComponentMetaArtifact(resultPath, artifact);
+  }
 
   const durationMs = Math.round(performance.now() - start);
   maybeGc();

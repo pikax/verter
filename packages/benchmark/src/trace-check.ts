@@ -27,10 +27,21 @@ import {
   parseTraceLog,
   validateTrace,
 } from "./trace-validator.js";
+import { compareResultArtifactToExpected, findTraceLogPath } from "./trace-check-core.js";
 
 const args = process.argv.slice(2);
 const traceDir = args.find((a) => !a.startsWith("--"));
 const strict = args.includes("--strict");
+const checkExpected = args.includes("--check-expected");
+
+let expectedDir = path.resolve(
+  import.meta.dirname,
+  "../benchmark-results/meta-ui/.expected-vue-component-meta",
+);
+const expectedDirIdx = args.indexOf("--expected-dir");
+if (expectedDirIdx !== -1 && args[expectedDirIdx + 1]) {
+  expectedDir = path.resolve(args[expectedDirIdx + 1]);
+}
 
 let batchComponents: Set<string> | null = null;
 const batchIdx = args.indexOf("--batch");
@@ -39,7 +50,9 @@ if (batchIdx !== -1 && args[batchIdx + 1]) {
 }
 
 if (!traceDir) {
-  console.error("Usage: tsx src/trace-check.ts <trace-dir> [--strict] [--batch Name1,Name2,...]");
+  console.error(
+    "Usage: tsx src/trace-check.ts <trace-dir> [--strict] [--batch Name1,Name2,...] [--check-expected] [--expected-dir <dir>]",
+  );
   process.exit(1);
 }
 
@@ -80,6 +93,11 @@ if (!fs.existsSync(absTraceDir)) {
   process.exit(1);
 }
 
+if (checkExpected && !fs.existsSync(expectedDir)) {
+  console.error(`Expected artifact directory not found: ${expectedDir}`);
+  process.exit(1);
+}
+
 let passed = 0;
 let failed = 0;
 let skipped = 0;
@@ -98,24 +116,14 @@ for (const specFile of specFiles.sort()) {
     continue;
   }
 
-  // Find matching trace file: try ComponentName.trace.log and
-  // src__runtime__components__ComponentName.vue.trace.log patterns
+  // Find the trace log in either the older flat layout or the structured traces/ layout.
   const componentName = spec.component;
-  const candidates = [
-    `${componentName}.trace.log`,
-    `src__runtime__components__${componentName}.vue.trace.log`,
-  ];
-
-  let traceContent: string | null = null;
-  let tracePath: string | null = null;
-  for (const candidate of candidates) {
-    const candidatePath = path.join(absTraceDir, candidate);
-    if (fs.existsSync(candidatePath)) {
-      traceContent = fs.readFileSync(candidatePath, "utf-8");
-      tracePath = candidatePath;
-      break;
-    }
-  }
+  const tracePath = findTraceLogPath({
+    componentName,
+    componentPath: spec.componentPath,
+    traceDir: absTraceDir,
+  });
+  const traceContent = tracePath ? fs.readFileSync(tracePath, "utf-8") : null;
 
   if (!traceContent || !tracePath) {
     if (batchComponents) {
@@ -142,9 +150,24 @@ for (const specFile of specFiles.sort()) {
 
   const result = validateTrace(spec, events, coreEvents);
   console.log(formatValidationResult(result));
+  let expectedComparisonPassed = true;
+  if (checkExpected) {
+    const expectedComparison = compareResultArtifactToExpected({
+      componentPath: spec.componentPath,
+      traceDir: absTraceDir,
+      expectedDir,
+    });
+    if (expectedComparison.passed) {
+      console.log(`[PASS] ${componentName} expected artifact matches pinned output`);
+    } else {
+      console.log(`[FAIL] ${componentName} expected artifact mismatch`);
+      console.log(`  ${expectedComparison.message}`);
+      expectedComparisonPassed = false;
+    }
+  }
   console.log("");
 
-  if (result.passed) {
+  if (result.passed && expectedComparisonPassed) {
     passed++;
   } else {
     failed++;

@@ -8,7 +8,7 @@
  * 4. Component names appear in results
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -219,5 +219,39 @@ describe("runComponentInIsolation", () => {
 
     expect(result.stdout_path).toBeTruthy();
     expect(result.stderr_path).toBeTruthy();
+  });
+
+  it("provisions a result artifact path for normalized component-meta output", async () => {
+    const tmpDir = mkdtempSync(resolve(tmpdir(), "verter-corpus-runner-"));
+    const childScript = resolve(tmpDir, "child-result.mjs");
+    writeFileSync(
+      childScript,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "const resultPath = process.env.VERTER_COMPONENT_META_RESULT_PATH;",
+        'if (!resultPath) throw new Error("missing VERTER_COMPONENT_META_RESULT_PATH");',
+        'writeFileSync(resultPath, JSON.stringify({ ok: true }), "utf8");',
+        'console.log("Done in 3ms (0 props) payload=0B mem=0B setup=0ms setup heap=0MB rss=0MB->heap=0MB rss=0MB query heap=0MB rss=0MB->heap=0MB rss=0MB");',
+        'console.log("Closed heap=0MB rss=0MB");',
+        "process.exit(0);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await runComponentInIsolation({
+      component: "src/runtime/components/Result.vue",
+      command: process.execPath,
+      args: [childScript],
+      timeoutMs: 5_000,
+      outputDir: tmpDir,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.result_path).toBeTruthy();
+    expect(result.result_path.endsWith("src__runtime__components__Result__vue.result.json")).toBe(
+      true,
+    );
+    expect(existsSync(result.result_path)).toBe(true);
+    expect(JSON.parse(readFileSync(result.result_path, "utf8"))).toEqual({ ok: true });
   });
 });

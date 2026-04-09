@@ -145,6 +145,16 @@ Supported flags:
 
 The generated JSON artifacts land under `packages/benchmark/benchmark-results/meta-ui/` by default, while reusable expected artifacts default to `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/`. CI builds the expected artifact set once, uploads it, and reuses it across the backend/scenario matrix in the `/meta-benchmark` workflow.
 
+The component-meta trace workflow can now validate correctness against those same pinned artifacts. Fresh trace runs emit normalized result artifacts under `<trace-dir>/results/`, and the checker can fail a batch if performance improved but the returned metadata changed:
+
+```bash
+npx tsx packages/benchmark/src/trace-check.ts \
+  tmp/batch1-trace-002 \
+  --batch Accordion,Alert,App \
+  --strict \
+  --check-expected
+```
+
 ## CI Integration
 
 Triggered via PR comment `/benchmark` or manually through GitHub Actions.
