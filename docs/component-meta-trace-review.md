@@ -1,5 +1,54 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T09:53:11.0266609+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior manual review:
+  - `574e64fb` `fix(semantic): preserve newlines in JSDoc description extraction`
+  - `b7faa689` `docs(component-meta): document slot binding collapse as open follow-up`
+  - `8f54fdfe` `docs(component-meta): fix quoted batch command and update fixed items`
+- Executor head reviewed: `8f54fdfe` `docs(component-meta): fix quoted batch command and update fixed items`
+- Judgment: `FAIL`
+
+### Findings
+
+1. Batch 1 is still not correctness-locked because the green expected-output gate ignores expected-bundle provenance.
+   - I reran:
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+     and it still returned `3 passed, 0 failed, 0 skipped`.
+   - `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` only compare per-component JSON files under the expected dir.
+   - `packages/benchmark/src/meta-ui-bench.ts` is stricter: `tryLoadExpectedArtifacts()` rejects reuse unless both `resolvedTargetSha` and the ordered `componentPaths` list match the prepared project.
+   - The expected manifest on disk still contains only:
+     - `resolvedTargetSha: "1e7377f370e03585dd86cdeb563e264688494ae6"`
+     - `componentPaths: ["src/runtime/components/CheckboxGroup.vue"]`
+   - So the current PASS still proves only that Batch 1 result artifacts match a mixed local expected directory, not that they match a coherent expected bundle the repo would actually reuse.
+
+2. The normalizer remains capable of hiding semantically real drift by deleting legitimate user schema members.
+   - `packages/benchmark/src/meta-ui-meta.ts` still applies `stripInternalSchemaNoise()` recursively to full prop/event/slot/member metadata.
+   - That helper drops any key named `declarations`, `getDeclarations`, or `getTypeObject` at any object depth.
+   - A user-facing schema object with one of those field names would therefore be changed before artifact comparison, which can make `--check-expected` pass after deleting semantically real members.
+   - I still do not find direct regression coverage for `refineMetaForBenchmark()` / `stripInternalSchemaNoise()`; the nearby benchmark specs cover manifest reuse and artifact comparison, not this normalizer behavior itself.
+
+3. The Batch 1 `PASSING` claim is still ahead of the verification evidence.
+   - `docs/component-meta-trace-progress.md` now has the correct quoted PowerShell batch command, and the JSDoc newline issue is properly moved out of the known-gaps list.
+   - Those are real improvements.
+   - But the doc still marks Batch 1 as `PASSING` while:
+     - the expected-output gate is still provenance-blind
+     - slot binding collapse remains an open follow-up
+     - I still do not find a newer executor-owned `cargo test --workspace --tests --verbose` log attached to the post-fix Batch 1 claim
+   - That keeps the batch below the campaign's acceptance bar.
+
+### Notes
+
+- The JSDoc newline fix in `574e64fb` looks real and appropriately tested.
+- The quoted `--batch "Accordion,Alert,App"` doc fix in `8f54fdfe` closes the earlier PowerShell workflow issue.
+- Documenting slot binding collapse as an explicit open follow-up is acceptable progress, but it is not the same as closing Batch 1.
+
 ## 2026-04-09T09:12:07.3051272+01:00 - Batch 1
 
 - Active batch:
