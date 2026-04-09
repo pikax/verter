@@ -2717,27 +2717,35 @@ impl VerterHost {
         let declaration_file = canonical_id.ends_with(".d.ts")
             || canonical_id.ends_with(".d.mts")
             || canonical_id.ends_with(".d.cts");
-        // 2. Build dep_edges from ModuleFacts-owned shallow import targets.
-        // For declaration files, prefer .d.ts companions over .js targets so
-        // that prepared-decl name_resolution entries point at the type surface.
+        // 2. Build dep_edges from already-resolved import targets only.
+        // Demand-driven: don't eagerly resolve imports with empty canonical_ids
+        // through VFS — let the solver resolve them on demand via
+        // resolve_import_binding_from_facts when it actually needs them.
+        // For declaration files, prefer .d.ts companions over .js targets.
         let mut dep_edges = rustc_hash::FxHashMap::default();
         let mut seen_sources = rustc_hash::FxHashSet::default();
         for target in state.import_targets.values() {
             if !seen_sources.insert(target.source_specifier.clone()) {
                 continue;
             }
-            let resolved = (!(target.canonical_id.is_empty()
-                || declaration_file && is_runtime_script_target(&target.canonical_id)))
-            .then(|| target.canonical_id.clone())
-            .or_else(|| {
-                self.resolve_route_type_edge_in_view(
+            // Only include imports that already have a resolved canonical_id
+            // from the host/scheduler. Skip empty canonical_ids — the solver
+            // will resolve them on demand if needed.
+            if target.canonical_id.is_empty() {
+                continue;
+            }
+            if declaration_file && is_runtime_script_target(&target.canonical_id) {
+                // For declaration files, prefer .d.ts companions — resolve
+                // through the type edge path to get the companion target.
+                if let Some(resolved) = self.resolve_route_type_edge_in_view(
                     canonical_id,
                     &target.source_specifier,
                     store_view,
-                )
-            });
-            if let Some(resolved) = resolved {
-                dep_edges.insert(target.source_specifier.clone(), resolved);
+                ) {
+                    dep_edges.insert(target.source_specifier.clone(), resolved);
+                }
+            } else {
+                dep_edges.insert(target.source_specifier.clone(), target.canonical_id.clone());
             }
         }
 
