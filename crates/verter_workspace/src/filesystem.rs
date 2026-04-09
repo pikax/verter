@@ -262,6 +262,17 @@ macro_rules! component_meta_trace_event {
     }};
 }
 
+fn vfs_read_file_missing_result_detail(canonical_id: &str, indexed_negative: bool) -> String {
+    if indexed_negative {
+        format!(
+            "path={} layer=dir_index cache=negative bytes=0",
+            canonical_id
+        )
+    } else {
+        format!("path={} layer=missing cache=miss bytes=0", canonical_id)
+    }
+}
+
 /// Options for creating a `FilesystemWorkspace`.
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemOptions {
@@ -464,7 +475,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
                 );
                 component_meta_trace_event!(
                     "vfs_read_file_result",
-                    format!("path={} layer=missing cache=miss bytes=0", canonical_id),
+                    vfs_read_file_missing_result_detail(canonical_id, true),
                 );
                 return None;
             }
@@ -498,7 +509,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
         component_meta_trace_event!(
             "vfs_read_file_result",
-            format!("path={} layer=missing cache=miss bytes=0", canonical_id),
+            vfs_read_file_missing_result_detail(canonical_id, false),
         );
         None
     }

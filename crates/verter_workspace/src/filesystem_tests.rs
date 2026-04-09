@@ -584,3 +584,63 @@ fn vfs_provenance_tracks_native_read_file_misses_after_stale_positive_index_hits
         "read_file should reuse the stale positive dir-index entry before attempting disk"
     );
 }
+
+#[test]
+fn dir_index_negative_avoids_disk_read_for_missing_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let present_path = dir.path().join("App.vue");
+    std::fs::write(&present_path, "<template>ok</template>").unwrap();
+
+    let missing = dir
+        .path()
+        .join("package.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    ws.reset_vfs_provenance();
+
+    // First read of missing file — seeds the parent directory index
+    let content = ws.read_file(&missing);
+    assert!(content.is_none(), "missing file should return None");
+
+    let after_seed = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        after_seed.dir_index_refresh_count, 1,
+        "first lookup should refresh the parent directory once"
+    );
+    assert_eq!(
+        after_seed.native_fs_read_file_miss_count, 0,
+        "dir-index negative should prevent any disk read attempt"
+    );
+
+    // Second read — should be a DirIndex hit (cached negative)
+    let content = ws.read_file(&missing);
+    assert!(content.is_none(), "missing file should still return None");
+
+    let after_hit = ws.vfs_provenance_snapshot();
+    assert_eq!(
+        after_hit.dir_index_hit_count, 1,
+        "subsequent lookup for the same missing file should be a dir-index hit"
+    );
+    assert_eq!(
+        after_hit.native_fs_read_file_miss_count, 0,
+        "dir-index cached negative should never attempt a disk read"
+    );
+}
+
+#[test]
+fn missing_read_file_trace_detail_distinguishes_dir_index_negative_from_generic_miss() {
+    let path = "d:/project/package.json";
+
+    assert_eq!(
+        vfs_read_file_missing_result_detail(path, true),
+        "path=d:/project/package.json layer=dir_index cache=negative bytes=0",
+        "indexed negatives must be labeled as dir_index/cache=negative"
+    );
+    assert_eq!(
+        vfs_read_file_missing_result_detail(path, false),
+        "path=d:/project/package.json layer=missing cache=miss bytes=0",
+        "true uncached misses must keep the generic missing/cache=miss label"
+    );
+}

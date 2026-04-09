@@ -51,7 +51,8 @@ impl NativeFs {
     /// List entries in a directory.
     pub fn read_dir(&self, dir: &str) -> Result<Vec<DirEntry>, VfsError> {
         let os_path = to_os_path(dir);
-        let entries = std::fs::read_dir(&os_path).map_err(|e| {
+        let os_path = normalize_read_dir_path(&os_path);
+        let entries = std::fs::read_dir(os_path.as_ref()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 VfsError::NotFound(dir.to_string())
             } else {
@@ -178,6 +179,26 @@ fn to_os_path(canonical_id: &str) -> String {
         canonical_id.replace('/', "\\")
     } else {
         canonical_id.to_string()
+    }
+}
+
+/// Normalize an OS path for `read_dir` so bare Windows drive letters read the drive root.
+///
+/// On Windows, `std::fs::read_dir("D:")` resolves relative to the drive's current working
+/// directory, not the drive root. This appends `\` to produce `D:\` which always means
+/// the root of drive D.
+///
+/// On non-Windows platforms this is a no-op.
+#[cfg(not(target_arch = "wasm32"))]
+fn normalize_read_dir_path(os_path: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows)
+        && os_path.len() == 2
+        && os_path.as_bytes()[0].is_ascii_alphabetic()
+        && os_path.as_bytes()[1] == b':'
+    {
+        std::borrow::Cow::Owned(format!("{os_path}\\"))
+    } else {
+        std::borrow::Cow::Borrowed(os_path)
     }
 }
 
@@ -309,6 +330,71 @@ mod tests {
         assert!(fs.file_exists(&canonical));
         fs.delete_file(&canonical).unwrap();
         assert!(!fs.file_exists(&canonical));
+    }
+
+    // ── normalize_read_dir_path tests ──
+
+    #[test]
+    fn normalize_read_dir_path_bare_drive_letter() {
+        let result = normalize_read_dir_path("D:");
+        if cfg!(windows) {
+            assert_eq!(
+                result.as_ref(),
+                "D:\\",
+                "bare drive letter must get trailing backslash on Windows"
+            );
+        } else {
+            assert_eq!(
+                result.as_ref(),
+                "D:",
+                "bare drive letter is a no-op on non-Windows"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_read_dir_path_lowercase_drive() {
+        let result = normalize_read_dir_path("d:");
+        if cfg!(windows) {
+            assert_eq!(
+                result.as_ref(),
+                "d:\\",
+                "lowercase drive letter must also normalize"
+            );
+        } else {
+            assert_eq!(result.as_ref(), "d:");
+        }
+    }
+
+    #[test]
+    fn normalize_read_dir_path_drive_with_trailing_backslash() {
+        // Already has a path separator — must be left alone
+        let result = normalize_read_dir_path("D:\\");
+        assert_eq!(result.as_ref(), "D:\\");
+    }
+
+    #[test]
+    fn normalize_read_dir_path_regular_path() {
+        let result = normalize_read_dir_path("D:\\projects\\verter");
+        assert_eq!(result.as_ref(), "D:\\projects\\verter");
+    }
+
+    #[test]
+    fn normalize_read_dir_path_unix_path_noop() {
+        let result = normalize_read_dir_path("/usr/local");
+        assert_eq!(result.as_ref(), "/usr/local");
+    }
+
+    #[test]
+    fn normalize_read_dir_path_empty_noop() {
+        let result = normalize_read_dir_path("");
+        assert_eq!(result.as_ref(), "");
+    }
+
+    #[test]
+    fn normalize_read_dir_path_single_char_noop() {
+        let result = normalize_read_dir_path("D");
+        assert_eq!(result.as_ref(), "D");
     }
 
     #[test]
