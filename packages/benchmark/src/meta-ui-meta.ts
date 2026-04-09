@@ -100,8 +100,10 @@ function stripInternalSchemaNoise(value: any): any {
   }
 
   const next: Record<string, unknown> = {};
+  // Strip vue-component-meta internal noise that leaks into schemas
+  const internalKeys = new Set(["declarations", "getDeclarations", "getTypeObject"]);
   for (const key of Object.keys(value)) {
-    if (key === "declarations") {
+    if (internalKeys.has(key)) {
       continue;
     }
     const entry = value[key];
