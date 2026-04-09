@@ -1,5 +1,51 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T04:47:09.7218947+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-trace-003`
+- Full-batch trace evidence: `tmp/batch1-trace-002`
+- Judgment: `FAIL`
+
+### Findings
+
+1. The new `store_view=false` forbidden assertions are written against the wrong field, so one of the key negative guards is ineffective.
+   - `packages/benchmark/src/trace-validator.ts` matches `namePattern` against the event name and `detailPattern` against the event detail.
+   - The new Batch 1 specs use:
+     - `namePattern: "/store_view=false/"`
+     - `detailPattern: "types/index.ts"`
+   - `store_view=false` appears in trace details, not in event names, so these assertions can never match and therefore can never fail.
+   - That leaves the intended guard against `types/index.ts` permissive reopening behavior effectively unenforced.
+
+2. The new trace-check harness is not usable as a per-batch validation gate.
+   - `packages/benchmark/src/trace-check.ts` scans every committed spec under `packages/benchmark/trace-specs/component-meta/`, not the active batch.
+   - It treats missing trace files as `SKIP` rather than failure.
+   - Confirmed behavior:
+     - `npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-trace-002 --strict`
+       - Batch 1 traces passed, but the command still failed because Batch 2 specs are under-specified.
+     - `npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-trace-003 --strict`
+       - `Accordion` passed, `Alert` and `App` were skipped because their traces were missing from the directory.
+   - That means the harness cannot currently answer the question the campaign needs answered: whether the active batch is fully validated.
+
+3. The stale-archive regression reported in the prior review appears fixed.
+   - `fix(verter_session): prevent stale archived facts for edited untracked deps` adds strict archive validation and targeted regression coverage.
+   - Verified by running:
+     - `cargo test --package verter_session archived_module_facts_rejected_when_workspace_dep_changes_content --tests --verbose`
+     - `cargo test --package verter_session validates_archived_rejects_untracked_file_whole_hash --tests --verbose`
+   - Both targeted tests passed.
+
+4. Workspace verification is current from the reviewer side.
+   - Reviewer reran `cargo test --workspace --tests --verbose` on current `HEAD` and captured the output in `tmp/reviewer-workspace-tests-2026-04-09b.log`.
+   - The log tail again shows passing test bodies, including `355 passed; 0 failed`.
+   - The shell still returned non-zero on this Windows host because the `verter_napi` runner emitted host-runtime `GetProcAddress failed` lines before its tests passed.
+
+5. Commit protection remains acceptable.
+   - The new work is committed with conventional messages.
+   - The worktree is clean.
+
 ## 2026-04-09T04:11:23.7033435+01:00 - Batch 1
 
 - Active batch:
