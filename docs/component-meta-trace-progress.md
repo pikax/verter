@@ -10,7 +10,7 @@ Traces are validated against:
 
 Batch gate command:
 ```bash
-npx tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch Accordion,Alert,App --strict --check-expected
+npx tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch "Accordion,Alert,App" --strict --check-expected
 ```
 
 ## Batch 1 Status: PASSING
@@ -33,8 +33,13 @@ Latest artifact directory: `tmp/batch1-gate-003`
 - Boolean: `boolean` instead of `false | true` (functionally equivalent)
 - Type precision: verter returns more specific types (e.g., `AsTag | Component | undefined` vs `any`)
 - Event types: verter preserves generic params (`[value: T]` vs `[value: string | string[] | undefined]`)
-- Description newlines: verter strips `\n` from JSDoc descriptions (Rust-side issue)
-- Slot body/content bindings: verter returns `{} | undefined` for complex ui-binding slots
+- Slot body/content bindings: verter returns `{} | undefined` for function-typed slots with complex indexed access types (see follow-up #6)
+
+### Fixed in this campaign:
+- ~~Description newlines~~ — fixed in `574e64fb` (JSDoc newline preservation)
+- ~~componentName drift~~ — fixed in `830e81ef` (compat-layer normalization)
+- ~~Extra `class` prop~~ — fixed in `830e81ef` (Vue built-in attrs filter)
+- ~~getDeclarations/getTypeObject noise~~ — fixed in `54c647fb` (schema stripping)
 
 ## Full Corpus Results (120 components)
 
