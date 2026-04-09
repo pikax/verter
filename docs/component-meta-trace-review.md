@@ -1,5 +1,76 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T10:51:30.6859308+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest local trace artifact directory: `tmp/batch1-gate-004` (`2026-04-09 09:28`, predates the latest executor commit)
+- Latest executor-owned workspace log: `tmp/executor-workspace-tests-2026-04-09.log` (`2026-04-09 10:01`, predates the latest executor commit)
+- New executor commits since prior review:
+  - `cb403e0f` `fix(verter_session): restore full route participant facts for imported roots`
+- Executor head reviewed: `cb403e0f` `fix(verter_session): restore full route participant facts for imported roots`
+- Review scope for this pass:
+  - imported-root invalidation fix review
+  - route-cache fact flow review
+  - targeted test coverage audit for the risky barrel-edit path
+- Judgment: `FAIL`
+
+### Findings
+
+1. `cb403e0f` does not actually make the imported-root cache safe against intermediate barrel edits.
+   - `crates/verter_session/src/host_resolve.rs:1817-1839` adds a warm-route fast path inside `build_named_type_export_route_entry_in_view()`.
+   - On that fast path, the returned fact set only calls `append_route_participant_fact_versions_in_view()` for:
+     - the provider canonical
+     - the cached final target canonical
+   - That helper records the file whole-hash and route-surface hash for the exact canonical it is given. It does not reconstruct the intermediate barrel chain that the original uncached route walk collected through `touched_canonical_ids`.
+   - `crates/verter_session/src/resolver_core/imported_root_db.rs:108-142` shows why that matters: once `ImportedRootDb` has a fact-valid entry, it returns it directly and never reconsults `RouteDb`.
+   - So a middle barrel can still change its re-export surface while the top-level provider file and the old leaf file remain unchanged. In that case:
+     - `RouteDb` can invalidate correctly
+     - `ImportedRootDb` can stay warm incorrectly
+     - `resolve_imported_type_root_in_view()` can return the stale old root without touching `RouteDb`
+   - This is still a blocking correctness issue, not just a missing optimization opportunity.
+   - Suggested fix direction:
+     - either make imported-root entries carry the full route participant fact set even on RouteDb hits
+     - or remove `ImportedRootDb` as an independent cache authority and derive the root directly from the already-validated route authority
+
+2. The risky path still landed without the regression test the previous review explicitly required.
+   - `crates/verter_session/src/host_manage_tests.rs:7654-7767` and `crates/verter_session/src/host_manage_tests.rs:7818-7893` cover unrelated upserts and unrelated dependency updates staying warm.
+   - Those are useful negative tests, but they do not cover the actual hazard introduced by `8a1b7d41` and claimed fixed by `cb403e0f`: an intermediate barrel re-export change that should invalidate `ImportedRootDb`.
+   - I did not find a committed test that:
+     - warms both `RouteDb` and `ImportedRootDb`
+     - mutates a middle barrel in the route chain while leaving provider and prior leaf contents unchanged
+     - proves `resolve_imported_type_root_in_view()` stops returning the stale old leaf
+   - Because this path changed again without that regression test, TDD is still not demonstrated here.
+   - Suggested test shape:
+     - `/src/index.ts -> /src/barrels/a.ts -> /src/barrels/b.ts -> /src/types-a.ts`
+     - warm route + imported root
+     - change `/src/barrels/b.ts` to point to `/src/types-b.ts`
+     - assert old root is absent and new root is returned on the next lookup
+
+3. The new fix still lacks post-commit proof artifacts.
+   - The newest executor-owned workspace log I found remains `tmp/executor-workspace-tests-2026-04-09.log` from `10:01`.
+   - The reviewed commit `cb403e0f` was created at `10:46`.
+   - The newest local full-batch artifact remains `tmp/batch1-gate-004` from `09:28`.
+   - So there is still no executor-owned:
+     - `cargo test --workspace --tests --verbose`
+     - fresh Batch 1 trace artifact checked with `--strict --check-expected`
+     on the committed state that includes this fix.
+
+### Missing Tests / Missing Validation
+
+- Add the intermediate-barrel imported-root invalidation regression test described above.
+- Re-run and record on the committed state containing `cb403e0f`:
+  - `cargo test --workspace --tests --verbose`
+  - `pnpm exec tsx packages/benchmark/src/trace-check.ts <fresh-trace-dir> --batch "Accordion,Alert,App" --strict --check-expected`
+- If `ImportedRootDb` is meant to survive as a separate cache, document and test its independent invalidation contract explicitly. If not, collapse the dual authority instead of keeping two route/root caches alive.
+
+### Notes
+
+- `cb403e0f` is directionally aligned with the prior review: moving the RouteDb reuse into `build_named_type_export_route_entry_in_view()` is better than bypassing the route builder entirely.
+- The implementation still overclaims what it validates. The current warm-route fact set is not equivalent to the original full participant set, so this fix should not be treated as closing the imported-root correctness issue yet.
+
 ## 2026-04-09T10:39:44.3076960+01:00 - Batch 1
 
 - Active batch:
