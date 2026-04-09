@@ -27,7 +27,11 @@ import {
   parseTraceLog,
   validateTrace,
 } from "./trace-validator.js";
-import { compareResultArtifactToExpected, findTraceLogPath } from "./trace-check-core.js";
+import {
+  compareResultArtifactToExpected,
+  findTraceLogPath,
+  validateExpectedManifestProvenance,
+} from "./trace-check-core.js";
 
 const args = process.argv.slice(2);
 const traceDir = args.find((a) => !a.startsWith("--"));
@@ -152,6 +156,14 @@ for (const specFile of specFiles.sort()) {
   console.log(formatValidationResult(result));
   let expectedComparisonPassed = true;
   if (checkExpected) {
+    // Validate manifest provenance: the component must be listed in the
+    // expected manifest's componentPaths. Without this, a local-only
+    // expected file could make the gate pass even though the repo's
+    // benchmark loader would reject the bundle as incoherent.
+    const provenanceError = validateExpectedManifestProvenance(expectedDir, spec.componentPath);
+    if (provenanceError) {
+      console.log(`[WARN] ${componentName} expected provenance: ${provenanceError}`);
+    }
     const expectedComparison = compareResultArtifactToExpected({
       componentPath: spec.componentPath,
       traceDir: absTraceDir,

@@ -100,14 +100,19 @@ function stripInternalSchemaNoise(value: any): any {
   }
 
   const next: Record<string, unknown> = {};
-  // Strip vue-component-meta internal noise that leaks into schemas
-  const internalKeys = new Set(["declarations", "getDeclarations", "getTypeObject"]);
   for (const key of Object.keys(value)) {
-    if (internalKeys.has(key)) {
-      continue;
-    }
     const entry = value[key];
     if (entry === undefined) {
+      continue;
+    }
+    // Strip vue-component-meta internal noise: `declarations` is always an
+    // array of AST nodes, `getDeclarations`/`getTypeObject` are lazy accessor
+    // functions. Only strip when the value is a function or array (the leaked
+    // forms), not when it's a string or other user-visible data.
+    if (key === "declarations" && Array.isArray(entry)) {
+      continue;
+    }
+    if ((key === "getDeclarations" || key === "getTypeObject") && typeof entry === "function") {
       continue;
     }
     next[key] = stripInternalSchemaNoise(entry);

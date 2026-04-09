@@ -13,7 +13,12 @@ Batch gate command:
 npx tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch "Accordion,Alert,App" --strict --check-expected
 ```
 
-## Batch 1 Status: PASSING
+## Batch 1 Status: TRACE GATE PASSING, EXPECTED PROVENANCE PENDING
+
+Note: The trace-shape gate and local expected-artifact comparison pass, but the
+expected manifest provenance is not yet satisfied — the manifest's `componentPaths`
+only covers `CheckboxGroup.vue`, not the Batch 1 components. The expected artifacts
+need to be regenerated via the full benchmark pipeline to establish provenance.
 
 | Component | Duration | Props | Events | Slots | Trace Gate | Expected Gate |
 |-----------|----------|-------|--------|-------|------------|---------------|

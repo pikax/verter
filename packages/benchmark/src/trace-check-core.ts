@@ -63,6 +63,36 @@ export function findTraceLogPath(input: TraceLogLookupInput): string | null {
   return null;
 }
 
+/**
+ * Validate that the expected artifact directory has manifest provenance
+ * covering the requested component. Returns null if valid, or a failure
+ * message if the manifest is missing or doesn't list the component.
+ */
+export function validateExpectedManifestProvenance(
+  expectedDir: string,
+  componentPath: string,
+): string | null {
+  const manifestPath = join(resolve(expectedDir), "meta-ui-expected-manifest.json");
+  if (!existsSync(manifestPath)) {
+    return `expected manifest not found: ${manifestPath}`;
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    resolvedTargetSha?: string;
+    componentPaths?: string[];
+  };
+  if (!manifest.resolvedTargetSha) {
+    return "expected manifest has no resolvedTargetSha — provenance unknown";
+  }
+  const normalized = componentPath.replace(/\\/g, "/");
+  if (!manifest.componentPaths?.includes(normalized)) {
+    return (
+      `component ${normalized} is not listed in the expected manifest's componentPaths ` +
+      `(manifest covers: ${manifest.componentPaths?.join(", ") ?? "none"})`
+    );
+  }
+  return null;
+}
+
 export function compareResultArtifactToExpected(
   input: ExpectedArtifactComparisonInput,
 ): ExpectedArtifactComparisonResult {
