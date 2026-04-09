@@ -383,6 +383,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
             },
         }
     }
+
+    fn tracks_file(&self, canonical_id: &str) -> bool {
+        self.whole_hashes.contains_key(canonical_id)
+    }
 }
 
 impl crate::resolver_core::ResolverStore for VerterHost {

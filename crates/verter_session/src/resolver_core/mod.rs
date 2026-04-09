@@ -122,6 +122,15 @@ pub trait StoreView {
     fn validates_archived(&self, fact: &FactVersionRef) -> bool {
         self.validates(fact)
     }
+    /// Whether the view tracks a specific file (has its hash in the snapshot).
+    ///
+    /// Used by `ModuleFactsDb::get_or_materialize` to decide whether to
+    /// include `DerivedFactHash::ImportRoute` in validation facts. Untracked
+    /// dependency files never have `set_import_dependencies` called on them,
+    /// so their route facts are safe to omit — eliminating false cache misses.
+    fn tracks_file(&self, _canonical_id: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

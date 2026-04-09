@@ -117,15 +117,22 @@ impl ModuleFactsDb {
             match materialize() {
                 Some(facts) => {
                     let arc = Arc::new(facts);
-                    let validation_facts = vec![FactVersionRef::FileWholeHash {
+                    let mut validation_facts = vec![FactVersionRef::FileWholeHash {
                         canonical_id: key.clone(),
                         hash: arc.whole_hash,
                     }];
-                    let validation_facts = append_import_route_validation_fact(
-                        validation_facts,
-                        &key,
-                        arc.import_route_hash,
-                    );
+                    // Only include ImportRoute validation for tracked files.
+                    // Untracked dependency files never have set_import_dependencies
+                    // called on them, so their route facts are safe to omit —
+                    // this eliminates false cache misses from the store view not
+                    // having their derived hashes.
+                    if view.tracks_file(&key) {
+                        validation_facts = append_import_route_validation_fact(
+                            validation_facts,
+                            &key,
+                            arc.import_route_hash,
+                        );
+                    }
                     self.facts
                         .insert_arc(key.clone(), arc.clone(), validation_facts);
                     Ok(arc)
@@ -379,6 +386,64 @@ mod tests {
         });
         assert!(result2.is_some());
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// View that accepts all hashes but doesn't track specific files.
+    /// Simulates HostStoreView for untracked dependency files.
+    #[derive(Debug)]
+    struct UntrackedAcceptingView {
+        token: StoreViewCompatToken,
+    }
+
+    impl StoreView for UntrackedAcceptingView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            self.token
+        }
+        fn validates(&self, _fact: &FactVersionRef) -> bool {
+            true // Accept everything (like untracked-file acceptance)
+        }
+        fn tracks_file(&self, _canonical_id: &str) -> bool {
+            false // No files tracked
+        }
+    }
+
+    /// Untracked dependency files should hit the validated cache on the
+    /// second access. Before the fix, ImportRoute facts caused false misses
+    /// for every access (O(n) redundant materialization).
+    #[test]
+    fn untracked_dep_file_hits_cache_on_second_access() {
+        let db = ModuleFactsDb::new();
+        let hash: Hash16 = [5; 16];
+        let import_route_hash: Hash16 = [6; 16];
+
+        let call_count = std::sync::atomic::AtomicU32::new(0);
+        let view = UntrackedAcceptingView {
+            token: StoreViewCompatToken(1),
+        };
+
+        // First access: materializes with import routes.
+        let facts_fn = || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut facts = make_test_facts(hash);
+            facts.import_route_hash = Some(import_route_hash);
+            Some(facts)
+        };
+        let r1 = db.get_or_materialize("dep.d.ts", &view, facts_fn);
+        assert!(r1.is_some());
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // Second access: must hit cache (no re-materialization).
+        let r2 = db.get_or_materialize("dep.d.ts", &view, || {
+            call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(make_test_facts(hash))
+        });
+        assert!(r2.is_some());
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "untracked dependency file should hit validated cache on second access, \
+             not re-materialize (ImportRoute fact should be omitted for untracked files)"
+        );
     }
 
     #[test]
