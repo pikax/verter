@@ -3705,60 +3705,33 @@ impl VerterHost {
                 imported_name,
                 current_view,
                 || {
-                    // Use the route-cached resolve_named_type_export_target_in_view
-                    // instead of calling build_named_type_export_route_entry_in_view
-                    // directly. This avoids redundant barrel walks when the route
-                    // has already been resolved by a prior query (e.g., ToasterProps
-                    // through types/index.ts barrel with 111 wildcard re-exports).
-                    let resolved = self.resolve_named_type_export_target_in_view(
+                    // Use resolve_named_type_export_target_in_view which checks
+                    // the RouteDb before doing the barrel walk. This avoids
+                    // redundant barrel walks when the route has already been
+                    // resolved by a prior query. Then collect full route
+                    // participant facts via build_named_type_export_route_entry_in_view
+                    // for proper cache invalidation on intermediate barrel changes.
+                    let (route_result, facts) = self.build_named_type_export_route_entry_in_view(
                         normalized_canonical.as_str(),
                         imported_name,
                         Some(current_view),
-                    );
-                    let Some((target_canonical, target_symbol)) = resolved else {
-                        // Cache the miss result with a provider fact so it
-                        // is invalidated when the provider file changes.
-                        let mut miss_facts = Vec::new();
-                        if let Some(pf) = self.ensure_module_facts_in_view(
-                            normalized_canonical.as_str(),
-                            Some(current_view),
-                        ) {
-                            miss_facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                                canonical_id: normalized_canonical.to_string(),
-                                hash: pf.whole_hash,
-                            });
+                    )?;
+                    let root_result = match route_result {
+                        crate::resolver_core::RouteResult::Resolved {
+                            defining_canonical,
+                            defining_symbol,
+                        } => crate::resolver_core::ImportedRootResult::Resolved {
+                            canonical_source: self
+                                .resolve_eval_dependency_canonical_in_view(
+                                    defining_canonical.as_str(),
+                                    Some(current_view),
+                                )
+                                .unwrap_or(defining_canonical),
+                            resolved_symbol: defining_symbol,
+                        },
+                        crate::resolver_core::RouteResult::Miss => {
+                            crate::resolver_core::ImportedRootResult::Miss
                         }
-                        return Some((crate::resolver_core::ImportedRootResult::Miss, miss_facts));
-                    };
-
-                    // Collect minimal fact versions for cache invalidation.
-                    let mut facts = Vec::new();
-                    if let Some(pf) = self.ensure_module_facts_in_view(
-                        normalized_canonical.as_str(),
-                        Some(current_view),
-                    ) {
-                        facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                            canonical_id: normalized_canonical.to_string(),
-                            hash: pf.whole_hash,
-                        });
-                    }
-                    if let Some(tf) = self
-                        .ensure_module_facts_in_view(target_canonical.as_str(), Some(current_view))
-                    {
-                        facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
-                            canonical_id: target_canonical.clone(),
-                            hash: tf.whole_hash,
-                        });
-                    }
-
-                    let root_result = crate::resolver_core::ImportedRootResult::Resolved {
-                        canonical_source: self
-                            .resolve_eval_dependency_canonical_in_view(
-                                target_canonical.as_str(),
-                                Some(current_view),
-                            )
-                            .unwrap_or(target_canonical),
-                        resolved_symbol: target_symbol,
                     };
                     Some((root_result, facts))
                 },
