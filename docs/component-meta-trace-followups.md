@@ -46,3 +46,34 @@ Same root cause as #3 — the arena panic was being caught/retried, causing the 
 **Results**: Table (46 props, 8.7s).
 
 **Commit**: `c78feab2`
+
+### 5. ~~Description newlines stripped in JSDoc extraction~~ RESOLVED
+
+**Root cause**: `parse_jsdoc()` in `crates/verter_semantic/src/analysis/jsdoc.rs` joined
+multi-line description parts with `" "` (space) instead of `"\n"` (newline). Blank lines
+between paragraphs were also dropped.
+
+**Fix**: Join description parts with `"\n"`, preserve blank lines as empty strings for
+paragraph breaks (`\n\n`). Added 3 tests.
+
+**Commit**: `574e64fb`
+
+## Open
+
+### 6. Slot binding type collapse for function-typed slots
+
+- **Component(s)**: Accordion (body, content, leading, trailing slots), likely others
+- **Symptom**: Slot schema returns `{} | undefined` instead of full binding shape
+  like `{ item: T; index: number; open: boolean; ui: Accordion['ui'] }`
+- **Root cause**: These slots are typed as `SlotProps<T>`, a function type alias:
+  `(props: { item: T, index: number, open: boolean, ui: Accordion['ui'] }) => VNode[]`.
+  The type solver fails to resolve `Accordion['ui']` which is a deeply nested indexed
+  access type: `ComponentConfig<typeof theme, AppConfig, 'accordion'>['ui']`. When
+  the indexed access fails, the entire function parameter type falls back to `{}`.
+- **Why the `default` slot works**: Its bindings are inline `{ item: T, index: number,
+  open: boolean }` without indexed access types, so the solver resolves it fully.
+- **Fix needed**: The type solver needs to either:
+  1. Handle indexed access types on computed generic compositions
+  2. Or preserve partial resolution (keep resolved members even when some fail)
+- **Impact**: Affects nuxt-ui's Accordion, Breadcrumb, CheckboxGroup, CommandPalette,
+  and any component using function-typed `SlotProps<T>` with complex UI type access.
