@@ -355,6 +355,34 @@ impl crate::resolver_core::StoreView for HostStoreView {
             },
         }
     }
+
+    /// Strict validation for ARCHIVED entries. Archived entries are from a
+    /// prior generation — they were soft-invalidated and may be stale.
+    /// For untracked files (not in whole_hashes), the content may have
+    /// changed on disk since the archive was created. Reject these to
+    /// force re-materialization from current workspace content.
+    fn validates_archived(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
+        match fact {
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => self
+                .whole_hashes
+                .get(canonical_id)
+                .is_some_and(|current| current == hash),
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => match kind {
+                crate::resolver_core::DerivedFactKind::DirectSource => self
+                    .whole_hashes
+                    .get(canonical_id)
+                    .is_some_and(|current| current == hash),
+                _ => self
+                    .derived_hashes
+                    .get(&(canonical_id.clone(), *kind))
+                    .is_some_and(|current| current == hash),
+            },
+        }
+    }
 }
 
 impl crate::resolver_core::ResolverStore for VerterHost {
@@ -505,6 +533,53 @@ mod tests {
                 hash: [99u8; 16],
             }),
             "Route derived fact for untracked file should NOT be accepted"
+        );
+    }
+
+    /// validates_archived must be STRICT for untracked files: archived entries
+    /// may be from a prior generation where the workspace content was different.
+    /// Primary-entry acceptance (validates) for untracked files is safe because
+    /// those entries were just materialized from current content.
+    #[test]
+    fn validates_archived_rejects_untracked_file_whole_hash() {
+        let view = super::HostStoreView {
+            mutation_epoch: 1,
+            whole_hashes: FxHashMap::from_iter([("/src/tracked.ts".to_string(), [1u8; 16])]),
+            ..Default::default()
+        };
+
+        // Tracked file in archive — validates if hash matches.
+        assert!(
+            view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/src/tracked.ts".to_string(),
+                hash: [1u8; 16],
+            })
+        );
+
+        // Tracked file in archive — rejects if hash mismatches.
+        assert!(
+            !view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/src/tracked.ts".to_string(),
+                hash: [2u8; 16],
+            })
+        );
+
+        // Untracked file in archive — MUST reject (content may have changed).
+        assert!(
+            !view.validates_archived(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }),
+            "validates_archived must reject untracked files to prevent stale data"
+        );
+
+        // Compare: validates() accepts the same untracked file (primary entries safe).
+        assert!(
+            view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }),
+            "validates() should still accept untracked files in primary cache"
         );
     }
 

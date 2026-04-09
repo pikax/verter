@@ -114,6 +114,14 @@ pub trait StoreView {
     fn checks_archive(&self) -> bool {
         false
     }
+    /// Validate a fact from an ARCHIVED entry. Archived entries may be stale
+    /// (they were soft-invalidated from a prior generation). The default
+    /// delegates to `validates`, but views that accept untracked files in
+    /// the primary path should be STRICT for archived entries to prevent
+    /// stale data from being returned after workspace-level content changes.
+    fn validates_archived(&self, fact: &FactVersionRef) -> bool {
+        self.validates(fact)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -390,10 +398,12 @@ where
 
         // Check the archive — stale store views may still validate against
         // prior generations of facts that were soft-invalidated.
+        // Uses validates_archived which is STRICT for untracked files to
+        // prevent stale data from surviving workspace content changes.
         if view.checks_archive() {
             let archived = self.archived.lock();
             if let Some(entry) = archived.get(key) {
-                if entry.facts.iter().all(|fact| view.validates(fact)) {
+                if entry.facts.iter().all(|fact| view.validates_archived(fact)) {
                     return Some(entry.value.clone());
                 }
             }

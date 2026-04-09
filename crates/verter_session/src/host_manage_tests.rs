@@ -7974,3 +7974,64 @@ fn regression_barrel_reexport_returns_none_for_prepared_decl() {
         "the defining file (inner.ts) should have the prepared decl for Props",
     );
 }
+
+/// Regression: validates() now accepts FileWholeHash facts for untracked files
+/// (dependency files not in the store view). When a workspace-only dependency
+/// file changes content (without being upserted), the old archived module_facts
+/// must NOT be returned through the store-view-validated cache path.
+///
+/// The scenario:
+/// 1. A dependency file is loaded from workspace (never upserted → not tracked)
+/// 2. Module_facts are materialized then archived (as HostStoreView::build does)
+/// 3. The workspace file changes (simulating a disk edit)
+/// 4. A new store view is created — still doesn't track the dependency
+/// 5. module_facts.get(dep, view) must NOT return stale archived facts
+#[test]
+fn archived_module_facts_rejected_when_workspace_dep_changes_content() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/dep.ts", "export interface DepType { version: 1 }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    // Step 1: materialize module_facts for /src/dep.ts (workspace-only,
+    // never upserted → won't be tracked by the store view).
+    let facts_v1 = host
+        .ensure_module_facts_in_view("/src/dep.ts", None)
+        .expect("dep v1 should materialize");
+    let hash_v1 = facts_v1.whole_hash;
+
+    // Step 2: soft-invalidate to push the entry into the archive.
+    // This simulates what HostStoreView::snapshot_module_fact_hashes does
+    // for entries it materializes during view construction.
+    host.resolver.runtime.module_facts.invalidate("/src/dep.ts");
+
+    // Step 3: change the dependency content via workspace injection.
+    // No upsert — the host doesn't know the content changed.
+    ws.inject_file(
+        "/src/dep.ts",
+        "export interface DepType { version: 2; extra: string }\n",
+    );
+
+    // Step 4: create a store view. The dep is not tracked (never upserted,
+    // not in scheduler or compile_cache).
+    let view = host.resolver_store_view();
+
+    // Step 5: query module_facts with the store view. The validated cache
+    // must NOT return the stale V1 facts from the archive.
+    let facts_after = host
+        .ensure_module_facts_in_view("/src/dep.ts", Some(&view))
+        .expect("dep should re-materialize with current workspace content");
+    assert_ne!(
+        facts_after.whole_hash, hash_v1,
+        "module_facts via store-view-validated cache must reflect the current \
+         workspace content (V2), not stale archived V1 facts. The untracked-file \
+         acceptance in validates() should not allow archived entries with a \
+         mismatched content hash to pass validation.",
+    );
+}
