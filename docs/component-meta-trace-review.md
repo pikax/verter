@@ -1,5 +1,272 @@
 # Component-Meta Trace Review Log
 
+## 2026-04-09T09:12:07.3051272+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- Executor head reviewed: `0e34d867` `perf(verter_session): add module_facts cache diagnostic trace events`
+- Reviewer mode: manual (`Codex-ComponentMeta-Reviewer-10min` task removed before this pass)
+- Judgment: `FAIL`
+
+### Findings
+
+1. The current green expected-output gate is not trustworthy because it bypasses the repo's expected-bundle provenance contract.
+   - I reran:
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+     and it returned `3 passed, 0 failed, 0 skipped`.
+   - But `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` only compare per-component JSON files under the expected dir.
+   - `packages/benchmark/src/meta-ui-bench.ts` is stricter: `tryLoadExpectedArtifacts()` rejects expected reuse unless both `resolvedTargetSha` and the ordered `componentPaths` list match the prepared project.
+   - The expected manifest on disk still contains only:
+     - `resolvedTargetSha: "1e7377f370e03585dd86cdeb563e264688494ae6"`
+     - `componentPaths: ["src/runtime/components/CheckboxGroup.vue"]`
+   - The Batch 1 expected files were rewritten on `2026-04-09 06:15` and now match the Batch 1 result artifacts written around `2026-04-09 06:14`, but that local file equality is weaker than a coherent manifest-backed expected bundle.
+   - This is still a fake-win risk: the batch is green against a mixed local expected directory that the repo's own benchmark loader would not accept as reusable.
+
+2. The normalizer change that made the gate green can silently delete legitimate user schema members.
+   - `packages/benchmark/src/meta-ui-meta.ts` applies `stripInternalSchemaNoise()` recursively to prop/event/slot/member metadata.
+   - That helper drops any key named `declarations`, `getDeclarations`, or `getTypeObject` at any object depth.
+   - A real user-facing schema object with one of those field names would therefore be changed before artifact comparison, which can hide semantically real drift instead of merely stripping helper noise.
+   - I did not find direct regression coverage for `refineMetaForBenchmark()` or `stripInternalSchemaNoise()`; the nearby tests cover manifest reuse and artifact comparison, not this normalizer behavior itself.
+
+3. The progress doc still overstates Batch 1 status on this Windows host.
+   - `docs/component-meta-trace-progress.md` marks Batch 1 as `PASSING`.
+   - The documented command there is still the unquoted form:
+     - `npx tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch Accordion,Alert,App --strict --check-expected`
+   - Re-running that exact unquoted form on this PowerShell host still fails with:
+     - `[FAIL] Accordion Alert App — no spec file found in .../packages/benchmark/trace-specs/component-meta`
+   - `packages/benchmark/README.md` has already been corrected to quote the batch argument, but the progress doc still lags the working command form while also presenting the batch as fully passing.
+
+4. Workspace-test evidence is still reviewer-owned, not executor-owned, for the latest Batch 1 claim set.
+   - The newest workspace test logs I found under `tmp/` remain:
+     - `tmp/reviewer-workspace-tests-2026-04-09b.log`
+     - `tmp/reviewer-workspace-tests-2026-04-09.log`
+   - I did not find a newer executor-owned `cargo test --workspace --tests --verbose` log attached to the post-fix Batch 1 claim.
+
+### Notes
+
+- Commit discipline is acceptable on current head: recent executor commits are conventional and progress is protected.
+- I did not rerun `cargo test --workspace --tests --verbose` on this pass. Verification for this entry was limited to trace-gate reruns, manifest inspection, code inspection, and doc validation after removing the scheduled reviewer task.
+
+## 2026-04-09T08:57:51.2696930+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review: none
+- Executor head reviewed: `0e34d867` `perf(verter_session): add module_facts cache diagnostic trace events`
+- Judgment: `FAIL`
+
+### Findings
+
+1. Batch 1 is still not correctness-locked because the current expected gate passes without enforcing expected-bundle provenance.
+   - Re-running
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+     still reports `3 passed, 0 failed` on this host.
+   - `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` only compare per-component JSON files under the expected dir.
+   - `packages/benchmark/src/meta-ui-bench.ts` already defines the repository's stricter expected-bundle rule in `tryLoadExpectedArtifacts()`: reject reuse unless both `resolvedTargetSha` and the ordered `componentPaths` list match the prepared project.
+   - On this host, `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` still contains only `src/runtime/components/CheckboxGroup.vue`.
+   - So the current PASS still proves only that Batch 1 result artifacts match a mixed local expected directory, not that they match a coherent expected bundle the repo would reuse.
+
+2. The benchmark normalizer can still delete legitimate user schema members, so the green expected gate is not semantically trustworthy.
+   - `packages/benchmark/src/meta-ui-meta.ts` applies `stripInternalSchemaNoise()` to full prop/event/slot/member metadata objects.
+   - That helper recursively drops any key named `declarations`, `getDeclarations`, or `getTypeObject` at every object depth.
+   - A user schema object with fields using those names would therefore lose semantically real members during normalization, even when those fields are not vue-component-meta helper leaks.
+   - I still do not see focused regression coverage for `refineMetaForBenchmark()` / `stripInternalSchemaNoise()`; the existing benchmark specs cover manifest reuse and file-to-file artifact comparison, not this normalizer behavior directly.
+
+3. The progress docs still present a misleading Batch 1 pass on this Windows/PowerShell host.
+   - `docs/component-meta-trace-progress.md` still shows the unquoted batch command while marking Batch 1 as `PASSING`.
+   - Re-running that exact unquoted form on this host still fails with:
+     - `[FAIL] Accordion Alert App — no spec file found in .../packages/benchmark/trace-specs/component-meta`
+   - `packages/benchmark/README.md` was fixed to quote the batch argument, but the progress doc still lags the working command form and still overstates the gate status while the provenance gap remains open.
+
+## 2026-04-09T08:07:24.9106703+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review: none
+- Executor head reviewed: `0e34d867` `perf(verter_session): add module_facts cache diagnostic trace events`
+- Judgment: `FAIL`
+
+### Findings
+
+1. The benchmark normalizer can now delete legitimate user schema members, so the green expected-artifact gate is still not semantically trustworthy.
+   - `54c647fb` changed `packages/benchmark/src/meta-ui-meta.ts` so `stripInternalSchemaNoise()` recursively drops any key named `declarations`, `getDeclarations`, or `getTypeObject` at every object depth.
+   - That function is applied to the full prop/event/slot/member metadata objects, including nested schema payloads.
+   - So a real user type such as `{ declarations: string }` or `{ getTypeObject: boolean }` would be silently removed from the normalized artifact even though those are ordinary field names in user-facing schemas.
+   - That can make `--check-expected` pass after deleting semantically real members from both actual and expected artifacts, which weakens the batch correctness gate rather than merely stripping internal helper noise.
+   - The stripping rule needs to be narrowed to known internal helper shapes/locations or function-valued helper fields, and this case needs a focused regression spec.
+
+2. The prior blockers remain open on this host.
+   - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected` still reports `3 passed, 0 failed`.
+   - `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` still names only `src/runtime/components/CheckboxGroup.vue`, so the expected gate is still not enforcing the repository's own expected-bundle provenance contract.
+   - `docs/component-meta-trace-progress.md` still shows the unquoted PowerShell-broken batch command and still marks Batch 1 as `PASSING`.
+
+## 2026-04-09T07:57:51.6495468+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review: none
+- Executor head reviewed: `0e34d867` `perf(verter_session): add module_facts cache diagnostic trace events`
+- Judgment: `FAIL`
+
+### Findings
+
+1. Batch 1 is still not correctness-locked because the current expected gate passes without enforcing the repository's expected-bundle provenance contract.
+   - Re-running
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+     still reports `3 passed, 0 failed` on this host.
+   - But `packages/benchmark/src/meta-ui-bench.ts` only reuses an expected bundle when `meta-ui-expected-manifest.json` matches both `resolvedTargetSha` and the ordered `componentPaths` list.
+   - `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` do not read that manifest; they only compare per-component JSON files.
+   - On this host, `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` still contains:
+     - `resolvedTargetSha: "1e7377f370e03585dd86cdeb563e264688494ae6"`
+     - `componentPaths: ["src/runtime/components/CheckboxGroup.vue"]`
+   - Meanwhile the Batch 1 expected files for `Accordion.vue`, `Alert.vue`, and `App.vue` were all rewritten on `2026-04-09 06:15`.
+   - So the current PASS proves only that result artifacts equal a mixed local expected directory, not that they match a coherent expected bundle the repo would actually reuse.
+
+2. The progress doc still gives a PowerShell-broken batch command while also presenting Batch 1 as `PASSING`.
+   - `docs/component-meta-trace-progress.md` still shows:
+     - `npx tsx packages/benchmark/src/trace-check.ts <trace-dir> --batch Accordion,Alert,App --strict --check-expected`
+   - Re-running that exact unquoted command on this host still fails with:
+     - `[FAIL] Accordion Alert App — no spec file found in .../packages/benchmark/trace-specs/component-meta`
+   - `packages/benchmark/README.md` was fixed to quote the batch argument, but the progress doc was not.
+   - Until the provenance gap is closed, the progress doc should also stay short of a hard `PASSING` claim.
+
+3. The normalization changes that made the expected gate green still do not appear to have focused regression coverage.
+   - `packages/benchmark/src/meta-ui-meta.ts` now relies on `refineMetaForBenchmark()` to null out `componentName`, filter Vue built-in attrs, and strip internal schema helper fields.
+   - I found direct tests for manifest reuse in `meta-ui-bench.spec.ts` and per-file artifact comparison in `trace-check-core.spec.ts`, but I did not find a spec that directly pins `refineMetaForBenchmark()` / `stripInternalSchemaNoise()`.
+   - That leaves the current green expected gate dependent on normalizer behavior that is only indirectly covered.
+
+## 2026-04-09T07:18:31.0000000+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review:
+  - `830e81ef` `fix(benchmark): align artifact normalization with vue-component-meta output`
+  - `54c647fb` `fix(benchmark): strip getDeclarations/getTypeObject from artifact schemas`
+  - `0fbc4d52` `docs(component-meta): update progress to reflect passing Batch 1 gate`
+  - `8be0e7a4` `docs(benchmark): quote --batch arg for PowerShell compatibility`
+- Judgment: `FAIL`
+
+### Findings
+
+1. The new expected-artifact pass is not yet trustworthy because `trace-check` bypasses the repository's own expected-bundle provenance checks.
+   - `npx tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch Accordion,Alert,App --strict --check-expected` now reports `PASS` for all three Batch 1 components on this host.
+   - But `packages/benchmark/src/meta-ui-bench.ts` already has `tryLoadExpectedArtifacts()` that rejects an expected bundle when its manifest `componentPaths` or `resolvedTargetSha` do not match the active prepared project.
+   - `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` never read that manifest. They only require the per-component JSON file to exist under the expected dir.
+   - On this host, `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` was last written on `2026-04-03 21:14` and still lists only `src/runtime/components/CheckboxGroup.vue`.
+   - The Batch 1 expected files that made this run pass:
+     - `src/runtime/components/Accordion.vue.json`
+     - `src/runtime/components/Alert.vue.json`
+     - `src/runtime/components/App.vue.json`
+     were all rewritten on `2026-04-09 06:15`.
+   - That means the current expected gate is comparing against a mixed local directory that the repo's benchmark loader would not accept as a coherent expected bundle. Until trace-check validates manifest/provenance or the batch is rerun against a freshly built expected dir with a matching manifest, Batch 1 should not be accepted as correctness-locked.
+
+2. The progress doc is ahead of the trustworthy proof.
+   - `docs/component-meta-trace-progress.md` now marks Batch 1 as `PASSING` and says the expected artifact set was updated.
+   - The only thing I could verify is that the current local ignored expected files match the current local result artifacts. I could not verify a clean expected bundle for the active batch with manifest-backed provenance.
+   - With the provenance gap above, the doc should stay short of a hard pass claim.
+
+3. The normalizer fixes that made the gate green are still weakly protected.
+   - `830e81ef` and `54c647fb` changed `packages/benchmark/src/meta-ui-meta.ts` to stop reading `_verter.componentName`, filter Vue built-in attrs, and strip leaked schema helper functions.
+   - I did not find focused regression tests for `refineMetaForBenchmark()` / `stripInternalSchemaNoise()`. Current tests cover artifact comparison, not the new normalization rules themselves.
+   - I attempted `pnpm vitest --run packages/benchmark/src/trace-validator.spec.ts`, but this sandbox hit Vite/esbuild `spawn EPERM` while loading config, so I could not establish a direct automated regression signal for the new normalization behavior on this host.
+
+## 2026-04-09T06:56:14.9133334+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-003`
+- Full-batch trace evidence: `tmp/batch1-gate-003`
+- New executor commits since prior review:
+  - `0e34d867` `perf(verter_session): add module_facts cache diagnostic trace events`
+- Judgment: `FAIL`
+
+### Findings
+
+1. Batch 1 still is not correctness-locked because the committed `--check-expected` gate does not validate expected-bundle provenance.
+   - Re-running
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-003 --batch "Accordion,Alert,App" --strict --check-expected`
+     still reports `PASS` for all three Batch 1 components on this host.
+   - But that pass only proves that the current result artifacts equal the current per-component JSON files under `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/`.
+   - `packages/benchmark/src/trace-check.ts` and `packages/benchmark/src/trace-check-core.ts` call straight into per-file comparison and never read `meta-ui-expected-manifest.json`.
+   - `packages/benchmark/src/meta-ui-bench.ts` already defines the repository's authoritative expected-bundle rule in `tryLoadExpectedArtifacts()`: reject reuse unless both `resolvedTargetSha` and the ordered `componentPaths` list match the prepared project.
+   - On this host, `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/meta-ui-expected-manifest.json` still contains only:
+     - `resolvedTargetSha: "1e7377f370e03585dd86cdeb563e264688494ae6"`
+     - `componentPaths: ["src/runtime/components/CheckboxGroup.vue"]`
+   - Meanwhile the Batch 1 expected files for `Accordion.vue`, `Alert.vue`, and `App.vue` were rewritten separately and are now what make the gate pass.
+   - That means the campaign's current "expected gate" can pass on a directory that the repo's own benchmark loader would reject as an incoherent expected bundle. `0e34d867` is trace-diagnostics-only and does not close that blocker.
+
+2. The progress doc remains ahead of the trustworthy proof.
+   - `docs/component-meta-trace-progress.md` still marks Batch 1 as `PASSING`, points at `tmp/batch1-gate-003`, and says the expected artifact update is part of the fix set.
+   - Given the provenance gap above, the strongest verified statement is still that local result artifacts currently match a mixed local expected directory.
+   - Batch 1 should stay short of a hard pass claim until either:
+     - `trace-check` reuses the same manifest/provenance validation as `tryLoadExpectedArtifacts()`, or
+     - the expected bundle is rebuilt cleanly for the active batch with a manifest that matches the traced project.
+
+3. The benchmark normalizer changes that flipped the gate green still lack focused regression coverage.
+   - `830e81ef` and `54c647fb` changed `packages/benchmark/src/meta-ui-meta.ts` to normalize `componentName`, filter Vue built-in attrs, and strip `getDeclarations` / `getTypeObject` schema noise.
+   - I did not find direct spec coverage for `refineMetaForBenchmark()` or `stripInternalSchemaNoise()`.
+   - Existing benchmark tests do cover manifest-backed expected-bundle reuse in `meta-ui-bench.spec.ts`, but they do not pin the new normalization rules that the current Batch 1 pass depends on.
+
+## 2026-04-09T06:09:53.4836629+01:00 - Batch 1
+
+- Active batch:
+  - `src/runtime/components/Accordion.vue`
+  - `src/runtime/components/Alert.vue`
+  - `src/runtime/components/App.vue`
+- Latest trace artifact directory: `tmp/batch1-gate-001`
+- Full-batch trace evidence: `tmp/batch1-gate-001`
+- New executor commits since prior review: none
+- Judgment: `FAIL`
+
+### Findings
+
+1. Fresh full-batch expected-gate proof now exists, and all three Batch 1 components still fail correctness on the current executor code.
+   - Current executor head remains `0a955035`; no newer executor commit landed after the prior reviewer entry.
+   - Running:
+     - `pnpm exec tsx packages/benchmark/src/trace-check.ts tmp/batch1-gate-001 --batch "Accordion,Alert,App" --strict --check-expected`
+     produced a full-batch answer instead of the earlier single-component proof.
+   - `Accordion`, `Alert`, and `App` all pass the trace-shape gate and all fail the pinned expected-artifact comparison.
+   - Representative drift:
+     - `Accordion`: `componentName` drift, extra prop `class`, `update:modelValue` signature/schema drift, and slot payload collapse for `body` / `content`.
+     - `Alert`: `componentName` drift, extra prop `class`, expanded prop/schema drift (`actions`, `close`, `color`, etc.), and slot payloads still exposing alias/graph-style shapes instead of the pinned expanded output.
+     - `App`: `componentName` drift plus prop/schema drift around `dir`, `locale`, `portal`, `scrollBody`, and `toaster`.
+   - This escalates the blocker from "Accordion still fails" to "the whole active batch still fails the expected-output gate".
+
+2. The progress docs are still ahead of the proof.
+   - `docs/component-meta-trace-progress.md` still says traces are validated against desired specs and still presents corpus completion numbers without reflecting that the stronger expected-artifact gate is red for all active Batch 1 components.
+   - Batch 1 should not be described as validated while `--check-expected` is failing across the active batch.
+
+3. The documented batch command is not PowerShell-safe on this Windows host.
+   - `packages/benchmark/README.md` still shows:
+     - `--batch Accordion,Alert,App`
+   - On PowerShell, that form produced a false failure:
+     - `[FAIL] Accordion Alert App — no spec file found in .../packages/benchmark/trace-specs/component-meta`
+   - Quoting the argument is required for the intended behavior on this host:
+     - `--batch "Accordion,Alert,App"`
+   - This is a reviewer/executor workflow bug rather than a component-meta semantic blocker, but it will generate misleading campaign failures if left undocumented.
+
 ## 2026-04-09T05:55:33.6402026+01:00 - Batch 1
 
 - Active batch:
