@@ -21,20 +21,20 @@ Issues that are not simple implementation fixes and require deeper investigation
 - **Why not a simple fix**: Inherent computation cost of type expansion. Requires solver-level caching or type-shape memoization.
 - **Likely next fix**: Profile solver internals to find redundant work across macros in the same file.
 
-## 3. Input, Select, Textarea return no component meta
+## 3. ~~Input, Select, Textarea return no component meta~~ RESOLVED
 
-- **Component(s)**: Input.vue, Select.vue, Textarea.vue
-- **Latest trace path**: `tmp/batch3-5-trace/`
-- **Current hot spans**: Query completes (Closed) but no meta returned
-- **Suspected root cause**: These components may use patterns that the meta resolver doesn't handle (e.g., complex type intersections with HTML element types from `../types/html.ts`).
-- **Why not a simple fix**: Need to investigate what specific type pattern causes the resolver to return None.
-- **Likely next fix**: Check if these components use `defineProps<Props & HTMLInputElement['$props']>()` or similar patterns.
+**Root cause**: `build_effective_args` in the type solver produced `NodeId::UNRESOLVED`
+(u32::MAX) for generic type parameters without explicit arguments or defaults. This
+value was later passed to `arena.get()` which panicked in release builds.
 
-## 4. Table.vue times out at 40s
+**Fix**: `arena.get()` returns a static `Unknown` node for UNRESOLVED IDs. Also,
+`build_effective_args` now produces `arena.primitive(PrimitiveKind::Unknown)` instead
+of `NodeId::UNRESOLVED`. Commit: `c78feab2`.
 
-- **Component(s)**: Table.vue
-- **Latest trace path**: `tmp/batch3-5-trace/Table.trace.log` (24897 lines)
-- **Current hot spans**: Still resolving macro types after 40s, 18 macros in the component
-- **Suspected root cause**: Table.vue has 18 macros and imports from `@tanstack/vue-table` which has complex generic types (CoreOptions, etc.). The type solver may hit exponential expansion.
-- **Why not a simple fix**: Requires type expansion budgets or solver-level cycle detection for deeply generic types.
-- **Likely next fix**: Check `@tanstack/vue-table` type complexity and add budget limits for per-component type expansion.
+**Results**: Input (43 props, 526ms), Select (42 props, 8.9s), Textarea (38 props, 309ms).
+
+## 4. ~~Table.vue times out at 40s~~ RESOLVED
+
+Same root cause as #3 — the arena panic was being caught/retried, causing the 40s timeout.
+
+**Results**: Table (46 props, 8.7s). Commit: `c78feab2`.
