@@ -127,10 +127,11 @@ fn wildcard_match_score(
     let Some(stem) = wildcard_source_stem_for_matching(candidate) else {
         return 0;
     };
-    exported_name
-        .starts_with(stem.as_str())
-        .then_some(stem.len())
-        .unwrap_or(0)
+    if exported_name.starts_with(stem.as_str()) {
+        stem.len()
+    } else {
+        0
+    }
 }
 
 fn ordered_wildcard_indices_for_exported_name(
@@ -1399,6 +1400,7 @@ impl VerterHost {
             // Frontier discovery stays route-only. Materialization resolves only
             // the demanded companion targets after the route is known.
             route_exports_only: true,
+            route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
         let mut inspected_symbols = rustc_hash::FxHashSet::default();
@@ -1416,23 +1418,25 @@ impl VerterHost {
         ));
 
         loop {
-            if let Err(failure) = frontier.run(&adapter) {
-                return Err(crate::types::ExternalTypeResolveError::StepLimitExceeded {
-                    limit: failure.limit,
-                    type_name: type_name.to_string(),
-                    last_dep: failure.context,
-                });
-            }
-
-            let target = frontier.final_target_for(&adapter, dep_canonical, type_name);
-            let had_route_cycle = target.is_none()
-                && frontier
-                    .get_resolved(dep_canonical, type_name)
-                    .and_then(|resolved| resolved.route_provenance.as_ref())
-                    .is_some();
+            let (target, had_route_cycle) = loop {
+                let has_more = frontier.run_one_level(&adapter).map_err(|failure| {
+                    crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                        limit: failure.limit,
+                        type_name: type_name.to_string(),
+                        last_dep: failure.context,
+                    }
+                })?;
+                let (target, had_route_cycle) =
+                    frontier.final_target_for_with_cycle(&adapter, dep_canonical, type_name);
+                if target.is_some() || !has_more {
+                    break (target, had_route_cycle);
+                }
+            };
             if target.is_none() {
                 return Ok((frontier, None, had_route_cycle));
             }
+
+            frontier.clear_pending();
 
             let companion_seeds = self.collect_frontier_companion_seeds_in_view(
                 &frontier,
@@ -1580,7 +1584,8 @@ impl VerterHost {
             // package declaration files do not reopen full imported-state
             // materialization while companion targets are selected.
             materialize_symbols: false,
-            route_exports_only: false,
+            route_exports_only: true,
+            route_shallow_cache: RefCell::new(RouteShallowStateCache::default()),
         };
         let mut memo = rustc_hash::FxHashMap::default();
         let mut active = rustc_hash::FxHashSet::default();
@@ -3778,6 +3783,7 @@ pub(crate) struct HostFrontierAdapter<'a> {
     pub store_view: Option<&'a crate::resolver_store::HostStoreView>,
     pub materialize_symbols: bool,
     pub route_exports_only: bool,
+    pub route_shallow_cache: RefCell<RouteShallowStateCache>,
 }
 
 impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
@@ -3789,6 +3795,14 @@ impl crate::resolver_core::FrontierHost for HostFrontierAdapter<'_> {
             .host
             .resolve_eval_dependency_canonical_in_view(canonical_id, self.store_view)
             .unwrap_or_else(|| canonical_id.to_string());
+
+        if self.route_exports_only {
+            return self.host.route_shallow_state_in_view(
+                canonical.as_str(),
+                self.store_view,
+                &mut self.route_shallow_cache.borrow_mut(),
+            );
+        }
 
         // ModuleFactsDb fast path.
         if let Some(sv) = self.store_view {

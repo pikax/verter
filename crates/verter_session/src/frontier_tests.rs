@@ -422,17 +422,13 @@ defineProps<Alpha & Beta & Gamma>()
 /// re-scan the wildcard sources.
 #[test]
 fn barrel_repeated_lookup_reuses_cached_surface() {
-    let host = strict_host();
-
-    upsert_non_sfc(&host, "/src/barrel.ts", "export * from './inner'\n");
-    upsert_non_sfc(
-        &host,
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/barrel.ts", "export * from './inner'\n");
+    ws.inject_file(
         "/src/inner.ts",
         "export interface Props { label: string }\nexport interface Events { click: boolean }\n",
     );
-
-    upsert_vue(
-        &host,
+    ws.inject_file(
         "/src/Consumer.vue",
         r#"<script setup lang="ts">
 import type { Props, Events } from './barrel'
@@ -441,23 +437,89 @@ defineProps<Props>()
 <template><div /></template>"#,
     );
 
+    let host = make_host_with_workspace(ws.clone());
     set_dep(&host, "/src/Consumer.vue", "./barrel", "/src/barrel.ts");
     set_dep(&host, "/src/barrel.ts", "./inner", "/src/inner.ts");
 
     let props = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
     assert!(props.is_some(), "Props should resolve through barrel");
-
-    // Reset provenance to measure second lookup
-    host.provenance().reset();
+    let barrel_reads_after_first = ws.read_count("/src/barrel.ts");
+    let inner_reads_after_first = ws.read_count("/src/inner.ts");
 
     let events = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Events");
     assert!(events.is_some(), "Events should resolve through barrel");
+    assert_eq!(
+        ws.read_count("/src/barrel.ts"),
+        barrel_reads_after_first,
+        "second barrel lookup should reuse the cached barrel surface",
+    );
+    assert_eq!(
+        ws.read_count("/src/inner.ts"),
+        inner_reads_after_first,
+        "second barrel lookup should reuse the cached child surface",
+    );
+}
 
-    let p = host.provenance().snapshot();
+/// If an earlier wildcard sibling is itself a barrel, its deeper descendants
+/// must not be loaded before the current layer proves that no same-layer
+/// sibling exports the requested symbol.
+#[test]
+fn same_layer_barrel_match_beats_deeper_earlier_branch() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/barrel.ts",
+        "export * from './a'\nexport * from './b'\n",
+    );
+    ws.inject_file("/workspace/src/a.ts", "export * from './a-deep'\n");
+    ws.inject_file(
+        "/workspace/src/a-deep.ts",
+        "export interface Props { source: 'deep' }\n",
+    );
+    ws.inject_file(
+        "/workspace/src/b.ts",
+        "export interface Props { source: 'same-layer' }\n",
+    );
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './barrel'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = make_host_with_workspace(ws.clone());
+    set_dep(
+        &host,
+        "/workspace/src/Consumer.vue",
+        "./barrel",
+        "/workspace/src/barrel.ts",
+    );
+    set_deps(
+        &host,
+        "/workspace/src/barrel.ts",
+        vec![
+            ("./a", "/workspace/src/a.ts"),
+            ("./b", "/workspace/src/b.ts"),
+        ],
+    );
+    set_dep(
+        &host,
+        "/workspace/src/a.ts",
+        "./a-deep",
+        "/workspace/src/a-deep.ts",
+    );
+
+    ws.reset_reads();
+    let result = resolve_type(&host, "/workspace/src/Consumer.vue", "./barrel", "Props");
     assert!(
-        p.resolver_barrel_fact_reuse >= 1,
-        "second barrel lookup should reuse the cached surface, got {:?}",
-        p
+        result.is_some(),
+        "Props should resolve through the same-layer barrel child"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/a-deep.ts"),
+        0,
+        "a deeper earlier branch must not be loaded before the same-layer sibling match is chosen",
     );
 }
 
@@ -1580,6 +1642,7 @@ defineProps<Props>()
         store_view: None,
         materialize_symbols: true,
         route_exports_only: false,
+        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();
@@ -1641,6 +1704,7 @@ defineProps<Props>()
         store_view: None,
         materialize_symbols: true,
         route_exports_only: false,
+        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
 
     let mut frontier = crate::resolver_core::ExternalTypeFrontier::new();

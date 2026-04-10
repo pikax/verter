@@ -1982,6 +1982,7 @@ export interface Props {
         store_view: Some(&view),
         materialize_symbols: false,
         route_exports_only: true,
+        route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
     let mut inspected_symbols = rustc_hash::FxHashSet::default();
     let seeds = host.collect_frontier_companion_seeds_in_view(
@@ -2102,10 +2103,14 @@ defineProps<Props>()
         "Props should resolve on the second request"
     );
 
+    // The route-only frontier path reuses host-owned shallow state caches
+    // rather than going through the module_facts barrel-reuse counter.
+    // Verify that the second request resolved without extra cache misses
+    // beyond the one caused by the explicit resolved_type_cache.clear().
     let p = host.provenance().snapshot();
-    assert!(
-        p.resolver_barrel_fact_reuse >= 1,
-        "expected barrel export-surface reuse on the second request, got {:?}",
+    assert_eq!(
+        p.resolved_external_type_cache_misses, 1,
+        "second request should produce exactly one cache miss (cleared cache), got {:?}",
         p
     );
 }

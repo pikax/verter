@@ -186,14 +186,29 @@ impl ExternalTypeFrontier {
     /// Returns `Ok(())` if all reachable symbols were processed (or budget
     /// was exceeded), `Err` for host-level failures.
     pub fn run<H: FrontierHost>(&mut self, host: &H) -> Result<(), BudgetExceededFailure> {
-        while !self.current_level.is_empty() {
-            self.process_level(host)?;
-
-            // Swap levels
-            self.current_level.clear();
-            std::mem::swap(&mut self.current_level, &mut self.next_level);
-        }
+        while self.run_one_level(host)? {}
         Ok(())
+    }
+
+    /// Process one BFS level and report whether another level remains.
+    pub fn run_one_level<H: FrontierHost>(
+        &mut self,
+        host: &H,
+    ) -> Result<bool, BudgetExceededFailure> {
+        if self.current_level.is_empty() {
+            return Ok(false);
+        }
+
+        self.process_level(host)?;
+        self.current_level.clear();
+        std::mem::swap(&mut self.current_level, &mut self.next_level);
+        Ok(!self.current_level.is_empty())
+    }
+
+    /// Drop any queued-but-unprocessed frontier work.
+    pub fn clear_pending(&mut self) {
+        self.current_level.clear();
+        self.next_level.clear();
     }
 
     /// Process one level of the frontier.
@@ -281,8 +296,7 @@ impl ExternalTypeFrontier {
             return self.resolve_through_export(host, pending, &state, target);
         }
 
-        // Step 2: Try wildcard reexport routing using the shallow edge first,
-        // then lazily proving the missing type route through the host.
+        // Step 2: Enqueue wildcard reexport targets for the next BFS layer.
         for (order, wildcard) in type_view.wildcard_reexports().iter().enumerate() {
             let target_canonical = if wildcard.canonical_id.is_empty() {
                 host.resolve_type_edge_canonical(&pending.canonical_id, &wildcard.source_specifier)
@@ -318,59 +332,14 @@ impl ExternalTypeFrontier {
                 }
             }
 
-            // Try resolving in the wildcard target
-            if let Some(wc_state) = host.ensure_shallow_state(&target_canonical) {
-                if wc_state
-                    .type_view()
-                    .export_target(&pending.exported_name)
-                    .is_some()
-                {
-                    // Found it — enqueue as next-level work from the target file
-                    let next = PendingExternalSymbol {
-                        canonical_id: target_canonical.clone(),
-                        exported_name: pending.exported_name.clone(),
-                        route: pending.route.clone(),
-                    };
-                    let key = (next.canonical_id.clone(), next.exported_name.clone());
-                    if self.seen.insert(key) {
-                        self.next_level.push(next);
-                    }
-
-                    return ResolvedSymbol {
-                        canonical_id: pending.canonical_id.clone(),
-                        exported_name: pending.exported_name.clone(),
-                        status: ResolvedSymbolStatus::ResolvedWithUnresolvedExternal,
-                        body: None,
-                        type_parameters: Vec::new(),
-                        unresolved_external: vec![ExternalSymbolRef {
-                            local_name: pending.exported_name.clone(),
-                            source_specifier: wildcard.source_specifier.clone(),
-                            imported_name: pending.exported_name.clone(),
-                            canonical_id: target_canonical.clone(),
-                        }],
-                        route_provenance: Some(ResolvedRouteProvenance {
-                            kind: RouteKind::Wildcard {
-                                barrel_canonical_id: pending.canonical_id.clone(),
-                                source_order: order,
-                            },
-                            defining_canonical_id: target_canonical.clone(),
-                            defining_name: pending.exported_name.clone(),
-                        }),
-                    };
-                }
-
-                // Check if the wildcard target itself has wildcards (recursive barrel)
-                if wc_state.has_wildcard_reexports() {
-                    let next = PendingExternalSymbol {
-                        canonical_id: target_canonical.clone(),
-                        exported_name: pending.exported_name.clone(),
-                        route: pending.route.clone(),
-                    };
-                    let key = (next.canonical_id.clone(), next.exported_name.clone());
-                    if self.seen.insert(key) {
-                        self.next_level.push(next);
-                    }
-                }
+            let next = PendingExternalSymbol {
+                canonical_id: target_canonical.clone(),
+                exported_name: pending.exported_name.clone(),
+                route: pending.route.clone(),
+            };
+            let key = (next.canonical_id.clone(), next.exported_name.clone());
+            if self.seen.insert(key) {
+                self.next_level.push(next);
             }
         }
 
@@ -588,8 +557,24 @@ impl ExternalTypeFrontier {
         exported_name: &str,
     ) -> Option<(String, String)> {
         let mut seen = FxHashSet::default();
+        let mut had_cycle = false;
 
-        self.final_target_from(host, canonical_id, exported_name, &mut seen)
+        self.final_target_from(host, canonical_id, exported_name, &mut seen, &mut had_cycle)
+    }
+
+    /// Follow the resolved route chain and report whether a route cycle was
+    /// encountered while proving the final target.
+    pub fn final_target_for_with_cycle<H: FrontierHost>(
+        &self,
+        host: &H,
+        canonical_id: &str,
+        exported_name: &str,
+    ) -> (Option<(String, String)>, bool) {
+        let mut seen = FxHashSet::default();
+        let mut had_cycle = false;
+        let target =
+            self.final_target_from(host, canonical_id, exported_name, &mut seen, &mut had_cycle);
+        (target, had_cycle)
     }
 
     fn final_target_from<H: FrontierHost>(
@@ -598,10 +583,12 @@ impl ExternalTypeFrontier {
         canonical_id: &str,
         exported_name: &str,
         seen: &mut FxHashSet<(String, String)>,
+        had_cycle: &mut bool,
     ) -> Option<(String, String)> {
         let current = (canonical_id.to_string(), exported_name.to_string());
 
         if !seen.insert(current.clone()) {
+            *had_cycle = true;
             return None;
         }
 
@@ -617,6 +604,7 @@ impl ExternalTypeFrontier {
                     &provenance.defining_canonical_id,
                     &provenance.defining_name,
                     seen,
+                    had_cycle,
                 ),
             };
         }
@@ -638,7 +626,9 @@ impl ExternalTypeFrontier {
                 continue;
             }
 
-            if let Some(target) = self.final_target_from(host, &wc_canonical, &current.1, seen) {
+            if let Some(target) =
+                self.final_target_from(host, &wc_canonical, &current.1, seen, had_cycle)
+            {
                 return Some(target);
             }
         }
@@ -697,6 +687,8 @@ impl Default for ExternalTypeFrontier {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::resolver_core::ShallowImportResolver;
     use verter_semantic::analysis::Hash16;
@@ -706,6 +698,7 @@ mod tests {
         files: FxHashMap<String, Arc<ShallowFileState>>,
         route_exports_only: bool,
         missing_type_edges: FxHashMap<(String, String), String>,
+        ensured: RefCell<Vec<String>>,
     }
 
     impl MockHost {
@@ -714,6 +707,7 @@ mod tests {
                 files: FxHashMap::default(),
                 route_exports_only: false,
                 missing_type_edges: FxHashMap::default(),
+                ensured: RefCell::new(Vec::new()),
             }
         }
 
@@ -732,10 +726,19 @@ mod tests {
                 target_canonical.to_string(),
             );
         }
+
+        fn ensure_log(&self) -> Vec<String> {
+            self.ensured.borrow().clone()
+        }
+
+        fn reset_ensure_log(&self) {
+            self.ensured.borrow_mut().clear();
+        }
     }
 
     impl FrontierHost for MockHost {
         fn ensure_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+            self.ensured.borrow_mut().push(canonical_id.to_string());
             self.files.get(canonical_id).cloned()
         }
 
@@ -897,6 +900,124 @@ mod tests {
     }
 
     #[test]
+    fn run_one_level_defers_wildcard_child_shallowing_until_next_level() {
+        let mut host = MockHost::new();
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved(
+                "export * from './first'\nexport * from './second'\n",
+                &[("./first", "/src/first.ts"), ("./second", "/src/second.ts")],
+            ),
+        );
+        host.add_file(
+            "/src/first.ts",
+            make_state("export interface Props { source: 'first' }"),
+        );
+        host.add_file(
+            "/src/second.ts",
+            make_state("export interface Other { source: 'second' }"),
+        );
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/barrel.ts".to_string(),
+            exported_name: "Props".to_string(),
+            route: None,
+        }]);
+
+        assert!(
+            frontier.run_one_level(&host).unwrap(),
+            "the first level should enqueue the barrel children"
+        );
+        assert_eq!(
+            host.ensure_log(),
+            vec!["/src/barrel.ts".to_string()],
+            "processing the barrel level should not shallow wildcard children inline"
+        );
+
+        host.reset_ensure_log();
+        assert!(
+            !frontier.run_one_level(&host).unwrap(),
+            "the second level should resolve the queued children"
+        );
+        assert_eq!(
+            host.ensure_log(),
+            vec!["/src/first.ts".to_string(), "/src/second.ts".to_string()],
+            "the next BFS level should shallow every queued same-layer child"
+        );
+        assert_eq!(
+            frontier.final_target_for(&host, "/src/barrel.ts", "Props"),
+            Some(("/src/first.ts".to_string(), "Props".to_string())),
+        );
+    }
+
+    #[test]
+    fn run_one_level_keeps_same_layer_siblings_ahead_of_grandchildren() {
+        let mut host = MockHost::new();
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved(
+                "export * from './a'\nexport * from './b'\n",
+                &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
+            ),
+        );
+        host.add_file(
+            "/src/a.ts",
+            make_state_resolved(
+                "export * from './a_deep'\n",
+                &[("./a_deep", "/src/a_deep.ts")],
+            ),
+        );
+        host.add_file(
+            "/src/b.ts",
+            make_state("export interface Props { source: 'b' }"),
+        );
+        host.add_file(
+            "/src/a_deep.ts",
+            make_state("export interface Props { source: 'a_deep' }"),
+        );
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/barrel.ts".to_string(),
+            exported_name: "Props".to_string(),
+            route: None,
+        }]);
+
+        assert!(
+            frontier.run_one_level(&host).unwrap(),
+            "the barrel level should enqueue the same-layer children"
+        );
+        host.reset_ensure_log();
+
+        assert!(
+            frontier.run_one_level(&host).unwrap(),
+            "processing the child layer should leave the deeper grandchild queued"
+        );
+        assert_eq!(
+            host.ensure_log(),
+            vec!["/src/a.ts".to_string(), "/src/b.ts".to_string()],
+            "same-layer children should be processed before any deeper wildcard grandchild"
+        );
+        assert_eq!(
+            frontier.final_target_for(&host, "/src/barrel.ts", "Props"),
+            Some(("/src/b.ts".to_string(), "Props".to_string())),
+            "a same-layer child match must beat a deeper earlier branch"
+        );
+
+        host.reset_ensure_log();
+        assert!(
+            !frontier.run_one_level(&host).unwrap(),
+            "the queued grandchild should remain for the following level"
+        );
+        assert_eq!(
+            host.ensure_log(),
+            vec!["/src/a_deep.ts".to_string()],
+            "the deeper grandchild should not run until the next BFS layer"
+        );
+    }
+
+    #[test]
     fn dedup_prevents_double_resolution() {
         let mut host = MockHost::new();
         host.add_file(
@@ -1043,12 +1164,10 @@ mod tests {
             "Props should be found in first.ts (first-wins)"
         );
 
-        // second.ts should NOT have been visited for Props
-        // (first source already claimed it)
-        let second = frontier.get_resolved("/src/second.ts", "Props");
-        assert!(
-            second.is_none(),
-            "Props should NOT be resolved from second.ts â€” first-wins"
+        assert_eq!(
+            frontier.final_target_for(&host, "/src/barrel.ts", "Props"),
+            Some(("/src/first.ts".to_string(), "Props".to_string())),
+            "declared-order routing should still choose the first matching wildcard child"
         );
     }
 
