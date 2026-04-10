@@ -14,6 +14,7 @@
 //! - Barrel and `export *` hops must be cached once discovered because repeated
 //!   wildcard re-export scans are expensive.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -53,6 +54,117 @@ type ResolvedExternalTypes =
 type ExternalTypeCache = crate::resolver_core::ExternalTypeBodyCache;
 type FrontierRequestedRoutes =
     rustc_hash::FxHashMap<(String, String), crate::resolver_core::RouteDemand>;
+type RouteShallowStateCache =
+    rustc_hash::FxHashMap<String, Arc<crate::resolver_core::ShallowFileState>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RouteOwnedShallowStateCacheKey {
+    host_instance_id: u64,
+    canonical_id: String,
+    view_epoch: u64,
+    workspace_generation: u64,
+}
+
+#[derive(Clone)]
+struct RouteOwnedShallowStateCacheEntry {
+    whole_hash: Hash16,
+    shallow_state: Arc<crate::resolver_core::ShallowFileState>,
+}
+
+thread_local! {
+    static HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE: RefCell<
+        FxHashMap<RouteOwnedShallowStateCacheKey, RouteOwnedShallowStateCacheEntry>
+    > = RefCell::new(FxHashMap::default());
+}
+
+fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
+    let mut segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let mut stem = segments.pop()?;
+
+    for suffix in [
+        ".d.ts", ".d.mts", ".d.cts", ".vue", ".tsx", ".ts", ".jsx", ".js", ".mts", ".cts",
+    ] {
+        if let Some(stripped) = stem.strip_suffix(suffix) {
+            stem = stripped;
+            break;
+        }
+    }
+
+    if stem == "index" {
+        stem = segments.pop()?;
+    }
+
+    let mut normalized = String::new();
+    let mut uppercase_next = true;
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if uppercase_next {
+                normalized.push(ch.to_ascii_uppercase());
+                uppercase_next = false;
+            } else {
+                normalized.push(ch);
+            }
+        } else {
+            uppercase_next = true;
+        }
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn wildcard_match_score(
+    exported_name: &str,
+    wildcard: &crate::resolver_core::WildcardReexport,
+) -> usize {
+    let candidate = if wildcard.canonical_id.is_empty() {
+        wildcard.source_specifier.as_str()
+    } else {
+        wildcard.canonical_id.as_str()
+    };
+    let Some(stem) = wildcard_source_stem_for_matching(candidate) else {
+        return 0;
+    };
+    exported_name
+        .starts_with(stem.as_str())
+        .then_some(stem.len())
+        .unwrap_or(0)
+}
+
+fn ordered_wildcard_indices_for_exported_name(
+    wildcards: &[crate::resolver_core::WildcardReexport],
+    exported_name: &str,
+) -> Vec<usize> {
+    let mut scored = wildcards
+        .iter()
+        .enumerate()
+        .map(|(index, wildcard)| (index, wildcard_match_score(exported_name, wildcard)))
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    scored.into_iter().map(|(index, _)| index).collect()
+}
+
+struct RouteOnlyShallowImportResolver<'a> {
+    host: &'a VerterHost,
+    owner_canonical: &'a str,
+    store_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
+impl crate::resolver_core::ShallowImportResolver for RouteOnlyShallowImportResolver<'_> {
+    fn resolve_canonical(&self, specifier: &str) -> Option<String> {
+        self.host.resolve_type_dependency_canonical_in_view(
+            self.owner_canonical,
+            specifier,
+            self.store_view,
+        )
+    }
+}
 
 fn external_type_debug_enabled() -> bool {
     std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
@@ -1677,11 +1789,15 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
+        route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
             crate::resolver_core::ExportTarget::Local { symbol_name } => {
-                let facts = self.ensure_module_facts_in_view(provider_canonical, store_view)?;
-                let state = &facts.shallow_state;
+                let state = self.route_shallow_state_in_view(
+                    provider_canonical,
+                    store_view,
+                    route_shallow_cache,
+                )?;
                 if state.is_import_local(symbol_name) {
                     let import_target = state.import_target(symbol_name)?;
                     let target_canonical = if import_target.canonical_id.is_empty() {
@@ -1699,6 +1815,7 @@ impl VerterHost {
                         store_view,
                         active,
                         participants,
+                        route_shallow_cache,
                     );
                 }
 
@@ -1728,9 +1845,182 @@ impl VerterHost {
                     store_view,
                     active,
                     participants,
+                    route_shallow_cache,
                 )
             }
         }
+    }
+
+    fn route_owned_shallow_state_cache_key(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        workspace_generation: u64,
+    ) -> RouteOwnedShallowStateCacheKey {
+        RouteOwnedShallowStateCacheKey {
+            host_instance_id: self.instance_id,
+            canonical_id: canonical_id.to_string(),
+            view_epoch: store_view
+                .map(|view| view.mutation_epoch())
+                .unwrap_or_else(|| self.current_store_view_epoch()),
+            workspace_generation,
+        }
+    }
+
+    fn cached_route_owned_shallow_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        workspace_generation: u64,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        let key = self.route_owned_shallow_state_cache_key(
+            canonical_id,
+            store_view,
+            workspace_generation,
+        );
+        let entry =
+            HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| cache.borrow().get(&key).cloned())?;
+
+        if let Some(current_hash) = self.get_whole_hash(canonical_id) {
+            if current_hash != entry.whole_hash
+                || !self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    current_hash,
+                    store_view,
+                )
+            {
+                return None;
+            }
+        } else if !self.ws().file_exists(canonical_id)
+            || !self.store_view_allows_current_whole_hash(
+                canonical_id,
+                entry.whole_hash,
+                store_view,
+            )
+        {
+            return None;
+        }
+
+        Some(entry.shallow_state)
+    }
+
+    fn cache_route_owned_shallow_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        workspace_generation: u64,
+        whole_hash: Hash16,
+        shallow_state: Arc<crate::resolver_core::ShallowFileState>,
+    ) {
+        let key = self.route_owned_shallow_state_cache_key(
+            canonical_id,
+            store_view,
+            workspace_generation,
+        );
+        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
+            cache.borrow_mut().insert(
+                key,
+                RouteOwnedShallowStateCacheEntry {
+                    whole_hash,
+                    shallow_state,
+                },
+            );
+        });
+    }
+
+    fn route_shallow_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let workspace_generation = self.ws().content_generation();
+
+        if let Some(view) = store_view {
+            if let Some(facts) = self
+                .resolver
+                .runtime
+                .module_facts
+                .get(normalized_canonical.as_str(), view)
+            {
+                return Some(Arc::clone(&facts.shallow_state));
+            }
+        }
+
+        if let Some(cached) = route_shallow_cache.get(normalized_canonical.as_str()) {
+            return Some(Arc::clone(cached));
+        }
+
+        if let Some(cached) = self.cached_route_owned_shallow_state_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+        ) {
+            route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&cached));
+            return Some(cached);
+        }
+
+        let raw_source = self.read_analysis_source(normalized_canonical.as_str())?;
+        let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+        if !self.store_view_allows_current_whole_hash(
+            normalized_canonical.as_str(),
+            whole_hash,
+            store_view,
+        ) {
+            return None;
+        }
+
+        if let Some(facts) = self
+            .resolver
+            .runtime
+            .module_facts
+            .get_any(normalized_canonical.as_str())
+        {
+            if facts.whole_hash == whole_hash {
+                return Some(Arc::clone(&facts.shallow_state));
+            }
+        }
+
+        let cached_parse = normalized_canonical
+            .ends_with(".vue")
+            .then(|| Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None)));
+        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+        ));
+        let (eval_env, external_type_analysis) = self.build_eval_env_and_external_type_analysis(
+            normalized_canonical.as_str(),
+            whole_hash,
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+            &eval_source,
+        );
+        let resolver = RouteOnlyShallowImportResolver {
+            host: self,
+            owner_canonical: normalized_canonical.as_str(),
+            store_view,
+        };
+        let shallow_state = Arc::new(
+            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
+                whole_hash,
+                external_type_analysis,
+                Some(eval_source.as_ref()),
+                Some(eval_env.as_ref()),
+                &resolver,
+            ),
+        );
+        route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&shallow_state));
+        self.cache_route_owned_shallow_state_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+            whole_hash,
+            Arc::clone(&shallow_state),
+        );
+        Some(shallow_state)
     }
 
     fn resolve_named_type_export_route_uncached_in_view(
@@ -1740,6 +2030,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
+        route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
         if !active.insert(key.clone()) {
@@ -1748,8 +2039,11 @@ impl VerterHost {
         participants.insert(provider_canonical.to_string());
 
         let result = (|| {
-            let facts = self.ensure_module_facts_in_view(provider_canonical, store_view)?;
-            let state = &facts.shallow_state;
+            let state = self.route_shallow_state_in_view(
+                provider_canonical,
+                store_view,
+                route_shallow_cache,
+            )?;
 
             if let Some(target) = state.export_target(exported_name) {
                 return self.resolve_named_type_export_route_from_target_in_view(
@@ -1758,10 +2052,16 @@ impl VerterHost {
                     store_view,
                     active,
                     participants,
+                    route_shallow_cache,
                 );
             }
 
-            for wildcard in &state.wildcard_reexports {
+            let wildcard_indices = ordered_wildcard_indices_for_exported_name(
+                &state.wildcard_reexports,
+                exported_name,
+            );
+            for wildcard_index in wildcard_indices {
+                let wildcard = &state.wildcard_reexports[wildcard_index];
                 let target_canonical = if wildcard.canonical_id.is_empty() {
                     self.resolve_route_type_edge_in_view(
                         provider_canonical,
@@ -1780,6 +2080,7 @@ impl VerterHost {
                     store_view,
                     active,
                     participants,
+                    route_shallow_cache,
                 )?;
                 if !child.is_miss() {
                     return Some(child);
@@ -1805,12 +2106,14 @@ impl VerterHost {
         let _ = self.ensure_module_facts_in_view(dep_canonical, store_view);
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
+        let mut route_shallow_cache = RouteShallowStateCache::default();
         let route_result = self.resolve_named_type_export_route_uncached_in_view(
             dep_canonical,
             requested_name,
             store_view,
             &mut active,
             &mut touched_canonical_ids,
+            &mut route_shallow_cache,
         )?;
 
         let mut facts = Vec::new();

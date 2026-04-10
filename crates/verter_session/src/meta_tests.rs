@@ -11741,6 +11741,117 @@ defineProps<{ parentProp: string }>()
 }
 
 #[test]
+fn package_component_root_prefers_declaration_companion_for_recursive_fallthrough() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/tsconfig.json".to_string(),
+        Arc::from(
+            r#"{ "compilerOptions": { "module": "esnext", "moduleResolution": "bundler" } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/package.json".to_string(),
+        Arc::from(
+            r#"{ "name": "reka-ui", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.d.ts".to_string(),
+        Arc::from(r#"export { default as FancyRoot } from './FancyRoot.vue'"#),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/index.js".to_string(),
+        Arc::from("export const runtimeOnly = true"),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/reka-ui/dist/FancyRoot.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+defineProps<{ childProp?: string }>()
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script setup lang="ts">
+import { FancyRoot } from 'reka-ui'
+</script>
+<template><FancyRoot /></template>"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+    assert!(
+        project.ensure_loaded("/workspace/src/App.vue").unwrap(),
+        "workspace owner should load the wrapper component"
+    );
+
+    let meta = get_meta(&project, "/workspace/src/App.vue");
+
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "childProp"),
+        "component root recursion should expose the child's declared props through the declaration companion"
+    );
+    assert!(
+        meta.accepted_props.iter().any(|p| p.name == "id"),
+        "component root recursion should still expose native attrs from the child root"
+    );
+    assert_eq!(
+        meta.accepted_surface_completeness,
+        AcceptedSurfaceCompleteness::Exact,
+        "typed package component roots should recurse exactly through the declaration companion"
+    );
+
+    let FallthroughSurface::Branches { branches } = &meta.fallthrough_surface else {
+        panic!("expected FallthroughSurface::Branches");
+    };
+    assert!(
+        branches
+            .iter()
+            .all(|branch| !matches!(branch.status, BranchStatus::Unresolved { .. })),
+        "typed package component roots should not stop at childResolutionFailed: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.status)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        branches
+            .iter()
+            .any(|branch| branch.root_chain.iter().any(|step| {
+                matches!(
+                    step,
+                    ResolvedRootStep::Component { canonical_id, .. }
+                        if canonical_id == "/workspace/node_modules/reka-ui/dist/FancyRoot.vue"
+                )
+            })),
+        "root chain should recurse through the declaration-exported child component, got: {:?}",
+        branches
+            .iter()
+            .map(|branch| &branch.root_chain)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn cycle_terminates_without_invented_members() {
     let project = make_project();
 

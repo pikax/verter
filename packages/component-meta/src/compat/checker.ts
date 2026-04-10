@@ -1064,9 +1064,14 @@ export class ComponentMetaChecker {
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
     if (this._session) {
+      const getResolvedComponentMeta = (
+        this._session as {
+          getResolvedComponentMeta?: import("../runtime/project-session.js").ProjectSession["getResolvedComponentMeta"];
+        }
+      ).getResolvedComponentMeta;
       const nativeMeta =
-        typeof this._session.getDeclaredComponentMeta === "function"
-          ? this._session.getDeclaredComponentMeta(absPath)
+        typeof getResolvedComponentMeta === "function"
+          ? getResolvedComponentMeta.call(this._session, absPath)
           : this._session.getComponentMeta(absPath);
       if (!nativeMeta) {
         return {

@@ -22,8 +22,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/runtime session/i);
   });
 
-  it("normalizes session-backed canonical ids before querying declared native metadata", async () => {
-    const getDeclaredComponentMeta = vi.fn(() => ({
+  it("normalizes session-backed canonical ids before querying resolved native metadata", async () => {
+    const getResolvedComponentMeta = vi.fn(() => ({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [],
@@ -66,9 +66,9 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta,
+        getResolvedComponentMeta,
         getComponentMeta() {
-          throw new Error("full native query should not be used for default Verter compat");
+          throw new Error("legacy full native query should not be used for default Verter compat");
         },
         getProvenance() {
           return "{}";
@@ -92,7 +92,7 @@ describe("ComponentMetaChecker session requirement", () => {
     );
     await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
   it("propagates native component-meta budget errors to callers", async () => {
@@ -107,7 +107,7 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta() {
+        getResolvedComponentMeta() {
           throw new Error(
             "component-meta external type resolution step budget exceeded (maxSteps=2000)",
           );
@@ -141,8 +141,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses one declared native query for explicit Verter compat output and _verter", async () => {
-    const declaredMeta: any = {
+  it("uses one resolved native query for explicit Verter compat output and _verter", async () => {
+    const resolvedMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -191,9 +191,9 @@ describe("ComponentMetaChecker session requirement", () => {
       rootReachability: { kind: "branches", branches: [] },
       fallthroughSurface: { kind: "branches", branches: [] },
     };
-    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
+    const getResolvedComponentMeta = vi.fn(() => resolvedMeta);
     const getComponentMeta = vi.fn(() => {
-      throw new Error("full native query should not be used for explicit Verter compat");
+      throw new Error("legacy full native query should not be used for explicit Verter compat");
     });
 
     const checker = new ComponentMetaChecker(
@@ -208,7 +208,7 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert() {},
         delete() {},
         getComponentMeta,
-        getDeclaredComponentMeta,
+        getResolvedComponentMeta,
         getProvenance() {
           return "{}";
         },
@@ -232,8 +232,8 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);

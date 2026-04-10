@@ -97,6 +97,10 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 **Component-meta deepening rule:** resolve one requested symbol/query path at a time. Do not let a file-level resolver widen into unrelated sibling symbols/files while chasing a single metadata request.
 
+**Component-meta imported-file rule:** imported files stay shallow-first and symbol-directed. After an imported canonical file is read/processed for the current version, consume only its shallow/export surface first. Do not navigate into its imports unless the requested symbol is present on a direct route from that shallow state, or the file is acting as a barrel and the symbol was not found locally.
+
+**Component-meta barrel BFS rule:** when the current imported file is a barrel and the requested symbol is not present in its shallow/export surface, follow wildcard barrel exports breadth-first by layer. Shallow all barrel children in the current layer, check each for the requested symbol, and only then continue to the next barrel layer. Do not descend one barrel branch depth-first ahead of same-layer siblings, and do not open unrelated imported files while searching that symbol route.
+
 **Component-meta projection rule:** when projecting metadata/fallthrough from an already-resolved query, reuse that resolved state plus the captured store/session view. Do not bounce back out to a fresh top-level fallthrough/meta query.
 
 **Component-meta collection rule:** imported-eval collection must stay lazy/BFS over the active symbol route. Do not add eager collector modes or source-text reparsing fallbacks in shared resolver code.

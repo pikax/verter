@@ -2005,7 +2005,7 @@ impl VerterHost {
         )
     }
 
-    fn build_eval_env_and_external_type_analysis(
+    pub(crate) fn build_eval_env_and_external_type_analysis(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
@@ -3251,33 +3251,81 @@ impl VerterHost {
         }
 
         let materialize = || -> Option<crate::resolver_core::ModuleFacts> {
-            // Materialize: read source, parse, build analysis, construct facts.
-            let raw_source = self.read_analysis_source(canonical_id)?;
-            let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-            if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-                return None;
-            }
+            // Materialize: read source, build analysis, construct facts.
+            #[cfg(feature = "scheduler")]
+            let scheduler_state = self.effective_file_state(canonical_id, None);
 
-            let cached_parse = canonical_id
-                .ends_with(".vue")
-                .then(|| Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None)));
+            #[cfg(feature = "scheduler")]
+            let (raw_source, cached_parse, whole_hash, snapshot) = if let Some(state) =
+                scheduler_state
+            {
+                if !self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    state.whole_hash,
+                    store_view,
+                ) {
+                    return None;
+                }
+                let snapshot =
+                    if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical_id) {
+                        self.provenance
+                            .module_facts_scheduler_snapshot_reuse
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        snapshot
+                    } else {
+                        self.build_snapshot_from_source_state(
+                            canonical_id,
+                            &state.source,
+                            state.cached_parse.as_deref(),
+                        )
+                    };
+                (
+                    state.source,
+                    state.cached_parse,
+                    state.whole_hash,
+                    Arc::new(snapshot),
+                )
+            } else {
+                let raw_source = self.read_analysis_source(canonical_id)?;
+                let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+                if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
+                {
+                    return None;
+                }
+                let cached_parse = canonical_id.ends_with(".vue").then(|| {
+                    Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None))
+                });
+                let snapshot = Arc::new(self.build_snapshot_from_source_state(
+                    canonical_id,
+                    &raw_source,
+                    cached_parse.as_deref(),
+                ));
+                (raw_source, cached_parse, whole_hash, snapshot)
+            };
+
+            #[cfg(not(feature = "scheduler"))]
+            let (raw_source, cached_parse, whole_hash, snapshot) = {
+                let raw_source = self.read_analysis_source(canonical_id)?;
+                let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+                if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
+                {
+                    return None;
+                }
+                let cached_parse = canonical_id.ends_with(".vue").then(|| {
+                    Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None))
+                });
+                let snapshot = Arc::new(self.build_snapshot_from_source_state(
+                    canonical_id,
+                    &raw_source,
+                    cached_parse.as_deref(),
+                ));
+                (raw_source, cached_parse, whole_hash, snapshot)
+            };
 
             let eval_source = Arc::<str>::from(Self::build_eval_script_source(
                 raw_source.as_ref(),
                 cached_parse.as_deref(),
             ));
-
-            // Build snapshot without resolving imports. Import resolution
-            // happens when get_raw_analysis_snapshot_in_view reads the facts
-            // and applies resolve_snapshot_imports_in_view on the clone.
-            // This avoids eagerly resolving ordinary imports that are irrelevant
-            // to the export surface, and prevents recursive materialization.
-            let snapshot = self.build_snapshot_from_source_state(
-                canonical_id,
-                &raw_source,
-                cached_parse.as_deref(),
-            );
-            let snapshot = Arc::new(snapshot);
             let declaration_file = canonical_id.ends_with(".d.ts")
                 || canonical_id.ends_with(".d.mts")
                 || canonical_id.ends_with(".d.cts");

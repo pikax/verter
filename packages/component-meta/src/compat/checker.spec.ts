@@ -871,15 +871,15 @@ describe("mapComponentMeta", () => {
 // ── Checker integration tests ───────────────────────────────────────
 
 describe("ComponentMetaChecker", () => {
-  it("uses the declared native component-meta query instead of rebuilding from analysis snapshots", async () => {
-    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
+  it("uses the resolved native component-meta query instead of rebuilding from analysis snapshots", async () => {
+    const getResolvedComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const session = {
       closed: false,
       engine: { state: "active" as const },
       upsert() {},
       delete() {},
-      getDeclaredComponentMeta,
+      getResolvedComponentMeta,
       getComponentMeta,
       getProvenance() {
         return "{}";
@@ -911,8 +911,8 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/tmp", "Single.vue"));
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith(resolvePath("/tmp", "Single.vue"));
     expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
@@ -1227,7 +1227,7 @@ defineProps<ButtonProps>()
   it("promotes lazy workspace files into the shared native project", async () => {
     const canonicalId = resolvePath("/tmp", "Lazy.vue");
     const ensureBaseFile = vi.fn(() => true);
-    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
+    const getResolvedComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const workspace = {
       readFile: vi.fn(async () => {
@@ -1251,7 +1251,7 @@ defineProps<ButtonProps>()
         upsert: vi.fn(),
         delete: vi.fn(),
         ensureBaseFile,
-        getDeclaredComponentMeta,
+        getResolvedComponentMeta,
         getComponentMeta,
         getProvenance() {
           return "{}";
@@ -1277,8 +1277,8 @@ defineProps<ButtonProps>()
 
     expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
     expect(workspace.readFile).not.toHaveBeenCalled();
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(canonicalId);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
@@ -1341,9 +1341,9 @@ defineEmits<{
     expect(meta._verter!.componentName).toBeDefined();
   });
 
-  it("uses the declared native query by default when a compat query exists", async () => {
+  it("uses the resolved native query by default when a compat query exists", async () => {
     const canonicalId = "Fast.vue";
-    const getDeclaredComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
+    const getResolvedComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const checker = new ComponentMetaChecker(
       {} as any,
@@ -1353,7 +1353,7 @@ defineEmits<{
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getDeclaredComponentMeta,
+        getResolvedComponentMeta,
         getComponentMeta,
         getProvenance() {
           return "{}";
@@ -1383,7 +1383,7 @@ defineEmits<{
 
     const meta = await checker.getComponentMeta(canonicalId);
 
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/project", canonicalId));
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith(resolvePath("/project", canonicalId));
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });

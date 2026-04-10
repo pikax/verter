@@ -315,14 +315,14 @@ describe("ComponentMetaSession public API", () => {
     project.close();
   });
 
-  it("uses the declared native component-meta query instead of rebuilding from session analysis helpers", async () => {
-    const getDeclaredComponentMeta = vi.fn((id: string) => nativeMetaPayload(id));
+  it("uses the resolved native component-meta query for public compat metadata", async () => {
+    const getResolvedComponentMeta = vi.fn((id: string) => nativeMetaPayload(id));
     const session = {
       closed: false,
       engine: { state: "active" as const, clearCaches() {} },
       upsert() {},
       delete() {},
-      getDeclaredComponentMeta,
+      getResolvedComponentMeta,
       getComponentMeta(id: string) {
         return nativeMetaPayload(id);
       },
@@ -342,7 +342,7 @@ describe("ComponentMetaSession public API", () => {
     const meta = await project.getComponentMeta("Button.vue");
 
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("/test/Button.vue");
+    expect(getResolvedComponentMeta).toHaveBeenCalledWith("/test/Button.vue");
   });
 
   it("projects optional generic raw prop text through the public session API", async () => {
@@ -647,7 +647,7 @@ describe("ComponentMetaSession public API", () => {
     expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe("/test/types.ts");
   });
 
-  it("routes compat and native project queries through different native session methods", async () => {
+  it("routes public and native project queries through the resolved native session method", async () => {
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
     const getResolvedComponentMeta = vi.fn(() => ({
       ...nativeMetaPayload("/test/Button.vue"),
@@ -679,8 +679,8 @@ describe("ComponentMetaSession public API", () => {
     const compatMeta = await project.getComponentMeta("Button.vue");
     const nativeMeta = await project.getNativeComponentMeta("Button.vue");
 
-    expect(getComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getComponentMeta).not.toHaveBeenCalled();
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(2);
     expect(compatMeta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(nativeMeta?.resolution?.mode).toBe("expanded");
   });

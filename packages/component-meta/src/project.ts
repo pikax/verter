@@ -165,9 +165,14 @@ export class ComponentMetaSession {
       return undefined;
     }
 
+    const getResolvedComponentMeta = (
+      this._session as {
+        getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
+      }
+    ).getResolvedComponentMeta;
     const nativeMeta =
-      typeof this._session.getDeclaredComponentMeta === "function"
-        ? this._session.getDeclaredComponentMeta(abs)
+      typeof getResolvedComponentMeta === "function"
+        ? getResolvedComponentMeta.call(this._session, abs)
         : this._session.getComponentMeta(abs);
     if (!nativeMeta) {
       return undefined;

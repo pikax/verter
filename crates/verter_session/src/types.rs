@@ -1470,6 +1470,7 @@ pub struct MetaProvenance {
     pub payload_cache_hits: std::sync::atomic::AtomicU64,
     pub payload_cache_misses: std::sync::atomic::AtomicU64,
     pub payload_encodes: std::sync::atomic::AtomicU64,
+    pub module_facts_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
     pub bundle_materializations: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
@@ -1499,6 +1500,7 @@ impl Default for MetaProvenance {
             payload_cache_hits: std::sync::atomic::AtomicU64::new(0),
             payload_cache_misses: std::sync::atomic::AtomicU64::new(0),
             payload_encodes: std::sync::atomic::AtomicU64::new(0),
+            module_facts_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64::new(0),
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
@@ -1585,6 +1587,10 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.payload_cache_misses.load(Relaxed),
             )
             .field("payload_encodes", &self.payload_encodes.load(Relaxed))
+            .field(
+                "module_facts_scheduler_snapshot_reuse",
+                &self.module_facts_scheduler_snapshot_reuse.load(Relaxed),
+            )
             .field("bundle_cache_hits", &self.bundle_cache_hits.load(Relaxed))
             .field(
                 "bundle_materializations",
@@ -1628,6 +1634,9 @@ impl MetaProvenance {
             payload_cache_hits: self.payload_cache_hits.load(Relaxed),
             payload_cache_misses: self.payload_cache_misses.load(Relaxed),
             payload_encodes: self.payload_encodes.load(Relaxed),
+            module_facts_scheduler_snapshot_reuse: self
+                .module_facts_scheduler_snapshot_reuse
+                .load(Relaxed),
             bundle_cache_hits: self.bundle_cache_hits.load(Relaxed),
             bundle_materializations: self.bundle_materializations.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
@@ -1659,6 +1668,7 @@ impl MetaProvenance {
         self.payload_cache_hits.store(0, Relaxed);
         self.payload_cache_misses.store(0, Relaxed);
         self.payload_encodes.store(0, Relaxed);
+        self.module_facts_scheduler_snapshot_reuse.store(0, Relaxed);
         self.bundle_cache_hits.store(0, Relaxed);
         self.bundle_materializations.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
@@ -1713,6 +1723,7 @@ pub struct MetaProvenanceSnapshot {
     pub payload_cache_hits: u64,
     pub payload_cache_misses: u64,
     pub payload_encodes: u64,
+    pub module_facts_scheduler_snapshot_reuse: u64,
     pub bundle_cache_hits: u64,
     pub bundle_materializations: u64,
     pub dep_resolution_calls: u64,

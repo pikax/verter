@@ -6507,6 +6507,234 @@ export interface UnusedProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn resolve_imported_type_root_unseeded_late_match_keeps_earlier_vue_siblings_off_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        concat!(
+            "export * from './Accordion.vue'\n",
+            "export * from './Alert.vue'\n",
+            "export * from './AuthForm.vue'\n",
+            "export * from './Avatar.vue'\n",
+            "export * from './Checkbox.vue'\n",
+            "export * from './Unused.vue'\n",
+        ),
+    );
+    ws.inject_file(
+        "/src/Accordion.vue",
+        r#"<script lang="ts">
+export interface AccordionProps {
+  items?: string[]
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Alert.vue",
+        r#"<script lang="ts">
+export interface AlertProps {
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/AuthForm.vue",
+        r#"<script lang="ts">
+export interface AuthFormProps {
+  title?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Checkbox.vue",
+        r#"<script lang="ts">
+export interface CheckboxProps {
+  checked?: boolean
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let root = host.resolve_imported_type_root_in_view("/src/types.ts", "CheckboxProps", None);
+
+    assert_eq!(
+        root,
+        ("/src/Checkbox.vue".to_string(), "CheckboxProps".to_string()),
+        "late wildcard imported-root proof should still resolve to the correct child",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Accordion.vue")
+            .is_none(),
+        "late wildcard imported-root proof should keep earlier Vue siblings off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Alert.vue")
+            .is_none(),
+        "late wildcard imported-root proof should keep earlier Vue siblings off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/AuthForm.vue")
+            .is_none(),
+        "late wildcard imported-root proof should keep earlier Vue siblings off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Avatar.vue")
+            .is_none(),
+        "late wildcard imported-root proof should keep earlier Vue siblings off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Checkbox.vue")
+            .is_none(),
+        "imported-root proof should stay on the route-owned path and avoid materializing the matched Vue child",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_imported_type_root_reuses_route_owned_vue_child_across_distinct_symbol_proofs() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/types.ts", "export * from './Accordion.vue'\n");
+    ws.inject_file(
+        "/src/Accordion.vue",
+        r#"<script lang="ts">
+export interface AccordionProps {
+  items?: string[]
+}
+
+export interface AccordionEmits {
+  change?: [value: string]
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let props_root =
+        host.resolve_imported_type_root_in_view("/src/types.ts", "AccordionProps", None);
+    let emits_root =
+        host.resolve_imported_type_root_in_view("/src/types.ts", "AccordionEmits", None);
+
+    assert_eq!(
+        props_root,
+        (
+            "/src/Accordion.vue".to_string(),
+            "AccordionProps".to_string()
+        ),
+        "first imported-root proof should resolve the Vue child type export",
+    );
+    assert_eq!(
+        emits_root,
+        (
+            "/src/Accordion.vue".to_string(),
+            "AccordionEmits".to_string()
+        ),
+        "second imported-root proof should resolve through the same route-owned Vue child",
+    );
+    assert!(
+        ws.read_count("/src/Accordion.vue") <= 1,
+        "distinct imported-root proofs should reuse the route-owned Vue child state instead of rereading it; saw {} reads",
+        ws.read_count("/src/Accordion.vue"),
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Accordion.vue")
+            .is_none(),
+        "route-owned reuse should stay off ModuleFactsDb for the matched Vue child",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn get_component_meta_reuses_scheduler_snapshot_when_materializing_owner_module_facts() {
+    let host = VerterHost::new_standalone(HostConfig {
+        analysis_level: AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    upsert_vue(
+        &host,
+        "/src/Accordion.vue",
+        r#"<script setup lang="ts">
+import type { AccordionRootProps } from 'reka-ui'
+
+const props = defineProps<AccordionRootProps>()
+</script>
+<template><div /></template>"#,
+    );
+
+    host.resolver
+        .runtime
+        .module_facts
+        .evict("/src/Accordion.vue");
+    host.provenance().reset();
+    let facts = host.ensure_module_facts_in_view("/src/Accordion.vue", None);
+    let provenance = host.provenance_snapshot();
+
+    assert!(
+        facts.is_some(),
+        "module-facts materialization should succeed for the scheduler-tracked owner",
+    );
+    assert!(
+        provenance.module_facts_scheduler_snapshot_reuse > 0,
+        "owner module-facts materialization should reuse the scheduler snapshot instead of rebuilding it from cached parse; saw {:?}",
+        provenance,
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn resolve_named_type_export_target_prefers_longest_wildcard_prefix_match() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -6551,6 +6779,89 @@ export interface CheckboxGroupProps {
             "CheckboxGroupProps".to_string()
         )),
         "route selection should prefer the longest matching wildcard source stem",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_imported_type_root_prefers_matching_wildcard_stem_before_unrelated_earlier_siblings() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        concat!(
+            "export * from './AuthForm.vue'\n",
+            "export * from './Avatar.vue'\n",
+            "export * from './Icon.vue'\n",
+            "export * from './Unused.vue'\n",
+        ),
+    );
+    ws.inject_file(
+        "/src/AuthForm.vue",
+        r#"<script lang="ts">
+export interface AuthFormProps {
+  title?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Icon.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_reads();
+    let root = host.resolve_imported_type_root_in_view("/src/types.ts", "IconProps", None);
+
+    assert_eq!(
+        root,
+        ("/src/Icon.vue".to_string(), "IconProps".to_string()),
+        "wildcard route proof should resolve IconProps through the matching child stem",
+    );
+    assert_eq!(
+        ws.read_count("/src/AuthForm.vue"),
+        0,
+        "wildcard route proof should skip earlier unrelated siblings when the requested export name points at a later matching stem",
+    );
+    assert_eq!(
+        ws.read_count("/src/Avatar.vue"),
+        0,
+        "wildcard route proof should not read other earlier siblings once the matching stem narrows the active route",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "wildcard route proof should stop after the matching child without touching later unrelated siblings",
     );
 }
 
