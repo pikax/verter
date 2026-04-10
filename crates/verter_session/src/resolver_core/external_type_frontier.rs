@@ -250,7 +250,7 @@ impl ExternalTypeFrontier {
                 let next = PendingExternalSymbol {
                     canonical_id: target_canonical.clone(),
                     exported_name: ext_ref.imported_name.clone(),
-                    route: None,
+                    route: Some(ext_ref.route.clone()),
                 };
                 let key = (next.canonical_id.clone(), next.exported_name.clone());
                 if self.seen.insert(key) {
@@ -397,6 +397,7 @@ impl ExternalTypeFrontier {
                                     source_specifier: import_target.source_specifier.clone(),
                                     imported_name: import_target.imported_name.clone(),
                                     canonical_id: target_canonical.clone(),
+                                    route: pending.route.clone().unwrap_or_default(),
                                 }],
                                 route_provenance: Some(ResolvedRouteProvenance {
                                     kind: RouteKind::Alias,
@@ -515,6 +516,7 @@ impl ExternalTypeFrontier {
                             source_specifier: source_specifier.clone(),
                             imported_name: original_name.clone(),
                             canonical_id: reexport_canonical.clone(),
+                            route: pending.route.clone().unwrap_or_default(),
                         }],
                         route_provenance: Some(ResolvedRouteProvenance {
                             kind: RouteKind::Alias,
@@ -540,6 +542,11 @@ impl ExternalTypeFrontier {
     /// Number of resolved symbols.
     pub fn resolved_count(&self) -> usize {
         self.resolved.len()
+    }
+
+    /// Number of pending symbols queued for the current BFS layer.
+    pub fn pending_count(&self) -> usize {
+        self.current_level.len()
     }
 
     /// Get a resolved symbol by key.
@@ -1014,6 +1021,66 @@ mod tests {
             host.ensure_log(),
             vec!["/src/a_deep.ts".to_string()],
             "the deeper grandchild should not run until the next BFS layer"
+        );
+    }
+
+    #[test]
+    fn pending_count_tracks_current_bfs_layer() {
+        let mut host = MockHost::new();
+        host.add_file(
+            "/src/barrel.ts",
+            make_state_resolved(
+                "export * from './a'\nexport * from './b'\n",
+                &[("./a", "/src/a.ts"), ("./b", "/src/b.ts")],
+            ),
+        );
+        host.add_file(
+            "/src/a.ts",
+            make_state_resolved(
+                "export * from './a_deep'\n",
+                &[("./a_deep", "/src/a_deep.ts")],
+            ),
+        );
+        host.add_file(
+            "/src/b.ts",
+            make_state("export interface Props { source: 'b' }"),
+        );
+        host.add_file(
+            "/src/a_deep.ts",
+            make_state("export interface Props { source: 'a_deep' }"),
+        );
+
+        let mut frontier = ExternalTypeFrontier::new();
+        frontier.seed(vec![PendingExternalSymbol {
+            canonical_id: "/src/barrel.ts".to_string(),
+            exported_name: "Props".to_string(),
+            route: None,
+        }]);
+
+        assert_eq!(
+            frontier.pending_count(),
+            1,
+            "the seed should occupy the first BFS layer by itself"
+        );
+
+        assert!(
+            frontier.run_one_level(&host).unwrap(),
+            "the root barrel should enqueue the same-layer children"
+        );
+        assert_eq!(
+            frontier.pending_count(),
+            2,
+            "the next BFS layer should contain both same-layer barrel children"
+        );
+
+        assert!(
+            frontier.run_one_level(&host).unwrap(),
+            "the child layer should leave the grandchild queued"
+        );
+        assert_eq!(
+            frontier.pending_count(),
+            1,
+            "only the deferred grandchild should remain for the following BFS layer"
         );
     }
 

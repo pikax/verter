@@ -85,6 +85,44 @@ fn read_file_three_layer_priority() {
     assert_eq!(content_after_clear.as_deref(), Some("snapshot content"));
 }
 
+#[test]
+fn read_file_trace_detail_tracks_actual_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test.vue");
+    std::fs::write(&file_path, "disk content").unwrap();
+
+    let canonical = file_path.to_string_lossy().replace('\\', "/");
+    let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    let content_disk = ws.read_file(&canonical);
+    assert_eq!(content_disk.as_deref(), Some("disk content"));
+    assert_eq!(
+        ws.take_last_read_file_trace_detail(&canonical).as_deref(),
+        Some("layer=disk cache=miss"),
+        "cold reads should report a disk miss"
+    );
+
+    let content_snapshot = ws.read_file(&canonical);
+    assert_eq!(content_snapshot.as_deref(), Some("disk content"));
+    assert_eq!(
+        ws.take_last_read_file_trace_detail(&canonical).as_deref(),
+        Some("layer=snapshot cache=hit"),
+        "warm reads should report a snapshot hit"
+    );
+
+    ws.apply_changes(vec![WorkspaceChange::OverlaySet {
+        canonical_id: canonical.clone(),
+        source: Arc::from("overlay content"),
+    }]);
+    let content_overlay = ws.read_file(&canonical);
+    assert_eq!(content_overlay.as_deref(), Some("overlay content"));
+    assert_eq!(
+        ws.take_last_read_file_trace_detail(&canonical).as_deref(),
+        Some("layer=overlay cache=hit"),
+        "overlay reads should report overlay hits"
+    );
+}
+
 // ── FilesystemWorkspace::file_exists ──
 
 #[test]

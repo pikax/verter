@@ -47,6 +47,15 @@ pub trait WorkspaceAccess: Send + Sync {
     /// snapshot/disk content. Returns `None` if the file doesn't exist.
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>>;
 
+    /// Trace-only detail about the most recent `read_file()` on the current
+    /// thread for this canonical path, if the workspace can provide it.
+    ///
+    /// This is intended for high-level trace events that want to preserve the
+    /// concrete VFS layer/cache result without re-reading the file.
+    fn take_last_read_file_trace_detail(&self, _canonical_id: &str) -> Option<String> {
+        None
+    }
+
     /// Check whether a file exists. In Filesystem mode, probes disk on miss.
     fn file_exists(&self, canonical_id: &str) -> bool;
 

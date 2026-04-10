@@ -125,6 +125,10 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.read_file(canonical_id)
     }
 
+    fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
+        self.inner.take_last_read_file_trace_detail(canonical_id)
+    }
+
     fn file_exists(&self, canonical_id: &str) -> bool {
         *self
             .exists_counts
@@ -6789,6 +6793,140 @@ export interface CheckboxGroupProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn current_dependency_fact_versions_in_view_keeps_shallow_tracked_barrel_siblings_off_module_facts()
+{
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Button.vue", "/src/Button.vue"),
+            exact_dependency("./Link.vue", "/src/Link.vue"),
+            exact_dependency("./Unused.vue", "/src/Unused.vue"),
+        ],
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    ws.reset_reads();
+    let resolved = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ButtonProps",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved.is_some(),
+        "component-meta macro resolution should still resolve ButtonProps",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        1,
+        "the barrel BFS may shallow a same-layer sibling once while proving the route",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Unused.vue")
+            .is_none(),
+        "route-only frontier discovery should keep unrelated same-layer siblings off ModuleFactsDb",
+    );
+
+    let final_view = host.resolver_store_view();
+    let unused_reads_before = ws.read_count("/src/Unused.vue");
+    let _facts = host.current_dependency_fact_versions_in_view(
+        "/src/Consumer.vue",
+        &tracked_deps,
+        Some(&final_view),
+    );
+
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        unused_reads_before,
+        "fact-version capture must not reread a shallow-only tracked barrel sibling",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Unused.vue")
+            .is_none(),
+        "fact-version capture must not promote a shallow-only tracked barrel sibling into ModuleFactsDb",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn resolve_imported_type_root_prefers_matching_wildcard_stem_before_unrelated_earlier_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -6867,6 +7005,100 @@ export interface UnusedProps {
         ws.read_count("/src/Unused.vue"),
         0,
         "wildcard route proof should stop after the matching child without touching later unrelated siblings",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_imported_type_root_nested_barrel_alias_keeps_unrelated_vue_siblings_off_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        "export * from './Button.vue'\nexport * from './Link.vue'\nexport * from './Unused.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+import type { LinkProps } from './types'
+
+export interface ButtonProps extends Omit<LinkProps, 'raw'> {
+  label?: string
+}
+</script>
+<template><button /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Link.vue",
+        r#"<script lang="ts">
+export interface LinkProps {
+  href?: string
+  raw?: boolean
+}
+</script>
+<template><a /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.set_import_dependencies(
+        "/src/Button.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Button.vue", "/src/Button.vue"),
+            exact_dependency("./Link.vue", "/src/Link.vue"),
+            exact_dependency("./Unused.vue", "/src/Unused.vue"),
+        ],
+    );
+
+    let view = host.resolver_store_view();
+    let root = host.resolve_imported_type_root_in_view("/src/types.ts", "LinkProps", Some(&view));
+
+    assert_eq!(
+        root,
+        ("/src/Link.vue".to_string(), "LinkProps".to_string()),
+        "nested barrel alias proof should still resolve LinkProps through the direct sibling barrel child",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Button.vue")
+            .is_none(),
+        "imported-root proof should keep earlier Vue siblings on the route-owned shallow path",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Link.vue")
+            .is_none(),
+        "imported-root proof should avoid materializing the matched Vue child",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Unused.vue")
+            .is_none(),
+        "imported-root proof should not materialize unrelated later Vue siblings",
     );
 }
 
@@ -6965,6 +7197,19 @@ export interface UnusedProps {
     assert!(
         !prop_names.contains("raw"),
         "nested barrel alias should still respect Omit, got {prop_names:?}",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        1,
+        "component-meta expansion may shallow a same-layer barrel sibling once during BFS route proofing",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Unused.vue")
+            .is_none(),
+        "component-meta expansion should keep shallow-only same-layer barrel siblings off ModuleFactsDb",
     );
 }
 
@@ -8405,4 +8650,25 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
         "after intermediate barrel change, root must point to types-b, \
          not stale types-a from the cached imported root",
     );
+}
+
+#[test]
+fn read_analysis_source_trace_result_labels_workspace_vfs_reads() {
+    assert_eq!(
+        super::read_analysis_source_result_detail("/src/types.ts", "workspace-vfs", 128, false,),
+        "owner=/src/types.ts source=workspace-vfs bytes=128"
+    );
+    assert_eq!(
+        super::read_analysis_source_result_detail("/src/types.ts", "workspace-vfs", 0, true,),
+        "owner=/src/types.ts source=workspace-vfs bytes=0 missing=true"
+    );
+}
+
+#[test]
+fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
+    assert_eq!(
+        super::workspace_vfs_source_kind(Some("layer=snapshot cache=hit".to_string())),
+        "workspace-vfs layer=snapshot cache=hit"
+    );
+    assert_eq!(super::workspace_vfs_source_kind(None), "workspace-vfs");
 }

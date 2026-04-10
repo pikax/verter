@@ -2015,6 +2015,152 @@ export interface Props {
     );
 }
 
+#[test]
+fn frontier_closure_preserves_nested_member_tail_for_imported_companions() {
+    let host = strict_host();
+
+    upsert_non_sfc(
+        &host,
+        "/src/leaf.ts",
+        "export interface Leaf { text: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/unused-leaf.ts",
+        "export interface UnusedLeaf { code: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/alpha.ts",
+        r#"
+import type { Leaf } from './leaf'
+import type { UnusedLeaf } from './unused-leaf'
+
+export interface AlphaProps {
+  label: Leaf
+  other: UnusedLeaf
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/beta.ts",
+        "export interface BetaProps { beta?: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+import type { AlphaProps } from './alpha'
+import type { BetaProps } from './beta'
+
+export interface Props {
+  primary?: AlphaProps
+  secondary?: BetaProps
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/barrel.ts",
+        "export { Props as PublicProps } from './types'\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/alpha.ts",
+        vec![
+            crate::DependencyResolution {
+                specifier: "./leaf".to_string(),
+                resolved_canonical_id: Some("/src/leaf.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "./unused-leaf".to_string(),
+                resolved_canonical_id: Some("/src/unused-leaf.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            crate::DependencyResolution {
+                specifier: "./alpha".to_string(),
+                resolved_canonical_id: Some("/src/alpha.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::DependencyResolution {
+                specifier: "./beta".to_string(),
+                resolved_canonical_id: Some("/src/beta.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/barrel.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let view = host.resolver_store_view();
+    let mut requested_routes = super::FrontierRequestedRoutes::default();
+    requested_routes.insert(
+        ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
+        crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into(), "label".into()]),
+    );
+
+    let (frontier, target, _had_route_cycle) = host
+        .run_external_type_frontier_closure_in_view(
+            "/src/barrel.ts",
+            "PublicProps",
+            &mut requested_routes,
+            Some(&view),
+        )
+        .expect("frontier closure should complete");
+
+    assert_eq!(
+        target,
+        Some(("/src/types.ts".to_string(), "Props".to_string())),
+        "barrel alias should resolve to the defining symbol",
+    );
+    assert_eq!(
+        requested_routes.get(&("/src/alpha.ts".to_string(), "AlphaProps".to_string())),
+        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
+            "label".into()
+        ])),
+        "the imported companion should keep only the remaining member tail",
+    );
+    assert!(
+        requested_routes.contains_key(&("/src/leaf.ts".to_string(), "Leaf".to_string())),
+        "the active nested imported dependency should still be followed",
+    );
+    assert!(
+        !requested_routes
+            .contains_key(&("/src/unused-leaf.ts".to_string(), "UnusedLeaf".to_string())),
+        "the inactive sibling inside the imported type should remain shallow",
+    );
+    assert!(
+        !requested_routes.contains_key(&("/src/beta.ts".to_string(), "BetaProps".to_string())),
+        "the inactive top-level sibling should remain shallow",
+    );
+
+    let touched: std::collections::BTreeSet<_> =
+        frontier.touched_canonical_ids().into_iter().collect();
+    assert!(
+        touched.contains("/src/leaf.ts"),
+        "nested active imported dependency should be touched, got {:?}",
+        touched
+    );
+    assert!(
+        !touched.contains("/src/unused-leaf.ts"),
+        "nested inactive sibling should not be materialized, got {:?}",
+        touched
+    );
+}
+
 #[cfg(feature = "scheduler")]
 #[test]
 fn barrel_cache_hits_increment_barrel_fact_reuse_counter() {
@@ -2480,6 +2626,78 @@ defineProps<Props>()
         }
         other => panic!("expected step-limit error, got {other:?}"),
     }
+}
+
+#[test]
+fn external_type_trace_status_maps_success_and_error_variants() {
+    assert_eq!(super::external_type_trace_success_status(false), "ok:none");
+    assert_eq!(
+        super::external_type_trace_success_status(true),
+        "ok:resolved"
+    );
+
+    assert_eq!(
+        super::external_type_trace_error_status(
+            &crate::types::ExternalTypeResolveError::MissingRootDependency,
+        ),
+        "err:missing_root"
+    );
+    assert_eq!(
+        super::external_type_trace_error_status(
+            &crate::types::ExternalTypeResolveError::DepthLimitExceeded {
+                limit: crate::types::MAX_RESOLVE_DEPTH,
+                type_name: "Props".to_string(),
+                last_dep: "/src/Consumer.vue".to_string(),
+            },
+        ),
+        "err:depth_limit"
+    );
+    assert_eq!(
+        super::external_type_trace_error_status(
+            &crate::types::ExternalTypeResolveError::StepLimitExceeded {
+                limit: crate::types::MAX_EXTERNAL_TYPE_RESOLVE_STEPS,
+                type_name: "Props".to_string(),
+                last_dep: "/src/types.ts".to_string(),
+            },
+        ),
+        "err:step_limit"
+    );
+}
+
+#[test]
+fn external_type_trace_deltas_use_request_start_baseline() {
+    let baseline = super::ExternalTypeTraceBaseline {
+        tracked_len: 1,
+        resolution_len: 2,
+        cache_len: 3,
+    };
+
+    assert_eq!(
+        super::external_type_trace_deltas(baseline, 4, 6, 8),
+        (3, 4, 5),
+        "trace deltas should be measured against the request-entry baseline"
+    );
+}
+
+#[test]
+fn external_type_frontier_layer_trace_details_include_bfs_metadata() {
+    assert_eq!(
+        super::external_type_frontier_layer_start_detail("/src/types.ts", "Props", 2, 5, 3),
+        "source=/src/types.ts exported=Props layer=2 pending=5 resolved=3"
+    );
+    assert_eq!(
+        super::external_type_frontier_layer_result_detail(
+            "/src/types.ts",
+            "Props",
+            2,
+            1,
+            7,
+            true,
+            false,
+            false,
+        ),
+        "source=/src/types.ts exported=Props layer=2 pending_next=1 resolved=7 has_more=true target_found=false route_cycle=false"
+    );
 }
 
 #[cfg(feature = "scheduler")]

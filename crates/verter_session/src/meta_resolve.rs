@@ -1958,17 +1958,42 @@ impl VerterHost {
                 let state = self.shallow_file_state_in_view(canonical_id, store_view)?;
                 Some(crate::resolver_store::hash_route_surface(&state))
             }
-            crate::resolver_core::DerivedFactKind::ImportRoute => self
-                .resolver
-                .runtime
-                .module_facts
-                .get_any(canonical_id)
-                .and_then(|facts| facts.import_route_hash)
-                .or_else(|| {
-                    self.ensure_module_facts_in_view(canonical_id, store_view)
-                        .and_then(|facts| facts.import_route_hash)
-                }),
+            crate::resolver_core::DerivedFactKind::ImportRoute => {
+                // Read-only: ImportRoute fact capture must not promote a
+                // shallow-only tracked dependency into full ModuleFacts.
+                self.current_cached_import_route_hash(canonical_id)
+            }
         }
+    }
+
+    fn current_cached_import_route_hash(&self, canonical_id: &str) -> Option<Hash16> {
+        self.resolver
+            .runtime
+            .module_facts
+            .get_any(canonical_id)
+            .and_then(|facts| facts.import_route_hash)
+            .or_else(|| {
+                #[cfg(feature = "scheduler")]
+                {
+                    self.compile_cache.get(canonical_id).and_then(|entry| {
+                        (!entry.import_routes.is_empty()).then(|| {
+                            crate::resolver_store::hash_import_route_targets(&entry.import_routes)
+                        })
+                    })
+                }
+
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    use crate::shared::read_lock;
+
+                    let files = read_lock(&self.files);
+                    files.get(canonical_id).and_then(|entry| {
+                        (!entry.import_routes.is_empty()).then(|| {
+                            crate::resolver_store::hash_import_route_targets(&entry.import_routes)
+                        })
+                    })
+                }
+            })
     }
 }
 

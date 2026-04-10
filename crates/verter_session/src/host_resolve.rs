@@ -57,6 +57,125 @@ type FrontierRequestedRoutes =
 type RouteShallowStateCache =
     rustc_hash::FxHashMap<String, Arc<crate::resolver_core::ShallowFileState>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExternalTypeTraceBaseline {
+    tracked_len: usize,
+    resolution_len: usize,
+    cache_len: usize,
+}
+
+impl ExternalTypeTraceBaseline {
+    fn capture(
+        tracked_deps: &std::collections::BTreeSet<String>,
+        resolution_deps: &std::collections::BTreeSet<String>,
+        cache: &ExternalTypeCache,
+    ) -> Self {
+        Self {
+            tracked_len: tracked_deps.len(),
+            resolution_len: resolution_deps.len(),
+            cache_len: cache.len(),
+        }
+    }
+}
+
+fn external_type_trace_success_status(has_result: bool) -> &'static str {
+    if has_result {
+        "ok:resolved"
+    } else {
+        "ok:none"
+    }
+}
+
+fn external_type_trace_error_status(
+    error: &crate::types::ExternalTypeResolveError,
+) -> &'static str {
+    match error {
+        crate::types::ExternalTypeResolveError::MissingRootDependency => "err:missing_root",
+        crate::types::ExternalTypeResolveError::DepthLimitExceeded { .. } => "err:depth_limit",
+        crate::types::ExternalTypeResolveError::StepLimitExceeded { .. } => "err:step_limit",
+    }
+}
+
+fn external_type_trace_deltas(
+    baseline: ExternalTypeTraceBaseline,
+    tracked_len: usize,
+    resolution_len: usize,
+    cache_len: usize,
+) -> (usize, usize, usize) {
+    (
+        tracked_len.saturating_sub(baseline.tracked_len),
+        resolution_len.saturating_sub(baseline.resolution_len),
+        cache_len.saturating_sub(baseline.cache_len),
+    )
+}
+
+fn emit_external_type_from_loaded_files_trace_result(
+    owner_canonical: &str,
+    import_source: &str,
+    type_name: &str,
+    status: &'static str,
+    baseline: ExternalTypeTraceBaseline,
+    tracked_len: usize,
+    resolution_len: usize,
+    cache_len: usize,
+    visiting_len: usize,
+    store_view_active: bool,
+) {
+    let (tracked_delta, resolution_delta, cache_delta) =
+        external_type_trace_deltas(baseline, tracked_len, resolution_len, cache_len);
+    component_meta_trace_event!(
+        "resolve_external_type_from_loaded_files_result",
+        format!(
+            "owner={} import={} type={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={} store_view={}",
+            owner_canonical,
+            import_source,
+            type_name,
+            status,
+            tracked_delta,
+            resolution_delta,
+            cache_delta,
+            visiting_len,
+            store_view_active,
+        ),
+    );
+}
+
+fn external_type_frontier_layer_start_detail(
+    source_canonical: &str,
+    exported_name: &str,
+    layer: usize,
+    pending: usize,
+    resolved: usize,
+) -> String {
+    format!(
+        "source={} exported={} layer={} pending={} resolved={}",
+        source_canonical, exported_name, layer, pending, resolved,
+    )
+}
+
+fn external_type_frontier_layer_result_detail(
+    source_canonical: &str,
+    exported_name: &str,
+    layer: usize,
+    pending_next: usize,
+    resolved: usize,
+    has_more: bool,
+    target_found: bool,
+    route_cycle: bool,
+) -> String {
+    format!(
+        "source={} exported={} layer={} pending_next={} resolved={} has_more={} target_found={} route_cycle={}",
+        source_canonical,
+        exported_name,
+        layer,
+        pending_next,
+        resolved,
+        has_more,
+        target_found,
+        route_cycle,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RouteOwnedShallowStateCacheKey {
     host_instance_id: u64,
@@ -1014,13 +1133,41 @@ impl VerterHost {
                 use_host_cache,
             ),
         );
+        let trace_baseline =
+            ExternalTypeTraceBaseline::capture(tracked_deps, resolution_deps, cache);
+        let emit_trace_result = |status: &'static str,
+                                 tracked_len: usize,
+                                 resolution_len: usize,
+                                 cache_len: usize,
+                                 visiting_len: usize| {
+            emit_external_type_from_loaded_files_trace_result(
+                owner_canonical,
+                import_source,
+                type_name,
+                status,
+                trace_baseline,
+                tracked_len,
+                resolution_len,
+                cache_len,
+                visiting_len,
+                store_view.is_some(),
+            );
+        };
 
         if depth >= crate::types::MAX_RESOLVE_DEPTH {
-            return Err(crate::types::ExternalTypeResolveError::DepthLimitExceeded {
+            let err = crate::types::ExternalTypeResolveError::DepthLimitExceeded {
                 limit: crate::types::MAX_RESOLVE_DEPTH,
                 type_name: type_name.to_string(),
                 last_dep: owner_canonical.to_string(),
-            });
+            };
+            emit_trace_result(
+                external_type_trace_error_status(&err),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
+            return Err(err);
         }
 
         let Some(dep_canonical) = self.resolve_loaded_dependency_canonical_in_view(
@@ -1029,11 +1176,25 @@ impl VerterHost {
             kind,
             store_view,
         ) else {
-            return if required_root_dep {
-                Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
-            } else {
-                Ok(None)
-            };
+            if required_root_dep {
+                let err = crate::types::ExternalTypeResolveError::MissingRootDependency;
+                emit_trace_result(
+                    external_type_trace_error_status(&err),
+                    tracked_deps.len(),
+                    resolution_deps.len(),
+                    cache.len(),
+                    visiting.len(),
+                );
+                return Err(err);
+            }
+            emit_trace_result(
+                external_type_trace_success_status(false),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
+            return Ok(None);
         };
 
         tracked_deps.insert(dep_canonical.clone());
@@ -1046,15 +1207,35 @@ impl VerterHost {
 
         let cache_key = (dep_canonical.clone(), type_name.to_string());
         if let Some(cached) = cache.get(&cache_key) {
+            emit_trace_result(
+                external_type_trace_success_status(cached.is_some()),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
             return Ok(cached.clone());
         }
 
-        let (frontier, target, had_route_cycle) = self.run_external_type_frontier_closure_in_view(
-            dep_canonical.as_str(),
-            type_name,
-            &mut requested_routes,
-            store_view,
-        )?;
+        let (frontier, target, had_route_cycle) = match self
+            .run_external_type_frontier_closure_in_view(
+                dep_canonical.as_str(),
+                type_name,
+                &mut requested_routes,
+                store_view,
+            ) {
+            Ok(result) => result,
+            Err(err) => {
+                emit_trace_result(
+                    external_type_trace_error_status(&err),
+                    tracked_deps.len(),
+                    resolution_deps.len(),
+                    cache.len(),
+                    visiting.len(),
+                );
+                return Err(err);
+            }
+        };
         let touched_ids = frontier.touched_canonical_ids();
 
         for touched_id in touched_ids {
@@ -1067,11 +1248,25 @@ impl VerterHost {
                 .ensure_module_facts_in_view(dep_canonical.as_str(), store_view)
                 .is_none()
             {
-                return if required_root_dep {
-                    Err(crate::types::ExternalTypeResolveError::MissingRootDependency)
-                } else {
-                    Ok(None)
-                };
+                if required_root_dep {
+                    let err = crate::types::ExternalTypeResolveError::MissingRootDependency;
+                    emit_trace_result(
+                        external_type_trace_error_status(&err),
+                        tracked_deps.len(),
+                        resolution_deps.len(),
+                        cache.len(),
+                        visiting.len(),
+                    );
+                    return Err(err);
+                }
+                emit_trace_result(
+                    external_type_trace_success_status(false),
+                    tracked_deps.len(),
+                    resolution_deps.len(),
+                    cache.len(),
+                    visiting.len(),
+                );
+                return Ok(None);
             }
 
             if had_route_cycle {
@@ -1081,6 +1276,13 @@ impl VerterHost {
             }
 
             cache.insert(cache_key.clone(), None);
+            emit_trace_result(
+                external_type_trace_success_status(false),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
             return Ok(None);
         };
 
@@ -1108,6 +1310,13 @@ impl VerterHost {
                     (effective_dep_canonical.clone(), effective_type_name.clone()),
                     resolved.clone(),
                 );
+                emit_trace_result(
+                    external_type_trace_success_status(resolved.is_some()),
+                    tracked_deps.len(),
+                    resolution_deps.len(),
+                    cache.len(),
+                    visiting.len(),
+                );
                 return Ok(resolved);
             }
 
@@ -1121,6 +1330,13 @@ impl VerterHost {
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key.clone(), cached.clone());
+            emit_trace_result(
+                external_type_trace_success_status(cached.is_some()),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
             return Ok(cached);
         }
 
@@ -1133,13 +1349,17 @@ impl VerterHost {
                 effective_dep_canonical, effective_type_name
             ));
             cache.insert(cache_key.clone(), None);
+            emit_trace_result(
+                external_type_trace_success_status(false),
+                tracked_deps.len(),
+                resolution_deps.len(),
+                cache.len(),
+                visiting.len(),
+            );
             return Ok(None);
         }
 
-        let resolved: Result<
-            Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-            crate::types::ExternalTypeResolveError,
-        > = Ok(self
+        let resolved = self
             .materialize_frontier_resolved_type_in_view(
                 &frontier,
                 &requested_routes,
@@ -1156,9 +1376,8 @@ impl VerterHost {
                     &ResolvedExternalTypes::default(),
                     store_view,
                 )
-            }));
+            });
         visiting.remove(&final_target_key);
-        let resolved = resolved?;
 
         if use_host_cache && profile_hash.is_none() {
             self.store_resolved_external_type_cache_in_view(
@@ -1176,39 +1395,14 @@ impl VerterHost {
             (effective_dep_canonical.clone(), effective_type_name.clone()),
             resolved.clone(),
         );
-
-        let tracked_before = tracked_deps.len();
-        let resolution_before = resolution_deps.len();
-        let cache_before = cache.len();
-        let result = Ok(resolved);
-        component_meta_trace_event!(
-            "resolve_external_type_from_loaded_files_result",
-            format!(
-                "owner={} import={} type={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={} store_view={}",
-                owner_canonical,
-                import_source,
-                type_name,
-                match &result {
-                    Ok(Some(_)) => "ok:resolved",
-                    Ok(None) => "ok:none",
-                    Err(crate::types::ExternalTypeResolveError::MissingRootDependency) => {
-                        "err:missing_root"
-                    }
-                    Err(crate::types::ExternalTypeResolveError::DepthLimitExceeded { .. }) => {
-                        "err:depth_limit"
-                    }
-                    Err(crate::types::ExternalTypeResolveError::StepLimitExceeded { .. }) => {
-                        "err:step_limit"
-                    }
-                },
-                tracked_deps.len().saturating_sub(tracked_before),
-                resolution_deps.len().saturating_sub(resolution_before),
-                cache.len().saturating_sub(cache_before),
-                visiting.len(),
-                store_view.is_some(),
-            ),
+        emit_trace_result(
+            external_type_trace_success_status(resolved.is_some()),
+            tracked_deps.len(),
+            resolution_deps.len(),
+            cache.len(),
+            visiting.len(),
         );
-        result
+        Ok(resolved)
     }
 
     pub(crate) fn resolve_component_meta_macro_elements_in_view(
@@ -1417,8 +1611,20 @@ impl VerterHost {
             },
         ));
 
+        let mut frontier_layer = 0usize;
         loop {
             let (target, had_route_cycle) = loop {
+                frontier_layer += 1;
+                component_meta_trace_event!(
+                    "external_type_frontier_layer_start",
+                    external_type_frontier_layer_start_detail(
+                        dep_canonical,
+                        type_name,
+                        frontier_layer,
+                        frontier.pending_count(),
+                        frontier.resolved_count(),
+                    ),
+                );
                 let has_more = frontier.run_one_level(&adapter).map_err(|failure| {
                     crate::types::ExternalTypeResolveError::StepLimitExceeded {
                         limit: failure.limit,
@@ -1428,6 +1634,19 @@ impl VerterHost {
                 })?;
                 let (target, had_route_cycle) =
                     frontier.final_target_for_with_cycle(&adapter, dep_canonical, type_name);
+                component_meta_trace_event!(
+                    "external_type_frontier_layer_result",
+                    external_type_frontier_layer_result_detail(
+                        dep_canonical,
+                        type_name,
+                        frontier_layer,
+                        frontier.pending_count(),
+                        frontier.resolved_count(),
+                        has_more,
+                        target.is_some(),
+                        had_route_cycle,
+                    ),
+                );
                 if target.is_some() || !has_more {
                     break (target, had_route_cycle);
                 }
@@ -1459,15 +1678,14 @@ impl VerterHost {
             }
 
             for seed in &companion_seeds {
+                let seed_route = seed.route.clone().unwrap_or_default();
                 requested_routes
                     .entry((seed.canonical_id.clone(), seed.exported_name.clone()))
                     .and_modify(|existing| {
-                        *existing = crate::resolver_core::merge_route_demands(
-                            existing,
-                            &crate::resolver_core::RouteDemand::Whole,
-                        );
+                        *existing =
+                            crate::resolver_core::merge_route_demands(existing, &seed_route);
                     })
-                    .or_insert(crate::resolver_core::RouteDemand::Whole);
+                    .or_insert(seed_route);
             }
             frontier.seed(companion_seeds);
         }
@@ -1513,12 +1731,16 @@ impl VerterHost {
             else {
                 continue;
             };
-            let required_import_names = self.required_import_names_for_exported_route_in_view(
+            let required_import_routes = self.required_import_routes_for_exported_route_in_view(
                 &canonical_id,
                 &exported_name,
                 &requested_route,
                 store_view,
             );
+            let required_import_names = required_import_routes
+                .keys()
+                .cloned()
+                .collect::<rustc_hash::FxHashSet<_>>();
             let mut attempted_requests = rustc_hash::FxHashSet::default();
             for binding in &analysis.extracted.bindings {
                 let required_aliases =
@@ -1554,10 +1776,14 @@ impl VerterHost {
                     let (target_canonical, target_name) = frontier
                         .final_target_for(adapter, &resolved_canonical, &resolved_name)
                         .unwrap_or((resolved_canonical, resolved_name));
+                    let target_route = required_import_routes
+                        .get(&required_alias)
+                        .cloned()
+                        .unwrap_or_default();
                     seeds.push(crate::resolver_core::PendingExternalSymbol {
                         canonical_id: target_canonical,
                         exported_name: target_name,
-                        route: Some(crate::resolver_core::RouteDemand::Whole),
+                        route: Some(target_route),
                     });
                 }
             }

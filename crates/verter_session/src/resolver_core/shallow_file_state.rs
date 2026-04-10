@@ -161,6 +161,8 @@ pub struct ExternalSymbolRef {
     /// The resolved canonical file ID of the target.
     /// Empty string if unresolved (construction without host resolver).
     pub canonical_id: String,
+    /// The remaining route demand on the imported symbol.
+    pub route: RouteDemand,
 }
 
 // ---------------------------------------------------------------------------
@@ -657,12 +659,7 @@ impl ShallowFileState {
 
                 // Collect external refs
                 for ext in &sym.external_deps {
-                    if !external_refs.iter().any(|e: &ExternalSymbolRef| {
-                        e.source_specifier == ext.source_specifier
-                            && e.imported_name == ext.imported_name
-                    }) {
-                        external_refs.push(ext.clone());
-                    }
+                    upsert_external_ref(&mut external_refs, ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 // This is an import — classify as external
@@ -672,13 +669,9 @@ impl ShallowFileState {
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
                         canonical_id: target.canonical_id.clone(),
+                        route: RouteDemand::Whole,
                     };
-                    if !external_refs.iter().any(|e| {
-                        e.source_specifier == ext_ref.source_specifier
-                            && e.imported_name == ext_ref.imported_name
-                    }) {
-                        external_refs.push(ext_ref);
-                    }
+                    upsert_external_ref(&mut external_refs, ext_ref);
                 } else {
                     // Import-local without a target — treat as missing
                     return LocalClosureResult {
@@ -777,12 +770,14 @@ impl ShallowFileState {
         };
 
         let mut seed_names = Vec::new();
+        let mut seed_external = Vec::new();
         let mut seen_symbols = FxHashSet::default();
         let found_path = collect_member_path_seed_names(
             self,
             &sym.raw_body,
             path,
             &mut seed_names,
+            &mut seed_external,
             &mut seen_symbols,
         );
 
@@ -795,7 +790,7 @@ impl ShallowFileState {
             };
         }
 
-        if seed_names.is_empty() {
+        if seed_names.is_empty() && seed_external.is_empty() {
             return LocalClosureResult {
                 status: LocalClosureStatus::Resolved,
                 local_symbols_used: vec![symbol_name.to_string()],
@@ -807,7 +802,7 @@ impl ShallowFileState {
         let mut visited = FxHashSet::default();
         visited.insert(symbol_name.to_string());
         let mut pending = seed_names;
-        let mut external_refs = Vec::new();
+        let mut external_refs = seed_external;
         let mut local_used = vec![symbol_name.to_string()];
         let mut steps = 1u64;
 
@@ -833,12 +828,7 @@ impl ShallowFileState {
                     }
                 }
                 for ext in &dep_sym.external_deps {
-                    if !external_refs.iter().any(|e: &ExternalSymbolRef| {
-                        e.source_specifier == ext.source_specifier
-                            && e.imported_name == ext.imported_name
-                    }) {
-                        external_refs.push(ext.clone());
-                    }
+                    upsert_external_ref(&mut external_refs, ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 if let Some(target) = self.import_targets.get(&current) {
@@ -847,13 +837,9 @@ impl ShallowFileState {
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
                         canonical_id: target.canonical_id.clone(),
+                        route: RouteDemand::Whole,
                     };
-                    if !external_refs.iter().any(|e| {
-                        e.source_specifier == ext_ref.source_specifier
-                            && e.imported_name == ext_ref.imported_name
-                    }) {
-                        external_refs.push(ext_ref);
-                    }
+                    upsert_external_ref(&mut external_refs, ext_ref);
                 }
             }
         }
@@ -959,12 +945,7 @@ impl ShallowFileState {
                     }
                 }
                 for ext in &dep_sym.external_deps {
-                    if !external_refs.iter().any(|e: &ExternalSymbolRef| {
-                        e.source_specifier == ext.source_specifier
-                            && e.imported_name == ext.imported_name
-                    }) {
-                        external_refs.push(ext.clone());
-                    }
+                    upsert_external_ref(&mut external_refs, ext.clone());
                 }
             } else if self.import_locals.contains(&current) {
                 if let Some(target) = self.import_targets.get(&current) {
@@ -973,13 +954,9 @@ impl ShallowFileState {
                         source_specifier: target.source_specifier.clone(),
                         imported_name: target.imported_name.clone(),
                         canonical_id: target.canonical_id.clone(),
+                        route: RouteDemand::Whole,
                     };
-                    if !external_refs.iter().any(|e| {
-                        e.source_specifier == ext_ref.source_specifier
-                            && e.imported_name == ext_ref.imported_name
-                    }) {
-                        external_refs.push(ext_ref);
-                    }
+                    upsert_external_ref(&mut external_refs, ext_ref);
                 }
             }
             // Skip unknown names silently — they may be type parameters
@@ -1005,6 +982,7 @@ fn collect_member_path_seed_names(
     expr: &TypeExpr,
     path: &[String],
     seed_names: &mut Vec<String>,
+    seed_external: &mut Vec<ExternalSymbolRef>,
     seen_symbols: &mut FxHashSet<String>,
 ) -> bool {
     if path.is_empty() {
@@ -1020,6 +998,19 @@ fn collect_member_path_seed_names(
             type_arguments,
         } if type_arguments.is_empty() => {
             let symbol_name = name.to_string();
+            if let Some(target) = state.import_targets.get(symbol_name.as_str()) {
+                upsert_external_ref(
+                    seed_external,
+                    ExternalSymbolRef {
+                        local_name: symbol_name,
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        canonical_id: target.canonical_id.clone(),
+                        route: RouteDemand::MemberPath(path.to_vec()),
+                    },
+                );
+                return true;
+            }
             if !seen_symbols.insert(symbol_name.clone()) {
                 return false;
             }
@@ -1032,15 +1023,21 @@ fn collect_member_path_seed_names(
                         &symbol.raw_body,
                         path,
                         seed_names,
+                        seed_external,
                         seen_symbols,
                     )
                 });
             seen_symbols.remove(symbol_name.as_str());
             result
         }
-        TypeExpr::Parenthesized(inner) => {
-            collect_member_path_seed_names(state, inner, path, seed_names, seen_symbols)
-        }
+        TypeExpr::Parenthesized(inner) => collect_member_path_seed_names(
+            state,
+            inner,
+            path,
+            seed_names,
+            seed_external,
+            seen_symbols,
+        ),
         _ => {
             let Some(prop) = direct_object_property(expr, path[0].as_str()) else {
                 return false;
@@ -1056,6 +1053,7 @@ fn collect_member_path_seed_names(
                     &prop.ty,
                     &path[1..],
                     seed_names,
+                    seed_external,
                     seen_symbols,
                 )
             }
@@ -1204,6 +1202,17 @@ fn collect_direct_object_properties<'a>(
     }
 }
 
+fn upsert_external_ref(external_refs: &mut Vec<ExternalSymbolRef>, ext_ref: ExternalSymbolRef) {
+    if let Some(existing) = external_refs.iter_mut().find(|existing| {
+        existing.source_specifier == ext_ref.source_specifier
+            && existing.imported_name == ext_ref.imported_name
+    }) {
+        existing.route = crate::resolver_core::merge_route_demands(&existing.route, &ext_ref.route);
+        return;
+    }
+    external_refs.push(ext_ref);
+}
+
 /// Collect all named type references from a TypeExpr, non-recursively
 /// (only direct references, not transitive).
 fn collect_type_refs(expr: &TypeExpr, out: &mut Vec<String>) {
@@ -1311,12 +1320,16 @@ fn classify_deps(
                 if !seen_external.insert((target.source_specifier.clone(), imported_name.clone())) {
                     continue;
                 }
-                external.push(ExternalSymbolRef {
-                    local_name: dep_name.clone(),
-                    source_specifier: target.source_specifier.clone(),
-                    imported_name,
-                    canonical_id: target.canonical_id.clone(),
-                });
+                upsert_external_ref(
+                    &mut external,
+                    ExternalSymbolRef {
+                        local_name: dep_name.clone(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name,
+                        canonical_id: target.canonical_id.clone(),
+                        route: RouteDemand::Whole,
+                    },
+                );
             }
         }
     }
@@ -1347,10 +1360,9 @@ fn augment_with_typeof_import_deps(
             source_specifier: target.source_specifier.clone(),
             imported_name: target.imported_name.clone(),
             canonical_id: target.canonical_id.clone(),
+            route: RouteDemand::Whole,
         };
-        if !external.contains(&dep) {
-            external.push(dep);
-        }
+        upsert_external_ref(external, dep);
     }
     external.sort_by(|left, right| {
         left.local_name
@@ -2076,6 +2088,44 @@ export interface Props {
             !ext_names.contains(&"Beta"),
             "nested member path should not widen to sibling nested members, got {:?}",
             ext_names
+        );
+    }
+
+    #[test]
+    fn route_closure_nested_member_path_carries_tail_into_imported_type() {
+        let source = r#"
+import type { Alpha } from './alpha'
+import type { Beta } from './beta'
+
+export interface Props {
+  primary: Alpha
+  secondary: Beta
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure(
+            "Props",
+            &RouteDemand::MemberPath(vec!["primary".into(), "label".into()]),
+            500,
+        );
+        let ext_names: Vec<&str> = closure
+            .unresolved_external
+            .iter()
+            .map(|e| e.imported_name.as_str())
+            .collect();
+        assert_eq!(
+            ext_names,
+            vec!["Alpha"],
+            "nested member path should cross into the imported type without widening, got {:?}",
+            ext_names
+        );
+        assert_eq!(
+            closure.unresolved_external[0].route,
+            RouteDemand::MemberPath(vec!["label".into()]),
+            "imported companion should keep only the remaining member path"
         );
     }
 

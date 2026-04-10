@@ -122,6 +122,10 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.read_file(canonical_id)
     }
 
+    fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
+        self.inner.take_last_read_file_trace_detail(canonical_id)
+    }
+
     fn file_exists(&self, canonical_id: &str) -> bool {
         self.inner.file_exists(canonical_id)
     }

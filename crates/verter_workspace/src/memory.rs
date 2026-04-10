@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::changes::{ChangeResult, WorkspaceChange};
@@ -6,6 +7,28 @@ use crate::engine::Engine;
 use crate::path_matches_prefix;
 use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
+
+thread_local! {
+    static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
+    LAST_READ_FILE_TRACE_DETAIL.with(|last| {
+        *last.borrow_mut() = Some((canonical_id.to_string(), detail.into()));
+    });
+}
+
+fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
+    LAST_READ_FILE_TRACE_DETAIL.with(|last| {
+        let mut last = last.borrow_mut();
+        match last.as_ref() {
+            Some((seen_canonical, _)) if seen_canonical == canonical_id => {
+                last.take().map(|(_, detail)| detail)
+            }
+            _ => None,
+        }
+    })
+}
 
 /// In-memory file content cache used by MemoryWorkspace and as the
 /// snapshot layer in FilesystemWorkspace.
@@ -158,10 +181,21 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // 1. Check overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
+            set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
             return Some(content);
         }
         // 2. Check snapshot (no disk fallback in memory mode)
-        self.engine.snapshot.read().read(canonical_id)
+        let content = self.engine.snapshot.read().read(canonical_id);
+        if content.is_some() {
+            set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
+        } else {
+            set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
+        }
+        content
+    }
+
+    fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
+        take_last_read_file_trace_detail(canonical_id)
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {

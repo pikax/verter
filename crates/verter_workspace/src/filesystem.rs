@@ -42,6 +42,25 @@ struct ComponentMetaTraceLine<'a> {
 
 thread_local! {
     static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
+    static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
+    LAST_READ_FILE_TRACE_DETAIL.with(|last| {
+        *last.borrow_mut() = Some((canonical_id.to_string(), detail.into()));
+    });
+}
+
+fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
+    LAST_READ_FILE_TRACE_DETAIL.with(|last| {
+        let mut last = last.borrow_mut();
+        match last.as_ref() {
+            Some((seen_canonical, _)) if seen_canonical == canonical_id => {
+                last.take().map(|(_, detail)| detail)
+            }
+            _ => None,
+        }
+    })
 }
 
 fn component_meta_trace_output_lock() -> &'static Mutex<()> {
@@ -440,6 +459,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         let _trace = component_meta_trace_scope!("vfs_read_file", format!("path={canonical_id}"));
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
+            set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
             component_meta_trace_event!(
                 "vfs_read_file_result",
                 format!(
@@ -452,6 +472,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         }
         // 2. Snapshot cache
         if let Some(content) = self.engine.snapshot.read().read(canonical_id) {
+            set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
             component_meta_trace_event!(
                 "vfs_read_file_result",
                 format!(
@@ -469,6 +490,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
             let _disk_trace =
                 component_meta_trace_scope!("vfs_read_file_disk", format!("path={canonical_id}"));
             if matches!(indexed_exists, Some(false)) {
+                set_last_read_file_trace_detail(canonical_id, "layer=dir_index cache=negative");
                 component_meta_trace_event!(
                     "vfs_read_file_disk_result",
                     format!("path={} found=false bytes=0", canonical_id),
@@ -484,6 +506,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
                     .snapshot
                     .write()
                     .inject(canonical_id.to_string(), content.clone());
+                set_last_read_file_trace_detail(canonical_id, "layer=disk cache=miss");
                 component_meta_trace_event!(
                     "vfs_read_file_disk_result",
                     format!("path={} found=true bytes={}", canonical_id, content.len(),),
@@ -507,11 +530,16 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
                 .native_fs_read_file_miss_count
                 .fetch_add(1, Ordering::Relaxed);
         }
+        set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
         component_meta_trace_event!(
             "vfs_read_file_result",
             vfs_read_file_missing_result_detail(canonical_id, false),
         );
         None
+    }
+
+    fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
+        take_last_read_file_trace_detail(canonical_id)
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {

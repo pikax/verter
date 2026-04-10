@@ -120,6 +120,29 @@ fn resolve_relative_path(base_dir: &str, relative: &str) -> String {
     }
 }
 
+fn read_analysis_source_result_detail(
+    canonical_id: &str,
+    source_kind: &str,
+    bytes: usize,
+    missing: bool,
+) -> String {
+    let mut detail = format!(
+        "owner={} source={} bytes={}",
+        canonical_id, source_kind, bytes,
+    );
+    if missing {
+        detail.push_str(" missing=true");
+    }
+    detail
+}
+
+fn workspace_vfs_source_kind(detail: Option<String>) -> String {
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("workspace-vfs {detail}"),
+        _ => "workspace-vfs".to_string(),
+    }
+}
+
 pub(crate) fn resolve_eval_dependency_canonical_with(
     dep_canonical: &str,
     mut has_candidate: impl FnMut(&str) -> bool,
@@ -1588,18 +1611,14 @@ impl VerterHost {
         if canonical_id.is_empty() {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                "owner= source=empty-canonical bytes=0 missing=true".to_string(),
+                read_analysis_source_result_detail("", "empty-canonical", 0, true),
             );
             return None;
         }
         if let Some(source) = self.get_source(canonical_id) {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                format!(
-                    "owner={} source=host-cache bytes={}",
-                    canonical_id,
-                    source.len(),
-                ),
+                read_analysis_source_result_detail(canonical_id, "host-cache", source.len(), false,),
             );
             return Some(source);
         }
@@ -1608,10 +1627,11 @@ impl VerterHost {
         if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical_id) {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                format!(
-                    "owner={} source=module-facts-db bytes={}",
+                read_analysis_source_result_detail(
                     canonical_id,
+                    "module-facts-db",
                     facts.raw_source.len(),
+                    false,
                 ),
             );
             return Some(Arc::clone(&facts.raw_source));
@@ -1620,30 +1640,33 @@ impl VerterHost {
         if is_raw_import_specifier_id(canonical_id) {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                format!(
-                    "owner={} source=raw-import-specifier bytes=0 missing=true",
-                    canonical_id
-                ),
+                read_analysis_source_result_detail(canonical_id, "raw-import-specifier", 0, true,),
             );
             return None;
         }
 
-        let source = self.ws().read_file(canonical_id);
+        let ws = self.ws();
+        let source = ws.read_file(canonical_id);
+        let workspace_source_kind =
+            workspace_vfs_source_kind(ws.take_last_read_file_trace_detail(canonical_id));
         if let Some(source) = source.as_ref() {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                format!(
-                    "owner={} source=workspace bytes={}",
+                read_analysis_source_result_detail(
                     canonical_id,
+                    workspace_source_kind.as_str(),
                     source.len(),
+                    false,
                 ),
             );
         } else {
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                format!(
-                    "owner={} source=workspace bytes=0 missing=true",
-                    canonical_id
+                read_analysis_source_result_detail(
+                    canonical_id,
+                    workspace_source_kind.as_str(),
+                    0,
+                    true,
                 ),
             );
         }
@@ -2862,6 +2885,86 @@ impl VerterHost {
     /// to only dependencies reachable from the requested route.
     ///
     /// Falls back to the whole-export closure when route-aware data is unavailable.
+    pub(crate) fn required_import_routes_for_exported_route_in_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::RouteDemand> {
+        use crate::resolver_core::shallow_file_state::ExportTarget;
+        use crate::resolver_core::RouteDemand;
+
+        if let Some(facts) = self.ensure_module_facts_in_view(canonical_id, store_view) {
+            let state = &facts.shallow_state;
+            let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
+                .local_closure_steps;
+            if let Some((symbol_name, is_alias_export)) = state
+                .export_target(exported_name)
+                .and_then(|target| match target {
+                    ExportTarget::Local { symbol_name } => {
+                        Some((symbol_name.as_str(), symbol_name != exported_name))
+                    }
+                    ExportTarget::Reexport { .. } => None,
+                })
+            {
+                if matches!(route, RouteDemand::Whole) && !is_alias_export {
+                    return self
+                        .external_type_analysis_in_view(canonical_id, store_view)
+                        .map(|analysis| {
+                            analysis
+                                .required_import_names(exported_name)
+                                .into_iter()
+                                .map(|name| (name, RouteDemand::Whole))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
+                let closure = state.route_closure(symbol_name, route, budget);
+                let mut result = rustc_hash::FxHashMap::default();
+                for ext in &closure.unresolved_external {
+                    result
+                        .entry(ext.local_name.clone())
+                        .and_modify(|existing| {
+                            *existing =
+                                crate::resolver_core::merge_route_demands(existing, &ext.route);
+                        })
+                        .or_insert_with(|| ext.route.clone());
+                }
+                return result;
+            }
+
+            if !matches!(route, RouteDemand::Whole) {
+                return self.required_import_routes_for_exported_route_in_view(
+                    canonical_id,
+                    exported_name,
+                    &RouteDemand::Whole,
+                    store_view,
+                );
+            }
+        }
+
+        if matches!(route, RouteDemand::Whole) {
+            return self
+                .external_type_analysis_in_view(canonical_id, store_view)
+                .map(|analysis| {
+                    analysis
+                        .required_import_names(exported_name)
+                        .into_iter()
+                        .map(|name| (name, RouteDemand::Whole))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+
+        self.required_import_routes_for_exported_route_in_view(
+            canonical_id,
+            exported_name,
+            &RouteDemand::Whole,
+            store_view,
+        )
+    }
+
     pub(crate) fn required_import_names_for_exported_route_in_view(
         &self,
         canonical_id: &str,
@@ -2869,59 +2972,16 @@ impl VerterHost {
         route: &crate::resolver_core::RouteDemand,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> rustc_hash::FxHashSet<String> {
-        use crate::resolver_core::shallow_file_state::ExportTarget;
-        use crate::resolver_core::RouteDemand;
-
-        let required =
-            if let Some(facts) = self.ensure_module_facts_in_view(canonical_id, store_view) {
-                let state = &facts.shallow_state;
-                let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
-                    .local_closure_steps;
-                if let Some((symbol_name, is_alias_export)) = state
-                    .export_target(exported_name)
-                    .and_then(|target| match target {
-                        ExportTarget::Local { symbol_name } => {
-                            Some((symbol_name.as_str(), symbol_name != exported_name))
-                        }
-                        ExportTarget::Reexport { .. } => None,
-                    })
-                {
-                    if matches!(route, RouteDemand::Whole) && !is_alias_export {
-                        return self
-                            .external_type_analysis_in_view(canonical_id, store_view)
-                            .map(|analysis| analysis.required_import_names(exported_name))
-                            .unwrap_or_default();
-                    }
-                    let closure = state.route_closure(symbol_name, route, budget);
-                    let mut result = rustc_hash::FxHashSet::default();
-                    for ext in &closure.unresolved_external {
-                        result.insert(ext.local_name.clone());
-                    }
-                    result
-                } else if matches!(route, RouteDemand::Whole) {
-                    self.external_type_analysis_in_view(canonical_id, store_view)
-                        .map(|analysis| analysis.required_import_names(exported_name))
-                        .unwrap_or_default()
-                } else {
-                    self.required_import_names_for_exported_route_in_view(
-                        canonical_id,
-                        exported_name,
-                        &RouteDemand::Whole,
-                        store_view,
-                    )
-                }
-            } else if matches!(route, RouteDemand::Whole) {
-                self.external_type_analysis_in_view(canonical_id, store_view)
-                    .map(|analysis| analysis.required_import_names(exported_name))
-                    .unwrap_or_default()
-            } else {
-                self.required_import_names_for_exported_route_in_view(
-                    canonical_id,
-                    exported_name,
-                    &RouteDemand::Whole,
-                    store_view,
-                )
-            };
+        let required_routes = self.required_import_routes_for_exported_route_in_view(
+            canonical_id,
+            exported_name,
+            route,
+            store_view,
+        );
+        let required = required_routes
+            .keys()
+            .cloned()
+            .collect::<rustc_hash::FxHashSet<_>>();
 
         if component_meta_debug_enabled() {
             let mut required_list = required.iter().cloned().collect::<Vec<_>>();
