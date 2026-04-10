@@ -7055,7 +7055,6 @@ defineProps<Props>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
         .expect("resolved component meta should exist");
-
     let published_names: std::collections::BTreeSet<_> = resolved
         .resolved_type_registry
         .iter()
@@ -7442,6 +7441,89 @@ defineProps<{
         !registry_names.contains(&"ComponentSlots") && !registry_names.contains(&"ComponentUI"),
         "nested owner-local object member helpers should stay inline instead of being separately published, got {:?}",
         registry_names
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_transitive_imported_registry_helpers_off_registry_when_inlined() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface ImportedBase {
+  href?: string
+  target?: string
+  label?: string
+}
+
+export type ImportedKeys = 'href' | 'target'
+
+export interface ImportedTheme {
+  color?: 'red' | 'blue'
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { ImportedBase, ImportedKeys, ImportedTheme } from './types'
+
+type ButtonItem = Omit<ImportedBase, ImportedKeys> & {
+  color?: ImportedTheme['color']
+}
+
+export interface Props {
+  item?: ButtonItem
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let registry_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        registry_names.contains("Props") && registry_names.contains("ButtonItem"),
+        "owner-local queried helpers should still publish, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("ImportedBase"),
+        "transitive imported helpers that are fully inlined into the owner helper surface should stay off the registry, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("ImportedKeys"),
+        "transitive imported utility key helpers should stay off the registry, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("ImportedTheme"),
+        "transitive imported indexed-access helpers should stay off the registry when their value is fully inlined, got {registry_names:?}"
+    );
+
+    let prop_names: Vec<&str> = resolved
+        .evaluated_types
+        .as_ref()
+        .expect("expanded resolution should include evaluated types")
+        .props
+        .iter()
+        .map(|prop| prop.name.as_str())
+        .collect();
+    assert!(
+        prop_names.contains(&"item"),
+        "public props should still resolve, got {prop_names:?}"
     );
 }
 
@@ -10291,6 +10373,261 @@ defineProps<Props>()
             && !prop_names.contains(&"viewTransition"),
         "dual-heritage Omit should exclude link-only keys: {:?}",
         prop_names
+    );
+}
+
+#[test]
+fn package_backed_omit_does_not_leak_omitted_editor_members_into_top_level_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  $doc(): string
+  chain(): string
+  active?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/drag.ts",
+            r#"
+import type { Editor } from 'editor-lib'
+
+export interface DragHandleProps {
+  class?: any
+  editor?: Editor
+  element?: object
+  appendTo?: object
+  onNodeChange?: () => void
+  pluginKey?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { DragHandleProps } from './drag'
+
+type Props = Omit<DragHandleProps, 'editor' | 'element' | 'onNodeChange' | 'class'> & {
+  editor: object
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./drag".to_string(),
+            resolved_canonical_id: Some("/src/drag.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/drag.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"editor"),
+        "top-level editor prop should survive the local override, got {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"appendTo") && prop_names.contains(&"pluginKey"),
+        "non-omitted drag props should still be present, got {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"$doc")
+            && !prop_names.contains(&"chain")
+            && !prop_names.contains(&"active")
+            && !prop_names.contains(&"element")
+            && !prop_names.contains(&"class")
+            && !prop_names.contains(&"onNodeChange"),
+        "Omit should not leak omitted package-backed editor members into top-level props: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn partial_omit_union_branch_does_not_leak_package_editor_members_into_top_level_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  $doc(): string
+  chain(): string
+  active?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/menu.ts",
+            r#"
+import type { Editor } from 'editor-lib'
+
+export interface MenuProps {
+  editor: Editor
+  element: object
+  appendTo?: object
+  pluginKey?: string
+  class?: any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuProps } from './menu'
+
+type BaseProps = {
+  layout?: 'fixed' | 'bubble'
+  editor: object
+}
+
+type Props =
+  | (BaseProps & { layout?: 'fixed' })
+  | (BaseProps & Partial<Omit<MenuProps, 'editor' | 'element' | 'class'>> & { layout?: 'bubble' })
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./menu".to_string(),
+            resolved_canonical_id: Some("/src/menu.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/menu.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"layout")
+            && prop_names.contains(&"editor")
+            && prop_names.contains(&"appendTo")
+            && prop_names.contains(&"pluginKey"),
+        "expected union props should be present, got {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"$doc")
+            && !prop_names.contains(&"chain")
+            && !prop_names.contains(&"active")
+            && !prop_names.contains(&"element")
+            && !prop_names.contains(&"class"),
+        "Partial<Omit<...>> union branch should not leak package editor members into top-level props: {:?}",
+        prop_names
+    );
+}
+
+#[test]
+fn package_backed_object_prop_does_not_flatten_members_into_top_level_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  $doc(): string
+  chain(): string
+  active?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Editor } from 'editor-lib'
+
+defineProps<{
+  editor: Editor
+  label?: string
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let registry_names: Vec<&str> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        prop_names.contains(&"editor") && prop_names.contains(&"label"),
+        "declared props should remain present, got {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"$doc")
+            && !prop_names.contains(&"chain")
+            && !prop_names.contains(&"active"),
+        "package-backed object props should stay nested instead of flattening their members into top-level props: {:?}",
+        prop_names
+    );
+    assert!(
+        !registry_names.contains(&"Editor"),
+        "direct package-backed public field refs should stay symbolic on the prop instead of being published into the registry, got {registry_names:?}",
     );
 }
 

@@ -1442,16 +1442,27 @@ impl VerterHost {
             return cached.clone();
         }
 
+        let (seed_canonical, seed_type_name) =
+            self.resolve_imported_type_root_in_view(dep_canonical.as_str(), type_name, store_view);
+        tracked_deps.insert(seed_canonical.clone());
+        resolution_deps.insert(seed_canonical.clone());
+
+        let seed_target_key = (seed_canonical.clone(), seed_type_name.clone());
+        if let Some(cached) = cache.get(&seed_target_key).cloned() {
+            cache.insert(cache_key, cached.clone());
+            return cached;
+        }
+
         let mut requested_routes = FrontierRequestedRoutes::default();
         requested_routes.insert(
-            (dep_canonical.clone(), type_name.to_string()),
+            (seed_canonical.clone(), seed_type_name.clone()),
             crate::resolver_core::RouteDemand::Whole,
         );
 
         let (frontier, target, had_route_cycle) = self
             .run_external_type_frontier_closure_in_view(
-                dep_canonical.as_str(),
-                type_name,
+                seed_canonical.as_str(),
+                seed_type_name.as_str(),
                 &mut requested_routes,
                 store_view,
             )

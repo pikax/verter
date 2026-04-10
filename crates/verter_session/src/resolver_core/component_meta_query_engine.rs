@@ -41,6 +41,13 @@ struct ScopedSolveKey {
     symbol_name: String,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct MaterializedMemberSurfaceKey {
+    scope_canonical_id: String,
+    symbol_name: String,
+    nested_surface: bool,
+}
+
 #[derive(Debug, Clone)]
 struct ScopedSolveEntry {
     result: SolverResult<TypeExpr>,
@@ -59,6 +66,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
+    imported_registry_symbols: FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>,
     /// Cached type declarations.
     declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
     /// Cached resolvability checks.
@@ -71,6 +79,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
+    /// Request-local cache for named-ref member surface materialization.
+    /// This sits above the DB-backed projection caches so repeated registry
+    /// enrichment can reuse the fully materialized nested surface for the same
+    /// imported named ref within one request.
+    materialized_member_surfaces: FxHashMap<MaterializedMemberSurfaceKey, TypeExpr>,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
 }
@@ -116,10 +129,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             scoped_cache: FxHashMap::default(),
+            imported_registry_symbols: FxHashMap::default(),
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
             scope_payloads: FxHashMap::default(),
+            materialized_member_surfaces: FxHashMap::default(),
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -135,10 +150,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             store_view,
             owner_engine,
             scoped_cache: FxHashMap::default(),
+            imported_registry_symbols: FxHashMap::default(),
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
             owner_collection_exprs: FxHashMap::default(),
             scope_payloads: FxHashMap::default(),
+            materialized_member_surfaces: FxHashMap::default(),
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -204,13 +221,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_id: &str,
         exported_name: &str,
     ) -> Option<ResolvedImportedRegistrySymbol> {
-        resolve_imported_registry_symbol_with_budget(
+        let key = (canonical_id.to_string(), exported_name.to_string());
+        if let Some(cached) = self.imported_registry_symbols.get(&key) {
+            return cached.clone();
+        }
+        let resolved = resolve_imported_registry_symbol_with_budget(
             self.host,
             canonical_id,
             exported_name,
             self.store_view,
             || self.allow_wildcard_route(),
-        )
+        );
+        self.imported_registry_symbols.insert(key, resolved.clone());
+        resolved
     }
 
     /// Resolve a type declaration, cached per query.
@@ -352,6 +375,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.scoped_cache.len()
     }
 
+    pub fn cached_materialized_member_surface(
+        &self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        nested_surface: bool,
+    ) -> Option<TypeExpr> {
+        materialized_member_surface_key(scope_canonical_id, expr, nested_surface)
+            .and_then(|key| self.materialized_member_surfaces.get(&key).cloned())
+    }
+
+    pub fn store_materialized_member_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        nested_surface: bool,
+        materialized: TypeExpr,
+    ) {
+        let Some(key) = materialized_member_surface_key(scope_canonical_id, expr, nested_surface)
+        else {
+            return;
+        };
+        self.materialized_member_surfaces.insert(key, materialized);
+    }
+
     pub fn total_steps(&self) -> u64 {
         self.owner_engine.total_steps()
     }
@@ -418,6 +465,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn solve_count(&self) -> u32 {
         self.owner_engine.solve_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn imported_registry_symbol_cache_len(&self) -> usize {
+        self.imported_registry_symbols.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
+        self.materialized_member_surfaces.len()
     }
 
     pub fn trace_summary(
@@ -860,6 +917,24 @@ fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr
     }
 
     Some(TypeExpr::Object(Arc::new(ObjectExpr { properties })))
+}
+
+fn materialized_member_surface_key(
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    nested_surface: bool,
+) -> Option<MaterializedMemberSurfaceKey> {
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => Some(MaterializedMemberSurfaceKey {
+            scope_canonical_id: scope_canonical_id.to_string(),
+            symbol_name: name.to_string(),
+            nested_surface,
+        }),
+        _ => None,
+    }
 }
 
 fn filter_identity_ref(result: &SolverResult<TypeExpr>, requested_name: &str) -> Option<TypeExpr> {

@@ -1241,26 +1241,29 @@ impl VerterHost {
                 .or_else(|| raw_body.cloned())
         }
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
+            let _entry_started =
+                crate::host_manage::component_meta_debug_enabled().then(std::time::Instant::now);
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
             };
-            let declaration_source = meta.declaration.canonical_source.as_str();
+            let declaration_source = meta.declaration.canonical_source.clone();
             if declaration_source.is_empty() || declaration_source == owner_canonical {
                 continue;
             }
             track_component_meta_dependency(
                 tracked_dependencies,
                 owner_canonical,
-                declaration_source,
+                declaration_source.as_str(),
             );
             let requested_exported_name = if meta.declaration.resolved_name.is_empty() {
                 entry.name.as_str()
             } else {
                 meta.declaration.resolved_name.as_str()
             };
-            let Some(resolved) = query_engine
-                .resolve_imported_registry_symbol(declaration_source, requested_exported_name)
-            else {
+            let Some(resolved) = query_engine.resolve_imported_registry_symbol(
+                declaration_source.as_str(),
+                requested_exported_name,
+            ) else {
                 continue;
             };
             track_component_meta_dependency(
@@ -1288,6 +1291,19 @@ impl VerterHost {
                 Some(materialized),
             )
             .unwrap_or_else(|| entry.type_expr.clone());
+            if let Some(started) = _entry_started {
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                if elapsed_ms >= 5.0 {
+                    crate::host_manage::component_meta_debug(format!(
+                        "REGISTRY_IMPORT_UPDATE owner={} name={} source={} resolved={} elapsed_ms={:.1}",
+                        owner_canonical,
+                        entry.name,
+                        declaration_source,
+                        meta.declaration.resolved_name,
+                        elapsed_ms,
+                    ));
+                }
+            }
         }
 
         let mut referenced_names: VecDeque<PendingComponentMetaRegistryRef> = VecDeque::new();
@@ -1301,6 +1317,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     self,
                     owner_canonical,
+                    snapshot,
                     store_view,
                     field,
                     &published_names,
@@ -1313,6 +1330,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     self,
                     owner_canonical,
+                    snapshot,
                     store_view,
                     field,
                     &published_names,
@@ -1325,6 +1343,7 @@ impl VerterHost {
                 collect_component_meta_registry_public_field_refs(
                     self,
                     owner_canonical,
+                    snapshot,
                     store_view,
                     field,
                     &published_names,
@@ -1380,6 +1399,13 @@ impl VerterHost {
                 .as_ref()
                 .map(|(_, exported_name)| exported_name.as_str())
                 .or(pending_exported_name_owned.as_deref());
+            if matches!(pending_route, crate::resolver_core::RouteDemand::Whole)
+                && imported_owner_route
+                    .as_ref()
+                    .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
+            {
+                continue;
+            }
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?} route={:?}",
@@ -1552,6 +1578,8 @@ impl VerterHost {
         // the shared request-scoped engine so projection/instantiation caches
         // are reused across all registry entries in one request.
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
+            let _entry_started =
+                crate::host_manage::component_meta_debug_enabled().then(std::time::Instant::now);
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
             };
@@ -1577,6 +1605,15 @@ impl VerterHost {
                 query_engine,
                 false,
             );
+            if let Some(started) = _entry_started {
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                if elapsed_ms >= 5.0 {
+                    crate::host_manage::component_meta_debug(format!(
+                        "REGISTRY_ENRICH_ENTRY owner={} name={} scope={} elapsed_ms={:.1}",
+                        owner_canonical, entry.name, scope_canonical, elapsed_ms,
+                    ));
+                }
+            }
         }
     }
 
@@ -2028,27 +2065,26 @@ fn preserve_package_backed_symbolic_refs(
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use rustc_hash::FxHashMap;
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     match (materialized, raw) {
         (TypeExpr::Object(materialized_object), TypeExpr::Object(raw_object)) => {
             let mut object = materialized_object.as_ref().clone();
+            let mut raw_properties = FxHashMap::with_capacity_and_hasher(
+                raw_object.properties.len(),
+                Default::default(),
+            );
+            for candidate in &raw_object.properties {
+                if let ObjectMember::Property(raw_property) = candidate {
+                    raw_properties.insert(raw_property.name.as_str(), raw_property);
+                }
+            }
             for member in &mut object.properties {
                 let ObjectMember::Property(property) = member else {
                     continue;
                 };
-                let raw_property =
-                    raw_object
-                        .properties
-                        .iter()
-                        .find_map(|candidate| match candidate {
-                            ObjectMember::Property(raw_property)
-                                if raw_property.name == property.name =>
-                            {
-                                Some(raw_property)
-                            }
-                            _ => None,
-                        });
+                let raw_property = raw_properties.get(property.name.as_str()).copied();
                 let Some(raw_property) = raw_property else {
                     continue;
                 };
@@ -2093,6 +2129,12 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
+    if let Some(cached) =
+        engine.cached_materialized_member_surface(scope_canonical_id, expr, nested_surface)
+    {
+        return cached;
+    }
+
     if !active.insert(expr.clone()) {
         return expr.clone();
     }
@@ -2120,6 +2162,12 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                     engine,
                     true,
                     active,
+                );
+                engine.store_materialized_member_surface(
+                    scope_canonical_id,
+                    expr,
+                    nested_surface,
+                    result.clone(),
                 );
                 active.remove(expr);
                 return result;
@@ -2452,6 +2500,12 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         _ => expr.clone(),
     };
 
+    engine.store_materialized_member_surface(
+        scope_canonical_id,
+        expr,
+        nested_surface,
+        result.clone(),
+    );
     active.remove(expr);
     result
 }

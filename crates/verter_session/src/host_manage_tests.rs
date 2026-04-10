@@ -6890,8 +6890,8 @@ export interface UnusedProps {
     );
     assert_eq!(
         ws.read_count("/src/Unused.vue"),
-        1,
-        "the barrel BFS may shallow a same-layer sibling once while proving the route",
+        0,
+        "root-stem route proof should keep unrelated same-layer barrel siblings off the active component-meta path",
     );
     assert!(
         host.resolver
@@ -6922,6 +6922,153 @@ export interface UnusedProps {
             .get_any("/src/Unused.vue")
             .is_none(),
         "fact-version capture must not promote a shallow-only tracked barrel sibling into ModuleFactsDb",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_macro_elements_skips_unrelated_wildcard_siblings_when_root_stem_matches()
+{
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ModalProps } from './types'
+
+defineProps<ModalProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        concat!(
+            "export * from './Accordion.vue'\n",
+            "export * from './Alert.vue'\n",
+            "export * from './Modal.vue'\n",
+            "export * from './Unused.vue'\n",
+        ),
+    );
+    ws.inject_file(
+        "/src/Accordion.vue",
+        r#"<script lang="ts">
+export interface AccordionProps {
+  items?: string[]
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Alert.vue",
+        r#"<script lang="ts">
+export interface AlertProps {
+  color?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Modal.vue",
+        r#"<script lang="ts">
+export interface ModalProps {
+  title?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Unused.vue",
+        r#"<script lang="ts">
+export interface UnusedProps {
+  never?: number
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Accordion.vue", "/src/Accordion.vue"),
+            exact_dependency("./Alert.vue", "/src/Alert.vue"),
+            exact_dependency("./Modal.vue", "/src/Modal.vue"),
+            exact_dependency("./Unused.vue", "/src/Unused.vue"),
+        ],
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    ws.reset_reads();
+    let resolved = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ModalProps",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved.is_some(),
+        "component-meta macro resolution should still resolve ModalProps",
+    );
+    assert_eq!(
+        ws.read_count("/src/Accordion.vue"),
+        0,
+        "matching wildcard stem should keep earlier unrelated siblings off the active route",
+    );
+    assert_eq!(
+        ws.read_count("/src/Alert.vue"),
+        0,
+        "matching wildcard stem should skip other unrelated siblings in the same barrel layer",
+    );
+    assert_eq!(
+        ws.read_count("/src/Unused.vue"),
+        0,
+        "matching wildcard stem should stop before unrelated later siblings",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Accordion.vue")
+            .is_none(),
+        "unrelated wildcard siblings should stay off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Alert.vue")
+            .is_none(),
+        "unrelated wildcard siblings should stay off ModuleFactsDb",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Unused.vue")
+            .is_none(),
+        "unrelated wildcard siblings should stay off ModuleFactsDb",
     );
 }
 
@@ -7200,8 +7347,8 @@ export interface UnusedProps {
     );
     assert_eq!(
         ws.read_count("/src/Unused.vue"),
-        1,
-        "component-meta expansion may shallow a same-layer barrel sibling once during BFS route proofing",
+        0,
+        "matching wildcard stems should keep unrelated same-layer barrel siblings off the component-meta expansion path",
     );
     assert!(
         host.resolver

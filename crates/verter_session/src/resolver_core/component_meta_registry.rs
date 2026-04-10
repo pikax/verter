@@ -1345,6 +1345,7 @@ pub(crate) fn collect_component_meta_registry_function_surface_refs(
 pub(crate) fn collect_component_meta_registry_public_field_refs(
     host: &VerterHost,
     owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
     store_view: Option<&crate::resolver_store::HostStoreView>,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
@@ -1358,13 +1359,27 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
-    collect_component_meta_registry_public_surface_refs(
-        expr,
-        published_names,
-        queued_names,
-        output,
-        source_hint,
-    );
+    let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
+        owner_component_meta_registry_import_binding(snapshot, name)
+            .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
+            || crate::meta_resolve::resolve_type_declaration_in_view(
+                host,
+                owner_canonical,
+                name,
+                store_view,
+            )
+            .canonical_source
+            .contains("/node_modules/")
+    });
+    if !skip_direct_plain_ref {
+        collect_component_meta_registry_public_surface_refs(
+            expr,
+            published_names,
+            queued_names,
+            output,
+            source_hint,
+        );
+    }
 
     collect_component_meta_registry_public_indexed_access_roots(
         host,

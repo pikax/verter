@@ -4675,6 +4675,11 @@ defineProps<Props>()
         result1.canonical_dependencies.contains("/src/types.ts"),
         "registry resolution should track the defining file as a dependency"
     );
+    assert_eq!(
+        query_engine.imported_registry_symbol_cache_len(),
+        1,
+        "repeated imported registry resolutions should reuse one request-local cache entry",
+    );
 }
 
 #[test]
@@ -4710,6 +4715,75 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
         (resolved.canonical_id.as_str(), resolved.exported_name.as_str()),
         ("/src/types.ts", "Props"),
         "registry resolution should read the defining export directly instead of keeping a query-local alias payload",
+    );
+}
+
+#[test]
+fn materialize_component_meta_member_surface_expr_reuses_request_local_cache() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface DeepLeaf {
+  label: string
+  count: number
+}
+
+export interface Inner {
+  primary: DeepLeaf
+  secondary: DeepLeaf
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Inner } from './types'
+defineProps<{ first: Inner; second: Inner }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
+
+    let first = materialize_component_meta_member_surface_expr(
+        &expr,
+        "/src/types.ts",
+        &mut query_engine,
+        true,
+    );
+    let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
+
+    let second = materialize_component_meta_member_surface_expr(
+        &expr,
+        "/src/types.ts",
+        &mut query_engine,
+        true,
+    );
+
+    assert_eq!(
+        first, second,
+        "cache reuse must preserve the materialized surface"
+    );
+    assert!(
+        cache_len_after_first > 0,
+        "first materialization should populate the request-local cache",
+    );
+    assert_eq!(
+        query_engine.materialized_member_surface_cache_len(),
+        cache_len_after_first,
+        "second materialization should reuse the existing request-local cache entry",
     );
 }
 
