@@ -16,7 +16,9 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::host::TypeSolverHost;
-use verter_semantic::analysis::type_solver::query_engine::{ProjectedSurface, TypeQueryEngine};
+use verter_semantic::analysis::type_solver::query_engine::{
+    ProjectedMember, ProjectedSurface, TypeQueryEngine,
+};
 use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::{
@@ -926,17 +928,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         if let super::RouteDemand::MemberPath(path) = route {
             if let [member_name] = path.as_slice() {
-                if let Some(projected_expr) = self.project_prepared_member_route_surface_expr(
+                if let Some(projected_member) = self.project_prepared_member_route_projection(
                     scope_canonical_id,
                     root_symbol,
                     member_name,
                 ) {
+                    let projected_expr = projected_member.ty.clone();
                     if let Some(store_view) = self.store_view {
                         self.cache_routed_expr_surface_expr(
                             scope_canonical_id,
                             root_symbol,
                             route,
                             &projected_expr,
+                            store_view,
+                        );
+                        self.cache_projected_member(
+                            scope_canonical_id,
+                            root_symbol,
+                            &projected_member,
                             store_view,
                         );
                     }
@@ -960,6 +969,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         if let super::RouteDemand::Pick(members) = route {
             if let Some(projected_expr) = self.project_prepared_pick_route_surface_expr(
+                scope_canonical_id,
+                root_symbol,
+                members,
+            ) {
+                if let Some(store_view) = self.store_view {
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
+                }
+                return Some(projected_expr);
+            }
+            if let Some(projected_expr) = self.project_pick_route_surface_expr_via_members(
                 scope_canonical_id,
                 root_symbol,
                 members,
@@ -1080,12 +1105,51 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    fn project_prepared_member_route_surface_expr(
+    fn cache_projected_member(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        projected_member: &ProjectedMember,
+        store_view: &HostStoreView,
+    ) {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
+
+        let op_key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: scope_canonical_id.to_owned(),
+                symbol_name: root_symbol.to_owned(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
+            member_name: projected_member.name.clone(),
+        };
+        if self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .is_none()
+        {
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                op_key,
+                TypeSurfaceOpResult::Member(projected_member.clone()),
+                facts,
+            );
+        }
+    }
+
+    fn project_prepared_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
         member_name: &str,
-    ) -> Option<TypeExpr> {
+    ) -> Option<ProjectedMember> {
         let prepared = self.host.prepared_type_decl_in_view(
             scope_canonical_id,
             symbol_name,
@@ -1095,7 +1159,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
             return None;
         }
-        match &member.ty {
+        let projected_ty = match &member.ty {
             TypeExpr::Object(_) => Some(member.ty.clone()),
             _ if prepared_member_body_stays_shallow(&member.ty) => Some(member.ty.clone()),
             _ if crate::meta_resolve::component_meta_registry_should_keep_raw_symbolic_non_object_alias(
@@ -1107,7 +1171,83 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 Some(member.ty.clone())
             }
             _ => self.project_expr_surface_expr(scope_canonical_id, &member.ty),
+        }?;
+        Some(ProjectedMember {
+            name: member_name.to_string(),
+            ty: projected_ty,
+            optional: member.optional,
+            readonly: member.readonly,
+            is_method: member.is_method,
+        })
+    }
+
+    #[cfg(test)]
+    fn project_prepared_member_route_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+    ) -> Option<TypeExpr> {
+        self.project_prepared_member_route_projection(scope_canonical_id, symbol_name, member_name)
+            .map(|projected_member| projected_member.ty)
+    }
+
+    fn project_pick_route_surface_expr_via_members(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        members: &[String],
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_expr::{
+            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+        };
+
+        let prepared =
+            self.host
+                .prepared_type_decl_in_view(scope_canonical_id, symbol_name, self.store_view);
+        let mut properties = Vec::with_capacity(members.len());
+        for member_name in members {
+            let projected_member = if prepared
+                .as_ref()
+                .and_then(|prepared| prepared.member(member_name))
+                .is_some()
+            {
+                self.project_prepared_member_route_projection(
+                    scope_canonical_id,
+                    symbol_name,
+                    member_name,
+                )?
+            } else {
+                self.project_type_member(scope_canonical_id, symbol_name, member_name)?
+            };
+            if let Some(store_view) = self.store_view {
+                self.cache_projected_member(
+                    scope_canonical_id,
+                    symbol_name,
+                    &projected_member,
+                    store_view,
+                );
+            }
+            if projected_member.is_method {
+                if let TypeExpr::Function(function) = &projected_member.ty {
+                    properties.push(ObjectMember::Method(MethodSignature {
+                        name: projected_member.name,
+                        function: (**function).clone(),
+                        optional: projected_member.optional,
+                    }));
+                    continue;
+                }
+            }
+            properties.push(ObjectMember::Property(ObjectProperty {
+                name: projected_member.name,
+                ty: projected_member.ty,
+                optional: projected_member.optional,
+                readonly: projected_member.readonly,
+            }));
         }
+        Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+            properties,
+        })))
     }
 
     fn project_prepared_pick_route_surface_expr(

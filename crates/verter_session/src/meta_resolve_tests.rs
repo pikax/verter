@@ -7580,6 +7580,112 @@ defineProps<{ first: Inner; second: Inner }>()
 }
 
 #[test]
+fn project_route_surface_expr_pick_warms_member_cache_for_inherited_members() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+interface RouterLinkProps {
+  replace?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'custom'> {
+  to?: string
+  target?: '_blank' | '_self'
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+}
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let route =
+        crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+
+    let projected = query_engine
+        .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+        .expect("inherited pick route should project");
+    let verter_semantic::analysis::type_expr::TypeExpr::Object(shape) = projected else {
+        panic!("projected inherited pick route should materialize as an object");
+    };
+    let member_names: std::collections::BTreeSet<_> = shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                Some(property.name.as_str())
+            }
+            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                Some(method.name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        member_names,
+        std::collections::BTreeSet::from(["target", "to"]),
+        "inherited pick route should stay on the requested members only",
+    );
+
+    let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
+        subject: crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/Link.vue".to_string(),
+            symbol_name: "LinkProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        },
+        route: route.clone(),
+    };
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&routed_key, &store_view)
+                .as_deref(),
+            Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
+                verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+            ))
+        ),
+        "pick route should publish the routed object surface into TypeSurfaceDb",
+    );
+
+    for member_name in ["to", "target"] {
+        let member_key = crate::resolver_core::TypeSurfaceOpKey::Member {
+            subject: crate::resolver_core::TypeSurfaceKey {
+                canonical_owner: "/src/Link.vue".to_string(),
+                symbol_name: "LinkProps".to_string(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
+            member_name: member_name.to_string(),
+        };
+        assert!(
+            matches!(
+                host.resolver_runtime()
+                    .type_surfaces
+                    .get(&member_key, &store_view)
+                    .as_deref(),
+                Some(crate::resolver_core::TypeSurfaceOpResult::Member(_))
+            ),
+            "pick route should also warm the shared member projection cache for inherited member `{member_name}`",
+        );
+    }
+}
+
+#[test]
 fn component_meta_query_engine_can_resolve_registry_symbols_filters_builtins() {
     let project = make_project();
     project
