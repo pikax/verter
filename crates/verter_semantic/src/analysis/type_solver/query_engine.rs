@@ -16,7 +16,7 @@ use super::audit::{AuditSink, NoopAudit, RecordingAudit};
 use super::host::{BareRefOrigin, ResolvedRootIdentity, TypeSolverHost, UtilitySource};
 use super::lower::lower_type_expr;
 use super::project;
-use super::result::SolverResult;
+use super::result::{SolverExactness, SolverResult};
 use super::solve::{project_to_type_expr, resolve_node, SolveLimits, SolveState};
 use super::substitution::SubstitutionEnv;
 use crate::analysis::type_expr::TypeExpr;
@@ -164,6 +164,18 @@ struct OpResult {
     visited_decls: Vec<ResolvedRootIdentity>,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ResolvedSubjectKey {
+    subject: SubjectId,
+    scope_canonical_id: String,
+}
+
+struct ResolvedSubjectEntry {
+    node: NodeId,
+    exactness: SolverExactness,
+    visited_decls: Vec<ResolvedRootIdentity>,
+}
+
 // ---------------------------------------------------------------------------
 // TypeQueryEngine
 // ---------------------------------------------------------------------------
@@ -177,6 +189,7 @@ struct OpResult {
 pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     host: &'a dyn TypeSolverHost,
     op_cache: FxHashMap<OpKey, OpResult>,
+    resolved_subjects: FxHashMap<ResolvedSubjectKey, ResolvedSubjectEntry>,
     shallow_field_expr_cache: FxHashMap<TypeExpr, bool>,
     shallow_imported_bare_ref_cache: FxHashMap<String, bool>,
     shallow_transitive_ref_cache: FxHashMap<String, bool>,
@@ -240,6 +253,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         Self {
             host,
             op_cache: FxHashMap::default(),
+            resolved_subjects: FxHashMap::default(),
             shallow_field_expr_cache: FxHashMap::default(),
             shallow_imported_bare_ref_cache: FxHashMap::default(),
             shallow_transitive_ref_cache: FxHashMap::default(),
@@ -1285,6 +1299,46 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         }
     }
 
+    fn resolve_subject_node(
+        &mut self,
+        subject: SubjectId,
+        scoped_host: &dyn TypeSolverHost,
+        scope_canonical_id: &str,
+    ) -> Option<ResolvedNodeResult> {
+        let cache_key = ResolvedSubjectKey {
+            subject,
+            scope_canonical_id: scope_canonical_id.to_string(),
+        };
+        if let Some(cached) = self.resolved_subjects.get(&cache_key) {
+            self.visited_decls
+                .extend(cached.visited_decls.iter().cloned());
+            return Some(ResolvedNodeResult {
+                node: cached.node,
+                exactness: cached.exactness,
+            });
+        }
+
+        let SubjectKey::Decl { symbol_name, .. } = self.subject_key(subject)?.clone() else {
+            return None;
+        };
+        let visited_start = self.visited_decls.len();
+        let resolved = self.resolve_expr_node_scoped(
+            scoped_host,
+            scope_canonical_id,
+            &TypeExpr::named(&symbol_name),
+        );
+        let visited_decls = self.visited_decls[visited_start..].to_vec();
+        self.resolved_subjects.insert(
+            cache_key,
+            ResolvedSubjectEntry {
+                node: resolved.node,
+                exactness: resolved.exactness,
+                visited_decls,
+            },
+        );
+        Some(resolved)
+    }
+
     // -----------------------------------------------------------------------
     // Subject interning and projection operators
     // -----------------------------------------------------------------------
@@ -1331,13 +1385,12 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         match &key {
             SubjectKey::Decl {
                 canonical_id: _,
-                symbol_name,
+                symbol_name: _,
                 ..
             } => {
                 let visited_start = self.visited_decls.len();
-                let type_ref = TypeExpr::named(symbol_name);
                 let resolved =
-                    self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
+                    self.resolve_subject_node(subject, scoped_host, scope_canonical_id)?;
                 if !resolved.exactness.is_exact() {
                     return None;
                 }
@@ -1429,9 +1482,9 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         match &key {
             SubjectKey::Decl { symbol_name, .. } => {
                 let visited_start = self.visited_decls.len();
-                let type_ref = TypeExpr::named(symbol_name);
+                let _ = symbol_name;
                 let resolved =
-                    self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
+                    self.resolve_subject_node(subject, scoped_host, scope_canonical_id)?;
                 if !resolved.exactness.is_exact() {
                     return None;
                 }
@@ -1471,24 +1524,29 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
 
         let key = self.subject_key(subject)?.clone();
         match &key {
-            SubjectKey::Decl { symbol_name, .. } => {
-                let type_ref = TypeExpr::named(symbol_name);
+            SubjectKey::Decl { symbol_name: _, .. } => {
                 let visited_start = self.visited_decls.len();
-                let projected =
-                    self.project_expr_surface(scoped_host, scope_canonical_id, &type_ref);
-                if let Some(ref surface) = projected {
-                    if let Some(result_expr) = projected_surface_to_type_expr(surface) {
-                        let visited_decls = self.visited_decls[visited_start..].to_vec();
-                        self.op_cache.insert(
-                            op_key,
-                            OpResult {
-                                result: SolverResult::exact_concrete(result_expr),
-                                visited_decls,
-                            },
-                        );
-                    }
+                let resolved =
+                    self.resolve_subject_node(subject, scoped_host, scope_canonical_id)?;
+                if !resolved.exactness.is_exact() {
+                    return None;
                 }
-                projected
+                let projected = project::project_surface(&self.arena, resolved.node);
+                if !projected.exactness.is_exact() {
+                    return None;
+                }
+                let surface = projected_surface_from_shape(&self.arena, &projected.value)?;
+                if let Some(result_expr) = projected_surface_to_type_expr(&surface) {
+                    let visited_decls = self.visited_decls[visited_start..].to_vec();
+                    self.op_cache.insert(
+                        op_key,
+                        OpResult {
+                            result: SolverResult::exact_concrete(result_expr),
+                            visited_decls,
+                        },
+                    );
+                }
+                Some(surface)
             }
             _ => None,
         }
@@ -3345,6 +3403,66 @@ mod tests {
             engine.total_steps(),
             steps_after_first,
             "cached member projection should not add solver steps",
+        );
+    }
+
+    #[test]
+    fn project_member_reuses_resolved_subject_across_distinct_members() {
+        let host = NoopSolverHost;
+        let scoped_host = ScopedTestHost::with_decls(&[(
+            "Widget",
+            TypeExpr::Object(std::sync::Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "title".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "count".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::Number),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                },
+            )),
+        )]);
+        let mut engine = TypeQueryEngine::new(&host);
+        let subject = engine.intern_subject(SubjectKey::Decl {
+            canonical_id: "scope_a".to_string(),
+            symbol_name: "Widget".to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        });
+
+        let first = engine
+            .project_member(subject, "title", &scoped_host, "scope_a")
+            .expect("first projected member should resolve");
+        let steps_after_first = engine.total_steps();
+        let solves_after_first = engine.solve_count();
+
+        let second = engine
+            .project_member(subject, "count", &scoped_host, "scope_a")
+            .expect("second projected member should reuse the resolved subject");
+
+        assert_eq!(first.name, "title");
+        assert_eq!(second.name, "count");
+        assert_eq!(
+            engine.solve_count(),
+            solves_after_first,
+            "distinct member projections on the same subject should reuse the resolved subject instead of re-solving it",
+        );
+        assert_eq!(
+            engine.total_steps(),
+            steps_after_first,
+            "distinct member projections on the same subject should not add solver steps once the subject is resolved",
         );
     }
 

@@ -106,44 +106,42 @@ impl HostStoreView {
             }
         }
 
-        view.snapshot_module_fact_hashes(host);
+        view.snapshot_tracked_import_route_hashes(host);
         view.compat_token = view.compute_compat_token();
         view
     }
 
-    fn snapshot_whole_hash_if_known(&mut self, host: &VerterHost, canonical_id: &str) {
-        if self.whole_hashes.contains_key(canonical_id) {
-            return;
-        }
-
-        if let Some(whole_hash) = host.get_whole_hash(canonical_id) {
-            self.whole_hashes
-                .insert(canonical_id.to_string(), whole_hash);
-        }
-    }
-
-    fn snapshot_module_fact_hashes(&mut self, host: &VerterHost) {
+    fn snapshot_tracked_import_route_hashes(&mut self, host: &VerterHost) {
         let canonical_ids: Vec<String> = self.whole_hashes.keys().cloned().collect();
 
         for canonical_id in canonical_ids {
-            let cached_facts = host.resolver.runtime.module_facts.get_any(&canonical_id);
-            let had_cached_facts = cached_facts.is_some();
-            let Some(facts) =
-                cached_facts.or_else(|| host.ensure_module_facts_in_view(&canonical_id, None))
-            else {
+            if self.derived_hashes.contains_key(&(
+                canonical_id.clone(),
+                crate::resolver_core::DerivedFactKind::ImportRoute,
+            )) {
                 continue;
-            };
-            self.snapshot_whole_hash_if_known(host, &canonical_id);
-            if facts.shallow_state.has_resolvable_surface() {
-                self.derived_hashes.insert(
-                    (
-                        canonical_id.clone(),
-                        crate::resolver_core::DerivedFactKind::Route,
-                    ),
-                    hash_route_surface(&facts.shallow_state),
-                );
             }
-            if let Some(import_route_hash) = facts.import_route_hash {
+
+            let import_route_hash = {
+                #[cfg(feature = "scheduler")]
+                {
+                    host.compile_cache.get(&canonical_id).and_then(|entry| {
+                        (!entry.import_routes.is_empty())
+                            .then(|| hash_import_route_targets(&entry.import_routes))
+                    })
+                }
+
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    let files = read_lock(&host.files);
+                    files.get(&canonical_id).and_then(|entry| {
+                        (!entry.import_routes.is_empty())
+                            .then(|| hash_import_route_targets(&entry.import_routes))
+                    })
+                }
+            };
+
+            if let Some(import_route_hash) = import_route_hash {
                 self.derived_hashes.insert(
                     (
                         canonical_id.clone(),
@@ -151,16 +149,6 @@ impl HostStoreView {
                     ),
                     import_route_hash,
                 );
-            }
-
-            if !had_cached_facts {
-                // Soft-invalidate (rather than hard-evict) so that these
-                // temporarily-materialized facts survive in the `previous`
-                // chain. Stale store views that captured the corresponding
-                // import_route_hash during this snapshot can still find them.
-                // The tombstone's impossible hash ensures no production
-                // (no-store-view) path returns these transient facts.
-                host.resolver.runtime.module_facts.invalidate(&canonical_id);
             }
         }
     }

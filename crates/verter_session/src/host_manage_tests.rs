@@ -1201,6 +1201,94 @@ defineProps<Props>()
     );
 }
 
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolver_store_view_does_not_materialize_tracked_module_facts() {
+    let host = strict_host();
+
+    upsert_vue(
+        &host,
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
+    upsert_non_sfc(
+        &host,
+        "/src/dep.ts",
+        "export interface Props { msg: string }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/unused.ts",
+        "export interface Unused { label: string }\n",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::DependencyResolution {
+            specifier: "./dep".to_string(),
+            resolved_canonical_id: Some("/src/dep.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    host.resolver
+        .runtime
+        .module_facts
+        .evict("/src/Consumer.vue");
+    host.resolver.runtime.module_facts.evict("/src/types.ts");
+    host.resolver.runtime.module_facts.evict("/src/dep.ts");
+    host.resolver.runtime.module_facts.evict("/src/unused.ts");
+    host.provenance().reset();
+
+    let view = host.resolver_store_view();
+    let provenance = host.provenance_snapshot();
+
+    assert_eq!(
+        provenance.module_facts_scheduler_snapshot_reuse, 0,
+        "capturing a store view should not eagerly materialize tracked module facts; the view should snapshot known whole/import-route hashes without paying scheduler-backed module-facts loads",
+    );
+    assert!(
+        view.whole_hash("/src/types.ts").is_some(),
+        "store view should still capture tracked whole hashes for direct dependencies",
+    );
+    assert!(
+        view.whole_hash("/src/dep.ts").is_some(),
+        "store view should still capture tracked whole hashes for transitive dependencies",
+    );
+    assert!(
+        view.derived_hash(
+            "/src/types.ts",
+            crate::resolver_core::DerivedFactKind::ImportRoute,
+        )
+        .is_some(),
+        "store view should snapshot tracked import-route hashes from host-owned dependency state without materializing module facts",
+    );
+
+    let resolved = host.resolve_type_dependency_canonical_shallow_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        Some(&view),
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/src/types.ts"),
+        "lazy store views should still resolve direct import edges through the captured import-route hash/state",
+    );
+}
+
 #[test]
 fn resolver_store_view_tracks_reexport_import_routes() {
     let host = strict_host();

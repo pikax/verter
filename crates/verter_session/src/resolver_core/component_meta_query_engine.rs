@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::host::TypeSolverHost;
@@ -108,6 +108,9 @@ pub struct ComponentMetaQueryEngine<'a> {
 static FORBID_STRUCTURAL_SLOW_LANE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
+static FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
 pub(crate) struct StructuralSlowLaneGuard;
 
 #[cfg(test)]
@@ -124,6 +127,23 @@ pub(crate) fn forbid_structural_slow_lane_for_tests() -> StructuralSlowLaneGuard
 }
 
 #[cfg(test)]
+pub(crate) struct DirectPickRoutedExprSlowLaneGuard;
+
+#[cfg(test)]
+impl Drop for DirectPickRoutedExprSlowLaneGuard {
+    fn drop(&mut self) {
+        FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn forbid_direct_pick_routed_expr_slow_lane_for_tests(
+) -> DirectPickRoutedExprSlowLaneGuard {
+    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.store(true, Ordering::SeqCst);
+    DirectPickRoutedExprSlowLaneGuard
+}
+
+#[cfg(test)]
 fn assert_structural_slow_lane_allowed() {
     assert!(
         !FORBID_STRUCTURAL_SLOW_LANE.load(Ordering::SeqCst),
@@ -131,8 +151,19 @@ fn assert_structural_slow_lane_allowed() {
     );
 }
 
+#[cfg(test)]
+fn assert_direct_pick_routed_expr_slow_lane_allowed() {
+    assert!(
+        !FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.load(Ordering::SeqCst),
+        "direct routed-expr pick slow lane should not be used when member projection can satisfy the route",
+    );
+}
+
 #[cfg(not(test))]
 fn assert_structural_slow_lane_allowed() {}
+
+#[cfg(not(test))]
+fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn new(
@@ -986,6 +1017,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
                 return Some(projected_expr);
             }
+            if let Some(projected_expr) = self.project_pick_route_surface_expr_via_members(
+                scope_canonical_id,
+                root_symbol,
+                members,
+            ) {
+                if let Some(store_view) = self.store_view {
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
+                }
+                return Some(projected_expr);
+            }
             if let Some(projected_expr) = self.project_pick_route_surface_expr_via_routed_expr(
                 scope_canonical_id,
                 root_symbol,
@@ -1004,22 +1051,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         scope_canonical_id,
                         root_symbol,
                         members,
-                        &projected_expr,
-                        store_view,
-                    );
-                }
-                return Some(projected_expr);
-            }
-            if let Some(projected_expr) = self.project_pick_route_surface_expr_via_members(
-                scope_canonical_id,
-                root_symbol,
-                members,
-            ) {
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        route,
                         &projected_expr,
                         store_view,
                     );
@@ -1196,12 +1227,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.store_view,
         )?;
         let member = prepared.member(member_name)?;
+        self.project_prepared_member_from_decl(scope_canonical_id, &prepared, member_name, member)
+    }
+
+    fn project_prepared_member_from_decl(
+        &mut self,
+        scope_canonical_id: &str,
+        prepared: &std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
+        member_name: &str,
+        member: &verter_semantic::analysis::type_solver::prepared::PreparedMember,
+    ) -> Option<ProjectedMember> {
         if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
             return None;
         }
         let projected_ty = match &member.ty {
             TypeExpr::Object(_) => Some(member.ty.clone()),
             _ if prepared_member_body_stays_shallow(&member.ty) => Some(member.ty.clone()),
+            _ if prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &member.ty) => {
+                Some(member.ty.clone())
+            }
             _ if crate::meta_resolve::component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                 &member.ty,
                 scope_canonical_id,
@@ -1219,6 +1263,101 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             readonly: member.readonly,
             is_method: member.is_method,
         })
+    }
+
+    fn project_local_inherited_member_route_projection(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+    ) -> Option<ProjectedMember> {
+        let mut visited = FxHashSet::default();
+        self.project_local_inherited_member_route_projection_from_symbol(
+            scope_canonical_id,
+            symbol_name,
+            member_name,
+            &mut visited,
+        )
+    }
+
+    fn project_local_inherited_member_route_projection_from_symbol(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> Option<ProjectedMember> {
+        if !visited.insert(symbol_name.to_string()) {
+            return None;
+        }
+
+        let result = self
+            .host
+            .prepared_type_decl_in_view(scope_canonical_id, symbol_name, self.store_view)
+            .and_then(|prepared| {
+                if let Some(member) = prepared.member(member_name) {
+                    return self.project_prepared_member_from_decl(
+                        scope_canonical_id,
+                        &prepared,
+                        member_name,
+                        member,
+                    );
+                }
+
+                self.project_local_inherited_member_route_projection_from_expr(
+                    scope_canonical_id,
+                    &prepared,
+                    &prepared.body,
+                    member_name,
+                    visited,
+                )
+            });
+
+        visited.remove(symbol_name);
+        result
+    }
+
+    fn project_local_inherited_member_route_projection_from_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        prepared: &std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
+        expr: &TypeExpr,
+        member_name: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> Option<ProjectedMember> {
+        match expr {
+            TypeExpr::Parenthesized(inner) => self
+                .project_local_inherited_member_route_projection_from_expr(
+                    scope_canonical_id,
+                    prepared,
+                    inner,
+                    member_name,
+                    visited,
+                ),
+            TypeExpr::Intersection(parts) => parts.iter().rev().find_map(|part| {
+                self.project_local_inherited_member_route_projection_from_expr(
+                    scope_canonical_id,
+                    prepared,
+                    part,
+                    member_name,
+                    visited,
+                )
+            }),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                let resolved = prepared.name_resolution.get(name.as_ref())?;
+                (resolved.canonical_id == scope_canonical_id).then_some(())?;
+                self.project_local_inherited_member_route_projection_from_symbol(
+                    scope_canonical_id,
+                    resolved.symbol_name.as_str(),
+                    member_name,
+                    visited,
+                )
+            }
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -1257,6 +1396,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     symbol_name,
                     member_name,
                 )?
+            } else if let Some(projected_member) = self
+                .project_local_inherited_member_route_projection(
+                    scope_canonical_id,
+                    symbol_name,
+                    member_name,
+                )
+            {
+                projected_member
             } else {
                 self.project_type_member(scope_canonical_id, symbol_name, member_name)?
             };
@@ -1297,6 +1444,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         route: &super::RouteDemand,
         _members: &[String],
     ) -> Option<TypeExpr> {
+        assert_direct_pick_routed_expr_slow_lane_allowed();
         self.project_routed_expr_surface_expr_direct(scope_canonical_id, symbol_name, route)
     }
 
@@ -1831,6 +1979,68 @@ fn prepared_member_body_stays_shallow(expr: &TypeExpr) -> bool {
     }
 }
 
+fn prepared_decl_keeps_raw_symbolic_non_object_alias(
+    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    expr: &TypeExpr,
+) -> bool {
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => true,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            prepared
+                .name_resolution
+                .get(name.as_ref())
+                .is_some_and(|resolved| resolved.canonical_id.contains("/node_modules/"))
+                && type_arguments
+                    .iter()
+                    .all(|arg| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, arg))
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element) => {
+            prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, element)
+        }
+        TypeExpr::Tuple { elements, .. } => elements.iter().all(|element| {
+            prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &element.ty)
+        }),
+        TypeExpr::Union(types)
+        | TypeExpr::Intersection(types)
+        | TypeExpr::TemplateLiteral {
+            expressions: types, ..
+        } => types
+            .iter()
+            .all(|ty| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, ty)),
+        TypeExpr::Function(func) => {
+            func.parameters
+                .iter()
+                .all(|param| prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, &param.ty))
+                && func.return_type.as_deref().is_none_or(|return_type| {
+                    prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, return_type)
+                })
+                && func.type_parameters.iter().all(|param| {
+                    param.constraint.as_deref().is_none_or(|constraint| {
+                        prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, constraint)
+                    }) && param.default.as_deref().is_none_or(|default| {
+                        prepared_decl_keeps_raw_symbolic_non_object_alias(prepared, default)
+                    })
+                })
+        }
+        TypeExpr::Object(object) => object.properties.is_empty(),
+        TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TypeOf(_) => false,
+    }
+}
+
 fn is_builtin_name(name: &str) -> bool {
     verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
@@ -2033,6 +2243,7 @@ fn type_expr_references_type_params(
 
 #[cfg(test)]
 mod tests {
+    use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
     use super::type_expr_references_type_params;
     use super::ComponentMetaQueryEngine;
     use crate::resolver_core::solver_host::SessionSolverHost;
@@ -2456,6 +2667,535 @@ export interface Props<T extends { id?: string } = { id?: string }> {
                 .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
                 .is_none(),
             "generic pick route members that still mention type parameters should fall back to the existing projection path",
+        );
+    }
+
+    #[test]
+    fn project_route_surface_expr_pick_prefers_member_projection_before_direct_routed_expr() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+interface RouterLinkProps {
+  replace?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'custom'> {
+  to?: string
+  target?: '_blank' | '_self'
+  href?: string
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+}
+</script>
+<template><a /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Link.vue"));
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let route =
+            crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+
+        let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+        let projected = query_engine
+            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+            .expect("member-viable inherited pick route should project without the direct routed-expr slow lane");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected inherited pick route should materialize as an object");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["target", "to"]),
+            "member-first pick projection should stay on the requested members only",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "same-file inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
+        );
+        assert_eq!(
+            query_engine.imported_registry_symbol_cache_len(),
+            0,
+            "same-file inherited pick members that end on package-backed symbolic refs should not resolve imported registry bodies just to decide they stay shallow",
+        );
+    }
+
+    #[test]
+    fn project_route_surface_expr_pick_keeps_package_backed_inherited_members_shallow() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/vue-router/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RouteLocationRaw {
+  path?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RouteLocationRaw } from './node_modules/vue-router/index.d.ts'
+
+interface NuxtLinkProps {
+  to?: RouteLocationRaw
+  target?: '_blank' | '_self'
+  href?: RouteLocationRaw
+}
+
+export interface LinkProps extends NuxtLinkProps {
+  as?: any
+}
+</script>
+<template><a /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Link.vue"));
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let route =
+            crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+
+        let projected = query_engine
+            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+            .expect("package-backed inherited pick route should project");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected inherited pick route should materialize as an object");
+        };
+        let to_member = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("`to` member should be present");
+        assert!(
+            matches!(to_member, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
+            "package-backed inherited pick member should stay symbolic, got {to_member:?}",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "package-backed inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
+        );
+        assert_eq!(
+            query_engine.imported_registry_symbol_cache_len(),
+            0,
+            "package-backed inherited pick members should not resolve imported registry bodies just to keep the package ref symbolic",
+        );
+    }
+
+    #[test]
+    fn project_route_surface_expr_pick_skips_irrelevant_imported_utility_extends() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/vue-router/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RouteLocationRaw {
+  path?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types/html.ts".to_string(),
+            Arc::from(
+                r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string | null
+  rel?: string | null
+  type?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RouteLocationRaw } from './node_modules/vue-router/index.d.ts'
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
+
+interface RouterLinkProps {
+  replace?: boolean
+  custom?: boolean
+}
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: RouteLocationRaw
+  href?: NuxtLinkProps['to']
+  target?: '_blank' | '_self' | (string & {}) | null
+}
+
+export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+}
+</script>
+<template><a /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Link.vue"));
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let route =
+            crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
+
+        let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+        let projected = query_engine
+            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+            .expect("local inherited members should project without deepening unrelated imported utility bases");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected inherited pick route should materialize as an object");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["target", "to"]),
+            "pick projection should stay on the requested local inherited members only",
+        );
+        let to_member = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "to" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("`to` member should be present");
+        assert!(
+            matches!(to_member, TypeExpr::Ref { name, .. } if name.as_ref() == "RouteLocationRaw"),
+            "package-backed inherited member should stay symbolic, got {to_member:?}",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "requesting locally inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
+        );
+        assert_eq!(
+            query_engine.imported_registry_symbol_cache_len(),
+            0,
+            "requesting locally inherited members should not resolve imported registry bodies for unrelated imported utility bases",
+        );
+    }
+
+    #[test]
+    fn project_route_surface_expr_pick_skips_realistic_link_utility_heritage() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/vue-router/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RouterLinkProps {
+  replace?: boolean
+  activeClass?: string
+  custom?: boolean
+}
+
+export interface RouteLocationRaw {
+  path?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types/html.ts".to_string(),
+            Arc::from(
+                r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string | null
+  rel?: string | null
+  type?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RouterLinkProps, RouteLocationRaw } from './node_modules/vue-router/index.d.ts'
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from './types/html'
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: RouteLocationRaw
+  href?: NuxtLinkProps['to']
+  target?: '_blank' | '_parent' | '_self' | '_top' | (string & {}) | null
+  rel?: 'noopener' | 'noreferrer' | (string & {}) | null
+}
+
+export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  active?: boolean
+  exact?: boolean
+  exactQuery?: boolean | 'partial'
+  exactHash?: boolean
+  inactiveClass?: string
+  custom?: boolean
+  raw?: boolean
+  class?: any
+}
+</script>
+<template><a /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Link.vue"));
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let route =
+            crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
+
+        let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+        let projected = query_engine
+            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+            .expect("realistic inherited pick route should project without the direct routed-expr slow lane");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected inherited pick route should materialize as an object");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["target", "to"]),
+            "pick projection should stay on the requested members only",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "realistic local inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
+        );
+        assert_eq!(
+            query_engine.imported_registry_symbol_cache_len(),
+            0,
+            "realistic local inherited members should not resolve imported registry bodies for unrelated imported utility bases",
+        );
+    }
+
+    #[test]
+    fn project_route_surface_expr_pick_skips_module_routed_link_utility_heritage() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/vue-router/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RouterLinkProps {
+  replace?: boolean
+  activeClass?: string
+  custom?: boolean
+}
+
+export interface RouteLocationRaw {
+  path?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types/html.ts".to_string(),
+            Arc::from(
+                r#"
+export interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+  disabled?: boolean
+}
+
+export interface AnchorHTMLAttributes {
+  href?: string
+  target?: string | null
+  rel?: string | null
+  type?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RouterLinkProps, RouteLocationRaw } from 'vue-router'
+import type { ButtonHTMLAttributes, AnchorHTMLAttributes } from '../types/html'
+
+interface NuxtLinkProps extends Omit<RouterLinkProps, 'to'> {
+  to?: RouteLocationRaw
+  href?: NuxtLinkProps['to']
+  target?: '_blank' | '_parent' | '_self' | '_top' | (string & {}) | null
+  rel?: 'noopener' | 'noreferrer' | (string & {}) | null
+}
+
+export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'type' | 'disabled'>, Omit<AnchorHTMLAttributes, 'href' | 'target' | 'rel' | 'type'> {
+  as?: any
+  type?: ButtonHTMLAttributes['type']
+  disabled?: boolean
+  active?: boolean
+  exact?: boolean
+  exactQuery?: boolean | 'partial'
+  exactHash?: boolean
+  inactiveClass?: string
+  custom?: boolean
+  raw?: boolean
+  class?: any
+}
+</script>
+<template><a /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Link.vue"));
+        host.set_import_dependencies(
+            "/src/Link.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "vue-router".to_string(),
+                    resolved_canonical_id: Some(
+                        "/src/node_modules/vue-router/index.d.ts".to_string(),
+                    ),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "../types/html".to_string(),
+                    resolved_canonical_id: Some("/src/types/html.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let route =
+            crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
+
+        let _guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+        let projected = query_engine
+            .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
+            .expect("module-routed inherited pick route should project without the direct routed-expr slow lane");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected inherited pick route should materialize as an object");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["target", "to"]),
+            "pick projection should stay on the requested members only",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "module-routed local inherited members should not invoke the generic solver",
+        );
+        assert_eq!(
+            query_engine.imported_registry_symbol_cache_len(),
+            0,
+            "module-routed local inherited members should not resolve imported registry bodies for unrelated imported utility bases",
         );
     }
 
