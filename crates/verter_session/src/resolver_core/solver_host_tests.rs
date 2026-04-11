@@ -387,6 +387,111 @@ fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
 }
 
 #[test]
+fn declaration_scope_root_identity_routes_barrel_import_bindings_to_final_target() {
+    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_source;
+    use verter_semantic::analysis::type_eval_build::parse_and_build_env;
+    use verter_semantic::analysis::Hash16;
+
+    let host = VerterHost::new_standalone(Default::default());
+    let allocator = oxc_allocator::Allocator::new();
+
+    let barrel_source = "export { Props } from './props'";
+    let barrel_analysis = Arc::new(analyze_external_type_source(barrel_source, &allocator));
+    let barrel_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+        Hash16::default(),
+        Arc::clone(&barrel_analysis),
+        None,
+    ));
+    host.seed_module_facts_for_test(
+        "/types/index.ts",
+        Hash16::default(),
+        Arc::<str>::from(barrel_source),
+        None,
+        None,
+        None,
+        barrel_analysis,
+        barrel_state,
+        None,
+        Some(Arc::<str>::from(barrel_source)),
+        FxHashMap::from_iter([(
+            "./props".to_string(),
+            crate::types::DependencyResolution {
+                specifier: "./props".to_string(),
+                resolved_canonical_id: Some("/types/props.ts".to_string()),
+                possible_canonical_ids: vec!["/types/props.ts".to_string()],
+            },
+        )]),
+    );
+
+    let props_source = "export interface Props { label: string }";
+    let props_analysis = Arc::new(analyze_external_type_source(props_source, &allocator));
+    let props_env = parse_and_build_env(props_source);
+    let props_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+        Hash16::default(),
+        Arc::clone(&props_analysis),
+        Some(&props_env),
+    ));
+    host.seed_module_facts_for_test(
+        "/types/props.ts",
+        Hash16::default(),
+        Arc::<str>::from(props_source),
+        None,
+        None,
+        None,
+        props_analysis,
+        props_state,
+        None,
+        Some(Arc::<str>::from(props_source)),
+        FxHashMap::default(),
+    );
+
+    let owner_source = r#"
+import type { Props } from "./types"
+export interface OwnerProps {
+  child: Props['label']
+}
+"#;
+    let owner_analysis = Arc::new(analyze_external_type_source(owner_source, &allocator));
+    let owner_env = parse_and_build_env(owner_source);
+    let owner_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+        Hash16::default(),
+        Arc::clone(&owner_analysis),
+        Some(&owner_env),
+    ));
+    host.seed_module_facts_for_test(
+        "/owner.ts",
+        Hash16::default(),
+        Arc::<str>::from(owner_source),
+        None,
+        None,
+        None,
+        owner_analysis,
+        owner_state,
+        None,
+        Some(Arc::<str>::from(owner_source)),
+        FxHashMap::from_iter([(
+            "./types".to_string(),
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/types/index.ts".to_string()),
+                possible_canonical_ids: vec!["/types/index.ts".to_string()],
+            },
+        )]),
+    );
+
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/owner.ts");
+    let root = solver_host
+        .root_identity("", "Props")
+        .expect("barrel import binding should resolve in declaration scope");
+
+    assert_eq!(
+        root.canonical_id, "/types/props.ts",
+        "root_identity should canonicalize barrel import bindings to the defining file"
+    );
+    assert_eq!(root.symbol_name, "Props");
+}
+
+#[test]
 fn prepared_value_decl_lookup_routes_barrel_targets_before_cache_lookup() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),

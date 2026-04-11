@@ -856,6 +856,48 @@ pub(crate) fn component_meta_registry_has_explicit_object_surface(
     }
 }
 
+pub(crate) fn component_meta_registry_raw_member_path_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    path: &[String],
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use verter_semantic::analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
+        match expr {
+            TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
+            TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == member_name => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    if path.is_empty() {
+        return Some(expr.clone());
+    }
+
+    let mut leaf = expr;
+    for member_name in path {
+        leaf = explicit_object_member(leaf, member_name)?;
+    }
+
+    Some(path.iter().rfold(leaf.clone(), |child, member_name| {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty {
+                name: member_name.clone(),
+                ty: child,
+                optional: true,
+                readonly: false,
+            })],
+        }))
+    }))
+}
+
 pub(crate) fn component_meta_registry_expr_references_name(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     target_name: &str,
@@ -1391,7 +1433,10 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
 ) {
     fn direct_public_ref<'a>(
         expr: &'a verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> Option<(&'a str, &'a [verter_semantic::analysis::type_expr::TypeExpr])> {
+    ) -> Option<(
+        &'a str,
+        &'a [verter_semantic::analysis::type_expr::TypeExpr],
+    )> {
         use verter_semantic::analysis::type_expr::TypeExpr;
 
         match expr {
@@ -1442,11 +1487,15 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             if canonical_id.is_empty() || canonical_id.contains("/node_modules/") {
                 return false;
             }
-            host.prepared_type_decl_in_view(canonical_id.as_str(), exported_name.as_str(), store_view)
-                .is_some_and(|prepared| {
-                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
-                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
-                })
+            host.prepared_type_decl_in_view(
+                canonical_id.as_str(),
+                exported_name.as_str(),
+                store_view,
+            )
+            .is_some_and(|prepared| {
+                component_meta_registry_has_non_object_top_level_surface(&prepared.body)
+                    && !component_meta_registry_has_explicit_object_surface(&prepared.body)
+            })
         });
     if !skip_direct_plain_ref && !skip_imported_generic_non_object_ref {
         collect_component_meta_registry_public_surface_refs(
@@ -1905,7 +1954,8 @@ mod tests {
 
     use super::{
         choose_preferred_imported_type_body, collect_component_meta_registry_refs,
-        component_meta_registry_public_indexed_access_route, imported_type_body_specificity_score,
+        component_meta_registry_public_indexed_access_route,
+        component_meta_registry_raw_member_path_surface, imported_type_body_specificity_score,
         owner_component_meta_registry_import_root, RouteDemand,
     };
     use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
@@ -2069,12 +2119,8 @@ export interface AvatarProps {
             .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
             .expect("app snapshot should exist");
 
-        let resolved = owner_component_meta_registry_import_root(
-            &host,
-            &snapshot,
-            "AvatarProps",
-            None,
-        );
+        let resolved =
+            owner_component_meta_registry_import_root(&host, &snapshot, "AvatarProps", None);
 
         assert_eq!(
             resolved,
@@ -2251,5 +2297,52 @@ export interface AvatarProps {
                 .expect("preferred body should exist");
 
         assert_eq!(preferred, method_object);
+    }
+
+    #[test]
+    fn raw_member_path_surface_projects_explicit_object_members_without_widening() {
+        let raw = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty {
+                    name: "ui".to_string(),
+                    ty: TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "base".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        })],
+                    })),
+                    optional: true,
+                    readonly: false,
+                }),
+                ObjectMember::Property(ObjectProperty {
+                    name: "label".to_string(),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: true,
+                    readonly: false,
+                }),
+            ],
+        }));
+
+        let projected = component_meta_registry_raw_member_path_surface(&raw, &["ui".to_string()])
+            .expect("explicit object surface should project the requested member path");
+
+        let TypeExpr::Object(shape) = projected else {
+            panic!("member path projection should stay object-shaped, got {projected:?}");
+        };
+        let member_names: Vec<_> = shape
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            vec!["ui"],
+            "raw member path projection should stay on the requested member instead of widening to siblings"
+        );
     }
 }

@@ -1421,7 +1421,9 @@ fn expand_macro_types_impl(
         engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
         parsed: &TypeExpr,
     ) -> ExpansionResult<ExpandedNormalizedExpr> {
-        if engine.should_preserve_shallow_field_expr(parsed) {
+        if let Some(fast) = engine.try_fast_shallow_field_expr(parsed) {
+            solver_to_expr_result(fast)
+        } else if engine.should_preserve_shallow_field_expr(parsed) {
             ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
                 expr: parsed.clone(),
             })

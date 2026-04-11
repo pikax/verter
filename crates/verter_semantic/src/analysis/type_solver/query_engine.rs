@@ -322,6 +322,64 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         preserve
     }
 
+    fn should_preserve_imported_utility_route(&mut self, expr: &TypeExpr) -> bool {
+        fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+            match expr {
+                TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                other => other,
+            }
+        }
+
+        match strip_parens(expr) {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if matches!(
+                self.host.utility_source(name.as_ref()),
+                UtilitySource::Builtin
+            ) && !type_arguments.is_empty() =>
+            {
+                type_arguments.iter().any(|argument| {
+                    self.should_preserve_imported_bare_ref(argument)
+                        || self.should_preserve_package_member_path(argument)
+                        || self.should_preserve_imported_utility_route(argument)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn should_preserve_imported_member_path(&mut self, expr: &TypeExpr) -> bool {
+        fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+            match expr {
+                TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                other => other,
+            }
+        }
+
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments: _,
+                } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let TypeExpr::IndexedAccess { object, .. } = strip_parens(expr) else {
+            return false;
+        };
+        let Some(name) = root_import_name(object) else {
+            return false;
+        };
+        if self.host.bare_ref_origin(name) != BareRefOrigin::Imported {
+            return false;
+        }
+        self.host.root_identity("", name).is_some()
+    }
+
     fn should_preserve_package_member_path(&mut self, expr: &TypeExpr) -> bool {
         fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
             match expr {
@@ -398,8 +456,154 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             });
 
         active_refs.remove(&cache_key);
-        self.shallow_transitive_ref_cache.insert(cache_key, preserve);
+        self.shallow_transitive_ref_cache
+            .insert(cache_key, preserve);
         preserve
+    }
+
+    pub fn try_fast_shallow_field_expr(
+        &mut self,
+        expr: &TypeExpr,
+    ) -> Option<SolverResult<TypeExpr>> {
+        fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+            match expr {
+                TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                other => other,
+            }
+        }
+
+        fn single_member_import_root(expr: &TypeExpr) -> Option<(&str, &str)> {
+            let TypeExpr::IndexedAccess { object, index } = strip_parens(expr) else {
+                return None;
+            };
+            let TypeExpr::Ref {
+                name,
+                type_arguments,
+            } = strip_parens(object)
+            else {
+                return None;
+            };
+            if !type_arguments.is_empty() {
+                return None;
+            }
+            let TypeExpr::Literal(crate::analysis::type_expr::LiteralValue::String(member_name)) =
+                strip_parens(index)
+            else {
+                return None;
+            };
+            Some((name.as_ref(), member_name.as_str()))
+        }
+
+        fn contains_direct_imported_utility_route<A: super::audit::AuditSink>(
+            engine: &TypeQueryEngine<'_, A>,
+            expr: &TypeExpr,
+        ) -> bool {
+            fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+                match expr {
+                    TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                    other => other,
+                }
+            }
+
+            fn imported_route_arg<A: super::audit::AuditSink>(
+                engine: &TypeQueryEngine<'_, A>,
+                expr: &TypeExpr,
+            ) -> bool {
+                match strip_parens(expr) {
+                    TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } => {
+                        (type_arguments.is_empty()
+                            && engine.host.bare_ref_origin(name.as_ref())
+                                == BareRefOrigin::Imported)
+                            || contains_direct_imported_utility_route(engine, expr)
+                    }
+                    TypeExpr::IndexedAccess { object, .. } => imported_route_arg(engine, object),
+                    TypeExpr::Parenthesized(inner) => imported_route_arg(engine, inner),
+                    _ => contains_direct_imported_utility_route(engine, expr),
+                }
+            }
+
+            match strip_parens(expr) {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members
+                    .iter()
+                    .any(|member| contains_direct_imported_utility_route(engine, member)),
+                TypeExpr::Array { element, .. }
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    contains_direct_imported_utility_route(engine, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements
+                    .iter()
+                    .any(|element| contains_direct_imported_utility_route(engine, &element.ty)),
+                TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                    crate::analysis::type_expr::ObjectMember::Property(property) => {
+                        contains_direct_imported_utility_route(engine, &property.ty)
+                    }
+                    crate::analysis::type_expr::ObjectMember::Method(method) => {
+                        method.function.parameters.iter().any(|parameter| {
+                            contains_direct_imported_utility_route(engine, &parameter.ty)
+                        }) || method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| {
+                                contains_direct_imported_utility_route(engine, return_type)
+                            })
+                    }
+                    crate::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                        function.parameters.iter().any(|parameter| {
+                            contains_direct_imported_utility_route(engine, &parameter.ty)
+                        }) || function.return_type.as_deref().is_some_and(|return_type| {
+                            contains_direct_imported_utility_route(engine, return_type)
+                        })
+                    }
+                    crate::analysis::type_expr::ObjectMember::IndexSignature(index) => {
+                        contains_direct_imported_utility_route(engine, &index.key_type)
+                            || contains_direct_imported_utility_route(engine, &index.value_type)
+                    }
+                }),
+                TypeExpr::Function(function) => {
+                    function.parameters.iter().any(|parameter| {
+                        contains_direct_imported_utility_route(engine, &parameter.ty)
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        contains_direct_imported_utility_route(engine, return_type)
+                    })
+                }
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if !type_arguments.is_empty()
+                    && matches!(
+                        engine.host.utility_source(name.as_ref()),
+                        UtilitySource::Builtin
+                    ) =>
+                {
+                    type_arguments
+                        .iter()
+                        .any(|argument| imported_route_arg(engine, argument))
+                }
+                _ => false,
+            }
+        }
+
+        if contains_direct_imported_utility_route(self, expr) {
+            return Some(SolverResult::exact_symbolic(expr.clone()));
+        }
+
+        let (root_name, member_name) = single_member_import_root(expr)?;
+        if self.host.bare_ref_origin(root_name) != BareRefOrigin::Imported {
+            return None;
+        }
+        let root_identity = self.host.root_identity("", root_name)?;
+        let prepared = self.host.resolve_prepared_type_decl(&root_identity)?;
+        let member = prepared.member(member_name)?;
+        if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+            return None;
+        }
+        Some(SolverResult::exact_concrete(member.ty.clone()))
     }
 
     fn should_preserve_shallow_field_expr_inner(
@@ -417,27 +621,35 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
 
         let preserve = if engine.should_preserve_imported_bare_ref(expr) {
             true
+        } else if engine.should_preserve_imported_member_path(expr) {
+            true
+        } else if engine.should_preserve_imported_utility_route(expr) {
+            true
         } else if engine.should_preserve_package_member_path(expr) {
             true
         } else {
             match expr {
-                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members
-                    .iter()
-                    .any(|member| Self::should_preserve_shallow_field_expr_inner(
-                        engine,
-                        member,
-                        active_exprs,
-                        active_refs,
-                    )),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            member,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
                 TypeExpr::Array { element, .. }
                 | TypeExpr::KeyOf(element)
                 | TypeExpr::Rest(element)
-                | TypeExpr::Parenthesized(element) => Self::should_preserve_shallow_field_expr_inner(
-                    engine,
-                    element,
-                    active_exprs,
-                    active_refs,
-                ),
+                | TypeExpr::Parenthesized(element) => {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        element,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
                 TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
                     Self::should_preserve_shallow_field_expr_inner(
                         engine,
@@ -494,14 +706,18 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                                 active_exprs,
                                 active_refs,
                             )
-                        }) || method.function.return_type.as_deref().is_some_and(|return_type| {
-                            Self::should_preserve_shallow_field_expr_inner(
-                                engine,
-                                return_type,
-                                active_exprs,
-                                active_refs,
-                            )
-                        })
+                        }) || method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| {
+                                Self::should_preserve_shallow_field_expr_inner(
+                                    engine,
+                                    return_type,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            })
                     }
                 }),
                 TypeExpr::Function(function) => {
@@ -642,26 +858,26 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                         )
                     })
                 }
-                TypeExpr::TemplateLiteral { expressions, .. } => expressions.iter().any(
-                    |expression| {
+                TypeExpr::TemplateLiteral { expressions, .. } => {
+                    expressions.iter().any(|expression| {
                         Self::should_preserve_shallow_field_expr_inner(
                             engine,
                             expression,
                             active_exprs,
                             active_refs,
                         )
-                    },
-                ),
-                TypeExpr::RecursiveRef { type_arguments, .. } => type_arguments.iter().any(
-                    |argument| {
+                    })
+                }
+                TypeExpr::RecursiveRef { type_arguments, .. } => {
+                    type_arguments.iter().any(|argument| {
                         Self::should_preserve_shallow_field_expr_inner(
                             engine,
                             argument,
                             active_exprs,
                             active_refs,
                         )
-                    },
-                ),
+                    })
+                }
                 TypeExpr::Primitive(_)
                 | TypeExpr::Literal(_)
                 | TypeExpr::TypeOf(_)
@@ -1649,6 +1865,142 @@ fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr
     })))
 }
 
+fn type_expr_references_type_params(
+    expr: &TypeExpr,
+    type_params: &[crate::analysis::type_expr::TypeParam],
+) -> bool {
+    use rustc_hash::FxHashSet;
+
+    fn visit(expr: &TypeExpr, type_param_names: &FxHashSet<&str>) -> bool {
+        match expr {
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Infer { .. } => false,
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                type_param_names.contains(name.as_ref())
+                    || type_arguments
+                        .iter()
+                        .any(|argument| visit(argument, type_param_names))
+            }
+            TypeExpr::TypeParameter(parameter) => {
+                type_param_names.contains(parameter.name.as_str())
+                    || parameter
+                        .constraint
+                        .as_deref()
+                        .is_some_and(|constraint| visit(constraint, type_param_names))
+                    || parameter
+                        .default
+                        .as_deref()
+                        .is_some_and(|default| visit(default, type_param_names))
+            }
+            TypeExpr::Union(types)
+            | TypeExpr::Intersection(types)
+            | TypeExpr::TemplateLiteral {
+                expressions: types, ..
+            } => types.iter().any(|ty| visit(ty, type_param_names)),
+            TypeExpr::Array { element, .. }
+            | TypeExpr::Parenthesized(element)
+            | TypeExpr::KeyOf(element)
+            | TypeExpr::Rest(element) => visit(element, type_param_names),
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| visit(&element.ty, type_param_names)),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                crate::analysis::type_expr::ObjectMember::Property(property) => {
+                    visit(&property.ty, type_param_names)
+                }
+                crate::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                    visit(&signature.key_type, type_param_names)
+                        || visit(&signature.value_type, type_param_names)
+                }
+                crate::analysis::type_expr::ObjectMember::CallSignature(function)
+                | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                    function
+                        .parameters
+                        .iter()
+                        .any(|parameter| visit(&parameter.ty, type_param_names))
+                        || function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| visit(return_type, type_param_names))
+                }
+                crate::analysis::type_expr::ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .any(|parameter| visit(&parameter.ty, type_param_names))
+                        || method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| visit(return_type, type_param_names))
+                }
+            }),
+            TypeExpr::Function(function) => {
+                function
+                    .parameters
+                    .iter()
+                    .any(|parameter| visit(&parameter.ty, type_param_names))
+                    || function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(|return_type| visit(return_type, type_param_names))
+                    || function.type_parameters.iter().any(|parameter| {
+                        parameter
+                            .constraint
+                            .as_deref()
+                            .is_some_and(|constraint| visit(constraint, type_param_names))
+                            || parameter
+                                .default
+                                .as_deref()
+                                .is_some_and(|default| visit(default, type_param_names))
+                    })
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                visit(object, type_param_names) || visit(index, type_param_names)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                visit(check, type_param_names)
+                    || visit(extends, type_param_names)
+                    || visit(true_type, type_param_names)
+                    || visit(false_type, type_param_names)
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                visit(source, type_param_names)
+                    || visit(value, type_param_names)
+                    || name_type
+                        .as_deref()
+                        .is_some_and(|name_type| visit(name_type, type_param_names))
+            }
+            TypeExpr::RecursiveRef { type_arguments, .. } => type_arguments
+                .iter()
+                .any(|argument| visit(argument, type_param_names)),
+        }
+    }
+
+    let type_param_names: FxHashSet<&str> = type_params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
+    !type_param_names.is_empty() && visit(expr, &type_param_names)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1659,6 +2011,7 @@ mod tests {
     use crate::analysis::type_expr::PrimitiveName;
     use crate::analysis::type_solver::host::NoopSolverHost;
     use crate::analysis::type_solver::result::ExecutionStatus;
+    use crate::analysis::type_solver::result::SolverExactness;
     use std::cell::Cell;
 
     #[test]
@@ -1877,16 +2230,18 @@ mod tests {
             let mut prepared = PreparedTypeDecl::new(
                 ResolvedRootIdentity::new(canonical_id, "DialogContentProps"),
                 TypeDeclKind::Interface,
-                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
-                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                        crate::analysis::type_expr::ObjectProperty {
-                            name: "id".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: true,
-                            readonly: false,
-                        },
-                    )],
-                })),
+                TypeExpr::Object(std::sync::Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "id".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        )],
+                    },
+                )),
             );
             prepared.build_member_index();
             prepared.classify_wrapper_shape();
@@ -1960,26 +2315,27 @@ mod tests {
             let mut command_palette_group = PreparedTypeDecl::new(
                 ResolvedRootIdentity::new("/src/CommandPalette.vue", "CommandPaletteGroup"),
                 TypeDeclKind::Interface,
-                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
-                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                        crate::analysis::type_expr::ObjectProperty {
-                            name: "items".to_string(),
-                            ty: TypeExpr::Array {
-                                element: std::sync::Arc::new(TypeExpr::named("T")),
+                TypeExpr::Object(std::sync::Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "items".to_string(),
+                                ty: TypeExpr::Array {
+                                    element: std::sync::Arc::new(TypeExpr::named("T")),
+                                    readonly: false,
+                                },
+                                optional: true,
                                 readonly: false,
                             },
-                            optional: true,
-                            readonly: false,
-                        },
-                    )],
-                })),
+                        )],
+                    },
+                )),
             );
-            command_palette_group.type_parameters =
-                vec![crate::analysis::type_expr::TypeParam {
-                    name: "T".to_string(),
-                    constraint: None,
-                    default: None,
-                }];
+            command_palette_group.type_parameters = vec![crate::analysis::type_expr::TypeParam {
+                name: "T".to_string(),
+                constraint: None,
+                default: None,
+            }];
             command_palette_group.build_member_index();
             command_palette_group.classify_wrapper_shape();
             command_palette_group.classify_projection();
@@ -1999,22 +2355,27 @@ mod tests {
                             TypeExpr::string_literal("custom"),
                         ],
                     ),
-                    TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
-                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                            crate::analysis::type_expr::ObjectProperty {
-                                name: "badge".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::String),
-                                optional: true,
-                                readonly: false,
-                            },
-                        )],
-                    })),
+                    TypeExpr::Object(std::sync::Arc::new(
+                        crate::analysis::type_expr::ObjectExpr {
+                            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "badge".to_string(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: true,
+                                    readonly: false,
+                                },
+                            )],
+                        },
+                    )),
                 ])),
             );
             content_search_item.build_member_index();
             content_search_item.classify_wrapper_shape();
             content_search_item.classify_projection();
-            decls.insert("ContentSearchItem".to_string(), Arc::new(content_search_item));
+            decls.insert(
+                "ContentSearchItem".to_string(),
+                Arc::new(content_search_item),
+            );
 
             let mut link_props = PreparedTypeDecl::new(
                 ResolvedRootIdentity::new("/src/Link.vue", "LinkProps"),
@@ -2035,26 +2396,28 @@ mod tests {
             let mut router_link_props = PreparedTypeDecl::new(
                 ResolvedRootIdentity::new("/node_modules/vue-router/index.d.ts", "RouterLinkProps"),
                 TypeDeclKind::Interface,
-                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
-                    properties: vec![
-                        crate::analysis::type_expr::ObjectMember::Property(
-                            crate::analysis::type_expr::ObjectProperty {
-                                name: "to".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::String),
-                                optional: true,
-                                readonly: false,
-                            },
-                        ),
-                        crate::analysis::type_expr::ObjectMember::Property(
-                            crate::analysis::type_expr::ObjectProperty {
-                                name: "replace".to_string(),
-                                ty: TypeExpr::Primitive(PrimitiveName::Boolean),
-                                optional: true,
-                                readonly: false,
-                            },
-                        ),
-                    ],
-                })),
+                TypeExpr::Object(std::sync::Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "to".to_string(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: true,
+                                    readonly: false,
+                                },
+                            ),
+                            crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "replace".to_string(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                                    optional: true,
+                                    readonly: false,
+                                },
+                            ),
+                        ],
+                    },
+                )),
             );
             router_link_props.build_member_index();
             router_link_props.classify_wrapper_shape();
@@ -2090,16 +2453,18 @@ mod tests {
             let mut imported_prepared = PreparedTypeDecl::new(
                 ResolvedRootIdentity::new("/src/types.ts", "DialogContentProps"),
                 TypeDeclKind::Interface,
-                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
-                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
-                        crate::analysis::type_expr::ObjectProperty {
-                            name: "id".to_string(),
-                            ty: TypeExpr::Primitive(PrimitiveName::String),
-                            optional: true,
-                            readonly: false,
-                        },
-                    )],
-                })),
+                TypeExpr::Object(std::sync::Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "id".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        )],
+                    },
+                )),
             );
             imported_prepared.build_member_index();
             imported_prepared.classify_wrapper_shape();
@@ -2125,9 +2490,8 @@ mod tests {
             ) {
                 ("/src/App.vue", "T") => Some(Arc::clone(&self.local_prepared)),
                 ("/src/types.ts", "DialogContentProps") => {
-                    self.imported_resolve_prepared_type_decl_calls.set(
-                        self.imported_resolve_prepared_type_decl_calls.get() + 1,
-                    );
+                    self.imported_resolve_prepared_type_decl_calls
+                        .set(self.imported_resolve_prepared_type_decl_calls.get() + 1);
                     Some(Arc::clone(&self.imported_prepared))
                 }
                 _ => None,
@@ -2163,7 +2527,10 @@ mod tests {
                 ("", "DialogContentProps") => {
                     self.imported_root_identity_calls
                         .set(self.imported_root_identity_calls.get() + 1);
-                    Some(ResolvedRootIdentity::new("/src/types.ts", "DialogContentProps"))
+                    Some(ResolvedRootIdentity::new(
+                        "/src/types.ts",
+                        "DialogContentProps",
+                    ))
                 }
                 _ => None,
             }
@@ -2194,9 +2561,7 @@ mod tests {
 
         fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
             match name {
-                "CommandPaletteGroup" | "LinkProps" | "RouterLinkProps" => {
-                    BareRefOrigin::Imported
-                }
+                "CommandPaletteGroup" | "LinkProps" | "RouterLinkProps" => BareRefOrigin::Imported,
                 "ContentSearchItem" => BareRefOrigin::Local,
                 _ => BareRefOrigin::Unknown,
             }
@@ -2208,7 +2573,9 @@ mod tests {
             symbol_name: &str,
         ) -> Option<ResolvedRootIdentity> {
             if canonical_id.is_empty() {
-                self.decls.get(symbol_name).map(|decl| decl.root_identity.clone())
+                self.decls
+                    .get(symbol_name)
+                    .map(|decl| decl.root_identity.clone())
             } else {
                 self.decls
                     .get(symbol_name)
@@ -2335,6 +2702,99 @@ mod tests {
             host.resolve_prepared_type_decl_calls.get(),
             0,
             "package-backed member path preservation should not materialize the imported prepared decl"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_keeps_direct_imported_member_paths_symbolic_without_prepared_lookup(
+    ) {
+        let host = CountingPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Intersection(std::sync::Arc::from(vec![
+            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::IndexedAccess {
+                object: std::sync::Arc::new(TypeExpr::named("DialogContentProps")),
+                index: std::sync::Arc::new(TypeExpr::string_literal("id")),
+            },
+        ]));
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "direct imported member paths inside symbolic wrappers should stay shallow"
+        );
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "direct imported member path preservation should still prove the import root once"
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "direct imported member path preservation should not materialize the imported prepared decl just to keep it shallow",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_materializes_imported_single_member_path() {
+        let host = CountingPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(TypeExpr::named("DialogContentProps")),
+            index: std::sync::Arc::new(TypeExpr::string_literal("id")),
+        };
+
+        let result = engine
+            .try_fast_shallow_field_expr(&expr)
+            .expect("direct imported member paths should use the prepared-member fast path");
+
+        assert_eq!(
+            result.value,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "fast shallow member expansion should reuse the direct prepared member body",
+        );
+        assert_eq!(result.exactness, SolverExactness::ExactConcrete);
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "fast imported member expansion should prove the import root once",
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            1,
+            "fast imported member expansion should read one prepared declaration",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_imported_utility_routes_symbolic_without_root_probes() {
+        let host = CountingPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Union(std::sync::Arc::from(vec![
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            TypeExpr::named_with_args(
+                "Omit",
+                vec![
+                    TypeExpr::named("DialogContentProps"),
+                    TypeExpr::string_literal("id"),
+                ],
+            ),
+        ]));
+
+        let result = engine
+            .try_fast_shallow_field_expr(&expr)
+            .expect("utility-wrapped imported refs should use the symbolic shallow fast path");
+
+        assert_eq!(result.value, expr);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.root_identity_calls.get(),
+            0,
+            "fast symbolic utility wrapping should not prove imported roots just to stay shallow",
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "fast symbolic utility wrapping should not materialize imported prepared declarations",
         );
     }
 
@@ -2657,5 +3117,4 @@ mod tests {
             "cached keyspace projection should not add solver steps",
         );
     }
-
 }

@@ -1100,11 +1100,10 @@ fn type_alias_body_text(text: &str) -> Option<&str> {
             ']' => bracket_depth = bracket_depth.saturating_sub(1),
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
-            '='
-                if angle_depth == 0
-                    && paren_depth == 0
-                    && bracket_depth == 0
-                    && brace_depth == 0 =>
+            '=' if angle_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
             {
                 return Some(
                     text[idx + ch.len_utf8()..]

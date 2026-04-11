@@ -13,8 +13,8 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_eval::DeclarationId;
+use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_semantic::analysis::type_solver::host::TypeSolverHost;
 use verter_semantic::analysis::type_solver::query_engine::{ProjectedSurface, TypeQueryEngine};
 use verter_semantic::analysis::type_solver::result::SolverResult;
@@ -278,6 +278,39 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             resolved_name,
             metadata.span,
         ))
+    }
+
+    pub fn resolve_direct_prepared_type_declaration_metadata(
+        &mut self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<ResolvedTypeDeclaration> {
+        if self
+            .host
+            .prepared_type_decl_in_view(canonical_source, resolved_name, self.store_view)
+            .is_none()
+        {
+            return None;
+        }
+        let metadata = local_type_symbol_metadata_for_known_source(
+            self.host,
+            canonical_source,
+            resolved_name,
+            self.store_view,
+        )?;
+        Some(ResolvedTypeDeclaration {
+            requested_name: resolved_name.to_string(),
+            declaration_id: self.host.local_type_declaration_id_in_view(
+                canonical_source,
+                resolved_name,
+                self.store_view,
+            ),
+            resolved_name: resolved_name.to_string(),
+            canonical_source: canonical_source.to_string(),
+            span: metadata.span,
+            kind: metadata.kind,
+            text: None,
+        })
     }
 
     /// Resolve a type declaration, cached per query.
@@ -857,9 +890,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             super::component_meta_registry::component_meta_registry_public_indexed_access_route(
                 expr,
             )
+            .or_else(|| {
+                super::component_meta_registry::component_meta_registry_public_utility_route(expr)
+            })
         {
             if let Some(projected) =
-                self.project_routed_expr_surface_expr(scope_canonical_id, &root_symbol, &route)
+                self.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
             {
                 return Some(projected);
             }
@@ -867,6 +903,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let solver_host = self.solver_host_for_scope(scope_canonical_id);
         self.owner_engine
             .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
+    }
+
+    pub fn project_route_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &super::RouteDemand,
+    ) -> Option<TypeExpr> {
+        self.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
     fn project_routed_expr_surface_expr(
@@ -887,32 +932,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     member_name,
                 ) {
                     if let Some(store_view) = self.store_view {
-                        let op_key = TypeSurfaceOpKey::RoutedExpr {
-                            subject: TypeSurfaceKey {
-                                canonical_owner: scope_canonical_id.to_owned(),
-                                symbol_name: root_symbol.to_owned(),
-                                instantiation_hash: 0,
-                                context_hash: 0,
-                            },
-                            route: route.clone(),
-                        };
-                        if self
-                            .host
-                            .resolver
-                            .runtime
-                            .type_surfaces
-                            .get(&op_key, store_view)
-                            .is_none()
-                        {
-                            let facts = self
-                                .type_surface_facts(scope_canonical_id)
-                                .unwrap_or_default();
-                            self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                                op_key,
-                                TypeSurfaceOpResult::Expr(projected_expr.clone()),
-                                facts,
-                            );
-                        }
+                        self.cache_routed_expr_surface_expr(
+                            scope_canonical_id,
+                            root_symbol,
+                            route,
+                            &projected_expr,
+                            store_view,
+                        );
                     }
                     return Some(projected_expr);
                 }
@@ -920,32 +946,32 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     self.project_type_member(scope_canonical_id, root_symbol, member_name)?;
                 let projected_expr = projected_member.ty.clone();
                 if let Some(store_view) = self.store_view {
-                    let op_key = TypeSurfaceOpKey::RoutedExpr {
-                        subject: TypeSurfaceKey {
-                            canonical_owner: scope_canonical_id.to_owned(),
-                            symbol_name: root_symbol.to_owned(),
-                            instantiation_hash: 0,
-                            context_hash: 0,
-                        },
-                        route: route.clone(),
-                    };
-                    if self
-                        .host
-                        .resolver
-                        .runtime
-                        .type_surfaces
-                        .get(&op_key, store_view)
-                        .is_none()
-                    {
-                        let facts = self
-                            .type_surface_facts(scope_canonical_id)
-                            .unwrap_or_default();
-                        self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                            op_key,
-                            TypeSurfaceOpResult::Expr(projected_expr.clone()),
-                            facts,
-                        );
-                    }
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
+                }
+                return Some(projected_expr);
+            }
+        }
+
+        if let super::RouteDemand::Pick(members) = route {
+            if let Some(projected_expr) = self.project_prepared_pick_route_surface_expr(
+                scope_canonical_id,
+                root_symbol,
+                members,
+            ) {
+                if let Some(store_view) = self.store_view {
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
                 }
                 return Some(projected_expr);
             }
@@ -1014,23 +1040,117 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
+    fn cache_routed_expr_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &super::RouteDemand,
+        projected_expr: &TypeExpr,
+        store_view: &HostStoreView,
+    ) {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
+
+        let op_key = TypeSurfaceOpKey::RoutedExpr {
+            subject: TypeSurfaceKey {
+                canonical_owner: scope_canonical_id.to_owned(),
+                symbol_name: root_symbol.to_owned(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
+            route: route.clone(),
+        };
+        if self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .is_none()
+        {
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                op_key,
+                TypeSurfaceOpResult::Expr(projected_expr.clone()),
+                facts,
+            );
+        }
+    }
+
     fn project_prepared_member_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
         member_name: &str,
     ) -> Option<TypeExpr> {
-        let prepared = self
-            .host
-            .prepared_type_decl_in_view(scope_canonical_id, symbol_name, self.store_view)?;
+        let prepared = self.host.prepared_type_decl_in_view(
+            scope_canonical_id,
+            symbol_name,
+            self.store_view,
+        )?;
         let member = prepared.member(member_name)?;
         if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
             return None;
         }
         match &member.ty {
             TypeExpr::Object(_) => Some(member.ty.clone()),
+            _ if prepared_member_body_stays_shallow(&member.ty) => Some(member.ty.clone()),
+            _ if crate::meta_resolve::component_meta_registry_should_keep_raw_symbolic_non_object_alias(
+                &member.ty,
+                scope_canonical_id,
+                self,
+            ) =>
+            {
+                Some(member.ty.clone())
+            }
             _ => self.project_expr_surface_expr(scope_canonical_id, &member.ty),
         }
+    }
+
+    fn project_prepared_pick_route_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        members: &[String],
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_expr::{
+            MethodSignature, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+        };
+
+        let prepared = self.host.prepared_type_decl_in_view(
+            scope_canonical_id,
+            symbol_name,
+            self.store_view,
+        )?;
+        let mut properties = Vec::with_capacity(members.len());
+        for member_name in members {
+            let member = prepared.member(member_name)?;
+            if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+                return None;
+            }
+            if member.is_method {
+                if let TypeExpr::Function(function) = &member.ty {
+                    properties.push(ObjectMember::Method(MethodSignature {
+                        name: member_name.clone(),
+                        function: (**function).clone(),
+                        optional: member.optional,
+                    }));
+                    continue;
+                }
+            }
+            properties.push(ObjectMember::Property(ObjectProperty {
+                name: member_name.clone(),
+                ty: member.ty.clone(),
+                optional: member.optional,
+                readonly: member.readonly,
+            }));
+        }
+        Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+            properties,
+        })))
     }
 
     fn type_surface_facts(
@@ -1121,8 +1241,11 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
-        self.host
-            .local_type_declaration_id_in_view(canonical_source, resolved_name, self.store_view)
+        self.host.local_type_declaration_id_in_view(
+            canonical_source,
+            resolved_name,
+            self.store_view,
+        )
     }
 
     fn resolve_type_dependency_canonical(
@@ -1224,6 +1347,32 @@ fn routed_expr_surface_key_expr(root_symbol: &str, route: &super::RouteDemand) -
                 index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
             },
         )),
+        super::RouteDemand::Pick(members) if !members.is_empty() => Some(TypeExpr::Ref {
+            name: std::sync::Arc::from("Pick"),
+            type_arguments: std::sync::Arc::from(vec![
+                TypeExpr::named(root_symbol),
+                TypeExpr::union(
+                    members
+                        .iter()
+                        .cloned()
+                        .map(TypeExpr::string_literal)
+                        .collect(),
+                ),
+            ]),
+        }),
+        super::RouteDemand::Omit(members) if !members.is_empty() => Some(TypeExpr::Ref {
+            name: std::sync::Arc::from("Omit"),
+            type_arguments: std::sync::Arc::from(vec![
+                TypeExpr::named(root_symbol),
+                TypeExpr::union(
+                    members
+                        .iter()
+                        .cloned()
+                        .map(TypeExpr::string_literal)
+                        .collect(),
+                ),
+            ]),
+        }),
         _ => None,
     }
 }
@@ -1370,6 +1519,55 @@ fn is_direct_surface_no_deps(
                 .all(|dep| dep.canonical_id.contains("/node_modules/")))
 }
 
+fn prepared_member_body_stays_shallow(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::Infer { .. }
+        | TypeExpr::TypeOf(_) => true,
+        TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => {
+            prepared_member_body_stays_shallow(inner)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            !types.is_empty() && types.iter().all(prepared_member_body_stays_shallow)
+        }
+        TypeExpr::Array { element, .. } => prepared_member_body_stays_shallow(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .all(|element| prepared_member_body_stays_shallow(&element.ty)),
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            expressions.iter().all(prepared_member_body_stays_shallow)
+        }
+        TypeExpr::Function(function) => {
+            function.type_parameters.iter().all(|parameter| {
+                parameter
+                    .constraint
+                    .as_deref()
+                    .is_none_or(prepared_member_body_stays_shallow)
+                    && parameter
+                        .default
+                        .as_deref()
+                        .is_none_or(prepared_member_body_stays_shallow)
+            }) && function
+                .parameters
+                .iter()
+                .all(|parameter| prepared_member_body_stays_shallow(&parameter.ty))
+                && function
+                    .return_type
+                    .as_deref()
+                    .is_none_or(prepared_member_body_stays_shallow)
+        }
+        TypeExpr::Ref { .. }
+        | TypeExpr::Object(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::RecursiveRef { .. } => false,
+    }
+}
+
 fn is_builtin_name(name: &str) -> bool {
     verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
@@ -1440,10 +1638,7 @@ fn type_expr_references_type_params(
 ) -> bool {
     use rustc_hash::FxHashSet;
 
-    fn visit(
-        expr: &TypeExpr,
-        type_param_names: &FxHashSet<&str>,
-    ) -> bool {
+    fn visit(expr: &TypeExpr, type_param_names: &FxHashSet<&str>) -> bool {
         match expr {
             TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
@@ -1566,15 +1761,17 @@ fn type_expr_references_type_params(
         }
     }
 
-    let type_param_names: FxHashSet<&str> =
-        type_params.iter().map(|param| param.name.as_str()).collect();
+    let type_param_names: FxHashSet<&str> = type_params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect();
     !type_param_names.is_empty() && visit(expr, &type_param_names)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ComponentMetaQueryEngine;
     use super::type_expr_references_type_params;
+    use super::ComponentMetaQueryEngine;
     use crate::resolver_core::solver_host::SessionSolverHost;
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::VerterHost;
@@ -1617,13 +1814,66 @@ export interface AvatarProps {
 
         assert_eq!(declaration.canonical_source, "/src/Avatar.vue");
         assert_eq!(declaration.resolved_name, "AvatarProps");
-        assert_eq!(declaration.kind, crate::resolver_core::ResolvedDeclarationKind::Interface);
+        assert_eq!(
+            declaration.kind,
+            crate::resolver_core::ResolvedDeclarationKind::Interface
+        );
         assert!(
             declaration
                 .text
                 .as_deref()
                 .is_some_and(|text| text.contains("interface AvatarProps")),
             "direct prepared declaration should still recover the local declaration text",
+        );
+    }
+
+    #[test]
+    fn resolve_direct_prepared_type_declaration_metadata_skips_text_recovery() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Avatar.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+  alt?: string
+}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Avatar.vue"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+
+        let declaration = engine
+            .resolve_direct_prepared_type_declaration_metadata("/src/Avatar.vue", "AvatarProps")
+            .expect("direct prepared metadata should resolve");
+
+        assert_eq!(declaration.canonical_source, "/src/Avatar.vue");
+        assert_eq!(declaration.resolved_name, "AvatarProps");
+        assert_eq!(
+            declaration.kind,
+            crate::resolver_core::ResolvedDeclarationKind::Interface
+        );
+        assert!(
+            declaration.span.end > declaration.span.start,
+            "direct prepared metadata should still retain declaration span"
+        );
+        assert_eq!(
+            declaration.text, None,
+            "metadata-only resolution should skip declaration text extraction for routed registry lookups",
         );
     }
 
@@ -1685,6 +1935,264 @@ export interface Props extends Pick<BaseProps, 'disabled' | 'type'> {
             member_names,
             std::collections::BTreeSet::from(["base", "label"]),
             "member route projection should follow the raw prepared member body to the requested surface",
+        );
+    }
+
+    #[test]
+    fn project_prepared_member_route_surface_expr_keeps_scalar_union_members_off_solver() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+export interface Props {
+  name?: 'foo' | 'bar'
+}
+"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/types.ts"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+
+        let projected = engine
+            .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "name")
+            .expect("prepared scalar member route should project");
+
+        assert_eq!(
+            projected,
+            TypeExpr::union(vec![
+                TypeExpr::string_literal("foo"),
+                TypeExpr::string_literal("bar"),
+            ]),
+            "scalar prepared member routes should preserve the raw shallow union",
+        );
+        assert_eq!(
+            engine.solve_count(),
+            0,
+            "scalar prepared member routes should stay on cached shallow state instead of invoking the solver",
+        );
+    }
+
+    #[test]
+    fn project_prepared_member_route_surface_expr_keeps_package_refs_shallow() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/workspace/node_modules/vue-router/package.json".to_string(),
+            Arc::from(
+                r#"{ "name": "vue-router", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#,
+            ),
+        );
+        ws.inject_file(
+            "/workspace/node_modules/vue-router/dist/index.d.ts".to_string(),
+            Arc::from("export interface RouteLocationRaw { path?: string }\n"),
+        );
+        ws.inject_file(
+            "/workspace/src/Link.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
+export interface Props {
+  to?: RouteLocationRaw
+}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        host.configure_projects(vec![
+            verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            ),
+        ]);
+        assert!(host.ensure_loaded("/workspace/src/Link.vue"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+
+        let projected = engine
+            .project_prepared_member_route_surface_expr("/workspace/src/Link.vue", "Props", "to")
+            .expect("prepared package member route should project");
+
+        assert_eq!(
+            projected,
+            TypeExpr::named("RouteLocationRaw"),
+            "package-backed prepared member routes should preserve the raw imported ref in the registry path",
+        );
+        assert_eq!(
+            engine.solve_count(),
+            0,
+            "package-backed prepared member routes should stay shallow instead of invoking solver projection",
+        );
+    }
+
+    #[test]
+    fn project_prepared_pick_route_surface_expr_keeps_requested_members_shallow() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+type ChatMessage = {
+  variants: {
+    side: 'left' | 'right'
+  }
+  slots: {
+    root?: string
+  }
+}
+
+export interface IconProps {
+  name?: string
+}
+
+export interface Props {
+  icon?: IconProps['name']
+  variant?: ChatMessage['variants']['side']
+  ui?: ChatMessage['slots']
+  unused?: {
+    deep?: boolean
+  }
+}
+"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/types.ts"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let requested = vec!["icon".to_string(), "ui".to_string(), "variant".to_string()];
+
+        let projected = engine
+            .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
+            .expect("prepared pick route surface should project");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected pick surface should be an object, got {projected:?}");
+        };
+
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["icon", "ui", "variant"]),
+            "pick route projection should stay on the requested members only",
+        );
+
+        let icon = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "icon" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("icon member should be present");
+        assert!(
+            matches!(icon, TypeExpr::IndexedAccess { .. }),
+            "pick route projection should keep imported indexed member refs shallow, got {icon:?}",
+        );
+
+        let ui = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("ui member should be present");
+        assert!(
+            matches!(ui, TypeExpr::IndexedAccess { .. }),
+            "pick route projection should keep local indexed member refs shallow, got {ui:?}",
+        );
+
+        let variant = object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "variant" => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            })
+            .expect("variant member should be present");
+        assert!(
+            matches!(variant, TypeExpr::IndexedAccess { .. }),
+            "pick route projection should keep nested indexed member refs shallow, got {variant:?}",
+        );
+    }
+
+    #[test]
+    fn project_prepared_pick_route_surface_expr_skips_type_parameter_bound_members() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+export interface Props<T extends { id?: string } = { id?: string }> {
+  item?: T
+}
+"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/types.ts"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let requested = vec!["item".to_string()];
+
+        assert!(
+            engine
+                .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
+                .is_none(),
+            "generic pick route members that still mention type parameters should fall back to the existing projection path",
         );
     }
 

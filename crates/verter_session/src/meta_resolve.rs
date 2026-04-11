@@ -1773,6 +1773,11 @@ impl VerterHost {
                     )
                 }
                 crate::resolver_core::RouteDemand::MemberPath(path) => {
+                    if let Some(projected) = raw_body.and_then(|expr| {
+                        component_meta_registry_raw_member_path_surface(expr, path)
+                    }) {
+                        return Some(projected);
+                    }
                     let route_expr = build_registry_indexed_access_expr(symbol_name, path);
                     let leaf = query_engine
                         .project_expr_surface_expr(scope_canonical_id, &route_expr)
@@ -1780,6 +1785,13 @@ impl VerterHost {
                     Some(wrap_registry_member_path_surface(path, leaf))
                 }
                 crate::resolver_core::RouteDemand::Pick(members) => {
+                    if let Some(projected) = query_engine.project_route_surface_expr(
+                        scope_canonical_id,
+                        symbol_name,
+                        route,
+                    ) {
+                        return Some(projected);
+                    }
                     let mut properties = Vec::new();
                     for member in members {
                         let route_expr = build_registry_indexed_access_expr(
@@ -1985,18 +1997,17 @@ impl VerterHost {
                 exported_name: pending_exported_name_owned,
                 route: pending_route,
             } = pending;
-            let imported_owner_route =
-                owner_component_meta_registry_import_root(
-                    self,
-                    snapshot,
-                    type_name.as_str(),
-                    store_view,
-                )
-                .filter(|_| {
-                        pending_source_hint_owned
-                            .as_deref()
-                            .is_none_or(|source| source.is_empty() || source == owner_canonical)
-                    });
+            let imported_owner_route = owner_component_meta_registry_import_root(
+                self,
+                snapshot,
+                type_name.as_str(),
+                store_view,
+            )
+            .filter(|_| {
+                pending_source_hint_owned
+                    .as_deref()
+                    .is_none_or(|source| source.is_empty() || source == owner_canonical)
+            });
             let pending_source_hint = imported_owner_route
                 .as_ref()
                 .map(|(canonical_id, _)| canonical_id.as_str())
@@ -2040,9 +2051,8 @@ impl VerterHost {
                     continue;
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
-                let _imported_pending_started =
-                    crate::host_manage::component_meta_debug_enabled()
-                        .then(std::time::Instant::now);
+                let _imported_pending_started = crate::host_manage::component_meta_debug_enabled()
+                    .then(std::time::Instant::now);
                 if let Some(resolved) = query_engine
                     .resolve_imported_registry_symbol(source_hint, requested_exported_name)
                 {
@@ -2061,13 +2071,27 @@ impl VerterHost {
                             dependency.as_str(),
                         );
                     }
-                    let declaration_started =
-                        crate::host_manage::component_meta_debug_enabled()
-                            .then(std::time::Instant::now);
-                    let mut declaration = query_engine.resolve_type_declaration(
-                        resolved.canonical_id.as_str(),
-                        resolved.exported_name.as_str(),
-                    );
+                    let declaration_started = crate::host_manage::component_meta_debug_enabled()
+                        .then(std::time::Instant::now);
+                    let mut declaration =
+                        if matches!(pending_route, crate::resolver_core::RouteDemand::Whole) {
+                            query_engine.resolve_type_declaration(
+                                resolved.canonical_id.as_str(),
+                                resolved.exported_name.as_str(),
+                            )
+                        } else {
+                            query_engine
+                                .resolve_direct_prepared_type_declaration_metadata(
+                                    resolved.canonical_id.as_str(),
+                                    resolved.exported_name.as_str(),
+                                )
+                                .unwrap_or_else(|| {
+                                    query_engine.resolve_type_declaration(
+                                        resolved.canonical_id.as_str(),
+                                        resolved.exported_name.as_str(),
+                                    )
+                                })
+                        };
                     let declaration_elapsed_ms = declaration_started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or_default();
@@ -2079,9 +2103,8 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
-                    let surface_started =
-                        crate::host_manage::component_meta_debug_enabled()
-                            .then(std::time::Instant::now);
+                    let surface_started = crate::host_manage::component_meta_debug_enabled()
+                        .then(std::time::Instant::now);
                     let type_expr = materialize_component_meta_registry_candidate_for_route(
                         query_engine,
                         resolved.canonical_id.as_str(),
@@ -2707,8 +2730,8 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_expr_references_name,
     component_meta_registry_has_explicit_object_surface,
     component_meta_registry_has_non_object_top_level_surface,
-    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
-    PendingComponentMetaRegistryRef,
+    component_meta_registry_raw_member_path_surface, owner_component_meta_registry_import_root,
+    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
 };
 
 fn materialize_component_meta_member_surface_expr(
@@ -2779,7 +2802,7 @@ fn preserve_package_backed_symbolic_refs(
     }
 }
 
-fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
+pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -2826,11 +2849,13 @@ fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
         TypeExpr::Array { element, .. }
         | TypeExpr::Parenthesized(element)
         | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element) => component_meta_registry_should_keep_raw_symbolic_non_object_alias(
-            element,
-            scope_canonical_id,
-            engine,
-        ),
+        | TypeExpr::Rest(element) => {
+            component_meta_registry_should_keep_raw_symbolic_non_object_alias(
+                element,
+                scope_canonical_id,
+                engine,
+            )
+        }
         TypeExpr::Tuple { elements, .. } => elements.iter().all(|element| {
             component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                 &element.ty,

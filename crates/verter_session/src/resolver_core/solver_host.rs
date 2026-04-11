@@ -166,10 +166,9 @@ impl<'a> SessionSolverHost<'a> {
                 } else {
                     target.canonical_id.clone()
                 };
-                return Some(ResolvedRootIdentity::new(
-                    resolved_id,
-                    &target.imported_name,
-                ));
+                return Some(
+                    self.resolve_imported_type_root_identity(&resolved_id, &target.imported_name),
+                );
             }
         }
 
@@ -177,10 +176,9 @@ impl<'a> SessionSolverHost<'a> {
             .host
             .prepared_decl_bundle_in_view(canonical_id, self.store_view)?;
         let binding = bundle.import_bindings.get(local_name)?;
-        Some(ResolvedRootIdentity::new(
-            &binding.canonical_id,
-            &binding.exported_name,
-        ))
+        Some(
+            self.resolve_imported_type_root_identity(&binding.canonical_id, &binding.exported_name),
+        )
     }
 
     fn resolve_namespace_member_from_facts(
@@ -205,6 +203,21 @@ impl<'a> SessionSolverHost<'a> {
             ),
             _ => None,
         }
+    }
+
+    fn resolve_imported_type_root_identity(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+    ) -> ResolvedRootIdentity {
+        if canonical_id.is_empty() {
+            return ResolvedRootIdentity::new(canonical_id, exported_name);
+        }
+
+        let (resolved_canonical_id, resolved_symbol_name) = self
+            .host
+            .resolve_imported_type_root_in_view(canonical_id, exported_name, self.store_view);
+        ResolvedRootIdentity::new(resolved_canonical_id, resolved_symbol_name)
     }
 }
 
@@ -520,8 +533,10 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         // from the exported name.
         if let Some(scope_payload) = self.scope_payload.as_ref() {
             if let Some(binding) = scope_payload.import_bindings.get(symbol_name) {
-                let resolved =
-                    ResolvedRootIdentity::new(&binding.canonical_id, &binding.exported_name);
+                let resolved = self.resolve_imported_type_root_identity(
+                    &binding.canonical_id,
+                    &binding.exported_name,
+                );
                 component_meta_trace_event!(
                     "solver_root_identity_result",
                     format!(

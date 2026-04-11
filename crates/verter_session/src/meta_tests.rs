@@ -7256,8 +7256,13 @@ defineProps<LinkProps>()
         })
         .collect();
     assert!(
-        member_names.contains(&"to") && member_names.contains(&"href"),
-        "NuxtLinkProps registry entry should preserve helper members, got {:?}",
+        member_names.contains(&"to"),
+        "NuxtLinkProps registry entry should keep the active helper route member, got {:?}",
+        member_names
+    );
+    assert!(
+        !member_names.contains(&"href"),
+        "NuxtLinkProps registry entry should stay route-scoped instead of widening into sibling aliases, got {:?}",
         member_names
     );
 }
@@ -11959,14 +11964,13 @@ defineProps<{
         "publishing the alias should not recurse into package-backed helpers"
     );
 
-    let surface_key = crate::resolver_core::TypeSurfaceOpKey::Surface(
-        crate::resolver_core::TypeSurfaceKey {
+    let surface_key =
+        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
             canonical_owner: "/src/types.ts".to_string(),
             symbol_name: "StringOrVNode".to_string(),
             instantiation_hash: 0,
             context_hash: 0,
-        },
-    );
+        });
     assert!(
         project
             .host()
