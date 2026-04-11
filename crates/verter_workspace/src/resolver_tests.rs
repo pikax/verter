@@ -1963,6 +1963,84 @@ fn bare_package_json_reread_per_importer() {
     );
 }
 
+#[test]
+fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier() {
+    use crate::engine::Engine;
+    use crate::types::{ResolutionContext, ResolveRequestKind};
+
+    let mut reader =
+        CountingReader::with_files(&["/repo/src/App.vue", "/repo/node_modules/pkg/dist/index.js"]);
+    reader.add_file(
+        "/repo/node_modules/pkg/package.json",
+        r#"{"module":"dist/index.js"}"#,
+    );
+
+    let engine = Engine::new();
+    {
+        use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
+        use crate::resolver::IdeProjectCompilerOptions;
+        let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: "/repo".to_string(),
+            rank: ProjectRank::Inferred,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/repo".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: ProjectMembership::MatchAll,
+        }]);
+        *engine.project_graph.write() = graph;
+        engine.rebuild_and_publish();
+    }
+
+    let ctx = ResolutionContext {
+        phase: ResolvePhase::CodegenBlocker,
+        kind: ResolveRequestKind::EsmImport,
+    };
+
+    let first = engine
+        .resolve_import(&reader, "/repo/src/App.vue", "pkg", ctx)
+        .expect("first resolution should succeed");
+    let after_first_exists = reader.file_exists_calls();
+    let after_first_reads = reader.read_file_calls();
+    let after_first_provenance = engine.vfs_provenance.snapshot();
+    assert_eq!(
+        after_first_provenance.import_resolution_cache_hit_count, 0,
+        "cold resolution should not report a lazy import cache hit",
+    );
+    assert_eq!(
+        after_first_provenance.import_resolution_cache_miss_count, 1,
+        "cold resolution should report a single lazy import cache miss",
+    );
+
+    let second = engine
+        .resolve_import(&reader, "/repo/src/App.vue", "pkg", ctx)
+        .expect("warm resolution should succeed");
+    let after_second_provenance = engine.vfs_provenance.snapshot();
+
+    assert_eq!(second, first, "warm cache hit should reuse the same result");
+    assert_eq!(
+        reader.file_exists_calls(),
+        after_first_exists,
+        "warm resolution should not rerun file-existence probes",
+    );
+    assert_eq!(
+        reader.read_file_calls(),
+        after_first_reads,
+        "warm resolution should not reread manifests or source files",
+    );
+    assert_eq!(
+        after_second_provenance.import_resolution_cache_hit_count, 1,
+        "second resolution should come from the lazy import cache",
+    );
+    assert_eq!(
+        after_second_provenance.import_resolution_cache_miss_count, 1,
+        "warm resolution should not add another cache miss",
+    );
+}
+
 /// Resolving `#imports` through the workspace manifest API should not re-read
 /// the same package.json for every importer.
 #[test]

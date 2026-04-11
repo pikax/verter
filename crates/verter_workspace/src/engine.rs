@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
@@ -13,8 +14,26 @@ use crate::package_index::PackageIndex;
 use crate::project_graph::ProjectGraph;
 use crate::published_state::PublishedRoot;
 use crate::traits::WorkspaceResourceSnapshot;
-use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
+use crate::types::{
+    ExactResolution, ExactResolutionResult, ResolvePhase, ResolveRequestKind, ResolveResult,
+    VfsProvenance,
+};
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LazyResolutionCacheKey {
+    importer_id: String,
+    specifier: String,
+    phase: ResolvePhase,
+    kind: ResolveRequestKind,
+}
+
+#[derive(Debug, Clone)]
+struct LazyResolutionCacheEntry {
+    result: Option<ResolveResult>,
+    content_generation: u64,
+    snapshot_generation: SnapshotGeneration,
+}
 
 /// Shared internal engine used by both `FilesystemWorkspace` and `MemoryWorkspace`.
 ///
@@ -47,6 +66,7 @@ pub(crate) struct Engine {
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
+    lazy_resolution_cache: RwLock<FxHashMap<LazyResolutionCacheKey, LazyResolutionCacheEntry>>,
     pub(crate) content_generation: AtomicU64,
     /// Project graph — the write-side store. Callers update this via
     /// `set_project_graph()` / `configure_resolver()`, then
@@ -74,6 +94,7 @@ impl Engine {
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
+            lazy_resolution_cache: RwLock::new(FxHashMap::default()),
             content_generation: AtomicU64::new(1),
             project_graph: RwLock::new(ProjectGraph::new()),
             package_index: RwLock::new(PackageIndex::new()),
@@ -102,7 +123,12 @@ impl Engine {
     }
 
     pub(crate) fn bump_content_generation(&self) -> u64 {
+        self.clear_lazy_resolution_cache();
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn clear_lazy_resolution_cache(&self) {
+        self.lazy_resolution_cache.write().clear();
     }
 
     /// Load the current published state (lock-free).
@@ -166,6 +192,7 @@ impl Engine {
             generation,
         };
 
+        self.clear_lazy_resolution_cache();
         self.published_state
             .store(Some(Arc::new(PublishedRoot::new_vfs_only(Arc::new(
                 snapshot,
@@ -266,8 +293,10 @@ impl Engine {
                 WorkspaceChange::DirectoryTreeDirty { prefix } => {
                     self.package_index.write().invalidate_under(&prefix);
                     self.dir_index.write().mark_dirty_under(&prefix);
+                    self.clear_lazy_resolution_cache();
                 }
                 WorkspaceChange::ConfigChanged { canonical_id: _ } => {
+                    self.clear_lazy_resolution_cache();
                     result.graph_rebuilt = true;
                     result.generation = Some(self.project_graph.read().generation() + 1);
                 }
@@ -323,8 +352,44 @@ impl Engine {
             }
         }
 
+        let published = self.published_state.load_full();
+        let content_generation = self.current_content_generation();
+        let snapshot_generation = published
+            .as_ref()
+            .map(|root| root.snapshot.generation)
+            .unwrap_or_default();
+        let cache_key = LazyResolutionCacheKey {
+            importer_id: importer_id.to_string(),
+            specifier: specifier.to_string(),
+            phase: ctx.phase,
+            kind: ctx.kind,
+        };
+        if let Some(entry) = self
+            .lazy_resolution_cache
+            .read()
+            .get(&cache_key)
+            .cloned()
+            .filter(|entry| {
+                entry.content_generation == content_generation
+                    && entry.snapshot_generation == snapshot_generation
+            })
+        {
+            self.vfs_provenance
+                .import_resolution_cache_hit_count
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(ref result) = entry.result {
+                self.edges
+                    .write()
+                    .add_lazily_resolved_dep(importer_id, &result.source_id);
+            }
+            return entry.result;
+        }
+        self.vfs_provenance
+            .import_resolution_cache_miss_count
+            .fetch_add(1, Ordering::Relaxed);
+
         // 2. Use published snapshot resolver (None before first publish)
-        let result = if let Some(root) = self.published_state.load_full() {
+        let result = if let Some(root) = published {
             let resolver = &root.snapshot.resolver;
             let request = crate::types::ResolveRequest {
                 importer_id: importer_id.to_string(),
@@ -343,6 +408,15 @@ impl Engine {
                 .write()
                 .add_lazily_resolved_dep(importer_id, &result.source_id);
         }
+
+        self.lazy_resolution_cache.write().insert(
+            cache_key,
+            LazyResolutionCacheEntry {
+                result: result.clone(),
+                content_generation,
+                snapshot_generation,
+            },
+        );
 
         result
     }

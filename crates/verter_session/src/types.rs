@@ -1462,6 +1462,8 @@ pub struct MetaProvenance {
     pub resolver_cycle_detections: std::sync::atomic::AtomicU64,
     pub resolver_route_fact_reuse: std::sync::atomic::AtomicU64,
     pub resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64,
+    pub import_resolution_cache_hit_count: std::sync::atomic::AtomicU64,
+    pub import_resolution_cache_miss_count: std::sync::atomic::AtomicU64,
     pub dir_index_hit_count: std::sync::atomic::AtomicU64,
     pub dir_index_refresh_count: std::sync::atomic::AtomicU64,
     pub dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64,
@@ -1492,6 +1494,8 @@ impl Default for MetaProvenance {
             resolver_cycle_detections: std::sync::atomic::AtomicU64::new(0),
             resolver_route_fact_reuse: std::sync::atomic::AtomicU64::new(0),
             resolver_barrel_fact_reuse: std::sync::atomic::AtomicU64::new(0),
+            import_resolution_cache_hit_count: std::sync::atomic::AtomicU64::new(0),
+            import_resolution_cache_miss_count: std::sync::atomic::AtomicU64::new(0),
             dir_index_hit_count: std::sync::atomic::AtomicU64::new(0),
             dir_index_refresh_count: std::sync::atomic::AtomicU64::new(0),
             dir_index_dirty_rescan_count: std::sync::atomic::AtomicU64::new(0),
@@ -1562,6 +1566,14 @@ impl std::fmt::Debug for MetaProvenance {
                 &self.resolver_barrel_fact_reuse.load(Relaxed),
             )
             .field(
+                "import_resolution_cache_hit_count",
+                &self.import_resolution_cache_hit_count.load(Relaxed),
+            )
+            .field(
+                "import_resolution_cache_miss_count",
+                &self.import_resolution_cache_miss_count.load(Relaxed),
+            )
+            .field(
                 "dir_index_hit_count",
                 &self.dir_index_hit_count.load(Relaxed),
             )
@@ -1626,6 +1638,10 @@ impl MetaProvenance {
             resolver_cycle_detections: self.resolver_cycle_detections.load(Relaxed),
             resolver_route_fact_reuse: self.resolver_route_fact_reuse.load(Relaxed),
             resolver_barrel_fact_reuse: self.resolver_barrel_fact_reuse.load(Relaxed),
+            import_resolution_cache_hit_count: self.import_resolution_cache_hit_count.load(Relaxed),
+            import_resolution_cache_miss_count: self
+                .import_resolution_cache_miss_count
+                .load(Relaxed),
             dir_index_hit_count: self.dir_index_hit_count.load(Relaxed),
             dir_index_refresh_count: self.dir_index_refresh_count.load(Relaxed),
             dir_index_dirty_rescan_count: self.dir_index_dirty_rescan_count.load(Relaxed),
@@ -1660,6 +1676,8 @@ impl MetaProvenance {
         self.resolver_cycle_detections.store(0, Relaxed);
         self.resolver_route_fact_reuse.store(0, Relaxed);
         self.resolver_barrel_fact_reuse.store(0, Relaxed);
+        self.import_resolution_cache_hit_count.store(0, Relaxed);
+        self.import_resolution_cache_miss_count.store(0, Relaxed);
         self.dir_index_hit_count.store(0, Relaxed);
         self.dir_index_refresh_count.store(0, Relaxed);
         self.dir_index_dirty_rescan_count.store(0, Relaxed);
@@ -1715,6 +1733,8 @@ pub struct MetaProvenanceSnapshot {
     pub resolver_cycle_detections: u64,
     pub resolver_route_fact_reuse: u64,
     pub resolver_barrel_fact_reuse: u64,
+    pub import_resolution_cache_hit_count: u64,
+    pub import_resolution_cache_miss_count: u64,
     pub dir_index_hit_count: u64,
     pub dir_index_refresh_count: u64,
     pub dir_index_dirty_rescan_count: u64,

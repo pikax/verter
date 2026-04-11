@@ -922,9 +922,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
+        if let Some(cached_expr) =
+            self.cached_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
+        {
+            return Some(cached_expr);
+        }
 
         if let super::RouteDemand::MemberPath(path) = route {
             if let [member_name] = path.as_slice() {
@@ -984,6 +986,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
                 return Some(projected_expr);
             }
+            if let Some(projected_expr) = self.project_pick_route_surface_expr_via_routed_expr(
+                scope_canonical_id,
+                root_symbol,
+                route,
+                members,
+            ) {
+                if let Some(store_view) = self.store_view {
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
+                    self.cache_pick_members_from_projected_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        members,
+                        &projected_expr,
+                        store_view,
+                    );
+                }
+                return Some(projected_expr);
+            }
             if let Some(projected_expr) = self.project_pick_route_surface_expr_via_members(
                 scope_canonical_id,
                 root_symbol,
@@ -1002,67 +1028,33 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
-        let route_expr = routed_expr_surface_key_expr(root_symbol, route)?;
-        let subject = TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: root_symbol.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        };
+        self.project_routed_expr_surface_expr_direct(scope_canonical_id, root_symbol, route)
+    }
+
+    fn cached_routed_expr_surface_expr(
+        &self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &super::RouteDemand,
+    ) -> Option<TypeExpr> {
+        use crate::resolver_core::type_surface_db::{TypeSurfaceKey, TypeSurfaceOpKey};
+
+        let store_view = self.store_view?;
         let op_key = TypeSurfaceOpKey::RoutedExpr {
-            subject,
+            subject: TypeSurfaceKey {
+                canonical_owner: scope_canonical_id.to_owned(),
+                symbol_name: root_symbol.to_owned(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
             route: route.clone(),
         };
-        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-
-        if let Some(store_view) = self.store_view {
-            let host = self.host;
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            let owner_engine = &mut self.owner_engine;
-            let cached = host
-                .resolver
-                .runtime
-                .type_surfaces
-                .get_or_project_with_facts(op_key, store_view, || {
-                    if host
-                        .prepared_type_decl_in_view(
-                            scope_canonical_id,
-                            root_symbol,
-                            Some(store_view),
-                        )
-                        .is_none()
-                    {
-                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                    }
-                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                        SessionSolverHost::from_scope_payload(
-                            host,
-                            Some(store_view),
-                            scope_canonical_id,
-                            scope_payload.clone(),
-                        )
-                    } else {
-                        SessionSolverHost::new(host, Some(store_view))
-                    };
-                    owner_engine
-                        .project_expr_surface_as_type_expr(
-                            &solver_host,
-                            scope_canonical_id,
-                            &route_expr,
-                        )
-                        .map(|expr| (TypeSurfaceOpResult::Expr(expr), facts.clone()))
-                })?;
-            return cached.as_expr().cloned();
-        }
-
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        self.owner_engine.project_expr_surface_as_type_expr(
-            &solver_host,
-            scope_canonical_id,
-            &route_expr,
-        )
+        self.host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .and_then(|cached| cached.as_expr().cloned())
     }
 
     fn cache_routed_expr_surface_expr(
@@ -1102,6 +1094,54 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 TypeSurfaceOpResult::Expr(projected_expr.clone()),
                 facts,
             );
+        }
+    }
+
+    fn cache_pick_members_from_projected_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        members: &[String],
+        projected_expr: &TypeExpr,
+        store_view: &HostStoreView,
+    ) {
+        use std::collections::BTreeSet;
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        let requested: BTreeSet<_> = members.iter().map(String::as_str).collect();
+        let TypeExpr::Object(object) = projected_expr else {
+            return;
+        };
+        for member in &object.properties {
+            let projected_member = match member {
+                ObjectMember::Property(property) if requested.contains(property.name.as_str()) => {
+                    Some(ProjectedMember {
+                        name: property.name.clone(),
+                        ty: property.ty.clone(),
+                        optional: property.optional,
+                        readonly: property.readonly,
+                        is_method: false,
+                    })
+                }
+                ObjectMember::Method(method) if requested.contains(method.name.as_str()) => {
+                    Some(ProjectedMember {
+                        name: method.name.clone(),
+                        ty: TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
+                        optional: method.optional,
+                        readonly: false,
+                        is_method: true,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(projected_member) = projected_member {
+                self.cache_projected_member(
+                    scope_canonical_id,
+                    root_symbol,
+                    &projected_member,
+                    store_view,
+                );
+            }
         }
     }
 
@@ -1248,6 +1288,89 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
             properties,
         })))
+    }
+
+    fn project_pick_route_surface_expr_via_routed_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        route: &super::RouteDemand,
+        _members: &[String],
+    ) -> Option<TypeExpr> {
+        self.project_routed_expr_surface_expr_direct(scope_canonical_id, symbol_name, route)
+    }
+
+    fn project_routed_expr_surface_expr_direct(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &super::RouteDemand,
+    ) -> Option<TypeExpr> {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
+
+        let route_expr = routed_expr_surface_key_expr(root_symbol, route)?;
+        let subject = TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: root_symbol.to_owned(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        };
+        let op_key = TypeSurfaceOpKey::RoutedExpr {
+            subject,
+            route: route.clone(),
+        };
+        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
+
+        if let Some(store_view) = self.store_view {
+            let host = self.host;
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            let owner_engine = &mut self.owner_engine;
+            let cached = host
+                .resolver
+                .runtime
+                .type_surfaces
+                .get_or_project_with_facts(op_key, store_view, || {
+                    if host
+                        .prepared_type_decl_in_view(
+                            scope_canonical_id,
+                            root_symbol,
+                            Some(store_view),
+                        )
+                        .is_none()
+                    {
+                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                    }
+                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                        SessionSolverHost::from_scope_payload(
+                            host,
+                            Some(store_view),
+                            scope_canonical_id,
+                            scope_payload.clone(),
+                        )
+                    } else {
+                        SessionSolverHost::new(host, Some(store_view))
+                    };
+                    owner_engine
+                        .project_expr_surface_as_type_expr(
+                            &solver_host,
+                            scope_canonical_id,
+                            &route_expr,
+                        )
+                        .map(|expr| (TypeSurfaceOpResult::Expr(expr), facts.clone()))
+                })?;
+            return cached.as_expr().cloned();
+        }
+
+        let solver_host = self.solver_host_for_scope(scope_canonical_id);
+        self.owner_engine.project_expr_surface_as_type_expr(
+            &solver_host,
+            scope_canonical_id,
+            &route_expr,
+        )
     }
 
     fn project_prepared_pick_route_surface_expr(

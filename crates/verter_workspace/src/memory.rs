@@ -251,6 +251,14 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         self.engine.current_content_generation()
     }
 
+    fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
+        self.engine.vfs_provenance.snapshot()
+    }
+
+    fn reset_vfs_provenance(&self) {
+        self.engine.vfs_provenance.reset();
+    }
+
     fn resource_snapshot(&self) -> crate::traits::WorkspaceResourceSnapshot {
         self.engine.resource_snapshot()
     }

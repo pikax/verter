@@ -694,6 +694,8 @@ impl VerterHost {
     pub fn provenance_snapshot(&self) -> MetaProvenanceSnapshot {
         let mut snapshot = self.provenance.snapshot();
         let vfs = self.ws().vfs_provenance_snapshot();
+        snapshot.import_resolution_cache_hit_count = vfs.import_resolution_cache_hit_count;
+        snapshot.import_resolution_cache_miss_count = vfs.import_resolution_cache_miss_count;
         snapshot.dir_index_hit_count = vfs.dir_index_hit_count;
         snapshot.dir_index_refresh_count = vfs.dir_index_refresh_count;
         snapshot.dir_index_dirty_rescan_count = vfs.dir_index_dirty_rescan_count;
