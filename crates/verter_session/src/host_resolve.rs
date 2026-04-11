@@ -56,6 +56,53 @@ type FrontierRequestedRoutes =
     rustc_hash::FxHashMap<(String, String), crate::resolver_core::RouteDemand>;
 type RouteShallowStateCache =
     rustc_hash::FxHashMap<String, Arc<crate::resolver_core::ShallowFileState>>;
+type FrontierCompanionPlanCache = rustc_hash::FxHashMap<
+    (String, String, crate::resolver_core::RouteDemand),
+    Arc<[PlannedFrontierCompanion]>,
+>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedFrontierCompanion {
+    alias: String,
+    resolved_canonical: String,
+    resolved_exported_name: String,
+    route: crate::resolver_core::RouteDemand,
+}
+
+#[derive(Default)]
+struct FrontierCompanionPlans {
+    entries: FrontierCompanionPlanCache,
+}
+
+impl FrontierCompanionPlans {
+    fn get_or_compute<F>(
+        &mut self,
+        canonical_id: &str,
+        exported_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        compute: F,
+    ) -> Arc<[PlannedFrontierCompanion]>
+    where
+        F: FnOnce() -> Vec<PlannedFrontierCompanion>,
+    {
+        let key = (
+            canonical_id.to_string(),
+            exported_name.to_string(),
+            route.clone(),
+        );
+        if let Some(cached) = self.entries.get(&key) {
+            return Arc::clone(cached);
+        }
+        let planned: Arc<[PlannedFrontierCompanion]> = Arc::from(compute());
+        self.entries.insert(key, Arc::clone(&planned));
+        planned
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExternalTypeTraceBaseline {
@@ -268,22 +315,6 @@ fn ordered_wildcard_indices_for_exported_name(
             .then_with(|| left_index.cmp(right_index))
     });
     scored.into_iter().map(|(index, _)| index).collect()
-}
-
-struct RouteOnlyShallowImportResolver<'a> {
-    host: &'a VerterHost,
-    owner_canonical: &'a str,
-    store_view: Option<&'a crate::resolver_store::HostStoreView>,
-}
-
-impl crate::resolver_core::ShallowImportResolver for RouteOnlyShallowImportResolver<'_> {
-    fn resolve_canonical(&self, specifier: &str) -> Option<String> {
-        self.host.resolve_type_dependency_canonical_in_view(
-            self.owner_canonical,
-            specifier,
-            self.store_view,
-        )
-    }
 }
 
 fn external_type_debug_enabled() -> bool {
@@ -1217,11 +1248,13 @@ impl VerterHost {
             return Ok(cached.clone());
         }
 
+        let mut companion_plans = FrontierCompanionPlans::default();
         let (frontier, target, had_route_cycle) = match self
             .run_external_type_frontier_closure_in_view(
                 dep_canonical.as_str(),
                 type_name,
                 &mut requested_routes,
+                &mut companion_plans,
                 store_view,
             ) {
             Ok(result) => result,
@@ -1363,6 +1396,7 @@ impl VerterHost {
             .materialize_frontier_resolved_type_in_view(
                 &frontier,
                 &requested_routes,
+                &mut companion_plans,
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
                 tracked_deps,
@@ -1459,11 +1493,13 @@ impl VerterHost {
             crate::resolver_core::RouteDemand::Whole,
         );
 
+        let mut companion_plans = FrontierCompanionPlans::default();
         let (frontier, target, had_route_cycle) = self
             .run_external_type_frontier_closure_in_view(
                 seed_canonical.as_str(),
                 seed_type_name.as_str(),
                 &mut requested_routes,
+                &mut companion_plans,
                 store_view,
             )
             .ok()?;
@@ -1496,6 +1532,7 @@ impl VerterHost {
             .materialize_frontier_resolved_type_in_view(
                 &frontier,
                 &requested_routes,
+                &mut companion_plans,
                 effective_dep_canonical.as_str(),
                 effective_type_name.as_str(),
                 tracked_deps,
@@ -1588,6 +1625,7 @@ impl VerterHost {
         dep_canonical: &str,
         type_name: &str,
         requested_routes: &mut FrontierRequestedRoutes,
+        companion_plans: &mut FrontierCompanionPlans,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Result<
         (
@@ -1674,6 +1712,7 @@ impl VerterHost {
                 store_view,
                 &mut inspected_symbols,
                 requested_routes,
+                companion_plans,
             );
             if crate::host_manage::component_meta_debug_enabled() {
                 crate::host_manage::component_meta_debug(format!(
@@ -1709,6 +1748,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         inspected_symbols: &mut rustc_hash::FxHashSet<(String, String)>,
         requested_routes: &mut FrontierRequestedRoutes,
+        companion_plans: &mut FrontierCompanionPlans,
     ) -> Vec<crate::resolver_core::PendingExternalSymbol> {
         let mut seeds = Vec::new();
         let requested_symbols: Vec<_> = requested_routes
@@ -1738,65 +1778,29 @@ impl VerterHost {
                 continue;
             }
 
-            let Some(analysis) = self.external_type_analysis_in_view(&canonical_id, store_view)
-            else {
-                continue;
-            };
-            let required_import_routes = self.required_import_routes_for_exported_route_in_view(
+            let planned_companions = self.planned_frontier_companions_in_view(
                 &canonical_id,
                 &exported_name,
                 &requested_route,
+                companion_plans,
                 store_view,
             );
-            let required_import_names = required_import_routes
-                .keys()
-                .cloned()
-                .collect::<rustc_hash::FxHashSet<_>>();
-            let mut attempted_requests = rustc_hash::FxHashSet::default();
-            for binding in &analysis.extracted.bindings {
-                let required_aliases =
-                    required_import_alias_names_for_binding(binding, &required_import_names);
-                for required_alias in required_aliases {
-                    let Some(imported_name) =
-                        imported_member_name_for_required_alias(binding, &required_alias)
-                    else {
-                        continue;
-                    };
-                    let request_key = (
-                        required_alias.clone(),
-                        binding.source.clone(),
-                        imported_name.clone(),
-                    );
-                    if !attempted_requests.insert(request_key) {
-                        continue;
-                    }
-
-                    let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
-                        &canonical_id,
-                        &binding.source,
-                        store_view,
-                    ) else {
-                        continue;
-                    };
-                    let (resolved_canonical, resolved_name) = self
-                        .resolve_imported_type_root_in_view(
-                            dep_canonical.as_str(),
-                            imported_name.as_str(),
-                            store_view,
-                        );
-                    let (target_canonical, target_name) = frontier
-                        .final_target_for(adapter, &resolved_canonical, &resolved_name)
-                        .unwrap_or((resolved_canonical, resolved_name));
-                    let target_route = required_import_routes
-                        .get(&required_alias)
-                        .cloned()
-                        .unwrap_or_default();
-                    seeds.push(crate::resolver_core::PendingExternalSymbol {
-                        canonical_id: target_canonical,
-                        exported_name: target_name,
-                        route: Some(target_route),
-                    });
-                }
+            for companion in planned_companions.iter() {
+                let (target_canonical, target_name) = frontier
+                    .final_target_for(
+                        adapter,
+                        &companion.resolved_canonical,
+                        &companion.resolved_exported_name,
+                    )
+                    .unwrap_or((
+                        companion.resolved_canonical.clone(),
+                        companion.resolved_exported_name.clone(),
+                    ));
+                seeds.push(crate::resolver_core::PendingExternalSymbol {
+                    canonical_id: target_canonical,
+                    exported_name: target_name,
+                    route: Some(companion.route.clone()),
+                });
             }
         }
 
@@ -1807,6 +1811,7 @@ impl VerterHost {
         &self,
         frontier: &crate::resolver_core::ExternalTypeFrontier,
         requested_routes: &FrontierRequestedRoutes,
+        companion_plans: &mut FrontierCompanionPlans,
         canonical_id: &str,
         exported_name: &str,
         tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -1829,6 +1834,7 @@ impl VerterHost {
         self.materialize_frontier_resolved_type_with_memo_in_view(
             frontier,
             requested_routes,
+            companion_plans,
             &adapter,
             canonical_id,
             exported_name,
@@ -1845,6 +1851,7 @@ impl VerterHost {
         &self,
         frontier: &crate::resolver_core::ExternalTypeFrontier,
         requested_routes: &FrontierRequestedRoutes,
+        companion_plans: &mut FrontierCompanionPlans,
         adapter: &HostFrontierAdapter<'_>,
         canonical_id: &str,
         exported_name: &str,
@@ -1872,19 +1879,107 @@ impl VerterHost {
         resolution_deps.insert(canonical_id.to_string());
 
         let resolved = (|| {
-            let analysis = self.external_type_analysis_in_view(canonical_id, store_view)?;
             let route = requested_routes
                 .get(&(canonical_id.to_string(), exported_name.to_string()))
                 .cloned()
                 .unwrap_or_default();
-            let required_import_names = self.required_import_names_for_exported_route_in_view(
+            let planned_companions = self.planned_frontier_companions_in_view(
                 canonical_id,
                 exported_name,
                 &route,
+                companion_plans,
                 store_view,
             );
             let mut companion_types = ResolvedExternalTypes::default();
+            for companion in planned_companions.iter() {
+                let (target_canonical, target_name) = frontier
+                    .final_target_for(
+                        adapter,
+                        &companion.resolved_canonical,
+                        &companion.resolved_exported_name,
+                    )
+                    .unwrap_or((
+                        companion.resolved_canonical.clone(),
+                        companion.resolved_exported_name.clone(),
+                    ));
+                if frontier
+                    .get_resolved(&target_canonical, &target_name)
+                    .is_none()
+                {
+                    continue;
+                }
+                if let Some(resolved_companion) = self
+                    .materialize_frontier_resolved_type_with_memo_in_view(
+                        frontier,
+                        requested_routes,
+                        companion_plans,
+                        adapter,
+                        &target_canonical,
+                        &target_name,
+                        tracked_deps,
+                        resolution_deps,
+                        store_view,
+                        memo,
+                        active,
+                    )
+                {
+                    tracked_deps.insert(target_canonical.clone());
+                    resolution_deps.insert(target_canonical.clone());
+                    if external_type_debug_enabled() {
+                        external_type_debug(format!(
+                            "frontier_materialize companion owner={} exported={} alias={} target={}:{} cached_member_count={}",
+                            canonical_id,
+                            exported_name,
+                            companion.alias,
+                            target_canonical,
+                            target_name,
+                            resolved_companion.props.len(),
+                        ));
+                    }
+                    companion_types
+                        .entry(companion.alias.clone())
+                        .or_insert(resolved_companion);
+                }
+            }
+
+            self.resolve_external_type_from_module_facts_in_view(
+                canonical_id,
+                exported_name,
+                &companion_types,
+                store_view,
+            )
+        })();
+
+        active.remove(&cache_key);
+        memo.insert(cache_key, resolved.clone());
+        resolved
+    }
+
+    fn planned_frontier_companions_in_view(
+        &self,
+        canonical_id: &str,
+        exported_name: &str,
+        route: &crate::resolver_core::RouteDemand,
+        companion_plans: &mut FrontierCompanionPlans,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Arc<[PlannedFrontierCompanion]> {
+        companion_plans.get_or_compute(canonical_id, exported_name, route, || {
+            let Some(analysis) = self.external_type_analysis_in_view(canonical_id, store_view)
+            else {
+                return Vec::new();
+            };
+            let required_import_routes = self.required_import_routes_for_exported_route_in_view(
+                canonical_id,
+                exported_name,
+                route,
+                store_view,
+            );
+            let required_import_names = required_import_routes
+                .keys()
+                .cloned()
+                .collect::<rustc_hash::FxHashSet<_>>();
             let mut attempted_requests = rustc_hash::FxHashSet::default();
+            let mut planned = Vec::new();
 
             for binding in &analysis.extracted.bindings {
                 let required_aliases =
@@ -1917,58 +2012,20 @@ impl VerterHost {
                             imported_name.as_str(),
                             store_view,
                         );
-                    let (target_canonical, target_name) = frontier
-                        .final_target_for(adapter, &resolved_canonical, &resolved_name)
-                        .unwrap_or((resolved_canonical, resolved_name));
-                    if frontier
-                        .get_resolved(&target_canonical, &target_name)
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    if let Some(companion) = self
-                        .materialize_frontier_resolved_type_with_memo_in_view(
-                            frontier,
-                            requested_routes,
-                            adapter,
-                            &target_canonical,
-                            &target_name,
-                            tracked_deps,
-                            resolution_deps,
-                            store_view,
-                            memo,
-                            active,
-                        )
-                    {
-                        tracked_deps.insert(target_canonical.clone());
-                        resolution_deps.insert(target_canonical.clone());
-                        if external_type_debug_enabled() {
-                            external_type_debug(format!(
-                                "frontier_materialize companion owner={} exported={} alias={} target={}:{} cached_member_count={}",
-                                canonical_id,
-                                exported_name,
-                                required_alias,
-                                target_canonical,
-                                target_name,
-                                companion.props.len(),
-                            ));
-                        }
-                        companion_types.entry(required_alias).or_insert(companion);
-                    }
+                    planned.push(PlannedFrontierCompanion {
+                        alias: required_alias.clone(),
+                        resolved_canonical,
+                        resolved_exported_name: resolved_name,
+                        route: required_import_routes
+                            .get(&required_alias)
+                            .cloned()
+                            .unwrap_or_default(),
+                    });
                 }
             }
 
-            self.resolve_external_type_from_module_facts_in_view(
-                canonical_id,
-                exported_name,
-                &companion_types,
-                store_view,
-            )
-        })();
-
-        active.remove(&cache_key);
-        memo.insert(cache_key, resolved.clone());
-        resolved
+            planned
+        })
     }
 
     fn append_route_participant_fact_versions_in_view(
@@ -1977,6 +2034,7 @@ impl VerterHost {
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        route_shallow_cache: Option<&RouteShallowStateCache>,
     ) {
         if let Some(hash) = store_view
             .and_then(|view| view.whole_hash(canonical))
@@ -1996,8 +2054,16 @@ impl VerterHost {
                 view.derived_hash(canonical, crate::resolver_core::DerivedFactKind::Route)
             })
             .or_else(|| {
-                self.shallow_file_state_in_view(canonical, store_view)
-                    .map(|state| crate::resolver_store::hash_route_surface(&state))
+                let normalized_canonical = self
+                    .resolve_eval_dependency_canonical_in_view(canonical, store_view)
+                    .unwrap_or_else(|| canonical.to_string());
+                route_shallow_cache
+                    .and_then(|cache| cache.get(normalized_canonical.as_str()))
+                    .map(|state| crate::resolver_store::hash_route_surface(state.as_ref()))
+                    .or_else(|| {
+                        self.shallow_file_state_in_view(canonical, store_view)
+                            .map(|state| crate::resolver_store::hash_route_surface(&state))
+                    })
             });
         if let Some(hash) = route_hash {
             let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
@@ -2017,11 +2083,69 @@ impl VerterHost {
         source_specifier: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<String> {
-        self.resolve_type_dependency_canonical_in_view(
-            owner_canonical,
-            source_specifier,
-            store_view,
-        )
+        if let Some(view) = store_view {
+            let view_is_current = self.current_store_view_epoch() == view.mutation_epoch();
+            if !view_is_current {
+                return None;
+            }
+        }
+
+        let resolved = self
+            .ws()
+            .resolve_import(
+                owner_canonical,
+                source_specifier,
+                verter_workspace::ResolutionContext {
+                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                },
+            )
+            .map(|resolution| {
+                self.normalize_live_type_dependency_target_in_view(
+                    owner_canonical,
+                    source_specifier,
+                    resolution.source_id.as_str(),
+                    store_view,
+                )
+            })
+            .or_else(|| {
+                self.fallback_relative_type_companion_in_view(
+                    owner_canonical,
+                    source_specifier,
+                    store_view,
+                )
+            })
+            .or_else(|| {
+                self.ws()
+                    .resolve_import(
+                        owner_canonical,
+                        source_specifier,
+                        verter_workspace::ResolutionContext {
+                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                            kind: verter_workspace::ResolveRequestKind::EsmImport,
+                        },
+                    )
+                    .map(|resolution| {
+                        self.normalize_live_type_dependency_target_in_view(
+                            owner_canonical,
+                            source_specifier,
+                            resolution.source_id.as_str(),
+                            store_view,
+                        )
+                    })
+            })?;
+
+        if store_view.is_some()
+            && !self.store_view_allows_current_whole_hash(
+                resolved.as_str(),
+                self.get_whole_hash(&resolved).unwrap_or_default(),
+                store_view,
+            )
+        {
+            return None;
+        }
+
+        Some(resolved)
     }
 
     fn resolve_named_type_export_route_from_target_in_view(
@@ -2240,20 +2364,14 @@ impl VerterHost {
             cached_parse.as_deref(),
             &eval_source,
         );
-        let resolver = RouteOnlyShallowImportResolver {
-            host: self,
-            owner_canonical: normalized_canonical.as_str(),
-            store_view,
-        };
-        let shallow_state = Arc::new(
-            crate::resolver_core::ShallowFileState::from_analysis_with_resolver(
-                whole_hash,
-                external_type_analysis,
-                Some(eval_source.as_ref()),
-                Some(eval_env.as_ref()),
-                &resolver,
-            ),
-        );
+        // Route-only shallow state must stay import-lazy. It can record raw
+        // import/reexport surfaces now and resolve only the single edge that
+        // the requested symbol route actually needs later.
+        let shallow_state = Arc::new(crate::resolver_core::ShallowFileState::from_analysis(
+            whole_hash,
+            external_type_analysis,
+            Some(eval_env.as_ref()),
+        ));
         route_shallow_cache.insert(normalized_canonical.clone(), Arc::clone(&shallow_state));
         self.cache_route_owned_shallow_state_in_view(
             normalized_canonical.as_str(),
@@ -2345,7 +2463,6 @@ impl VerterHost {
         crate::resolver_core::RouteResult,
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
-        let _ = self.ensure_module_facts_in_view(dep_canonical, store_view);
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();
         let mut route_shallow_cache = RouteShallowStateCache::default();
@@ -2369,6 +2486,7 @@ impl VerterHost {
                 &mut facts,
                 &mut seen,
                 store_view,
+                Some(&route_shallow_cache),
             );
         }
 

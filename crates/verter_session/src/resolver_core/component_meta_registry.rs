@@ -1431,28 +1431,14 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
-    fn direct_public_ref<'a>(
-        expr: &'a verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> Option<(
-        &'a str,
-        &'a [verter_semantic::analysis::type_expr::TypeExpr],
-    )> {
-        use verter_semantic::analysis::type_expr::TypeExpr;
-
-        match expr {
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => Some((name.as_ref(), type_arguments.as_ref())),
-            TypeExpr::Parenthesized(inner) => direct_public_ref(inner),
-            _ => None,
-        }
-    }
-
-    let parsed_raw = field
-        .raw_type
-        .as_deref()
-        .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
+    let parsed_raw = (!component_meta_registry_field_expr_has_actionable_route(&field.r#type))
+        .then(|| {
+            field
+                .raw_type
+                .as_deref()
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+        })
+        .flatten();
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
@@ -1474,8 +1460,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             .canonical_source
             .contains("/node_modules/")
     });
-    let skip_imported_generic_non_object_ref =
-        direct_public_ref(expr).is_some_and(|(name, type_arguments)| {
+    let skip_imported_generic_non_object_ref = component_meta_registry_direct_public_ref(expr)
+        .is_some_and(|(name, type_arguments)| {
             if type_arguments.is_empty() {
                 return false;
             }
@@ -1532,6 +1518,29 @@ pub(crate) fn component_meta_registry_ref_name(
         TypeExpr::Parenthesized(inner) => component_meta_registry_ref_name(inner),
         _ => None,
     }
+}
+
+pub(crate) fn component_meta_registry_direct_public_ref(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<(&str, &[verter_semantic::analysis::type_expr::TypeExpr])> {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => Some((name.as_ref(), type_arguments.as_ref())),
+        TypeExpr::Parenthesized(inner) => component_meta_registry_direct_public_ref(inner),
+        _ => None,
+    }
+}
+
+pub(crate) fn component_meta_registry_field_expr_has_actionable_route(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    component_meta_registry_direct_public_ref(expr).is_some()
+        || component_meta_registry_public_utility_route(expr).is_some()
+        || component_meta_registry_public_indexed_access_route(expr).is_some()
 }
 
 pub(crate) fn component_meta_registry_string_literal_keys(
@@ -1954,6 +1963,7 @@ mod tests {
 
     use super::{
         choose_preferred_imported_type_body, collect_component_meta_registry_refs,
+        component_meta_registry_field_expr_has_actionable_route,
         component_meta_registry_public_indexed_access_route,
         component_meta_registry_raw_member_path_surface, imported_type_body_specificity_score,
         owner_component_meta_registry_import_root, RouteDemand,
@@ -2033,6 +2043,28 @@ mod tests {
         assert!(
             output.is_empty(),
             "indexed-access helper refs should enqueue only the routed root helper"
+        );
+    }
+
+    #[test]
+    fn field_expr_actionable_route_recognizes_direct_generic_refs() {
+        let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+            "GetModelValue<T, VK, true>",
+        );
+
+        assert!(
+            component_meta_registry_field_expr_has_actionable_route(&expr),
+            "direct public generic refs should reuse the existing symbolic field expr instead of reparsing raw_type",
+        );
+    }
+
+    #[test]
+    fn field_expr_actionable_route_rejects_expanded_object_surfaces() {
+        let expr = object_with_props(&["base", "label"]);
+
+        assert!(
+            !component_meta_registry_field_expr_has_actionable_route(&expr),
+            "expanded object surfaces still need raw_type reparsing when the raw annotation carries a routed helper like Button['ui']",
         );
     }
 

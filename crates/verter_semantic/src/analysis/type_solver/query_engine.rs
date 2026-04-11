@@ -330,6 +330,21 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             }
         }
 
+        fn imported_value_route_arg<A: super::audit::AuditSink>(
+            engine: &TypeQueryEngine<'_, A>,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens(expr) {
+                TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef { path }) => {
+                    path.first().is_some_and(|root| {
+                        engine.host.bare_ref_origin(root) == BareRefOrigin::Imported
+                    })
+                }
+                TypeExpr::Parenthesized(inner) => imported_value_route_arg(engine, inner),
+                _ => false,
+            }
+        }
+
         match strip_parens(expr) {
             TypeExpr::Ref {
                 name,
@@ -341,6 +356,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             {
                 type_arguments.iter().any(|argument| {
                     self.should_preserve_imported_bare_ref(argument)
+                        || imported_value_route_arg(self, argument)
                         || self.should_preserve_package_member_path(argument)
                         || self.should_preserve_imported_utility_route(argument)
                 })
@@ -494,6 +510,60 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             Some((name.as_ref(), member_name.as_str()))
         }
 
+        fn fast_symbolic_imported_generic_route<A: super::audit::AuditSink>(
+            engine: &TypeQueryEngine<'_, A>,
+            expr: &TypeExpr,
+            active_locals: &mut rustc_hash::FxHashSet<String>,
+        ) -> bool {
+            match strip_parens(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => match engine.host.bare_ref_origin(name.as_ref()) {
+                    BareRefOrigin::Imported => !type_arguments.is_empty(),
+                    BareRefOrigin::Local if type_arguments.is_empty() => {
+                        if !active_locals.insert(name.to_string()) {
+                            return false;
+                        }
+                        let preserve = engine
+                            .host
+                            .root_identity("", name.as_ref())
+                            .and_then(|root_identity| {
+                                engine.host.resolve_prepared_type_decl(&root_identity)
+                            })
+                            .is_some_and(|prepared| {
+                                fast_symbolic_imported_generic_route(
+                                    engine,
+                                    &prepared.body,
+                                    active_locals,
+                                )
+                            });
+                        active_locals.remove(name.as_ref());
+                        preserve
+                    }
+                    _ => false,
+                },
+                TypeExpr::IndexedAccess { object, .. }
+                | TypeExpr::Array {
+                    element: object, ..
+                }
+                | TypeExpr::KeyOf(object)
+                | TypeExpr::Rest(object)
+                | TypeExpr::Parenthesized(object) => {
+                    fast_symbolic_imported_generic_route(engine, object, active_locals)
+                }
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    fast_symbolic_imported_generic_route(engine, &element.ty, active_locals)
+                }),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        fast_symbolic_imported_generic_route(engine, member, active_locals)
+                    })
+                }
+                _ => false,
+            }
+        }
+
         fn contains_direct_imported_utility_route<A: super::audit::AuditSink>(
             engine: &TypeQueryEngine<'_, A>,
             expr: &TypeExpr,
@@ -502,6 +572,21 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 match expr {
                     TypeExpr::Parenthesized(inner) => strip_parens(inner),
                     other => other,
+                }
+            }
+
+            fn imported_value_route_arg<A: super::audit::AuditSink>(
+                engine: &TypeQueryEngine<'_, A>,
+                expr: &TypeExpr,
+            ) -> bool {
+                match strip_parens(expr) {
+                    TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef { path }) => {
+                        path.first().is_some_and(|root| {
+                            engine.host.bare_ref_origin(root) == BareRefOrigin::Imported
+                        })
+                    }
+                    TypeExpr::Parenthesized(inner) => imported_value_route_arg(engine, inner),
+                    _ => false,
                 }
             }
 
@@ -517,9 +602,11 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                         (type_arguments.is_empty()
                             && engine.host.bare_ref_origin(name.as_ref())
                                 == BareRefOrigin::Imported)
+                            || imported_value_route_arg(engine, expr)
                             || contains_direct_imported_utility_route(engine, expr)
                     }
                     TypeExpr::IndexedAccess { object, .. } => imported_route_arg(engine, object),
+                    TypeExpr::TypeOf(_) => imported_value_route_arg(engine, expr),
                     TypeExpr::Parenthesized(inner) => imported_route_arg(engine, inner),
                     _ => contains_direct_imported_utility_route(engine, expr),
                 }
@@ -593,17 +680,39 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             return Some(SolverResult::exact_symbolic(expr.clone()));
         }
 
-        let (root_name, member_name) = single_member_import_root(expr)?;
-        if self.host.bare_ref_origin(root_name) != BareRefOrigin::Imported {
-            return None;
+        if let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens(expr)
+        {
+            if !type_arguments.is_empty()
+                && self.host.bare_ref_origin(name.as_ref()) == BareRefOrigin::Imported
+            {
+                let _ = self.host.root_identity("", name.as_ref())?;
+                return Some(SolverResult::exact_symbolic(expr.clone()));
+            }
         }
-        let root_identity = self.host.root_identity("", root_name)?;
-        let prepared = self.host.resolve_prepared_type_decl(&root_identity)?;
-        let member = prepared.member(member_name)?;
-        if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
-            return None;
+
+        if let Some((root_name, member_name)) = single_member_import_root(expr) {
+            if self.host.bare_ref_origin(root_name) == BareRefOrigin::Imported {
+                let root_identity = self.host.root_identity("", root_name)?;
+                if root_identity.canonical_id.contains("/node_modules/")
+                    || root_identity.canonical_id.contains("\\node_modules\\")
+                {
+                    return Some(SolverResult::exact_symbolic(expr.clone()));
+                }
+                let prepared = self.host.resolve_prepared_type_decl(&root_identity)?;
+                let member = prepared.member(member_name)?;
+                if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+                    return None;
+                }
+                return Some(SolverResult::exact_concrete(member.ty.clone()));
+            }
         }
-        Some(SolverResult::exact_concrete(member.ty.clone()))
+
+        let mut active_locals = rustc_hash::FxHashSet::default();
+        fast_symbolic_imported_generic_route(self, expr, &mut active_locals)
+            .then(|| SolverResult::exact_symbolic(expr.clone()))
     }
 
     fn should_preserve_shallow_field_expr_inner(
@@ -2276,14 +2385,14 @@ mod tests {
 
         fn utility_source(&self, name: &str) -> UtilitySource {
             match name {
-                "Omit" | "Partial" => UtilitySource::Builtin,
+                "Omit" | "Partial" | "ReturnType" => UtilitySource::Builtin,
                 _ => UtilitySource::Unknown,
             }
         }
 
         fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
             match name {
-                "DialogContentProps" => BareRefOrigin::Imported,
+                "DialogContentProps" | "useTemplateRef" => BareRefOrigin::Imported,
                 _ => BareRefOrigin::Unknown,
             }
         }
@@ -2530,6 +2639,108 @@ mod tests {
                     Some(ResolvedRootIdentity::new(
                         "/src/types.ts",
                         "DialogContentProps",
+                    ))
+                }
+                _ => None,
+            }
+        }
+    }
+
+    struct LocalAliasImportedGenericFastHost {
+        local_root_identity_calls: Cell<u32>,
+        imported_root_identity_calls: Cell<u32>,
+        local_prepared_lookup_calls: Cell<u32>,
+        imported_prepared_lookup_calls: Cell<u32>,
+        local_prepared: Arc<PreparedTypeDecl>,
+    }
+
+    impl LocalAliasImportedGenericFastHost {
+        fn new() -> Self {
+            let mut local_prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/App.vue", "DashboardSearch"),
+                TypeDeclKind::Alias,
+                TypeExpr::named_with_args(
+                    "ComponentConfig",
+                    vec![
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        TypeExpr::Primitive(PrimitiveName::String),
+                        TypeExpr::string_literal("dashboardSearch"),
+                    ],
+                ),
+            );
+            local_prepared.build_member_index();
+            local_prepared.classify_wrapper_shape();
+            local_prepared.classify_projection();
+
+            Self {
+                local_root_identity_calls: Cell::new(0),
+                imported_root_identity_calls: Cell::new(0),
+                local_prepared_lookup_calls: Cell::new(0),
+                imported_prepared_lookup_calls: Cell::new(0),
+                local_prepared: Arc::new(local_prepared),
+            }
+        }
+    }
+
+    impl TypeSolverHost for LocalAliasImportedGenericFastHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            match (
+                root_identity.canonical_id.as_str(),
+                root_identity.symbol_name.as_str(),
+            ) {
+                ("/src/App.vue", "DashboardSearch") => {
+                    self.local_prepared_lookup_calls
+                        .set(self.local_prepared_lookup_calls.get() + 1);
+                    Some(Arc::clone(&self.local_prepared))
+                }
+                ("/src/types/tv.ts", "ComponentConfig") => {
+                    self.imported_prepared_lookup_calls
+                        .set(self.imported_prepared_lookup_calls.get() + 1);
+                    None
+                }
+                _ => None,
+            }
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, _name: &str) -> UtilitySource {
+            UtilitySource::Unknown
+        }
+
+        fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+            match name {
+                "DashboardSearch" => BareRefOrigin::Local,
+                "ComponentConfig" => BareRefOrigin::Imported,
+                _ => BareRefOrigin::Unknown,
+            }
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            match (canonical_id, symbol_name) {
+                ("", "DashboardSearch") => {
+                    self.local_root_identity_calls
+                        .set(self.local_root_identity_calls.get() + 1);
+                    Some(ResolvedRootIdentity::new("/src/App.vue", "DashboardSearch"))
+                }
+                ("", "ComponentConfig") => {
+                    self.imported_root_identity_calls
+                        .set(self.imported_root_identity_calls.get() + 1);
+                    Some(ResolvedRootIdentity::new(
+                        "/src/types/tv.ts",
+                        "ComponentConfig",
                     ))
                 }
                 _ => None,
@@ -2795,6 +3006,134 @@ mod tests {
             host.resolve_prepared_type_decl_calls.get(),
             0,
             "fast symbolic utility wrapping should not materialize imported prepared declarations",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_return_type_of_imported_value_symbolic() {
+        let host = CountingPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::named_with_args(
+            "ReturnType",
+            vec![TypeExpr::TypeOf(crate::analysis::type_expr::ValueRef {
+                path: vec!["useTemplateRef".to_string()],
+            })],
+        );
+
+        let result = engine.try_fast_shallow_field_expr(&expr).expect(
+            "ReturnType<typeof importedValue> should stay symbolic on the shallow fast path",
+        );
+
+        assert_eq!(result.value, expr);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.root_identity_calls.get(),
+            0,
+            "utility routes over imported values should not probe imported roots just to stay shallow",
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "utility routes over imported values should not materialize imported declarations",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_package_single_member_paths_symbolic_without_prepared_lookup(
+    ) {
+        let host = CountingPreserveHost::new_package();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(TypeExpr::named("DialogContentProps")),
+            index: std::sync::Arc::new(TypeExpr::string_literal("id")),
+        };
+
+        let result = engine
+            .try_fast_shallow_field_expr(&expr)
+            .expect("package-backed single-member paths should use the symbolic shallow fast path");
+
+        assert_eq!(
+            result.value, expr,
+            "package-backed single-member paths should stay symbolic in shallow field expansion"
+        );
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "package-backed single-member fast path should still prove the imported root once",
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "package-backed single-member fast path should not materialize the imported prepared declaration",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_package_generic_refs_symbolic_without_prepared_lookup() {
+        let host = CountingPreserveHost::new_package();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::named_with_args(
+            "DialogContentProps",
+            vec![TypeExpr::Primitive(PrimitiveName::String)],
+        );
+
+        let result = engine.try_fast_shallow_field_expr(&expr).expect(
+            "package-backed imported generic refs should use the symbolic shallow fast path",
+        );
+
+        assert_eq!(result.value, expr);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "package-backed imported generic refs should prove the imported root once",
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "package-backed imported generic refs should not materialize the prepared declaration just to stay symbolic",
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_local_alias_member_paths_symbolic_when_body_routes_into_imported_generic(
+    ) {
+        let host = LocalAliasImportedGenericFastHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(TypeExpr::IndexedAccess {
+                object: std::sync::Arc::new(TypeExpr::named("DashboardSearch")),
+                index: std::sync::Arc::new(TypeExpr::string_literal("variants")),
+            }),
+            index: std::sync::Arc::new(TypeExpr::string_literal("size")),
+        };
+
+        let result = engine
+            .try_fast_shallow_field_expr(&expr)
+            .expect("local alias member paths that only route into imported generic helpers should stay symbolic immediately");
+
+        assert_eq!(result.value, expr);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.local_root_identity_calls.get(),
+            1,
+            "the fast path should prove the local alias once",
+        );
+        assert_eq!(
+            host.local_prepared_lookup_calls.get(),
+            1,
+            "the fast path should inspect the local alias body once",
+        );
+        assert_eq!(
+            host.imported_root_identity_calls.get(),
+            0,
+            "the fast path should not chase the imported generic helper just to keep the route symbolic",
+        );
+        assert_eq!(
+            host.imported_prepared_lookup_calls.get(),
+            0,
+            "the fast path should not materialize the imported helper declaration",
         );
     }
 

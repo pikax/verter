@@ -80,6 +80,12 @@ pub struct ResolvedComponentMetaParts {
     pub fact_versions: Vec<FactVersionRef>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentMetaResolutionPurpose {
+    Full,
+    Fallthrough,
+}
+
 pub fn component_meta_resolved_macros(
     snapshot_macros: &[AnalyzedMacro],
     resolved_macros: &[ResolvedMacroMeta],
@@ -141,6 +147,7 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         owner_canonical: &str,
         snapshot: &Self::Snapshot,
         eval_context: Option<&Self::EvalContext>,
+        purpose: ComponentMetaResolutionPurpose,
     ) -> ComponentMetaEvalOutputs;
 
     #[allow(clippy::too_many_arguments)]
@@ -196,6 +203,7 @@ pub fn resolve_component_meta_parts<H>(
     snapshot: &H::Snapshot,
     expanded: bool,
     eval_context: Option<&H::EvalContext>,
+    purpose: ComponentMetaResolutionPurpose,
 ) -> ResolvedComponentMetaParts
 where
     H: ComponentMetaResolverHost,
@@ -209,7 +217,7 @@ where
     let mut tracked_deps = BTreeSet::new();
 
     let eval_outputs = if expanded {
-        host.build_eval_outputs(owner_canonical, snapshot, eval_context)
+        host.build_eval_outputs(owner_canonical, snapshot, eval_context, purpose)
     } else {
         ComponentMetaEvalOutputs::default()
     };
@@ -219,6 +227,27 @@ where
     let macros = host.snapshot_macros(snapshot);
     let macro_type_deps: Vec<MacroTypeDep> = host.snapshot_macro_type_deps(snapshot).to_vec();
     for dep in &macro_type_deps {
+        if purpose == ComponentMetaResolutionPurpose::Fallthrough
+            && !macro_kind_needed_for_fallthrough(dep.macro_kind)
+        {
+            continue;
+        }
+        if expanded
+            && macros.get(dep.macro_index).is_some_and(|mac| {
+                let authoritative_owner = macro_has_authoritative_owner_surface(
+                    mac,
+                    eval_outputs.evaluated_types.as_ref(),
+                    dep.macro_index,
+                );
+                let authoritative_resolved_local =
+                    macro_has_authoritative_resolved_local_surface(mac);
+                (!is_direct_macro_type_reference(macros, dep)
+                    && (authoritative_owner || authoritative_resolved_local))
+                    || authoritative_resolved_local
+            })
+        {
+            continue;
+        }
         let macro_index = dep.macro_index;
         let dep_exported_name = macro_dep_exported_type_name(imports, dep);
         let dep_canonical = host
@@ -338,8 +367,20 @@ where
 
     if expanded {
         for (macro_index, mac) in host.snapshot_macros(snapshot).iter().enumerate() {
+            if purpose == ComponentMetaResolutionPurpose::Fallthrough
+                && !macro_kind_needed_for_fallthrough(mac.kind)
+            {
+                continue;
+            }
             let owner_source = host.read_source(owner_canonical);
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
+                if !is_direct_local_macro_type_reference(
+                    mac,
+                    resolved_index,
+                    resolved.name.as_str(),
+                ) {
+                    continue;
+                }
                 if !resolved_macros
                     .iter()
                     .any(|meta| meta.macro_index == macro_index && meta.type_name == resolved.name)
@@ -435,6 +476,16 @@ where
     }
 }
 
+fn macro_kind_needed_for_fallthrough(kind: AnalyzedMacroKind) -> bool {
+    matches!(
+        kind,
+        AnalyzedMacroKind::DefineProps
+            | AnalyzedMacroKind::WithDefaults
+            | AnalyzedMacroKind::DefineModel
+            | AnalyzedMacroKind::DefineEmits
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +495,7 @@ mod tests {
         ResolvedMemberVisibility, ResolvedProp, RuntimeType,
     };
     use verter_semantic::analysis::type_eval::DeclarationId;
+    use verter_semantic::analysis::type_expr::PrimitiveName;
     use verter_semantic::analysis::types::{
         AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, ResolvedLocalType,
     };
@@ -459,6 +511,7 @@ mod tests {
     struct TestHost {
         source: String,
         external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
+        eval_outputs: ComponentMetaEvalOutputs,
     }
 
     impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
@@ -523,8 +576,9 @@ mod tests {
             _owner_canonical: &str,
             _snapshot: &Self::Snapshot,
             _eval_context: Option<&Self::EvalContext>,
+            _purpose: ComponentMetaResolutionPurpose,
         ) -> ComponentMetaEvalOutputs {
-            ComponentMetaEvalOutputs::default()
+            self.eval_outputs.clone()
         }
 
         fn resolve_macro_elements(
@@ -577,6 +631,7 @@ mod tests {
         let host = TestHost {
             source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -606,8 +661,14 @@ mod tests {
             macro_type_deps: Vec::new(),
         };
 
-        let resolved =
-            resolve_component_meta_parts(&host, "/src/Accordion.vue", &snapshot, true, None);
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/Accordion.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
 
         assert_eq!(resolved.resolved_macros.len(), 1);
         assert_eq!(resolved.resolved_macros[0].macro_index, 0);
@@ -648,6 +709,7 @@ defineSlots<CalendarSlots>()
         let host = TestHost {
             source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -675,7 +737,14 @@ defineSlots<CalendarSlots>()
             macro_type_deps: Vec::new(),
         };
 
-        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
 
         assert_eq!(resolved.resolved_macros.len(), 1);
         assert_eq!(resolved.resolved_macros[0].slots.len(), 1);
@@ -739,6 +808,7 @@ type LocalItem = {
         let host = TestHost {
             source: source.to_string(),
             external_macro_elements,
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -791,7 +861,14 @@ type LocalItem = {
             ],
         };
 
-        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
         let registry_names: Vec<&str> = resolved
             .resolved_type_registry
             .iter()
@@ -802,6 +879,412 @@ type LocalItem = {
             registry_names,
             vec!["Props"],
             "transitive imported macro deps should stay out of the initial registry seed; later append can publish only what the owner surface actually requests"
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_eval_surface_is_authoritative(
+    ) {
+        let source = r#"
+type Props = Pick<ImportedBase, 'href'>
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("href".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs {
+                evaluated_types: Some(verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                    define_props: vec![
+                        verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                            macro_index: 0,
+                            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                                    properties: vec![
+                                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                                            name: "href".to_string(),
+                                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                                            optional: true,
+                                            readonly: false,
+                                        },
+                                    ],
+                                    index_signatures: Vec::new(),
+                                    call_signatures: Vec::new(),
+                                },
+                            ),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                tracked_dependencies: BTreeSet::new(),
+            },
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "{ href?: string }".to_string(),
+                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "href".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        })],
+                    }))),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "authoritative owner-evaluated surfaces should keep transitive imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_raw_surface_is_authoritative(
+    ) {
+        let source = r#"
+type Props = Pick<ImportedBase, 'href'>
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("href".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: vec![verter_semantic::analysis::AnalyzedPropField {
+                    name: "href".to_string(),
+                    is_optional: true,
+                    span: Span::new(0, 0),
+                    type_annotation: Some("string".to_string()),
+                    description: None,
+                    tags: Vec::new(),
+                    resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                    resolution_error: None,
+                }],
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "{ href?: string }".to_string(),
+                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "href".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        })],
+                    }))),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "authoritative owner-local raw fields should keep transitive imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_skips_transitive_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
+    ) {
+        let source = r#"
+type Props = {
+  href?: ImportedBase['href']
+}
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("href".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "{ href?: ImportedBase['href'] }".to_string(),
+                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "href".to_string(),
+                            ty: TypeExpr::IndexedAccess {
+                                object: std::sync::Arc::new(TypeExpr::Ref {
+                                    name: "ImportedBase".into(),
+                                    type_arguments: Vec::new().into(),
+                                }),
+                                index: std::sync::Arc::new(TypeExpr::string_literal("href")),
+                            },
+                            optional: true,
+                            readonly: false,
+                        })],
+                    }))),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "authoritative resolved-local surfaces should keep transitive imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_resolved_local_surface_is_authoritative(
+    ) {
+        let source = r#"
+type Props = {
+  tooltip?: ImportedBase
+}
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("label".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "{ tooltip?: ImportedBase }".to_string(),
+                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: "tooltip".to_string(),
+                            ty: TypeExpr::Ref {
+                                name: "ImportedBase".into(),
+                                type_arguments: Vec::new().into(),
+                            },
+                            optional: true,
+                            readonly: false,
+                        })],
+                    }))),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "authoritative resolved-local surfaces should keep nested direct imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -827,6 +1310,7 @@ type LocalItem = {
                     ..ResolvedElements::default()
                 },
             )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -855,7 +1339,14 @@ type LocalItem = {
             }],
         };
 
-        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
         let registry_names: Vec<&str> = resolved
             .resolved_type_registry
             .iter()
@@ -905,6 +1396,7 @@ type LocalItem = {
                     ..ResolvedElements::default()
                 },
             )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -933,10 +1425,96 @@ type LocalItem = {
             }],
         };
 
-        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
         assert!(
             resolved.resolved_type_registry.is_empty(),
             "direct non-object imported aliases should stay out of the initial registry seed"
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_keeps_non_root_local_helpers_off_resolved_macros() {
+        let source = r#"
+type Props = Helper
+
+interface Helper {
+  label?: string
+}
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::new(),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![
+                    ResolvedLocalType {
+                        name: "Props".to_string(),
+                        expanded: "{ label?: string }".to_string(),
+                        type_expr: Some(TypeExpr::Ref {
+                            name: "Helper".into(),
+                            type_arguments: Vec::new().into(),
+                        }),
+                        span: Span::new(0, "type Props = Helper".len() as u32),
+                    },
+                    ResolvedLocalType {
+                        name: "Helper".to_string(),
+                        expanded: "{ label?: string }".to_string(),
+                        type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                            properties: vec![ObjectMember::Property(ObjectProperty {
+                                name: "label".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            })],
+                        }))),
+                        span: Span::new(0, source.len() as u32),
+                    },
+                ],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: Vec::new(),
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+        let resolved_names: Vec<&str> = resolved
+            .resolved_macros
+            .iter()
+            .map(|entry| entry.type_name.as_str())
+            .collect();
+
+        assert_eq!(
+            resolved_names,
+            vec!["Props"],
+            "only the direct local macro root should project into resolved_macros; helper companions should stay lazy",
         );
     }
 }
@@ -982,6 +1560,92 @@ fn is_direct_macro_type_reference(macros: &[AnalyzedMacro], dep: &MacroTypeDep) 
             .iter()
             .any(|type_name| type_name == &dep.type_name)
     })
+}
+
+fn is_direct_local_macro_type_reference(
+    mac: &AnalyzedMacro,
+    resolved_index: usize,
+    resolved_name: &str,
+) -> bool {
+    resolved_index == 0
+        || mac
+            .type_references
+            .iter()
+            .any(|type_name| type_name == resolved_name)
+}
+
+fn macro_has_authoritative_evaluated_surface(
+    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    macro_kind: AnalyzedMacroKind,
+    macro_index: usize,
+) -> bool {
+    let Some(evaluated) = evaluated else {
+        return false;
+    };
+
+    match macro_kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => evaluated
+            .define_props
+            .iter()
+            .find(|entry| entry.macro_index == macro_index)
+            .is_some_and(|entry| !entry.result.value.properties.is_empty()),
+        AnalyzedMacroKind::DefineEmits => evaluated
+            .define_emits
+            .iter()
+            .find(|entry| entry.macro_index == macro_index)
+            .is_some_and(|entry| {
+                !entry.result.value.properties.is_empty()
+                    || !entry.result.value.call_signatures.is_empty()
+            }),
+        AnalyzedMacroKind::DefineSlots => evaluated
+            .define_slots
+            .iter()
+            .find(|entry| entry.macro_index == macro_index)
+            .is_some_and(|entry| !entry.result.value.properties.is_empty()),
+        AnalyzedMacroKind::DefineExpose => !evaluated.bindings.is_empty(),
+        AnalyzedMacroKind::DefineOptions => false,
+    }
+}
+
+fn macro_has_authoritative_owner_surface(
+    mac: &AnalyzedMacro,
+    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    macro_index: usize,
+) -> bool {
+    if macro_has_authoritative_evaluated_surface(evaluated, mac.kind, macro_index) {
+        return true;
+    }
+
+    match mac.kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => !mac.prop_fields.is_empty(),
+        AnalyzedMacroKind::DefineEmits => !mac.emit_fields.is_empty(),
+        AnalyzedMacroKind::DefineSlots => !mac.slot_fields.is_empty(),
+        AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
+        AnalyzedMacroKind::DefineOptions => false,
+    }
+}
+
+fn macro_has_authoritative_resolved_local_surface(mac: &AnalyzedMacro) -> bool {
+    mac.resolved_local_types
+        .iter()
+        .enumerate()
+        .filter(|(resolved_index, resolved)| {
+            is_direct_local_macro_type_reference(mac, *resolved_index, resolved.name.as_str())
+        })
+        .any(|(_, resolved)| {
+            project_macro_surfaces_from_expanded_text(mac.kind, &resolved.expanded).is_some_and(
+                |projected| {
+                    !projected.native_props.is_empty()
+                        || !projected.props.is_empty()
+                        || !projected.emits.is_empty()
+                        || !projected.slots.is_empty()
+                },
+            )
+        })
 }
 
 fn macro_dep_exported_type_name<'a>(

@@ -683,6 +683,7 @@ impl FallthroughRequestHost for VerterHost {
 struct HostFallthroughResolver<'a> {
     host: &'a VerterHost,
     parent_canonical_id: &'a str,
+    parent_snapshot: &'a FileAnalysisSnapshot,
     store_view: Option<&'a HostStoreView>,
 }
 
@@ -744,35 +745,31 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         )?;
 
         let derived_import_binding = self
-            .host
-            .get_raw_analysis_snapshot_in_view(parent_canonical, self.store_view)
-            .and_then(|snapshot| {
-                snapshot
-                    .imports
+            .parent_snapshot
+            .imports
+            .iter()
+            .find(|import| import.source == import_source)
+            .and_then(|import| {
+                import
+                    .bindings
                     .iter()
-                    .find(|import| import.source == import_source)
-                    .and_then(|import| {
-                        import
-                            .bindings
-                            .iter()
-                            .find(|binding| !binding.is_type_only && binding.name == component_name)
-                    })
-                    .map(|binding| {
-                        (
-                            match binding.kind {
-                                verter_semantic::analysis::types::ImportBindingKind::Named => {
-                                    crate::resolver_core::symbol_resolver::ImportBindingKind::Named
-                                }
-                                verter_semantic::analysis::types::ImportBindingKind::Default => {
-                                    crate::resolver_core::symbol_resolver::ImportBindingKind::Default
-                                }
-                                verter_semantic::analysis::types::ImportBindingKind::Namespace => {
-                                    crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
-                                }
-                            },
-                            binding.imported_name.clone(),
-                        )
-                    })
+                    .find(|binding| !binding.is_type_only && binding.name == component_name)
+            })
+            .map(|binding| {
+                (
+                    match binding.kind {
+                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Named
+                        }
+                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                        }
+                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
+                        }
+                    },
+                    binding.imported_name.clone(),
+                )
             });
 
         let binding_kind = binding_kind
@@ -2899,7 +2896,7 @@ impl VerterHost {
             let state = &facts.shallow_state;
             let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
                 .local_closure_steps;
-            if let Some((symbol_name, is_alias_export)) = state
+            if let Some((symbol_name, _is_alias_export)) = state
                 .export_target(exported_name)
                 .and_then(|target| match target {
                     ExportTarget::Local { symbol_name } => {
@@ -2908,18 +2905,6 @@ impl VerterHost {
                     ExportTarget::Reexport { .. } => None,
                 })
             {
-                if matches!(route, RouteDemand::Whole) && !is_alias_export {
-                    return self
-                        .external_type_analysis_in_view(canonical_id, store_view)
-                        .map(|analysis| {
-                            analysis
-                                .required_import_names(exported_name)
-                                .into_iter()
-                                .map(|name| (name, RouteDemand::Whole))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                }
                 let closure = state.route_closure(symbol_name, route, budget);
                 let mut result = rustc_hash::FxHashMap::default();
                 for ext in &closure.unresolved_external {
@@ -4431,6 +4416,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         owner_eval_source: Option<&str>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
         let eval_source = owner_eval_source.map(str::to_string).or_else(|| {
             self.current_eval_state_in_view(canonical, store_view).map(
@@ -4444,6 +4430,7 @@ impl VerterHost {
             snapshot,
             &eval_source,
             store_view,
+            purpose,
             None,
         )
     }
@@ -4475,6 +4462,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         external_engine: Option<
             &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
         >,
@@ -4487,7 +4475,11 @@ impl VerterHost {
             let _ = self.ensure_module_facts_in_view(canonical, store_view);
         }
         let requested_binding_names =
-            crate::resolver_core::collect_requested_binding_names(snapshot.macros.as_ref());
+            if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Full {
+                crate::resolver_core::collect_requested_binding_names(snapshot.macros.as_ref())
+            } else {
+                rustc_hash::FxHashSet::default()
+            };
         let binding_entries = {
             let _trace = component_meta_trace_scope!(
                 "compute_evaluated_types_binding_entries",
@@ -4516,20 +4508,36 @@ impl VerterHost {
                 ),
             );
             if let Some(engine) = external_engine {
-                verter_semantic::analysis::type_eval_build::expand_macro_types_with_engine(
+                verter_semantic::analysis::type_eval_build::expand_macro_types_with_engine_for_scope(
                     snapshot.macros.as_ref(),
                     Some(eval_source),
                     binding_entries.as_slice(),
+                    match purpose {
+                        crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
+                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Full
+                        }
+                        crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough => {
+                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
+                        }
+                    },
                     engine,
                 )
             } else {
                 let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
                     self, store_view, canonical,
                 );
-                verter_semantic::analysis::type_eval_build::expand_macro_types_with_bindings(
+                verter_semantic::analysis::type_eval_build::expand_macro_types_with_bindings_for_scope(
                     snapshot.macros.as_ref(),
                     Some(eval_source),
                     binding_entries.as_slice(),
+                    match purpose {
+                        crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
+                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Full
+                        }
+                        crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough => {
+                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
+                        }
+                    },
                     &solver_host,
                 )
             }
@@ -4830,12 +4838,7 @@ impl VerterHost {
                 .and_then(|view| view.whole_hash(canonical_id))
                 .or_else(|| self.get_whole_hash(canonical_id))
                 .unwrap_or_default();
-            self.compute_component_meta_state(
-                canonical_id,
-                crate::types::ResolverMode::Expanded,
-                whole_hash,
-                store_view,
-            )?
+            self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash, store_view)?
         };
         self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
@@ -4885,6 +4888,7 @@ impl VerterHost {
         let fallthrough_resolver = HostFallthroughResolver {
             host: self,
             parent_canonical_id: canonical_id,
+            parent_snapshot: &resolved.snapshot,
             store_view,
         };
         // Build a lightweight fallthrough eval env: base owner env + runtime
@@ -4892,6 +4896,7 @@ impl VerterHost {
         let eval_env = self.build_fallthrough_eval_env_lightweight_in_view(
             canonical_id,
             &resolved.snapshot,
+            Some(&base_meta.root_reachability),
             prop_type_overrides,
             store_view,
         );
@@ -4921,6 +4926,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
+        root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
         prop_type_overrides: Option<
             &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
         >,
@@ -4943,16 +4949,23 @@ impl VerterHost {
             .map(|env| (*env).clone())?;
 
         // Hydrate required runtime values from imports.
-        let required_runtime_value_names = collect_required_template_runtime_value_names(snapshot);
-        let local_value_names: rustc_hash::FxHashSet<String> =
-            env.value_symbols.keys().cloned().collect();
-        self.materialize_imported_runtime_values_into_env_in_view(
-            snapshot,
-            &local_value_names,
-            Some(&required_runtime_value_names),
-            &mut env,
-            store_view,
-        );
+        let required_runtime_value_names = match root_reachability {
+            Some(root_reachability) => {
+                collect_required_root_fallthrough_runtime_value_names(snapshot, root_reachability)
+            }
+            None => collect_required_template_runtime_value_names(snapshot),
+        };
+        if !required_runtime_value_names.is_empty() {
+            let local_value_names: rustc_hash::FxHashSet<String> =
+                env.value_symbols.keys().cloned().collect();
+            self.materialize_imported_runtime_values_into_env_in_view(
+                snapshot,
+                &local_value_names,
+                Some(&required_runtime_value_names),
+                &mut env,
+                store_view,
+            );
+        }
 
         // Apply prop type overrides for generic root propagation.
         if let Some(overrides) = prop_type_overrides {
@@ -7690,6 +7703,70 @@ fn collect_required_template_runtime_value_names(
 
     for component in &template.components {
         for prop in &component.props {
+            required.extend(prop.referenced_bindings.iter().cloned());
+            if prop.is_shorthand {
+                required.insert(prop.name.clone());
+            }
+        }
+    }
+
+    required
+}
+
+fn collect_required_root_fallthrough_runtime_value_names(
+    snapshot: &FileAnalysisSnapshot,
+    root_reachability: &verter_semantic::analysis::component_meta::RootReachability,
+) -> rustc_hash::FxHashSet<String> {
+    use verter_semantic::analysis::component_meta::{RootReachability, RootTargetRef};
+    use verter_semantic::analysis::template::BindingUsageKind;
+
+    let mut required = rustc_hash::FxHashSet::default();
+    let Some(template) = snapshot.template.as_ref() else {
+        return required;
+    };
+
+    let RootReachability::Branches { branches } = root_reachability else {
+        return required;
+    };
+
+    for branch in branches {
+        let element_index = match &branch.target {
+            RootTargetRef::NativeElement { element_index, .. }
+            | RootTargetRef::DynamicComponentUsage { element_index, .. }
+            | RootTargetRef::ComponentUsage { element_index, .. }
+            | RootTargetRef::UnresolvedTarget { element_index, .. } => *element_index as usize,
+        };
+
+        let Some(element) = template.elements.get(element_index) else {
+            continue;
+        };
+
+        for occurrence in &template.binding_occurrences {
+            if occurrence.span.start < element.span.start
+                || occurrence.span.end > element.tag_span_end
+            {
+                continue;
+            }
+            if matches!(
+                occurrence.usage_kind,
+                BindingUsageKind::DirectiveValue | BindingUsageKind::EventHandler
+            ) {
+                required.insert(occurrence.name.clone());
+            }
+        }
+
+        let usage_index = match &branch.target {
+            RootTargetRef::DynamicComponentUsage { usage_index, .. }
+            | RootTargetRef::ComponentUsage { usage_index, .. } => Some(*usage_index as usize),
+            RootTargetRef::NativeElement { .. } | RootTargetRef::UnresolvedTarget { .. } => None,
+        };
+
+        let Some(usage) = usage_index.and_then(|usage_index| template.components.get(usage_index))
+        else {
+            continue;
+        };
+
+        for prop in &usage.props {
             required.extend(prop.referenced_bindings.iter().cloned());
             if prop.is_shorthand {
                 required.insert(prop.name.clone());

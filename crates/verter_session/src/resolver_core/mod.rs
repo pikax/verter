@@ -44,8 +44,9 @@ pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
     collect_requested_binding_names, component_meta_resolved_macros, component_meta_type_registry,
     resolve_component_meta_parts, resolved_elements_to_type_expr_via_type_text,
-    ComponentMetaEvalOutputs, ComponentMetaResolverHost, ResolvedComponentMetaParts,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedTypeRegistryMeta,
+    ComponentMetaEvalOutputs, ComponentMetaResolutionPurpose, ComponentMetaResolverHost,
+    ResolvedComponentMetaParts, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta,
+    ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};

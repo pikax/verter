@@ -66,6 +66,17 @@ fn request_source_performed_compute(source: RequestSource) -> bool {
     )
 }
 
+fn should_skip_imported_registry_seed_refresh(
+    owner_canonical: &str,
+    declaration_source: &str,
+    existing_expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    !declaration_source.is_empty()
+        && declaration_source != owner_canonical
+        && crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(existing_expr)
+        && !crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface(existing_expr)
+}
+
 #[derive(Debug, Clone)]
 pub struct CapturedComponentMetaInputs {
     whole_hash: Hash16,
@@ -262,6 +273,12 @@ pub struct ResolvedComponentMetaState {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryMaterialization {
+    Full,
+    SkipAppend,
 }
 
 fn collect_expanded_slot_binding_param_types<'a>(
@@ -559,21 +576,39 @@ fn produce_macro_object_shapes(
                 define_props_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                if let Some(lowered) = params.define_emits.get(define_emits_index) {
-                    let item_started = std::time::Instant::now();
-                    let (shape, source) = synthesize_define_emits_shape_from_resolved_macro(
-                        macro_index,
-                        resolved_macros,
-                    )
-                    .map(|shape| (Some(shape), MacroShapeSource::ResolvedMacro))
-                    .unwrap_or_else(|| {
-                        produce_one_macro_object_shape(
-                            query_engine,
+                if let Some((shape, source)) = synthesize_define_emits_shape_from_known_surface(
+                    macro_index,
+                    snapshot,
+                    resolved_macros,
+                    evaluated_types,
+                ) {
+                    projection_hits += 1;
+                    let count = shape.value.properties.len() + shape.value.call_signatures.len();
+                    component_meta_trace_event!(
+                        "macro_object_shape",
+                        format!(
+                            "owner={} macro_index={} kind=define_emits source={} surface={} took={:?}",
                             owner_canonical,
-                            lowered,
-                            verter_semantic::analysis::type_eval_build::has_named_shape_surface,
-                        )
-                    });
+                            macro_index,
+                            source.label(),
+                            count,
+                            std::time::Duration::ZERO,
+                        ),
+                    );
+                    evaluated_types.define_emits.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape,
+                        },
+                    );
+                } else if let Some(lowered) = params.define_emits.get(define_emits_index) {
+                    let item_started = std::time::Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                    );
                     if source.is_projection() {
                         projection_hits += 1;
                     } else if source.is_solver() {
@@ -601,7 +636,29 @@ fn produce_macro_object_shapes(
                 define_emits_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                if let Some(lowered) = params.define_slots.get(define_slots_index) {
+                if let Some((shape, source)) =
+                    synthesize_define_slots_shape_from_known_surface(macro_index, resolved_macros)
+                {
+                    projection_hits += 1;
+                    let count = shape.value.properties.len();
+                    component_meta_trace_event!(
+                        "macro_object_shape",
+                        format!(
+                            "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                            owner_canonical,
+                            macro_index,
+                            source.label(),
+                            count,
+                            std::time::Duration::ZERO,
+                        ),
+                    );
+                    evaluated_types.define_slots.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                            macro_index,
+                            result: shape,
+                        },
+                    );
+                } else if let Some(lowered) = params.define_slots.get(define_slots_index) {
                     if mac.slot_fields.is_empty() {
                         let item_started = std::time::Instant::now();
                         let (shape, source) = produce_one_macro_object_shape_for_slots(
@@ -848,52 +905,199 @@ fn synthesize_define_props_shape_from_known_surface_with_authority(
     ))
 }
 
-fn synthesize_define_emits_shape_from_resolved_macro(
+fn reuse_expanded_define_emits_shape(
+    snapshot: &FileAnalysisSnapshot,
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+) -> bool {
+    !evaluated_types.emits.is_empty()
+        && snapshot
+            .macros
+            .iter()
+            .filter(|mac| {
+                mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+                    && mac.is_type_based
+            })
+            .take(2)
+            .count()
+            == 1
+}
+
+fn synthesize_define_emits_shape_from_known_surface(
     macro_index: usize,
+    snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
-) -> Option<ShapeResult> {
+    evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+) -> Option<(ShapeResult, MacroShapeSource)> {
     use verter_semantic::analysis::type_expand::{
         ExpandedObjectShape, ExpandedProperty, ExpansionResult,
     };
     use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+
+    let use_all_expanded_emits = reuse_expanded_define_emits_shape(snapshot, evaluated_types);
+    if use_all_expanded_emits {
+        let mut exactness = SolverExactness::ExactConcrete;
+        let mut execution_status = ExecutionStatus::Completed;
+        let mut diagnostics = Vec::new();
+        let mut properties = Vec::with_capacity(evaluated_types.emits.len());
+
+        for emit in &evaluated_types.emits {
+            exactness = exactness.merge(emit.exactness);
+            execution_status =
+                merge_expansion_execution_status(execution_status, emit.execution_status);
+            diagnostics.extend(emit.diagnostics.clone());
+            properties.push(ExpandedProperty {
+                name: emit.name.clone(),
+                ty: emit.r#type.clone(),
+                optional: false,
+                readonly: false,
+            });
+        }
+
+        return Some((
+            ExpansionResult {
+                value: ExpandedObjectShape {
+                    properties,
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+                exactness,
+                execution_status,
+                diagnostics,
+            },
+            MacroShapeSource::Fields,
+        ));
+    }
 
     let mut matching_macros = resolved_macros.iter().filter(|resolved| {
         resolved.macro_index == macro_index
             && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
             && !resolved.emits.is_empty()
     });
+    let resolved_macro = matching_macros.next();
+    if matching_macros.next().is_some() {
+        return None;
+    }
+    let mut exactness = SolverExactness::ExactConcrete;
+    let mut execution_status = ExecutionStatus::Completed;
+    let mut diagnostics = Vec::new();
+    let mut properties = Vec::new();
+
+    if let Some(resolved_macro) = resolved_macro {
+        properties.reserve(resolved_macro.emits.len());
+        for emit in &resolved_macro.emits {
+            let field = evaluated_types
+                .emits
+                .iter()
+                .find(|field| field.name == emit.name);
+            if let Some(field) = field {
+                exactness = exactness.merge(field.exactness);
+                execution_status =
+                    merge_expansion_execution_status(execution_status, field.execution_status);
+                diagnostics.extend(field.diagnostics.clone());
+                properties.push(ExpandedProperty {
+                    name: field.name.clone(),
+                    ty: field.r#type.clone(),
+                    optional: false,
+                    readonly: false,
+                });
+                continue;
+            }
+
+            let ty = emit
+                .payload_type
+                .as_deref()
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+                .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
+                    raw: "unknown".to_string(),
+                });
+            properties.push(ExpandedProperty {
+                name: emit.name.clone(),
+                ty,
+                optional: false,
+                readonly: false,
+            });
+        }
+    } else {
+        return None;
+    }
+
+    Some((
+        ExpansionResult {
+            value: ExpandedObjectShape {
+                properties,
+                index_signatures: Vec::new(),
+                call_signatures: Vec::new(),
+            },
+            exactness,
+            execution_status,
+            diagnostics,
+        },
+        MacroShapeSource::ResolvedMacro,
+    ))
+}
+
+fn synthesize_define_slots_shape_from_known_surface(
+    macro_index: usize,
+    resolved_macros: &[ResolvedMacroMeta],
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedObjectShape, ExpandedProperty, ExpansionResult,
+    };
+
+    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
+        resolved.macro_index == macro_index
+            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+            && !resolved.slots.is_empty()
+    });
     let resolved_macro = matching_macros.next()?;
     if matching_macros.next().is_some() {
         return None;
     }
 
-    let mut properties = Vec::with_capacity(resolved_macro.emits.len());
-    for emit in &resolved_macro.emits {
-        let ty = emit
-            .payload_type
-            .as_deref()
-            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
-            .unwrap_or_else(|| verter_semantic::analysis::type_expr::TypeExpr::Unknown {
-                raw: "unknown".to_string(),
-            });
-        properties.push(ExpandedProperty {
-            name: emit.name.clone(),
-            ty,
-            optional: false,
+    let properties = resolved_macro
+        .slots
+        .iter()
+        .map(|slot| ExpandedProperty {
+            name: slot.name.clone(),
+            ty: slot_field_function_type_expr(slot),
+            optional: !slot.is_required,
             readonly: false,
-        });
-    }
+        })
+        .collect();
 
-    Some(ExpansionResult {
-        value: ExpandedObjectShape {
+    Some((
+        ExpansionResult::exact_symbolic(ExpandedObjectShape {
             properties,
             index_signatures: Vec::new(),
             call_signatures: Vec::new(),
-        },
-        exactness: SolverExactness::ExactSymbolic,
-        execution_status: ExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-    })
+        }),
+        MacroShapeSource::ResolvedMacro,
+    ))
+}
+
+fn slot_field_function_type_expr(
+    slot: &verter_semantic::analysis::AnalyzedSlotField,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let return_type = slot.return_type.as_deref().unwrap_or("any");
+    let signature = if slot.bindings.is_empty() {
+        format!("() => {return_type}")
+    } else {
+        let bindings = slot
+            .bindings
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{}: {}",
+                    binding.name,
+                    binding.type_annotation.as_deref().unwrap_or("unknown")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("(props: {{ {bindings} }}) => {return_type}")
+    };
+
+    verter_semantic::analysis::type_expr_lower::parse_type_annotation(&signature)
 }
 
 fn reuse_expanded_define_props_shape(
@@ -1387,7 +1591,15 @@ impl VerterHost {
         whole_hash: Hash16,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
-        self.compute_component_meta_state_inner(canonical, mode, whole_hash, None, store_view)
+        self.compute_component_meta_state_inner(
+            canonical,
+            mode,
+            whole_hash,
+            None,
+            store_view,
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+        )
     }
 
     fn compute_component_meta_state_from_captured(
@@ -1403,6 +1615,25 @@ impl VerterHost {
             captured.whole_hash,
             Some(captured),
             store_view,
+            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+            RegistryMaterialization::Full,
+        )
+    }
+
+    pub(crate) fn compute_component_meta_state_for_fallthrough(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<ResolvedComponentMetaState> {
+        self.compute_component_meta_state_inner(
+            canonical,
+            ResolverMode::Expanded,
+            whole_hash,
+            None,
+            store_view,
+            crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
+            RegistryMaterialization::SkipAppend,
         )
     }
 
@@ -1413,6 +1644,8 @@ impl VerterHost {
         whole_hash: Hash16,
         captured: Option<&CapturedComponentMetaInputs>,
         store_view: Option<&crate::resolver_store::HostStoreView>,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
+        registry_materialization: RegistryMaterialization,
     ) -> Option<ResolvedComponentMetaState> {
         let audit_enabled = self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
@@ -1475,6 +1708,7 @@ impl VerterHost {
             &snapshot,
             mode == ResolverMode::Expanded,
             captured,
+            purpose,
         );
         if let Some(started) = parts_started {
             audit_timings.solver_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1485,100 +1719,112 @@ impl VerterHost {
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = std::time::Instant::now();
-        let owner_engine = resolver_host
-            .shared_owner_engine
-            .take()
-            .map(std::cell::RefCell::into_inner)
-            .unwrap_or_else(|| {
-                verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                    &owner_solver_host,
-                )
-            });
-        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
-            self,
-            store_view,
-            owner_engine,
-        );
-        self.append_component_meta_registry_entries(
-            canonical,
-            &snapshot,
-            parts.evaluated_types.as_ref(),
-            &mut parts.resolved_type_registry,
-            &mut parts.resolved_type_registry_meta,
-            &mut parts.tracked_dependencies,
-            store_view,
-            &mut query_engine,
-        );
-        if mode == ResolverMode::Expanded {
-            if let Some(eval_source) = captured
-                .and_then(|captured| captured.owner_eval_source.as_deref())
-                .map(str::to_string)
-                .or_else(|| {
-                    self.ensure_module_facts_in_view(canonical, store_view)
-                        .map(|facts| {
-                            VerterHost::build_eval_script_source(
-                                &facts.raw_source,
-                                facts.cached_parse.as_deref(),
-                            )
-                        })
-                })
-            {
-                let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-                produce_macro_object_shapes(
-                    canonical,
-                    &snapshot,
-                    &parts.resolved_macros,
-                    &eval_source,
-                    &mut evaluated_types,
-                    &mut query_engine,
+        let solver_audit = if registry_materialization == RegistryMaterialization::Full {
+            let owner_engine = resolver_host
+                .shared_owner_engine
+                .take()
+                .map(std::cell::RefCell::into_inner)
+                .unwrap_or_else(|| {
+                    verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                        &owner_solver_host,
+                    )
+                });
+            let mut query_engine =
+                crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+                    self,
+                    store_view,
+                    owner_engine,
                 );
-                if !evaluated_types.is_empty() {
-                    enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
-                    parts.evaluated_types = Some(evaluated_types);
+            self.append_component_meta_registry_entries(
+                canonical,
+                &snapshot,
+                parts.evaluated_types.as_ref(),
+                &mut parts.resolved_type_registry,
+                &mut parts.resolved_type_registry_meta,
+                &mut parts.tracked_dependencies,
+                store_view,
+                &mut query_engine,
+            );
+            if mode == ResolverMode::Expanded {
+                if let Some(eval_source) = captured
+                    .and_then(|captured| captured.owner_eval_source.as_deref())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        self.ensure_module_facts_in_view(canonical, store_view)
+                            .map(|facts| {
+                                VerterHost::build_eval_script_source(
+                                    &facts.raw_source,
+                                    facts.cached_parse.as_deref(),
+                                )
+                            })
+                    })
+                {
+                    let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+                    produce_macro_object_shapes(
+                        canonical,
+                        &snapshot,
+                        &parts.resolved_macros,
+                        &eval_source,
+                        &mut evaluated_types,
+                        &mut query_engine,
+                    );
+                    if !evaluated_types.is_empty() {
+                        enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
+                        parts.evaluated_types = Some(evaluated_types);
+                    }
                 }
             }
-        }
-        audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
-        {
-            let ts = query_engine.trace_summary();
-            crate::host_manage::component_meta_trace_event!(
-                "solver_trace_summary",
-                format!(
-                    "owner={} steps={} solves={} refs={} host_lookups={} indexed_access={} unions={} intersections={} objects={} conditionals={} mapped={} inst_cache_hits={} inst_cache_misses={} proj_cache_hits={} arena_high_water={} scoped_cache={}",
-                    canonical,
-                    query_engine.total_steps(),
-                    query_engine.solve_count(),
-                    ts.resolve_ref_count,
-                    ts.resolve_ref_host_lookups,
-                    ts.resolve_indexed_access_count,
-                    ts.resolve_union_count,
-                    ts.resolve_intersection_count,
-                    ts.resolve_object_count,
-                    ts.resolve_conditional_count,
-                    ts.resolve_mapped_count,
-                    ts.instantiation_cache_hits,
-                    ts.instantiation_cache_misses,
-                    ts.projection_cache_hits,
-                    ts.arena_high_water,
-                    query_engine.scoped_cache_len(),
-                ),
-            );
-        }
-        if query_engine.has_fuse_tripped() {
-            for trip in query_engine.fuse_trips() {
+            {
+                let ts = query_engine.trace_summary();
                 crate::host_manage::component_meta_trace_event!(
-                    "fuse_tripped",
+                    "solver_trace_summary",
                     format!(
-                        "owner={} fuse={} budget={} actual={}",
-                        canonical, trip.fuse_name, trip.budget, trip.actual,
+                        "owner={} steps={} solves={} refs={} host_lookups={} indexed_access={} unions={} intersections={} objects={} conditionals={} mapped={} inst_cache_hits={} inst_cache_misses={} proj_cache_hits={} arena_high_water={} scoped_cache={}",
+                        canonical,
+                        query_engine.total_steps(),
+                        query_engine.solve_count(),
+                        ts.resolve_ref_count,
+                        ts.resolve_ref_host_lookups,
+                        ts.resolve_indexed_access_count,
+                        ts.resolve_union_count,
+                        ts.resolve_intersection_count,
+                        ts.resolve_object_count,
+                        ts.resolve_conditional_count,
+                        ts.resolve_mapped_count,
+                        ts.instantiation_cache_hits,
+                        ts.instantiation_cache_misses,
+                        ts.projection_cache_hits,
+                        ts.arena_high_water,
+                        query_engine.scoped_cache_len(),
                     ),
                 );
             }
-        }
-        let solver_audit = crate::component_meta_audit::RustSolverAudit {
-            total_resolve_steps: query_engine.total_steps(),
-            solve_count: query_engine.solve_count(),
+            if query_engine.has_fuse_tripped() {
+                for trip in query_engine.fuse_trips() {
+                    crate::host_manage::component_meta_trace_event!(
+                        "fuse_tripped",
+                        format!(
+                            "owner={} fuse={} budget={} actual={}",
+                            canonical, trip.fuse_name, trip.budget, trip.actual,
+                        ),
+                    );
+                }
+            }
+            crate::component_meta_audit::RustSolverAudit {
+                total_resolve_steps: query_engine.total_steps(),
+                solve_count: query_engine.solve_count(),
+            }
+        } else {
+            crate::host_manage::component_meta_trace_event!(
+                "solver_trace_summary",
+                format!(
+                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 proj_cache_hits=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped",
+                    canonical,
+                ),
+            );
+            crate::component_meta_audit::RustSolverAudit::default()
         };
+        audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         let store_merge_started = audit_enabled.then(Instant::now);
         let final_store_view = self.resolver_store_view();
         parts.fact_versions = self.current_dependency_fact_versions_in_view(
@@ -1680,6 +1926,16 @@ impl VerterHost {
                     )
             }) {
                 return raw_body.cloned();
+            }
+            if let Some(raw) = raw_body.filter(|expr| {
+                component_meta_registry_has_non_object_top_level_surface(expr)
+                    && component_meta_registry_prefers_structural_materialization(expr)
+            }) {
+                return Some(materialize_component_meta_registry_structural_expr(
+                    raw,
+                    scope_canonical_id,
+                    query_engine,
+                ));
             }
             query_engine
                 .project_type_surface_expr(scope_canonical_id, symbol_name)
@@ -1851,9 +2107,10 @@ impl VerterHost {
                 }
             }
         }
+        let debug_enabled = crate::host_manage::component_meta_debug_enabled();
+        let import_refresh_started = debug_enabled.then(std::time::Instant::now);
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
-            let _entry_started =
-                crate::host_manage::component_meta_debug_enabled().then(std::time::Instant::now);
+            let _entry_started = debug_enabled.then(std::time::Instant::now);
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
             };
@@ -1866,6 +2123,13 @@ impl VerterHost {
                 owner_canonical,
                 declaration_source.as_str(),
             );
+            if should_skip_imported_registry_seed_refresh(
+                owner_canonical,
+                declaration_source.as_str(),
+                &entry.type_expr,
+            ) {
+                continue;
+            }
             let requested_exported_name = if meta.declaration.resolved_name.is_empty() {
                 entry.name.as_str()
             } else {
@@ -1917,6 +2181,9 @@ impl VerterHost {
                 }
             }
         }
+        let import_refresh_elapsed_ms = import_refresh_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
 
         let mut referenced_names: VecDeque<PendingComponentMetaRegistryRef> = VecDeque::new();
         let mut queued_names = rustc_hash::FxHashSet::default();
@@ -1924,6 +2191,7 @@ impl VerterHost {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
+        let public_field_collect_started = debug_enabled.then(std::time::Instant::now);
         if let Some(evaluated_types) = evaluated_types {
             for field in &evaluated_types.props {
                 collect_component_meta_registry_public_field_refs(
@@ -1965,12 +2233,28 @@ impl VerterHost {
                 );
             }
         }
+        let public_field_collect_elapsed_ms = public_field_collect_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        let seed_scan_started = debug_enabled.then(std::time::Instant::now);
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let source_hint = resolved_type_registry_meta
                 .get(index)
                 .map(|meta| meta.declaration.canonical_source.as_str());
-            let source_expr =
-                query_engine.owner_collection_expr(owner_canonical, entry.name.as_str());
+            if source_hint.is_some_and(|source| {
+                should_skip_imported_registry_seed_refresh(
+                    owner_canonical,
+                    source,
+                    &entry.type_expr,
+                )
+            }) {
+                continue;
+            }
+            let source_expr = source_hint
+                .filter(|source| source.is_empty() || *source == owner_canonical)
+                .and_then(|_| {
+                    query_engine.owner_collection_expr(owner_canonical, entry.name.as_str())
+                });
             collect_component_meta_registry_refs(
                 source_expr.as_ref().unwrap_or(&entry.type_expr),
                 &published_names,
@@ -1980,6 +2264,9 @@ impl VerterHost {
                 false,
             );
         }
+        let seed_scan_elapsed_ms = seed_scan_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
 
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
@@ -2186,7 +2473,7 @@ impl VerterHost {
                     type_name.as_str(),
                     &pending_route,
                     owner_collection_expr.as_ref(),
-                    false,
+                    true,
                 )
             });
             if materialized.is_some() && declaration.canonical_source.is_empty() {
@@ -2249,8 +2536,10 @@ impl VerterHost {
                 _loop_materializations,
                 published_names.len(),
                 _loop_start.elapsed().as_secs_f64() * 1000.0,
-            ));
+                ));
         }
+        let loop_elapsed_ms = _loop_start.elapsed().as_secs_f64() * 1000.0;
+        let enrich_started = debug_enabled.then(std::time::Instant::now);
 
         // Registry enrichment: materialize imported type expressions through
         // the shared request-scoped engine so projection/instantiation caches
@@ -2304,6 +2593,20 @@ impl VerterHost {
                     ));
                 }
             }
+        }
+        let enrich_elapsed_ms = enrich_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or_default();
+        if debug_enabled {
+            crate::host_manage::component_meta_debug(format!(
+                "PROFILE_PHASES owner={} import_refresh_ms={:.1} public_field_collect_ms={:.1} seed_scan_ms={:.1} loop_ms={:.1} enrich_ms={:.1}",
+                owner_canonical,
+                import_refresh_elapsed_ms,
+                public_field_collect_elapsed_ms,
+                seed_scan_elapsed_ms,
+                loop_elapsed_ms,
+                enrich_elapsed_ms,
+            ));
         }
     }
 
@@ -2730,8 +3033,10 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_expr_references_name,
     component_meta_registry_has_explicit_object_surface,
     component_meta_registry_has_non_object_top_level_surface,
-    component_meta_registry_raw_member_path_surface, owner_component_meta_registry_import_root,
-    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
+    component_meta_registry_public_indexed_access_route,
+    component_meta_registry_public_utility_route, component_meta_registry_raw_member_path_surface,
+    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
+    PendingComponentMetaRegistryRef,
 };
 
 fn materialize_component_meta_member_surface_expr(
@@ -2748,6 +3053,299 @@ fn materialize_component_meta_member_surface_expr(
         nested_surface,
         &mut active,
     )
+}
+
+fn component_meta_registry_prefers_structural_materialization(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(_)
+        | TypeExpr::Array { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Union(_)
+        | TypeExpr::Intersection(_)
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TemplateLiteral { .. }
+        | TypeExpr::Function(_)
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_) => true,
+        TypeExpr::Ref { .. }
+        | TypeExpr::Object(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn materialize_component_meta_registry_structural_expr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    fn inner(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        scope_canonical_id: &str,
+        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        if !active.insert(expr.clone()) {
+            return expr.clone();
+        }
+
+        let result = if let Some((root_symbol, route)) =
+            component_meta_registry_public_utility_route(expr)
+                .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        {
+            engine
+                .project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
+                .or_else(|| {
+                    let declaration =
+                        engine.resolve_type_declaration(scope_canonical_id, &root_symbol);
+                    (!declaration.canonical_source.is_empty())
+                        .then(|| {
+                            engine.project_route_surface_expr(
+                                declaration.canonical_source.as_str(),
+                                if declaration.resolved_name.is_empty() {
+                                    root_symbol.as_str()
+                                } else {
+                                    declaration.resolved_name.as_str()
+                                },
+                                &route,
+                            )
+                        })
+                        .flatten()
+                })
+                .unwrap_or_else(|| expr.clone())
+        } else {
+            match expr {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if type_arguments.is_empty() => {
+                    if component_meta_ref_resolves_to_package(scope_canonical_id, name, engine) {
+                        expr.clone()
+                    } else {
+                        engine
+                            .project_type_surface_expr(scope_canonical_id, name)
+                            .or_else(|| {
+                                let declaration =
+                                    engine.resolve_type_declaration(scope_canonical_id, name);
+                                (!declaration.canonical_source.is_empty())
+                                    .then(|| {
+                                        engine.project_type_surface_expr(
+                                            declaration.canonical_source.as_str(),
+                                            if declaration.resolved_name.is_empty() {
+                                                name
+                                            } else {
+                                                declaration.resolved_name.as_str()
+                                            },
+                                        )
+                                    })
+                                    .flatten()
+                            })
+                            .unwrap_or_else(|| expr.clone())
+                    }
+                }
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => TypeExpr::Ref {
+                    name: name.clone(),
+                    type_arguments: Arc::from(
+                        type_arguments
+                            .iter()
+                            .map(|arg| inner(arg, scope_canonical_id, engine, active))
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+                TypeExpr::Parenthesized(inner_expr) => TypeExpr::Parenthesized(Arc::new(inner(
+                    inner_expr,
+                    scope_canonical_id,
+                    engine,
+                    active,
+                ))),
+                TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                    element: Arc::new(inner(element, scope_canonical_id, engine, active)),
+                    readonly: *readonly,
+                },
+                TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+                    elements: Arc::from(
+                        elements
+                            .iter()
+                            .map(
+                                |element| verter_semantic::analysis::type_expr::TupleElement {
+                                    label: element.label.clone(),
+                                    ty: inner(&element.ty, scope_canonical_id, engine, active),
+                                    optional: element.optional,
+                                    rest: element.rest,
+                                },
+                            )
+                            .collect::<Vec<_>>(),
+                    ),
+                    readonly: *readonly,
+                },
+                TypeExpr::Union(types) => TypeExpr::Union(Arc::from(
+                    types
+                        .iter()
+                        .map(|ty| inner(ty, scope_canonical_id, engine, active))
+                        .collect::<Vec<_>>(),
+                )),
+                TypeExpr::Intersection(types) => TypeExpr::Intersection(Arc::from(
+                    types
+                        .iter()
+                        .map(|ty| inner(ty, scope_canonical_id, engine, active))
+                        .collect::<Vec<_>>(),
+                )),
+                TypeExpr::Conditional {
+                    check,
+                    extends,
+                    true_type,
+                    false_type,
+                } => TypeExpr::Conditional {
+                    check: Arc::new(inner(check, scope_canonical_id, engine, active)),
+                    extends: Arc::new(inner(extends, scope_canonical_id, engine, active)),
+                    true_type: Arc::new(inner(true_type, scope_canonical_id, engine, active)),
+                    false_type: Arc::new(inner(false_type, scope_canonical_id, engine, active)),
+                },
+                TypeExpr::Mapped {
+                    parameter,
+                    source,
+                    optional,
+                    readonly,
+                    name_type,
+                    value,
+                } => TypeExpr::Mapped {
+                    parameter: parameter.clone(),
+                    source: Arc::new(inner(source, scope_canonical_id, engine, active)),
+                    optional: *optional,
+                    readonly: *readonly,
+                    name_type: name_type.as_deref().map(|name_type| {
+                        Arc::new(inner(name_type, scope_canonical_id, engine, active))
+                    }),
+                    value: Arc::new(inner(value, scope_canonical_id, engine, active)),
+                },
+                TypeExpr::TemplateLiteral {
+                    quasis,
+                    expressions,
+                } => TypeExpr::TemplateLiteral {
+                    quasis: quasis.clone(),
+                    expressions: Arc::from(
+                        expressions
+                            .iter()
+                            .map(|expr| inner(expr, scope_canonical_id, engine, active))
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+                TypeExpr::Function(function) => {
+                    let mut function = function.as_ref().clone();
+                    for parameter in &mut function.parameters {
+                        parameter.ty = inner(&parameter.ty, scope_canonical_id, engine, active);
+                    }
+                    if let Some(return_type) = function.return_type.as_mut() {
+                        *return_type =
+                            Arc::new(inner(return_type, scope_canonical_id, engine, active));
+                    }
+                    for type_parameter in &mut function.type_parameters {
+                        if let Some(constraint) = type_parameter.constraint.as_mut() {
+                            *constraint =
+                                Arc::new(inner(constraint, scope_canonical_id, engine, active));
+                        }
+                        if let Some(default) = type_parameter.default.as_mut() {
+                            *default = Arc::new(inner(default, scope_canonical_id, engine, active));
+                        }
+                    }
+                    TypeExpr::Function(Arc::new(function))
+                }
+                TypeExpr::KeyOf(inner_expr) => TypeExpr::KeyOf(Arc::new(inner(
+                    inner_expr,
+                    scope_canonical_id,
+                    engine,
+                    active,
+                ))),
+                TypeExpr::Rest(inner_expr) => TypeExpr::Rest(Arc::new(inner(
+                    inner_expr,
+                    scope_canonical_id,
+                    engine,
+                    active,
+                ))),
+                TypeExpr::Object(object) => {
+                    let mut object = object.as_ref().clone();
+                    for member in &mut object.properties {
+                        match member {
+                            ObjectMember::Property(property) => {
+                                property.ty =
+                                    inner(&property.ty, scope_canonical_id, engine, active);
+                            }
+                            ObjectMember::IndexSignature(signature) => {
+                                signature.key_type =
+                                    inner(&signature.key_type, scope_canonical_id, engine, active);
+                                signature.value_type = inner(
+                                    &signature.value_type,
+                                    scope_canonical_id,
+                                    engine,
+                                    active,
+                                );
+                            }
+                            ObjectMember::CallSignature(function)
+                            | ObjectMember::ConstructSignature(function) => {
+                                for parameter in &mut function.parameters {
+                                    parameter.ty =
+                                        inner(&parameter.ty, scope_canonical_id, engine, active);
+                                }
+                                if let Some(return_type) = function.return_type.as_mut() {
+                                    *return_type = Arc::new(inner(
+                                        return_type,
+                                        scope_canonical_id,
+                                        engine,
+                                        active,
+                                    ));
+                                }
+                            }
+                            ObjectMember::Method(method) => {
+                                for parameter in &mut method.function.parameters {
+                                    parameter.ty =
+                                        inner(&parameter.ty, scope_canonical_id, engine, active);
+                                }
+                                if let Some(return_type) = method.function.return_type.as_mut() {
+                                    *return_type = Arc::new(inner(
+                                        return_type,
+                                        scope_canonical_id,
+                                        engine,
+                                        active,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    TypeExpr::Object(Arc::new(object))
+                }
+                TypeExpr::IndexedAccess { .. }
+                | TypeExpr::Primitive(_)
+                | TypeExpr::Literal(_)
+                | TypeExpr::Unknown { .. }
+                | TypeExpr::RecursiveRef { .. }
+                | TypeExpr::TypeOf(_)
+                | TypeExpr::TypeParameter(_)
+                | TypeExpr::Infer { .. } => expr.clone(),
+            }
+        };
+
+        active.remove(expr);
+        result
+    }
+
+    let mut active = rustc_hash::FxHashSet::default();
+    inner(expr, scope_canonical_id, engine, &mut active)
 }
 
 fn preserve_package_backed_symbolic_refs(
@@ -3506,6 +4104,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         owner_canonical: &str,
         snapshot: &Self::Snapshot,
         eval_context: Option<&Self::EvalContext>,
+        purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> ComponentMetaEvalOutputs {
         let eval_started = component_meta_debug_enabled().then(Instant::now);
         if component_meta_debug_enabled() {
@@ -3556,6 +4155,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                         snapshot,
                         &eval_source,
                         self.store_view,
+                        purpose,
                         Some(&mut *engine),
                     )
             })
@@ -3566,6 +4166,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                     snapshot,
                     eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
                     self.store_view,
+                    purpose,
                 )
         };
         if let Some(compute_eval_start) = compute_eval_start {

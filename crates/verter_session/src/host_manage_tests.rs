@@ -1845,7 +1845,7 @@ import { unused } from './unused'
         .get_analysis_snapshot_internal("/src/App.vue", None)
         .expect("analysis snapshot should exist");
     let env = host
-        .build_fallthrough_eval_env_lightweight_in_view("/src/App.vue", &snapshot, None, None)
+        .build_fallthrough_eval_env_lightweight_in_view("/src/App.vue", &snapshot, None, None, None)
         .expect("fallthrough owner env should build");
 
     assert!(
@@ -1855,6 +1855,115 @@ import { unused } from './unused'
     assert!(
         !env.value_symbols.contains_key("unused"),
         "unused runtime imports should stay out of the fallthrough owner env"
+    );
+}
+
+#[test]
+fn build_fallthrough_eval_env_skips_nested_non_root_component_bindings() {
+    let host = make_host();
+    upsert_non_sfc(&host, "/src/used.ts", "export const used = 'used'");
+    upsert_non_sfc(
+        &host,
+        "/src/unused-nested.ts",
+        "export const unusedNested = 'unused-nested'",
+    );
+    upsert_vue(
+        &host,
+        "/src/Child.vue",
+        r#"<script setup lang="ts">
+defineProps<{ label?: string }>()
+</script>
+<template><span /></template>"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import { used } from './used'
+import { unusedNested } from './unused-nested'
+import Child from './Child.vue'
+</script>
+<template>
+  <div :title="used">
+    <Child :label="unusedNested" />
+  </div>
+</template>"#,
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            exact_dependency("./used", "/src/used.ts"),
+            exact_dependency("./unused-nested", "/src/unused-nested.ts"),
+            exact_dependency("./Child.vue", "/src/Child.vue"),
+        ],
+    );
+
+    let snapshot = host
+        .get_analysis_snapshot_internal("/src/App.vue", None)
+        .expect("analysis snapshot should exist");
+    let mut visiting = rustc_hash::FxHashSet::default();
+    let resolved = host
+        .compute_component_meta_state(
+            "/src/App.vue",
+            crate::types::ResolverMode::Expanded,
+            host.get_whole_hash("/src/App.vue")
+                .expect("whole hash should exist for App.vue"),
+            None,
+        )
+        .expect("resolved meta should exist");
+    let resolution = host
+        .compute_fallthrough_surface_from_resolved_state(
+            "/src/App.vue",
+            &resolved,
+            None,
+            &mut visiting,
+            None,
+        )
+        .expect("fallthrough should resolve");
+    assert!(
+        matches!(
+            resolution.fallthrough_surface,
+            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
+        ),
+        "sanity check: single native root should still produce a fallthrough branch"
+    );
+
+    let base_meta = verter_semantic::analysis::component_meta::extract_component_meta(
+        verter_semantic::analysis::component_meta::ComponentMetaInput {
+            macros: &resolved.snapshot.macros,
+            bindings: &resolved.snapshot.bindings,
+            imports: &resolved.snapshot.imports,
+            template: resolved.snapshot.template.as_deref(),
+            options_api: resolved.snapshot.options_api.as_ref(),
+            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+                resolved.snapshot.script_flags,
+            ),
+            styles: &resolved.snapshot.styles,
+            vue_api_calls: &resolved.snapshot.vue_api_calls,
+            store_usages: &resolved.snapshot.store_usages,
+            resolved_macros: &[],
+            resolved_type_registry: &[],
+            evaluated_types: None,
+            file_path: "/src/App.vue",
+        },
+    );
+    let env = host
+        .build_fallthrough_eval_env_lightweight_in_view(
+            "/src/App.vue",
+            &snapshot,
+            Some(&base_meta.root_reachability),
+            None,
+            None,
+        )
+        .expect("fallthrough owner env should build");
+
+    assert!(
+        env.value_symbols.contains_key("used"),
+        "root-branch runtime bindings should still be materialized"
+    );
+    assert!(
+        !env.value_symbols.contains_key("unusedNested"),
+        "nested non-root component prop bindings should stay out of the root fallthrough env"
     );
 }
 
@@ -2010,6 +2119,57 @@ import Button from './components'
         !default_props.contains("disabled"),
         "default barrel import should not route through the named Button export, got {:?}",
         default_props
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_fallthrough_surface_reuses_parent_snapshot_for_child_binding_lookup() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Parent.vue",
+        r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template>
+  <Child class="root-child" />
+</template>"#,
+    );
+    ws.inject_file(
+        "/src/Child.vue",
+        r#"<script setup lang="ts">
+defineProps<{ label?: string }>()
+</script>
+<template><button /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Parent.vue"),
+        "parent should load from the workspace",
+    );
+    host.set_import_dependencies(
+        "/src/Parent.vue",
+        vec![exact_dependency("./Child.vue", "/src/Child.vue")],
+    );
+
+    ws.reset_reads();
+    let resolution = host.resolve_fallthrough_surface("/src/Parent.vue");
+
+    assert!(
+        resolution.is_some(),
+        "fallthrough should resolve through the imported child root",
+    );
+    assert!(
+        ws.read_count("/src/Parent.vue") <= 1,
+        "fallthrough should reuse the parent snapshot while resolving child binding identity instead of rereading the parent source; saw {} reads",
+        ws.read_count("/src/Parent.vue"),
     );
 }
 
@@ -5910,6 +6070,53 @@ fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_loca
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn resolve_imported_type_root_keeps_local_export_import_edges_lazy() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+import type { A } from './a'
+import type { B } from './b'
+
+export interface Props {
+  label: string
+}
+"#,
+    );
+    ws.inject_file("/src/a.ts", "export interface A { value: string }\n");
+    ws.inject_file("/src/b.ts", "export interface B { value: number }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    ws.reset_resolves();
+
+    let root = host.resolve_imported_type_root_in_view("/src/types.ts", "Props", None);
+
+    assert_eq!(
+        root,
+        ("/src/types.ts".to_string(), "Props".to_string()),
+        "local exported symbols should resolve to their defining file without leaving the file",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types.ts", "./a"),
+        0,
+        "imported-root proof for a local export must not resolve unrelated import edges",
+    );
+    assert_eq!(
+        ws.resolve_count("/src/types.ts", "./b"),
+        0,
+        "imported-root proof for a local export must not resolve later unrelated import edges",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -7074,6 +7281,196 @@ export interface UnusedProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn resolve_component_meta_macro_elements_keeps_leaf_object_prop_imports_symbolic() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+import type { AvatarProps } from './Avatar.vue'
+import type { IconProps } from './Icon.vue'
+
+export interface Props {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+  alt?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Icon.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+  class?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Avatar.vue", "/src/Avatar.vue"),
+            exact_dependency("./Icon.vue", "/src/Icon.vue"),
+        ],
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    ws.reset_reads();
+    let resolved = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "Props",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved.is_some(),
+        "component-meta macro resolution should still resolve Props",
+    );
+    assert_eq!(
+        ws.read_count("/src/Avatar.vue"),
+        0,
+        "whole-route macro resolution should keep direct imported object props symbolic instead of materializing their files",
+    );
+    assert!(
+        ws.read_count("/src/Icon.vue") > 0,
+        "actionable indexed member routes should still resolve the imported file they actually need",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/Avatar.vue")
+            .is_none(),
+        "symbolic imported object props should stay off ModuleFactsDb",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn required_import_routes_for_exported_whole_route_preserves_member_tail() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/types.ts",
+        r#"
+import type { AvatarProps } from './Avatar.vue'
+import type { IconProps } from './Icon.vue'
+
+export interface Props {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+}
+"#,
+    );
+    ws.inject_file(
+        "/src/Avatar.vue",
+        r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/Icon.vue",
+        r#"<script lang="ts">
+export interface IconProps {
+  name?: string
+  class?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/types.ts"),
+        "types should load from the workspace",
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![
+            exact_dependency("./Avatar.vue", "/src/Avatar.vue"),
+            exact_dependency("./Icon.vue", "/src/Icon.vue"),
+        ],
+    );
+
+    let view = host.resolver_store_view();
+    let routes = host.required_import_routes_for_exported_route_in_view(
+        "/src/types.ts",
+        "Props",
+        &crate::resolver_core::RouteDemand::Whole,
+        Some(&view),
+    );
+
+    assert_eq!(
+        routes.len(),
+        1,
+        "whole-route imported closure should only include actionable indexed-member refs",
+    );
+    assert_eq!(
+        routes.get("IconProps"),
+        Some(&crate::resolver_core::RouteDemand::MemberPath(vec![
+            "name".to_string()
+        ])),
+        "whole-route imported closure should preserve the requested member tail instead of widening to Whole",
+    );
+    assert!(
+        !routes.contains_key("AvatarProps"),
+        "direct imported object props should stay symbolic on whole-route closure",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn resolve_imported_type_root_prefers_matching_wildcard_stem_before_unrelated_earlier_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -7152,6 +7549,14 @@ export interface UnusedProps {
         ws.read_count("/src/Unused.vue"),
         0,
         "wildcard route proof should stop after the matching child without touching later unrelated siblings",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/src/types.ts")
+            .is_none(),
+        "imported-root route proof should keep the provider barrel shallow-only and off ModuleFactsDb",
     );
 }
 

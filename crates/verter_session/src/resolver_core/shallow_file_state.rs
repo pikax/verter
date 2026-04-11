@@ -165,6 +165,13 @@ pub struct ExternalSymbolRef {
     pub route: RouteDemand,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WholeRouteContext {
+    Root,
+    CallableParam,
+    LeafProperty,
+}
+
 // ---------------------------------------------------------------------------
 // Budget and failure contract (Phase 1.5)
 // ---------------------------------------------------------------------------
@@ -720,7 +727,7 @@ impl ShallowFileState {
         budget: usize,
     ) -> LocalClosureResult {
         match route {
-            RouteDemand::Whole => self.local_closure(symbol_name, budget),
+            RouteDemand::Whole => self.whole_route_closure(symbol_name, budget),
             RouteDemand::MemberPath(path) if !path.is_empty() => {
                 self.member_path_route_closure(symbol_name, path, budget)
             }
@@ -973,6 +980,682 @@ impl ShallowFileState {
             local_symbols_used: local_used,
             unresolved_external: external_refs,
             steps,
+        }
+    }
+
+    fn whole_route_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
+        let Some(sym) = self.symbols.get(symbol_name) else {
+            return self.local_closure(symbol_name, budget);
+        };
+
+        let mut visited = FxHashSet::default();
+        visited.insert(symbol_name.to_string());
+        let mut local_used = vec![symbol_name.to_string()];
+        let mut external_refs = Vec::new();
+        let mut steps = 1u64;
+
+        if !self.collect_whole_route_refs(
+            &sym.raw_body,
+            WholeRouteContext::Root,
+            &mut visited,
+            &mut local_used,
+            &mut external_refs,
+            &mut steps,
+            budget,
+        ) {
+            return LocalClosureResult {
+                status: LocalClosureStatus::BudgetExceeded,
+                local_symbols_used: local_used,
+                unresolved_external: external_refs,
+                steps,
+            };
+        }
+
+        let status = if external_refs.is_empty() {
+            LocalClosureStatus::Resolved
+        } else {
+            LocalClosureStatus::ResolvedWithExternalDeps
+        };
+
+        LocalClosureResult {
+            status,
+            local_symbols_used: local_used,
+            unresolved_external: external_refs,
+            steps,
+        }
+    }
+
+    fn collect_whole_route_refs(
+        &self,
+        expr: &TypeExpr,
+        context: WholeRouteContext,
+        visited: &mut FxHashSet<String>,
+        local_used: &mut Vec<String>,
+        external_refs: &mut Vec<ExternalSymbolRef>,
+        steps: &mut u64,
+        budget: usize,
+    ) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => self
+                .collect_whole_route_refs(
+                    inner,
+                    context,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                ),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                for inner in types.iter() {
+                    if !self.collect_whole_route_refs(
+                        inner,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeExpr::Array { element, .. } => self.collect_whole_route_refs(
+                element,
+                context,
+                visited,
+                local_used,
+                external_refs,
+                steps,
+                budget,
+            ),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    if !self.collect_whole_route_refs(
+                        &element.ty,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeExpr::Object(obj) => {
+                if matches!(context, WholeRouteContext::LeafProperty) {
+                    return true;
+                }
+
+                for member in &obj.properties {
+                    let status = match member {
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => self
+                            .collect_whole_route_refs(
+                                &prop.ty,
+                                WholeRouteContext::LeafProperty,
+                                visited,
+                                local_used,
+                                external_refs,
+                                steps,
+                                budget,
+                            ),
+                        verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(sig) => {
+                            self.collect_whole_route_refs(
+                                &sig.value_type,
+                                WholeRouteContext::LeafProperty,
+                                visited,
+                                local_used,
+                                external_refs,
+                                steps,
+                                budget,
+                            )
+                        }
+                        verter_semantic::analysis::type_expr::ObjectMember::CallSignature(func)
+                        | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                            func,
+                        ) => self.collect_whole_route_function_refs(
+                            func,
+                            visited,
+                            local_used,
+                            external_refs,
+                            steps,
+                            budget,
+                        ),
+                        verter_semantic::analysis::type_expr::ObjectMember::Method(method) => self
+                            .collect_whole_route_function_refs(
+                                &method.function,
+                                visited,
+                                local_used,
+                                external_refs,
+                                steps,
+                                budget,
+                            ),
+                    };
+                    if !status {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeExpr::Function(func) => {
+                if matches!(context, WholeRouteContext::LeafProperty) {
+                    return true;
+                }
+                self.collect_whole_route_function_refs(
+                    func,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                )
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                let symbol_name = name.as_ref();
+                if let Some(target) = self.import_targets.get(symbol_name) {
+                    if matches!(
+                        context,
+                        WholeRouteContext::Root | WholeRouteContext::CallableParam
+                    ) {
+                        upsert_external_ref(
+                            external_refs,
+                            ExternalSymbolRef {
+                                local_name: symbol_name.to_string(),
+                                source_specifier: target.source_specifier.clone(),
+                                imported_name: target.imported_name.clone(),
+                                canonical_id: target.canonical_id.clone(),
+                                route: RouteDemand::Whole,
+                            },
+                        );
+                    }
+                    return true;
+                }
+
+                if let Some(route) = self.utility_route_for_ref(symbol_name, type_arguments) {
+                    return self.follow_routed_expr(
+                        &type_arguments[0],
+                        route,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    );
+                }
+
+                if matches!(
+                    symbol_name,
+                    "Partial" | "Required" | "Readonly" | "NonNullable"
+                ) && !type_arguments.is_empty()
+                    && !matches!(context, WholeRouteContext::LeafProperty)
+                {
+                    return self.collect_whole_route_refs(
+                        &type_arguments[0],
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    );
+                }
+
+                if self.symbols.contains_key(symbol_name) {
+                    return self.follow_local_symbol_precise(
+                        symbol_name,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    );
+                }
+
+                true
+            }
+            TypeExpr::IndexedAccess { .. } => {
+                let Some((base_expr, route)) = self.extract_indexed_access_route(expr) else {
+                    return true;
+                };
+                self.follow_routed_expr(
+                    base_expr,
+                    route,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                )
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                for inner in [check, extends, true_type, false_type] {
+                    if !self.collect_whole_route_refs(
+                        inner,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                if !self.collect_whole_route_refs(
+                    source,
+                    context,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                ) {
+                    return false;
+                }
+                if !self.collect_whole_route_refs(
+                    value,
+                    context,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                ) {
+                    return false;
+                }
+                if let Some(name_type) = name_type.as_deref() {
+                    return self.collect_whole_route_refs(
+                        name_type,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    );
+                }
+                true
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for inner in expressions.iter() {
+                    if !self.collect_whole_route_refs(
+                        inner,
+                        context,
+                        visited,
+                        local_used,
+                        external_refs,
+                        steps,
+                        budget,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            TypeExpr::TypeOf(value_ref) => {
+                if let Some(root) = value_ref.path.first() {
+                    if let Some(target) = self.import_targets.get(root.as_str()) {
+                        if matches!(
+                            context,
+                            WholeRouteContext::Root | WholeRouteContext::CallableParam
+                        ) {
+                            upsert_external_ref(
+                                external_refs,
+                                ExternalSymbolRef {
+                                    local_name: root.clone(),
+                                    source_specifier: target.source_specifier.clone(),
+                                    imported_name: target.imported_name.clone(),
+                                    canonical_id: target.canonical_id.clone(),
+                                    route: RouteDemand::Whole,
+                                },
+                            );
+                        }
+                    }
+                }
+                true
+            }
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Unknown { .. } => true,
+        }
+    }
+
+    fn collect_whole_route_function_refs(
+        &self,
+        func: &verter_semantic::analysis::type_expr::FunctionExpr,
+        visited: &mut FxHashSet<String>,
+        local_used: &mut Vec<String>,
+        external_refs: &mut Vec<ExternalSymbolRef>,
+        steps: &mut u64,
+        budget: usize,
+    ) -> bool {
+        for param in &func.parameters {
+            if !self.collect_whole_route_refs(
+                &param.ty,
+                WholeRouteContext::CallableParam,
+                visited,
+                local_used,
+                external_refs,
+                steps,
+                budget,
+            ) {
+                return false;
+            }
+        }
+        for type_param in &func.type_parameters {
+            if let Some(constraint) = type_param.constraint.as_deref() {
+                if !self.collect_whole_route_refs(
+                    constraint,
+                    WholeRouteContext::CallableParam,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                ) {
+                    return false;
+                }
+            }
+            if let Some(default) = type_param.default.as_deref() {
+                if !self.collect_whole_route_refs(
+                    default,
+                    WholeRouteContext::CallableParam,
+                    visited,
+                    local_used,
+                    external_refs,
+                    steps,
+                    budget,
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn follow_local_symbol_precise(
+        &self,
+        symbol_name: &str,
+        context: WholeRouteContext,
+        visited: &mut FxHashSet<String>,
+        local_used: &mut Vec<String>,
+        external_refs: &mut Vec<ExternalSymbolRef>,
+        steps: &mut u64,
+        budget: usize,
+    ) -> bool {
+        if !visited.insert(symbol_name.to_string()) {
+            return true;
+        }
+        *steps += 1;
+        if *steps as usize >= budget {
+            return false;
+        }
+        let Some(sym) = self.symbols.get(symbol_name) else {
+            return true;
+        };
+        local_used.push(symbol_name.to_string());
+        self.collect_whole_route_refs(
+            &sym.raw_body,
+            context,
+            visited,
+            local_used,
+            external_refs,
+            steps,
+            budget,
+        )
+    }
+
+    fn follow_routed_expr(
+        &self,
+        expr: &TypeExpr,
+        route: RouteDemand,
+        visited: &mut FxHashSet<String>,
+        local_used: &mut Vec<String>,
+        external_refs: &mut Vec<ExternalSymbolRef>,
+        steps: &mut u64,
+        budget: usize,
+    ) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) => self.follow_routed_expr(
+                inner,
+                route,
+                visited,
+                local_used,
+                external_refs,
+                steps,
+                budget,
+            ),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                let symbol_name = name.as_ref();
+                if let Some(target) = self.import_targets.get(symbol_name) {
+                    upsert_external_ref(
+                        external_refs,
+                        ExternalSymbolRef {
+                            local_name: symbol_name.to_string(),
+                            source_specifier: target.source_specifier.clone(),
+                            imported_name: target.imported_name.clone(),
+                            canonical_id: target.canonical_id.clone(),
+                            route,
+                        },
+                    );
+                    return true;
+                }
+                if let Some(sym) = self.symbols.get(symbol_name) {
+                    match &route {
+                        RouteDemand::Whole => self.follow_local_symbol_precise(
+                            symbol_name,
+                            WholeRouteContext::Root,
+                            visited,
+                            local_used,
+                            external_refs,
+                            steps,
+                            budget,
+                        ),
+                        RouteDemand::MemberPath(path) => {
+                            let mut seed_names = Vec::new();
+                            let mut seed_external = Vec::new();
+                            let mut seen_symbols = FxHashSet::default();
+                            let found_path = collect_member_path_seed_names(
+                                self,
+                                &sym.raw_body,
+                                path,
+                                &mut seed_names,
+                                &mut seed_external,
+                                &mut seen_symbols,
+                            );
+                            if !found_path {
+                                return true;
+                            }
+                            for ext in seed_external {
+                                upsert_external_ref(external_refs, ext);
+                            }
+                            for seed_name in seed_names {
+                                if let Some(target) = self.import_targets.get(seed_name.as_str()) {
+                                    upsert_external_ref(
+                                        external_refs,
+                                        ExternalSymbolRef {
+                                            local_name: seed_name.clone(),
+                                            source_specifier: target.source_specifier.clone(),
+                                            imported_name: target.imported_name.clone(),
+                                            canonical_id: target.canonical_id.clone(),
+                                            route: RouteDemand::Whole,
+                                        },
+                                    );
+                                } else if self.symbols.contains_key(seed_name.as_str())
+                                    && !self.follow_local_symbol_precise(
+                                        seed_name.as_str(),
+                                        WholeRouteContext::Root,
+                                        visited,
+                                        local_used,
+                                        external_refs,
+                                        steps,
+                                        budget,
+                                    )
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        }
+                        RouteDemand::Pick(_) | RouteDemand::Omit(_) => {
+                            let closure = self.route_closure(symbol_name, &route, budget);
+                            if matches!(closure.status, LocalClosureStatus::BudgetExceeded) {
+                                return false;
+                            }
+                            for local_name in closure.local_symbols_used {
+                                if visited.insert(local_name.clone()) {
+                                    local_used.push(local_name);
+                                }
+                            }
+                            for ext in closure.unresolved_external {
+                                upsert_external_ref(external_refs, ext);
+                            }
+                            true
+                        }
+                    }
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        }
+    }
+
+    fn utility_route_for_ref(
+        &self,
+        name: &str,
+        type_arguments: &[TypeExpr],
+    ) -> Option<RouteDemand> {
+        if type_arguments.len() != 2 {
+            return None;
+        }
+        let mut seen_locals = FxHashSet::default();
+        let keys =
+            self.extract_string_literal_keys_from_type_expr(&type_arguments[1], &mut seen_locals);
+        if keys.is_empty() {
+            return None;
+        }
+        match name {
+            "Pick" => Some(RouteDemand::Pick(keys)),
+            "Omit" => Some(RouteDemand::Omit(keys)),
+            _ => None,
+        }
+    }
+
+    fn extract_string_literal_keys_from_type_expr(
+        &self,
+        expr: &TypeExpr,
+        seen_locals: &mut FxHashSet<String>,
+    ) -> Vec<String> {
+        match expr {
+            TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                value,
+            )) => {
+                vec![value.clone()]
+            }
+            TypeExpr::Union(types) => {
+                let mut keys = Vec::new();
+                for inner in types.iter() {
+                    keys.extend(
+                        self.extract_string_literal_keys_from_type_expr(inner, seen_locals),
+                    );
+                }
+                keys.sort();
+                keys.dedup();
+                keys
+            }
+            TypeExpr::Parenthesized(inner) => {
+                self.extract_string_literal_keys_from_type_expr(inner, seen_locals)
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() && self.symbols.contains_key(name.as_ref()) => {
+                if !seen_locals.insert(name.to_string()) {
+                    return Vec::new();
+                }
+                let keys = self
+                    .symbols
+                    .get(name.as_ref())
+                    .map(|symbol| {
+                        self.extract_string_literal_keys_from_type_expr(
+                            &symbol.raw_body,
+                            seen_locals,
+                        )
+                    })
+                    .unwrap_or_default();
+                seen_locals.remove(name.as_ref());
+                keys
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn extract_indexed_access_route<'a>(
+        &self,
+        expr: &'a TypeExpr,
+    ) -> Option<(&'a TypeExpr, RouteDemand)> {
+        let TypeExpr::IndexedAccess { object, index } = expr else {
+            return None;
+        };
+        let mut seen_locals = FxHashSet::default();
+        let keys = self.extract_string_literal_keys_from_type_expr(index, &mut seen_locals);
+        if keys.is_empty() {
+            return None;
+        }
+        let (base_expr, mut path) = self.extract_indexed_access_base(object.as_ref())?;
+        if keys.len() == 1 {
+            path.push(keys[0].clone());
+            Some((base_expr, RouteDemand::MemberPath(path)))
+        } else if path.is_empty() {
+            Some((base_expr, RouteDemand::Pick(keys)))
+        } else {
+            None
+        }
+    }
+
+    fn extract_indexed_access_base<'a>(
+        &self,
+        expr: &'a TypeExpr,
+    ) -> Option<(&'a TypeExpr, Vec<String>)> {
+        match expr {
+            TypeExpr::Parenthesized(inner) => self.extract_indexed_access_base(inner),
+            TypeExpr::IndexedAccess { .. } => {
+                let (base_expr, route) = self.extract_indexed_access_route(expr)?;
+                match route {
+                    RouteDemand::MemberPath(path) => Some((base_expr, path)),
+                    _ => None,
+                }
+            }
+            _ => Some((expr, Vec::new())),
         }
     }
 }
@@ -1952,7 +2635,7 @@ export interface Props {
             "Member('a') should NOT include Beta"
         );
 
-        // Route::Whole should include both
+        // Route::Whole should keep direct object prop refs symbolic
         let closure_whole = state.route_closure("Props", &RouteDemand::Whole, 500);
         let ext_names_whole: Vec<&str> = closure_whole
             .unresolved_external
@@ -1960,9 +2643,42 @@ export interface Props {
             .map(|e| e.imported_name.as_str())
             .collect();
         assert!(
-            ext_names_whole.contains(&"Alpha") && ext_names_whole.contains(&"Beta"),
-            "Whole should include both Alpha and Beta, got {:?}",
+            ext_names_whole.is_empty(),
+            "Whole route should keep direct imported object prop refs symbolic, got {:?}",
             ext_names_whole
+        );
+    }
+
+    #[test]
+    fn route_closure_whole_keeps_leaf_object_prop_imports_symbolic() {
+        let source = r#"
+import type { AvatarProps } from './avatar'
+import type { IconProps } from './icon'
+
+export interface Props {
+  icon?: IconProps['name']
+  avatar?: AvatarProps
+}
+"#;
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let closure = state.route_closure("Props", &RouteDemand::Whole, 500);
+        assert_eq!(
+            closure
+                .unresolved_external
+                .iter()
+                .map(|e| e.imported_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IconProps"],
+            "Whole route should keep direct imported object props symbolic while still following actionable member routes, got {:?}",
+            closure.unresolved_external
+        );
+        assert_eq!(
+            closure.unresolved_external[0].route,
+            RouteDemand::MemberPath(vec!["name".into()]),
+            "whole-route imported closure should preserve the member tail on the external route"
         );
     }
 

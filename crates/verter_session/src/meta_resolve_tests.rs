@@ -73,6 +73,321 @@ fn clear_legacy_cached_resolved_state(project: &MetaProject, canonical: &str, mo
 }
 
 #[test]
+fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
+    let object = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: "label".to_string(),
+                        ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                            verter_semantic::analysis::type_expr::PrimitiveName::String,
+                        ),
+                        optional: true,
+                        readonly: false,
+                    },
+                ),
+            ],
+        },
+    ));
+
+    assert!(
+        should_skip_imported_registry_seed_refresh("/src/App.vue", "/src/types.ts", &object),
+        "imported direct-macro seeds that already hold an explicit object surface should stay on that seeded surface instead of re-entering imported registry materialization",
+    );
+}
+
+#[test]
+fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable() {
+    let symbolic = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
+        object: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::named(
+            "Button",
+        )),
+        index: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::string_literal("variants")),
+    };
+
+    assert!(
+        !should_skip_imported_registry_seed_refresh("/src/App.vue", "/src/types.ts", &symbolic),
+        "symbolic imported seeds still need the imported-registry refresh path to materialize their requested route",
+    );
+}
+
+#[test]
+fn append_component_meta_registry_entries_skips_imported_refresh_for_explicit_seeded_object_surfaces(
+) {
+    let project = make_project();
+    project
+        .upsert_base("/src/types.ts", "export interface Props { label: string }")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types'
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        "/src/App.vue",
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    let props_entry = parts
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Props")
+        .expect("the direct imported macro root should seed the initial registry");
+    assert!(
+        matches!(
+            props_entry.type_expr,
+            verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+        ),
+        "the initial direct imported seed should already hold an explicit object surface"
+    );
+
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        host,
+        Some(&store_view),
+        owner_engine,
+    );
+
+    host.append_component_meta_registry_entries(
+        "/src/App.vue",
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.imported_registry_symbol_cache_len(),
+        0,
+        "explicit imported direct-macro seeds should reuse their seeded object surface instead of re-resolving the imported registry root during append",
+    );
+}
+
+#[test]
+fn materialize_component_meta_registry_structural_expr_preserves_conditional_wrapper_for_routed_branches(
+) {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface SingleValue { current: string }
+export interface RangeValue { current: number }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="R extends boolean">
+import type { SingleValue, RangeValue } from './types'
+
+type ModelValue<R extends boolean = false> =
+  R extends true ? RangeValue['current'] : SingleValue['current']
+
+defineProps<{ modelValue?: ModelValue<R> }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let owner_engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+        &owner_solver_host,
+    );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        host,
+        Some(&store_view),
+        owner_engine,
+    );
+    let raw_body = query_engine
+        .owner_collection_expr("/src/App.vue", "ModelValue")
+        .expect("owner helper body should be available from prepared declarations");
+
+    let materialized = materialize_component_meta_registry_structural_expr(
+        &raw_body,
+        "/src/App.vue",
+        &mut query_engine,
+    );
+
+    let verter_semantic::analysis::type_expr::TypeExpr::Conditional {
+        true_type,
+        false_type,
+        ..
+    } = materialized
+    else {
+        panic!("local routed helper should stay conditional instead of flattening the wrapper");
+    };
+
+    assert_eq!(
+        true_type,
+        Arc::new(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::Number,
+        )),
+        "the true branch should materialize through the routed imported member surface",
+    );
+    assert_eq!(
+        false_type,
+        Arc::new(verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::String,
+        )),
+        "the false branch should materialize through the routed imported member surface",
+    );
+}
+
+#[test]
+fn append_component_meta_registry_entries_keep_local_conditional_routed_aliases_structural() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface SingleValue { current: string }
+export interface RangeValue { current: number }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="R extends boolean">
+import type { SingleValue, RangeValue } from './types'
+
+type ModelValue<R extends boolean = false> =
+  R extends true ? RangeValue['current'] : SingleValue['current']
+
+defineProps<{ modelValue?: ModelValue<R> }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        "/src/App.vue",
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        host,
+        Some(&store_view),
+        owner_engine,
+    );
+
+    host.append_component_meta_registry_entries(
+        "/src/App.vue",
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+
+    let model_value = parts
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ModelValue")
+        .expect("local routed helper should be published into the type registry");
+
+    let verter_semantic::analysis::type_expr::TypeExpr::Conditional {
+        true_type,
+        false_type,
+        ..
+    } = &model_value.type_expr
+    else {
+        panic!("registry helper should preserve the conditional wrapper");
+    };
+
+    assert_eq!(
+        true_type.as_ref(),
+        &verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::Number,
+        ),
+    );
+    assert_eq!(
+        false_type.as_ref(),
+        &verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+            verter_semantic::analysis::type_expr::PrimitiveName::String,
+        ),
+    );
+}
+
+#[test]
 fn component_meta_request_executor_uses_captured_owner_inputs_after_owner_changes() {
     let project = make_project();
     project
@@ -4587,6 +4902,7 @@ defineProps<Local>()
         &snapshot,
         true,
         None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
 
     // After the macro hot-path cutover, object-shape production for
@@ -5492,6 +5808,357 @@ defineModel<boolean>('open')
 }
 
 #[test]
+fn append_component_meta_registry_entries_keep_local_explicit_object_helpers_raw() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { VNode } from 'vue'
+
+type Tier = {
+  id: string
+  badge?: string
+}
+
+type SectionFeature<T extends Tier = Tier> = {
+  id?: string
+  title: string
+  tiers?: {
+    [K in Extract<T['id'], string>]: boolean | string
+  } & Record<string, boolean | string>
+}
+
+export interface Section<T extends Tier = Tier> {
+  id?: string
+  title: string
+  features: SectionFeature<T>[]
+}
+
+export interface Props<T extends Tier = Tier> {
+  sections: Section<T>[]
+}
+
+export type Slots<T extends Tier = Tier> = {
+  'section-title'?: (props: { section: Section<T> }) => VNode[]
+}
+</script>
+<script setup lang=\"ts\" generic=\"T extends Tier\">
+defineProps<Props<T>>()
+defineSlots<Slots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        "/src/App.vue",
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        host,
+        Some(&store_view),
+        owner_engine,
+    );
+    let solves_before = query_engine.solve_count();
+
+    host.append_component_meta_registry_entries(
+        "/src/App.vue",
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count().saturating_sub(solves_before),
+        0,
+        "owner-local explicit object helpers should reuse the prepared raw surface instead of triggering a projection solve during append"
+    );
+
+    let section_entry = parts
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Section")
+        .expect("local helper should be published into the registry");
+    let verter_semantic::analysis::type_expr::TypeExpr::Object(section_object) =
+        &section_entry.type_expr
+    else {
+        panic!("local explicit helper should stay an object surface");
+    };
+    let feature_property = section_object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(property)
+                if property.name == "features" =>
+            {
+                Some(property)
+            }
+            _ => None,
+        })
+        .expect("section helper should preserve the features property");
+    assert!(
+        matches!(
+            feature_property.ty,
+            verter_semantic::analysis::type_expr::TypeExpr::Array { .. }
+        ),
+        "the raw object surface should keep the local array member instead of flattening the whole helper"
+    );
+}
+
+#[test]
+fn compute_component_meta_state_for_fallthrough_skips_registry_append_publication() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { VNode } from 'vue'
+
+type Tier = {
+  id: string
+  badge?: string
+}
+
+type SectionFeature<T extends Tier = Tier> = {
+  id?: string
+  title: string
+  tiers?: {
+    [K in Extract<T['id'], string>]: boolean | string
+  } & Record<string, boolean | string>
+}
+
+export interface Section<T extends Tier = Tier> {
+  id?: string
+  title: string
+  features: SectionFeature<T>[]
+}
+
+export interface Props<T extends Tier = Tier> {
+  sections: Section<T>[]
+}
+
+export type Slots<T extends Tier = Tier> = {
+  'section-title'?: (props: { section: Section<T> }) => VNode[]
+}
+</script>
+<script setup lang=\"ts\" generic=\"T extends Tier\">
+defineProps<Props<T>>()
+defineSlots<Slots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let whole_hash = store_view
+        .whole_hash("/src/App.vue")
+        .expect("whole hash should exist for the owner");
+
+    let full = host
+        .compute_component_meta_state(
+            "/src/App.vue",
+            super::ResolverMode::Expanded,
+            whole_hash,
+            Some(&store_view),
+        )
+        .expect("full expanded state should resolve");
+    let fallthrough = host
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .expect("fallthrough-expanded state should resolve");
+
+    assert!(
+        full.resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "Section"),
+        "full expanded state should still publish the local helper through registry append"
+    );
+    assert!(
+        !fallthrough
+            .resolved_type_registry
+            .iter()
+            .any(|entry| entry.name == "Section"),
+        "fallthrough-expanded state should skip registry append publication for local helpers"
+    );
+    assert!(
+        fallthrough.resolved_type_registry.len() < full.resolved_type_registry.len(),
+        "fallthrough-expanded state should keep only the preseeded registry entries"
+    );
+}
+
+#[test]
+fn compute_component_meta_state_for_fallthrough_skips_slot_and_expose_expansion() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface Props {
+  label: string
+}
+
+export interface Slots {
+  default?: (props: { value: string }) => any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Props, Slots } from './types'
+
+const exposed: { focus(): void } = {
+  focus() {},
+}
+
+defineProps<Props>()
+defineSlots<Slots>()
+defineExpose({ exposed })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    let store_view = host.resolver_store_view();
+    let whole_hash = store_view
+        .whole_hash("/src/App.vue")
+        .expect("whole hash should exist for the owner");
+
+    let full = host
+        .compute_component_meta_state(
+            "/src/App.vue",
+            super::ResolverMode::Expanded,
+            whole_hash,
+            Some(&store_view),
+        )
+        .expect("full expanded state should resolve");
+    let fallthrough = host
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .expect("fallthrough-expanded state should resolve");
+
+    assert!(
+        full.resolved_macros
+            .iter()
+            .any(|entry| entry.type_name == "Props"),
+        "full expanded state should still resolve defineProps imports"
+    );
+    assert!(
+        full.resolved_macros
+            .iter()
+            .any(|entry| entry.type_name == "Slots"),
+        "full expanded state should still resolve defineSlots imports"
+    );
+
+    let full_eval = full
+        .evaluated_types
+        .as_ref()
+        .expect("full expanded state should carry evaluated types");
+    assert!(
+        !full_eval.define_slots.is_empty(),
+        "full expanded state should expand defineSlots"
+    );
+    assert!(
+        !full_eval.bindings.is_empty(),
+        "full expanded state should expand defineExpose bindings"
+    );
+
+    assert!(
+        fallthrough
+            .resolved_macros
+            .iter()
+            .any(|entry| entry.type_name == "Props"),
+        "fallthrough-expanded state must still resolve defineProps imports"
+    );
+    assert!(
+        fallthrough
+            .resolved_macros
+            .iter()
+            .all(|entry| entry.type_name != "Slots"),
+        "fallthrough-expanded state should skip imported defineSlots resolution entirely"
+    );
+
+    let fallthrough_props = fallthrough
+        .resolved_macros
+        .iter()
+        .find(|entry| entry.type_name == "Props")
+        .expect("fallthrough-expanded state should still materialize the props surface");
+    assert!(
+        fallthrough_props
+            .props
+            .iter()
+            .any(|prop| prop.name == "label"),
+        "fallthrough-expanded state must still preserve the requested defineProps surface"
+    );
+    assert!(
+        fallthrough
+            .evaluated_types
+            .as_ref()
+            .is_none_or(|evaluated| evaluated.define_slots.is_empty()),
+        "fallthrough-expanded state should skip defineSlots expansion"
+    );
+    assert!(
+        fallthrough
+            .evaluated_types
+            .as_ref()
+            .is_none_or(|evaluated| evaluated.slot_bindings.is_empty()),
+        "fallthrough-expanded state should skip slot binding expansion"
+    );
+    assert!(
+        fallthrough
+            .evaluated_types
+            .as_ref()
+            .is_none_or(|evaluated| evaluated.bindings.is_empty()),
+        "fallthrough-expanded state should skip defineExpose binding expansion"
+    );
+}
+
+#[test]
 fn produce_macro_object_shapes_reuses_resolved_define_emits_surface() {
     let project = make_project();
     project
@@ -5626,6 +6293,564 @@ defineEmits<Emits>()
         .map(|property| property.name.as_str())
         .collect();
     assert_eq!(emit_names, vec!["save", "update:open"]);
+}
+
+#[test]
+fn produce_macro_object_shapes_reuses_expanded_define_emits_fields_without_solves() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  save: [id: number]
+  'update:open': [value: boolean]
+}
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = FileAnalysisSnapshot {
+        macros: vec![verter_semantic::analysis::AnalyzedMacro {
+            kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+            is_type_based: true,
+            type_references: vec!["Emits".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = Vec::new();
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        emits: vec![
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "save".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[id: number]",
+                ),
+                raw_type: Some("[id: number]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "update:open".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[value: boolean]",
+                ),
+                raw_type: Some("[value: boolean]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    produce_macro_object_shapes(
+        "/src/App.vue",
+        &snapshot,
+        &resolved_macros,
+        "defineEmits<Emits>()",
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "expanded defineEmits fields should be reused directly instead of triggering another solve"
+    );
+    assert_eq!(
+        evaluated_types.define_emits.len(),
+        1,
+        "expanded defineEmits fields should still synthesize a macro object shape"
+    );
+    let emit_names: Vec<&str> = evaluated_types.define_emits[0]
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+    assert_eq!(emit_names, vec!["save", "update:open"]);
+}
+
+#[test]
+fn produce_macro_object_shapes_reuses_expanded_define_emits_fields_with_define_model_present() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  save: [id: number]
+  'update:open': [value: boolean]
+}
+defineEmits<Emits>()
+defineModel<string>('searchTerm')
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = FileAnalysisSnapshot {
+        macros: vec![
+            verter_semantic::analysis::AnalyzedMacro {
+                kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["Emits".to_string()],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: verter_span::Span::new(0, 0),
+            },
+            verter_semantic::analysis::AnalyzedMacro {
+                kind: verter_semantic::analysis::AnalyzedMacroKind::DefineModel,
+                is_type_based: true,
+                type_references: vec!["string".to_string()],
+                binding_name: Some("searchTerm".to_string()),
+                model_name: Some("searchTerm".to_string()),
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: verter_span::Span::new(0, 0),
+            },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = Vec::new();
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        emits: vec![
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "save".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[id: number]",
+                ),
+                raw_type: Some("[id: number]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "update:open".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[value: boolean]",
+                ),
+                raw_type: Some("[value: boolean]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    produce_macro_object_shapes(
+        "/src/App.vue",
+        &snapshot,
+        &resolved_macros,
+        "defineEmits<Emits>()\ndefineModel<string>('searchTerm')",
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "defineModel should not force defineEmits back through the solver when expanded emit fields already exist"
+    );
+    assert_eq!(
+        evaluated_types.define_emits.len(),
+        1,
+        "expanded defineEmits fields should still synthesize a macro object shape with defineModel present"
+    );
+    let emit_names: Vec<&str> = evaluated_types.define_emits[0]
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+    assert_eq!(emit_names, vec!["save", "update:open"]);
+}
+
+#[test]
+fn produce_macro_object_shapes_reuses_expanded_define_emits_fields_even_with_duplicate_resolved_macros(
+) {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  save: [id: number]
+  'update:open': [value: boolean]
+}
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = FileAnalysisSnapshot {
+        macros: vec![verter_semantic::analysis::AnalyzedMacro {
+            kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+            is_type_based: true,
+            type_references: vec!["Emits".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = vec![
+        ResolvedMacroMeta {
+            macro_index: 0,
+            macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+            type_name: "Emits".to_string(),
+            import_source: String::new(),
+            surface_is_authoritative: true,
+            declaration: crate::resolver_core::ResolvedTypeDeclaration {
+                requested_name: "Emits".to_string(),
+                declaration_id: None,
+                resolved_name: "Emits".to_string(),
+                canonical_source: "/src/App.vue".to_string(),
+                span: verter_span::Span::new(0, 0),
+                kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+                text: Some(
+                    "type Emits = { save: [id: number]; 'update:open': [value: boolean] }"
+                        .to_string(),
+                ),
+            },
+            native_props: Vec::new(),
+            props: Vec::new(),
+            emits: vec![verter_semantic::analysis::AnalyzedEmitField {
+                name: "save".to_string(),
+                span: verter_span::Span::new(0, 0),
+                payload_type: Some("[id: number]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            }],
+            slots: Vec::new(),
+            jsdoc: None,
+        },
+        ResolvedMacroMeta {
+            macro_index: 0,
+            macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+            type_name: "Emits".to_string(),
+            import_source: String::new(),
+            surface_is_authoritative: false,
+            declaration: crate::resolver_core::ResolvedTypeDeclaration {
+                requested_name: "Emits".to_string(),
+                declaration_id: None,
+                resolved_name: "Emits".to_string(),
+                canonical_source: "/src/App.vue".to_string(),
+                span: verter_span::Span::new(0, 0),
+                kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+                text: Some(
+                    "type Emits = { save: [id: number]; 'update:open': [value: boolean] }"
+                        .to_string(),
+                ),
+            },
+            native_props: Vec::new(),
+            props: Vec::new(),
+            emits: vec![verter_semantic::analysis::AnalyzedEmitField {
+                name: "update:open".to_string(),
+                span: verter_span::Span::new(0, 0),
+                payload_type: Some("[value: boolean]".to_string()),
+                description: None,
+                tags: Vec::new(),
+            }],
+            slots: Vec::new(),
+            jsdoc: None,
+        },
+    ];
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        emits: vec![
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "save".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[id: number]",
+                ),
+                raw_type: Some("[id: number]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "update:open".to_string(),
+                r#type: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    "[value: boolean]",
+                ),
+                raw_type: Some("[value: boolean]".to_string()),
+                optional: false,
+                exactness:
+                    verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    produce_macro_object_shapes(
+        "/src/App.vue",
+        &snapshot,
+        &resolved_macros,
+        "defineEmits<Emits>()",
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "expanded defineEmits fields should bypass solver fallback even when resolved macro metadata contains duplicate entries"
+    );
+    assert_eq!(evaluated_types.define_emits.len(), 1);
+}
+
+#[test]
+fn produce_macro_object_shapes_reuses_resolved_define_slots_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"
+export interface Slots {
+  default?(props: { ui: string }): any
+  item?(props: { index: number }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Slots } from './base'
+
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = FileAnalysisSnapshot {
+        macros: vec![verter_semantic::analysis::AnalyzedMacro {
+            kind: verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+            is_type_based: true,
+            type_references: vec!["Slots".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = vec![ResolvedMacroMeta {
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        type_name: "Slots".to_string(),
+        import_source: "./base".to_string(),
+        surface_is_authoritative: true,
+        declaration: crate::resolver_core::ResolvedTypeDeclaration {
+            requested_name: "Slots".to_string(),
+            declaration_id: None,
+            resolved_name: "Slots".to_string(),
+            canonical_source: "/src/base.ts".to_string(),
+            span: verter_span::Span::new(0, 0),
+            kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+            text: Some(
+                "interface Slots { default?(props: { ui: string }): any; item?(props: { index: number }): any }"
+                    .to_string(),
+            ),
+        },
+        native_props: Vec::new(),
+        props: Vec::new(),
+        emits: Vec::new(),
+        slots: vec![
+            verter_semantic::analysis::AnalyzedSlotField {
+                name: "default".to_string(),
+                is_required: false,
+                span: verter_span::Span::new(0, 0),
+                bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
+                    name: "ui".to_string(),
+                    type_annotation: Some("string".to_string()),
+                    span: verter_span::Span::new(0, 0),
+                }],
+                return_type: Some("any".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+            verter_semantic::analysis::AnalyzedSlotField {
+                name: "item".to_string(),
+                is_required: false,
+                span: verter_span::Span::new(0, 0),
+                bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
+                    name: "index".to_string(),
+                    type_annotation: Some("number".to_string()),
+                    span: verter_span::Span::new(0, 0),
+                }],
+                return_type: Some("any".to_string()),
+                description: None,
+                tags: Vec::new(),
+            },
+        ],
+        jsdoc: None,
+    }];
+    let mut evaluated_types =
+        verter_semantic::analysis::type_expand::ExpandedComponentTypes::default();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    produce_macro_object_shapes(
+        "/src/App.vue",
+        &snapshot,
+        &resolved_macros,
+        "defineSlots<Slots>()",
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "resolved imported defineSlots surfaces should be reused directly instead of triggering another projection/solve pass"
+    );
+    assert_eq!(
+        evaluated_types.define_slots.len(),
+        1,
+        "resolved defineSlots slot fields should synthesize a macro object shape"
+    );
+    let slot_names: Vec<&str> = evaluated_types.define_slots[0]
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+    assert_eq!(slot_names, vec!["default", "item"]);
+    assert!(
+        matches!(
+            evaluated_types.define_slots[0].result.value.properties[0].ty,
+            verter_semantic::analysis::type_expr::TypeExpr::Function(_)
+        ),
+        "resolved defineSlots reuse should preserve function-valued slot members"
+    );
 }
 
 #[test]

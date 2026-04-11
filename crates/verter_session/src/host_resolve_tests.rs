@@ -1955,12 +1955,14 @@ export interface Props {
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
         crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into()]),
     );
+    let mut companion_plans = super::FrontierCompanionPlans::default();
 
     let (frontier, target, _had_route_cycle) = host
         .run_external_type_frontier_closure_in_view(
             "/src/barrel.ts",
             "PublicProps",
             &mut requested_routes,
+            &mut companion_plans,
             Some(&view),
         )
         .expect("frontier closure should complete");
@@ -1991,6 +1993,7 @@ export interface Props {
         Some(&view),
         &mut inspected_symbols,
         &mut requested_routes,
+        &mut companion_plans,
     );
     assert!(
         seeds
@@ -2111,12 +2114,14 @@ export interface Props {
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
         crate::resolver_core::RouteDemand::MemberPath(vec!["primary".into(), "label".into()]),
     );
+    let mut companion_plans = super::FrontierCompanionPlans::default();
 
     let (frontier, target, _had_route_cycle) = host
         .run_external_type_frontier_closure_in_view(
             "/src/barrel.ts",
             "PublicProps",
             &mut requested_routes,
+            &mut companion_plans,
             Some(&view),
         )
         .expect("frontier closure should complete");
@@ -2158,6 +2163,62 @@ export interface Props {
         !touched.contains("/src/unused-leaf.ts"),
         "nested inactive sibling should not be materialized, got {:?}",
         touched
+    );
+}
+
+#[test]
+fn frontier_companion_plan_cache_reuses_same_route_entry() {
+    let mut cache = super::FrontierCompanionPlans::default();
+    let route = crate::resolver_core::RouteDemand::Whole;
+
+    let first = cache.get_or_compute("/src/button.ts", "ButtonProps", &route, || {
+        vec![super::PlannedFrontierCompanion {
+            alias: "LinkProps".to_string(),
+            resolved_canonical: "/src/link.ts".to_string(),
+            resolved_exported_name: "LinkProps".to_string(),
+            route: crate::resolver_core::RouteDemand::Whole,
+        }]
+    });
+    let second = cache.get_or_compute("/src/button.ts", "ButtonProps", &route, || {
+        panic!("same-route plan should be reused")
+    });
+
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "same requested route should reuse one request-local companion plan entry",
+    );
+    assert_eq!(
+        cache.len(),
+        1,
+        "repeated plan lookup should keep one cache entry",
+    );
+}
+
+#[test]
+fn frontier_companion_plan_cache_keeps_distinct_routes_separate() {
+    let mut cache = super::FrontierCompanionPlans::default();
+
+    let whole = cache.get_or_compute(
+        "/src/button.ts",
+        "ButtonProps",
+        &crate::resolver_core::RouteDemand::Whole,
+        Vec::new,
+    );
+    let member = cache.get_or_compute(
+        "/src/button.ts",
+        "ButtonProps",
+        &crate::resolver_core::RouteDemand::MemberPath(vec!["icon".to_string()]),
+        Vec::new,
+    );
+
+    assert!(
+        !std::sync::Arc::ptr_eq(&whole, &member),
+        "different routes must not collapse to the same companion plan entry",
+    );
+    assert_eq!(
+        cache.len(),
+        2,
+        "whole and member-path requests should cache separately",
     );
 }
 

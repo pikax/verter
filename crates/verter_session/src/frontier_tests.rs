@@ -1599,8 +1599,14 @@ export { InternalProps as PublicProps }
         !member_required.contains("Beta"),
         "narrow route should not widen to sibling imports"
     );
-    assert!(whole_required.contains("Alpha"));
-    assert!(whole_required.contains("Beta"));
+    assert!(
+        !whole_required.contains("Alpha"),
+        "whole-route closure should keep direct imported object props symbolic through a local export alias",
+    );
+    assert!(
+        !whole_required.contains("Beta"),
+        "whole-route closure should not widen to sibling imported object props through a local export alias",
+    );
 }
 
 // ===========================================================================

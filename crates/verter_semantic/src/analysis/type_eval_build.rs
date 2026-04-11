@@ -1342,6 +1342,7 @@ pub fn expand_macro_types(
         source,
         binding_entries.as_slice(),
         Some(env),
+        MacroExpansionScope::Full,
         &mut engine,
     );
     // Standalone path: produce object shapes via the solver directly.
@@ -1356,14 +1357,36 @@ pub fn expand_macro_types(
 /// This is the cache-owned production path used by `verter_session`, where
 /// local binding types come from prepared value declarations rather than an
 /// `EvalEnv`. Creates its own internal `TypeQueryEngine`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroExpansionScope {
+    Full,
+    Fallthrough,
+}
+
 pub fn expand_macro_types_with_bindings(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
+    expand_macro_types_with_bindings_for_scope(
+        macros,
+        source,
+        binding_entries,
+        MacroExpansionScope::Full,
+        solver_host,
+    )
+}
+
+pub fn expand_macro_types_with_bindings_for_scope(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    binding_entries: &[(String, TypeExpr)],
+    scope: MacroExpansionScope,
+    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
+) -> crate::analysis::type_expand::ExpandedComponentTypes {
     let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
-    expand_macro_types_impl(macros, source, binding_entries, None, &mut engine)
+    expand_macro_types_impl(macros, source, binding_entries, None, scope, &mut engine)
 }
 
 /// Like `expand_macro_types_with_bindings`, but accepts an external
@@ -1375,7 +1398,23 @@ pub fn expand_macro_types_with_engine(
     binding_entries: &[(String, TypeExpr)],
     engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_impl(macros, source, binding_entries, None, engine)
+    expand_macro_types_with_engine_for_scope(
+        macros,
+        source,
+        binding_entries,
+        MacroExpansionScope::Full,
+        engine,
+    )
+}
+
+pub fn expand_macro_types_with_engine_for_scope(
+    macros: &[crate::analysis::types::AnalyzedMacro],
+    source: Option<&str>,
+    binding_entries: &[(String, TypeExpr)],
+    scope: MacroExpansionScope,
+    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+) -> crate::analysis::type_expand::ExpandedComponentTypes {
+    expand_macro_types_impl(macros, source, binding_entries, None, scope, engine)
 }
 
 fn collect_binding_entries_from_env(
@@ -1402,6 +1441,7 @@ fn expand_macro_types_impl(
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     debug_env: Option<&mut EvalEnv>,
+    scope: MacroExpansionScope,
     engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
 ) -> crate::analysis::type_expand::ExpandedComponentTypes {
     use crate::analysis::type_expand::{
@@ -1523,75 +1563,79 @@ fn expand_macro_types_impl(
             }
         }
 
-        // Expand slot binding types (no skip heuristic — expander handles complexity)
-        for slot in &m.slot_fields {
-            for binding in &slot.bindings {
-                if let Some(ref type_ann) = binding.type_annotation {
-                    let parsed = parse_type_annotation(type_ann);
-                    if !parsed.is_unknown() {
-                        let item_started = Instant::now();
-                        let slot_binding_target = format!("{}.{}", slot.name, binding.name);
-                        let stage_log = ExpandStageLog {
-                            macro_index,
-                            macro_kind: m.kind,
-                            stage: "slot_binding",
-                            target: slot_binding_target.as_str(),
-                            started: item_started,
-                            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
-                        };
-                        log_expand_stage_start(&stage_log);
-                        let expanded = expand_field_expr(engine, &parsed);
-                        log_expand_stage(
-                            stage_log,
-                            expanded.exactness,
-                            expanded.execution_status,
-                            &expanded.diagnostics,
-                            debug_env.as_deref(),
-                        );
-                        result.slot_bindings.push(ExpandedField {
-                            name: slot_binding_target,
-                            r#type: expanded.value.expr,
-                            raw_type: Some(type_ann.clone()),
-                            optional: false,
-                            exactness: expanded.exactness,
-                            execution_status: expanded.execution_status,
-                            diagnostics: expanded.diagnostics,
-                        });
+        // Slot binding expansion is not needed for fallthrough-only meta.
+        if scope == MacroExpansionScope::Full {
+            for slot in &m.slot_fields {
+                for binding in &slot.bindings {
+                    if let Some(ref type_ann) = binding.type_annotation {
+                        let parsed = parse_type_annotation(type_ann);
+                        if !parsed.is_unknown() {
+                            let item_started = Instant::now();
+                            let slot_binding_target = format!("{}.{}", slot.name, binding.name);
+                            let stage_log = ExpandStageLog {
+                                macro_index,
+                                macro_kind: m.kind,
+                                stage: "slot_binding",
+                                target: slot_binding_target.as_str(),
+                                started: item_started,
+                                start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
+                            };
+                            log_expand_stage_start(&stage_log);
+                            let expanded = expand_field_expr(engine, &parsed);
+                            log_expand_stage(
+                                stage_log,
+                                expanded.exactness,
+                                expanded.execution_status,
+                                &expanded.diagnostics,
+                                debug_env.as_deref(),
+                            );
+                            result.slot_bindings.push(ExpandedField {
+                                name: slot_binding_target,
+                                r#type: expanded.value.expr,
+                                raw_type: Some(type_ann.clone()),
+                                optional: false,
+                                exactness: expanded.exactness,
+                                execution_status: expanded.execution_status,
+                                diagnostics: expanded.diagnostics,
+                            });
+                        }
                     }
                 }
             }
         }
     }
 
-    // Expand binding type annotations (for expose/value lookups)
-    for (name, type_ann) in binding_entries {
-        let item_started = Instant::now();
-        let stage_log = ExpandStageLog {
-            macro_index: usize::MAX,
-            macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
-            stage: "binding",
-            target: name.as_str(),
-            started: item_started,
-            start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
-        };
-        log_expand_stage_start(&stage_log);
-        let expanded = expand_field_expr(engine, type_ann);
-        log_expand_stage(
-            stage_log,
-            expanded.exactness,
-            expanded.execution_status,
-            &expanded.diagnostics,
-            debug_env.as_deref(),
-        );
-        result.bindings.push(ExpandedField {
-            name: name.clone(),
-            r#type: expanded.value.expr,
-            raw_type: None,
-            optional: false,
-            exactness: expanded.exactness,
-            execution_status: expanded.execution_status,
-            diagnostics: expanded.diagnostics,
-        });
+    // Expose/value binding expansion is not needed for fallthrough-only meta.
+    if scope == MacroExpansionScope::Full {
+        for (name, type_ann) in binding_entries {
+            let item_started = Instant::now();
+            let stage_log = ExpandStageLog {
+                macro_index: usize::MAX,
+                macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
+                stage: "binding",
+                target: name.as_str(),
+                started: item_started,
+                start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
+            };
+            log_expand_stage_start(&stage_log);
+            let expanded = expand_field_expr(engine, type_ann);
+            log_expand_stage(
+                stage_log,
+                expanded.exactness,
+                expanded.execution_status,
+                &expanded.diagnostics,
+                debug_env.as_deref(),
+            );
+            result.bindings.push(ExpandedField {
+                name: name.clone(),
+                r#type: expanded.value.expr,
+                raw_type: None,
+                optional: false,
+                exactness: expanded.exactness,
+                execution_status: expanded.execution_status,
+                diagnostics: expanded.diagnostics,
+            });
+        }
     }
 
     type_expand_debug(|| {
