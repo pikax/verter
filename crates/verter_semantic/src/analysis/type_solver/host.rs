@@ -59,6 +59,14 @@ pub enum UtilitySource {
     Unknown,
 }
 
+/// Whether a bare type name in the current scope is local or imported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareRefOrigin {
+    Local,
+    Imported,
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Request status
 // ---------------------------------------------------------------------------
@@ -112,6 +120,14 @@ pub trait TypeSolverHost {
 
     /// Classify whether a type name is a built-in utility.
     fn utility_source(&self, name: &str) -> UtilitySource;
+
+    /// Classify whether a bare reference name comes from the current local
+    /// scope or from an import binding. Used by lazy field expansion to keep
+    /// imported object-like refs symbolic until a deeper route is requested.
+    fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+        let _ = name;
+        BareRefOrigin::Unknown
+    }
 
     /// Resolve a (canonical_id, symbol_name) to a stable root identity,
     /// following re-exports to the defining file.
@@ -209,6 +225,17 @@ impl TypeSolverHost for EvalEnvSolverHost {
         }
     }
 
+    fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+        if self.type_symbols.contains_key(name)
+            || self.type_bindings.contains_key(name)
+            || self.value_symbols.contains_key(name)
+        {
+            BareRefOrigin::Local
+        } else {
+            BareRefOrigin::Unknown
+        }
+    }
+
     fn root_identity(
         &self,
         _canonical_id: &str,
@@ -249,6 +276,10 @@ impl TypeSolverHost for NoopSolverHost {
 
     fn utility_source(&self, _name: &str) -> UtilitySource {
         UtilitySource::Unknown
+    }
+
+    fn bare_ref_origin(&self, _name: &str) -> BareRefOrigin {
+        BareRefOrigin::Unknown
     }
 }
 

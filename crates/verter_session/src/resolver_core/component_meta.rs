@@ -10,6 +10,7 @@ use verter_semantic::analysis::types::{
 };
 
 use crate::resolver_core::{
+    component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
     surface_projector::{
         project_macro_surfaces_from_expanded_text, project_macro_surfaces_from_source_type_name,
@@ -45,6 +46,7 @@ pub struct ResolvedMacroMeta {
     pub macro_kind: AnalyzedMacroKind,
     pub type_name: String,
     pub import_source: String,
+    pub surface_is_authoritative: bool,
     pub declaration: ResolvedTypeDeclaration,
     pub native_props: Vec<ResolvedNativeProp>,
     pub props: Vec<verter_semantic::analysis::AnalyzedPropField>,
@@ -246,6 +248,7 @@ where
                 macro_kind: dep.macro_kind,
                 type_name: dep.type_name.clone(),
                 import_source: dep.import_source.clone(),
+                surface_is_authoritative: false,
                 declaration,
                 native_props: Vec::new(),
                 props: Vec::new(),
@@ -262,6 +265,7 @@ where
                 macro_kind: dep.macro_kind,
                 type_name: dep.type_name.clone(),
                 import_source: dep.import_source.clone(),
+                surface_is_authoritative: false,
                 declaration,
                 native_props: Vec::new(),
                 props: Vec::new(),
@@ -289,6 +293,7 @@ where
                 || declaration.canonical_source.contains("/node_modules/");
             if is_direct_macro_type_reference(macros, dep)
                 && !package_backed_dep
+                && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
             {
                 resolved_type_registry.push(ResolvedTypeAnalysis {
@@ -306,6 +311,7 @@ where
                 macro_kind: dep.macro_kind,
                 type_name: dep.type_name.clone(),
                 import_source: dep.import_source.clone(),
+                surface_is_authoritative: true,
                 declaration,
                 native_props: projected.native_props,
                 props: projected.props,
@@ -319,6 +325,7 @@ where
                 macro_kind: dep.macro_kind,
                 type_name: dep.type_name.clone(),
                 import_source: dep.import_source.clone(),
+                surface_is_authoritative: false,
                 declaration,
                 native_props: Vec::new(),
                 props: Vec::new(),
@@ -375,6 +382,7 @@ where
                                 macro_kind: mac.kind,
                                 type_name: resolved.name.clone(),
                                 import_source: String::new(),
+                                surface_is_authoritative: true,
                                 declaration,
                                 native_props: projected.native_props,
                                 props: projected.props,
@@ -860,6 +868,77 @@ type LocalItem = {
             "the direct imported macro root should still seed the initial registry"
         );
     }
+
+    #[test]
+    fn resolve_component_meta_parts_skips_direct_non_object_imported_macro_seed() {
+        let host = TestHost {
+            source: "export type StringOrVNode = string | VNode | (() => VNode);".to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "StringOrVNode".to_string()),
+                ResolvedElements {
+                    props: vec![
+                        ResolvedProp {
+                            span: Span::new(0, 0),
+                            key: Span::new(0, 0),
+                            key_name: Some("component".to_string()),
+                            optional: true,
+                            types: vec![RuntimeType::Object],
+                            visibility: ResolvedMemberVisibility::Public,
+                            type_span: None,
+                            type_text: Some("object".to_string()),
+                            map_local: false,
+                            span_is_absolute: true,
+                        },
+                        ResolvedProp {
+                            span: Span::new(0, 0),
+                            key: Span::new(0, 0),
+                            key_name: Some("children".to_string()),
+                            optional: true,
+                            types: vec![RuntimeType::String],
+                            visibility: ResolvedMemberVisibility::Public,
+                            type_span: None,
+                            type_text: Some("string".to_string()),
+                            map_local: false,
+                            span_is_absolute: true,
+                        },
+                    ],
+                    ..ResolvedElements::default()
+                },
+            )]),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["StringOrVNode".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(0, 1),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "StringOrVNode".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, 1),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(&host, "/src/App.vue", &snapshot, true, None);
+        assert!(
+            resolved.resolved_type_registry.is_empty(),
+            "direct non-object imported aliases should stay out of the initial registry seed"
+        );
+    }
 }
 
 pub fn resolved_elements_to_type_expr_via_type_text(
@@ -971,4 +1050,72 @@ fn source_for_local_type_projection(source: &str) -> Cow<'_, str> {
     } else {
         Cow::Owned(extracted)
     }
+}
+
+fn should_seed_direct_macro_registry_entry(declaration: &ResolvedTypeDeclaration) -> bool {
+    if declaration.kind != crate::resolver_core::ResolvedDeclarationKind::TypeAlias {
+        return true;
+    }
+    let Some(text) = declaration.text.as_deref() else {
+        return true;
+    };
+    let Some(body_text) = type_alias_body_text(text) else {
+        return true;
+    };
+    let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(body_text);
+    !component_meta_registry_has_non_object_top_level_surface(&parsed)
+}
+
+fn type_alias_body_text(text: &str) -> Option<&str> {
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => in_string = Some(ch),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '='
+                if angle_depth == 0
+                    && paren_depth == 0
+                    && bracket_depth == 0
+                    && brace_depth == 0 =>
+            {
+                return Some(
+                    text[idx + ch.len_utf8()..]
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    None
 }

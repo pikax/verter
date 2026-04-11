@@ -11,9 +11,9 @@ use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::arena::{NodeId, QueryArena, SolverCaches};
+use super::arena::{Node, NodeId, QueryArena, SolverCaches};
 use super::audit::{AuditSink, NoopAudit, RecordingAudit};
-use super::host::{ResolvedRootIdentity, TypeSolverHost};
+use super::host::{BareRefOrigin, ResolvedRootIdentity, TypeSolverHost, UtilitySource};
 use super::lower::lower_type_expr;
 use super::project;
 use super::result::SolverResult;
@@ -177,6 +177,9 @@ struct OpResult {
 pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     host: &'a dyn TypeSolverHost,
     op_cache: FxHashMap<OpKey, OpResult>,
+    shallow_field_expr_cache: FxHashMap<TypeExpr, bool>,
+    shallow_imported_bare_ref_cache: FxHashMap<String, bool>,
+    shallow_transitive_ref_cache: FxHashMap<String, bool>,
     subjects: FxHashMap<SubjectKey, SubjectId>,
     subject_keys: Vec<SubjectKey>,
     next_subject_id: u32,
@@ -237,6 +240,9 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         Self {
             host,
             op_cache: FxHashMap::default(),
+            shallow_field_expr_cache: FxHashMap::default(),
+            shallow_imported_bare_ref_cache: FxHashMap::default(),
+            shallow_transitive_ref_cache: FxHashMap::default(),
             subjects: FxHashMap::default(),
             subject_keys: Vec::new(),
             next_subject_id: 0,
@@ -257,14 +263,464 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         self.solve_with_trace(expr).0
     }
 
+    pub fn should_preserve_imported_bare_ref(&mut self, expr: &TypeExpr) -> bool {
+        fn is_package_canonical(canonical_id: &str) -> bool {
+            canonical_id.contains("/node_modules/") || canonical_id.contains("\\node_modules\\")
+        }
+
+        fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+            match expr {
+                TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                other => other,
+            }
+        }
+
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens(expr)
+        else {
+            return false;
+        };
+        if !type_arguments.is_empty() {
+            return false;
+        }
+        if let Some(cached) = self.shallow_imported_bare_ref_cache.get(name.as_ref()) {
+            return *cached;
+        }
+
+        let preserve = if self.host.bare_ref_origin(name.as_ref()) != BareRefOrigin::Imported {
+            false
+        } else {
+            let Some(root_identity) = self.host.root_identity("", name.as_ref()) else {
+                self.shallow_imported_bare_ref_cache
+                    .insert(name.to_string(), false);
+                return false;
+            };
+            if is_package_canonical(&root_identity.canonical_id) {
+                self.shallow_imported_bare_ref_cache
+                    .insert(name.to_string(), true);
+                return true;
+            }
+            let Some(prepared) = self.host.resolve_prepared_type_decl(&root_identity) else {
+                self.shallow_imported_bare_ref_cache
+                    .insert(name.to_string(), false);
+                return false;
+            };
+
+            matches!(
+                prepared.projection_class,
+                super::prepared::PreparedProjectionClass::DirectMembers
+            ) || matches!(
+                prepared.kind,
+                crate::analysis::type_eval::TypeDeclKind::Class
+            )
+        };
+
+        self.shallow_imported_bare_ref_cache
+            .insert(name.to_string(), preserve);
+        preserve
+    }
+
+    fn should_preserve_package_member_path(&mut self, expr: &TypeExpr) -> bool {
+        fn strip_parens(expr: &TypeExpr) -> &TypeExpr {
+            match expr {
+                TypeExpr::Parenthesized(inner) => strip_parens(inner),
+                other => other,
+            }
+        }
+
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments: _,
+                } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let Some(name) = root_import_name(expr) else {
+            return false;
+        };
+        if self.host.bare_ref_origin(name) != BareRefOrigin::Imported {
+            return false;
+        }
+        let Some(root_identity) = self.host.root_identity("", name) else {
+            return false;
+        };
+        root_identity.canonical_id.contains("/node_modules/")
+            || root_identity.canonical_id.contains("\\node_modules\\")
+    }
+
+    fn should_preserve_transitive_ref(
+        &mut self,
+        name: &str,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        let Some(root_identity) = self.host.root_identity("", name) else {
+            return false;
+        };
+        let cache_key = format!(
+            "{}::{}",
+            root_identity.canonical_id, root_identity.symbol_name
+        );
+        if let Some(cached) = self.shallow_transitive_ref_cache.get(&cache_key) {
+            return *cached;
+        }
+        if root_identity.canonical_id.contains("/node_modules/")
+            || root_identity.canonical_id.contains("\\node_modules\\")
+        {
+            self.shallow_transitive_ref_cache
+                .insert(cache_key.clone(), true);
+            return true;
+        }
+        if !active_refs.insert(cache_key.clone()) {
+            return false;
+        }
+
+        let preserve = self
+            .host
+            .resolve_prepared_type_decl(&root_identity)
+            .is_some_and(|prepared| {
+                if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
+                    true
+                } else {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        self,
+                        &prepared.body,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+            });
+
+        active_refs.remove(&cache_key);
+        self.shallow_transitive_ref_cache.insert(cache_key, preserve);
+        preserve
+    }
+
+    fn should_preserve_shallow_field_expr_inner(
+        engine: &mut TypeQueryEngine<'_, A>,
+        expr: &TypeExpr,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        if let Some(cached) = engine.shallow_field_expr_cache.get(expr) {
+            return *cached;
+        }
+        if !active_exprs.insert(expr.clone()) {
+            return false;
+        }
+
+        let preserve = if engine.should_preserve_imported_bare_ref(expr) {
+            true
+        } else if engine.should_preserve_package_member_path(expr) {
+            true
+        } else {
+            match expr {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members
+                    .iter()
+                    .any(|member| Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        member,
+                        active_exprs,
+                        active_refs,
+                    )),
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => Self::should_preserve_shallow_field_expr_inner(
+                    engine,
+                    element,
+                    active_exprs,
+                    active_refs,
+                ),
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        &element.ty,
+                        active_exprs,
+                        active_refs,
+                    )
+                }),
+                TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                    crate::analysis::type_expr::ObjectMember::Property(property) => {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            &property.ty,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }
+                    crate::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            &signature.key_type,
+                            active_exprs,
+                            active_refs,
+                        ) || Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            &signature.value_type,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }
+                    crate::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                        function.parameters.iter().any(|parameter| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                &parameter.ty,
+                                active_exprs,
+                                active_refs,
+                            )
+                        }) || function.return_type.as_deref().is_some_and(|return_type| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                return_type,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                    }
+                    crate::analysis::type_expr::ObjectMember::Method(method) => {
+                        method.function.parameters.iter().any(|parameter| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                &parameter.ty,
+                                active_exprs,
+                                active_refs,
+                            )
+                        }) || method.function.return_type.as_deref().is_some_and(|return_type| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                return_type,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                    }
+                }),
+                TypeExpr::Function(function) => {
+                    function.parameters.iter().any(|parameter| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            &parameter.ty,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            return_type,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }) || function.type_parameters.iter().any(|parameter| {
+                        parameter.constraint.as_deref().is_some_and(|constraint| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                constraint,
+                                active_exprs,
+                                active_refs,
+                            )
+                        }) || parameter.default.as_deref().is_some_and(|default| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                default,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                    })
+                }
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    (matches!(
+                        engine.host.utility_source(name.as_ref()),
+                        UtilitySource::Builtin
+                    ) || !type_arguments.is_empty())
+                        && type_arguments.iter().any(|argument| {
+                            Self::should_preserve_shallow_field_expr_inner(
+                                engine,
+                                argument,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                        || engine.should_preserve_transitive_ref(
+                            name.as_ref(),
+                            active_exprs,
+                            active_refs,
+                        )
+                }
+                TypeExpr::TypeParameter(parameter) => {
+                    parameter.constraint.as_deref().is_some_and(|constraint| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            constraint,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }) || parameter.default.as_deref().is_some_and(|default| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            default,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        object,
+                        active_exprs,
+                        active_refs,
+                    ) || Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        index,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+                TypeExpr::Conditional {
+                    check,
+                    extends,
+                    true_type,
+                    false_type,
+                } => {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        check,
+                        active_exprs,
+                        active_refs,
+                    ) || Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        extends,
+                        active_exprs,
+                        active_refs,
+                    ) || Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        true_type,
+                        active_exprs,
+                        active_refs,
+                    ) || Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        false_type,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+                TypeExpr::Mapped {
+                    source,
+                    value,
+                    name_type,
+                    ..
+                } => {
+                    Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        source,
+                        active_exprs,
+                        active_refs,
+                    ) || Self::should_preserve_shallow_field_expr_inner(
+                        engine,
+                        value,
+                        active_exprs,
+                        active_refs,
+                    ) || name_type.as_deref().is_some_and(|name_type| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            name_type,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::TemplateLiteral { expressions, .. } => expressions.iter().any(
+                    |expression| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            expression,
+                            active_exprs,
+                            active_refs,
+                        )
+                    },
+                ),
+                TypeExpr::RecursiveRef { type_arguments, .. } => type_arguments.iter().any(
+                    |argument| {
+                        Self::should_preserve_shallow_field_expr_inner(
+                            engine,
+                            argument,
+                            active_exprs,
+                            active_refs,
+                        )
+                    },
+                ),
+                TypeExpr::Primitive(_)
+                | TypeExpr::Literal(_)
+                | TypeExpr::TypeOf(_)
+                | TypeExpr::Infer { .. }
+                | TypeExpr::Unknown { .. } => false,
+            }
+        };
+
+        active_exprs.remove(expr);
+        engine
+            .shallow_field_expr_cache
+            .insert(expr.clone(), preserve);
+        preserve
+    }
+
+    pub fn should_preserve_shallow_field_expr(&mut self, expr: &TypeExpr) -> bool {
+        let mut active_exprs = rustc_hash::FxHashSet::default();
+        let mut active_refs = rustc_hash::FxHashSet::default();
+        Self::should_preserve_shallow_field_expr_inner(
+            self,
+            expr,
+            &mut active_exprs,
+            &mut active_refs,
+        )
+    }
+
+    /// Solve while keeping package-backed prepared refs symbolic.
+    pub fn solve_preserving_package_refs(&mut self, expr: &TypeExpr) -> SolverResult<TypeExpr> {
+        self.solve_with_trace_preserving_package_refs(expr).0
+    }
+
     /// Solve and return trace (for Phase 1 macro expansion).
     pub fn solve_with_trace(
         &mut self,
         expr: &TypeExpr,
     ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        self.solve_with_trace_internal(expr, false)
+    }
+
+    /// Solve and return trace while keeping package-backed prepared refs symbolic.
+    pub fn solve_with_trace_preserving_package_refs(
+        &mut self,
+        expr: &TypeExpr,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        self.solve_with_trace_internal(expr, true)
+    }
+
+    fn solve_with_trace_internal(
+        &mut self,
+        expr: &TypeExpr,
+        preserve_package_symbolic_refs: bool,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
         let top_level_key = OpKey::TopLevel {
             expr_hash: hash_expr(expr),
-            scope_canonical_id: String::new(),
+            scope_canonical_id: if preserve_package_symbolic_refs {
+                "__preserve_package_refs__".to_string()
+            } else {
+                String::new()
+            },
         };
         if let Some(cached) = self.op_cache.get(&top_level_key) {
             self.audit.op_cache_hit("TopLevel");
@@ -274,12 +730,25 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         }
         self.audit.op_cache_miss("TopLevel");
 
-        let mut state = SolveState::with_caches(
-            SolveLimits::default(),
-            std::mem::take(&mut self.instantiation_cache),
-            std::mem::take(&mut self.caches),
-        );
-        state.projection_cache = std::mem::take(&mut self.projection_cache);
+        let mut state = if preserve_package_symbolic_refs {
+            SolveState::with_caches(
+                SolveLimits::default(),
+                FxHashMap::default(),
+                SolverCaches::default(),
+            )
+        } else {
+            SolveState::with_caches(
+                SolveLimits::default(),
+                std::mem::take(&mut self.instantiation_cache),
+                std::mem::take(&mut self.caches),
+            )
+        };
+        state.preserve_package_symbolic_refs = preserve_package_symbolic_refs;
+        state.projection_cache = if preserve_package_symbolic_refs {
+            FxHashMap::default()
+        } else {
+            std::mem::take(&mut self.projection_cache)
+        };
         let root = lower_type_expr(&mut self.arena, expr);
         let resolved = resolve_node(
             &mut self.arena,
@@ -292,9 +761,11 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
 
         let visited = std::mem::take(&mut state.visited_external_decls);
         self.visited_decls.extend(visited.iter().cloned());
-        self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
-        self.projection_cache = std::mem::take(&mut state.projection_cache);
-        self.caches = std::mem::take(&mut state.relation_caches);
+        if !preserve_package_symbolic_refs {
+            self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
+            self.projection_cache = std::mem::take(&mut state.projection_cache);
+            self.caches = std::mem::take(&mut state.relation_caches);
+        }
         self.accumulate_trace_summary(&state);
 
         let result = SolverResult {
@@ -330,9 +801,32 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        self.solve_scoped_internal(scoped_host, scope_canonical_id, expr, false)
+    }
+
+    pub fn solve_scoped_preserving_package_refs(
+        &mut self,
+        scoped_host: &dyn TypeSolverHost,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
+        self.solve_scoped_internal(scoped_host, scope_canonical_id, expr, true)
+    }
+
+    fn solve_scoped_internal(
+        &mut self,
+        scoped_host: &dyn TypeSolverHost,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        preserve_package_symbolic_refs: bool,
+    ) -> (SolverResult<TypeExpr>, Vec<ResolvedRootIdentity>) {
         let top_level_key = OpKey::TopLevel {
             expr_hash: hash_expr(expr),
-            scope_canonical_id: scope_canonical_id.to_string(),
+            scope_canonical_id: if preserve_package_symbolic_refs {
+                format!("{scope_canonical_id}::__preserve_package_refs__")
+            } else {
+                scope_canonical_id.to_string()
+            },
         };
         if let Some(cached) = self.op_cache.get(&top_level_key) {
             self.audit.op_cache_hit("TopLevel_scoped");
@@ -342,13 +836,27 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         }
         self.audit.op_cache_miss("TopLevel_scoped");
 
-        let mut state = SolveState::with_caches_and_scope(
-            SolveLimits::default(),
-            std::mem::take(&mut self.instantiation_cache),
-            std::mem::take(&mut self.caches),
-            scope_canonical_id.to_string(),
-        );
-        state.projection_cache = std::mem::take(&mut self.projection_cache);
+        let mut state = if preserve_package_symbolic_refs {
+            SolveState::with_caches_and_scope(
+                SolveLimits::default(),
+                FxHashMap::default(),
+                SolverCaches::default(),
+                scope_canonical_id.to_string(),
+            )
+        } else {
+            SolveState::with_caches_and_scope(
+                SolveLimits::default(),
+                std::mem::take(&mut self.instantiation_cache),
+                std::mem::take(&mut self.caches),
+                scope_canonical_id.to_string(),
+            )
+        };
+        state.preserve_package_symbolic_refs = preserve_package_symbolic_refs;
+        state.projection_cache = if preserve_package_symbolic_refs {
+            FxHashMap::default()
+        } else {
+            std::mem::take(&mut self.projection_cache)
+        };
         let root = lower_type_expr(&mut self.arena, expr);
         let resolved = resolve_node(
             &mut self.arena,
@@ -361,9 +869,11 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
 
         let visited = std::mem::take(&mut state.visited_external_decls);
         self.visited_decls.extend(visited.iter().cloned());
-        self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
-        self.projection_cache = std::mem::take(&mut state.projection_cache);
-        self.caches = std::mem::take(&mut state.relation_caches);
+        if !preserve_package_symbolic_refs {
+            self.instantiation_cache = std::mem::take(&mut state.instantiation_cache);
+            self.projection_cache = std::mem::take(&mut state.projection_cache);
+            self.caches = std::mem::take(&mut state.relation_caches);
+        }
         self.accumulate_trace_summary(&state);
 
         let result = SolverResult {
@@ -499,47 +1009,80 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 symbol_name,
                 ..
             } => {
+                let visited_start = self.visited_decls.len();
                 let type_ref = TypeExpr::named(symbol_name);
                 let resolved =
                     self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
                 if !resolved.exactness.is_exact() {
                     return None;
                 }
+                let projected_member = project::project_member(
+                    &mut self.arena,
+                    &mut self.caches,
+                    resolved.node,
+                    member_name,
+                );
+                if projected_member.exactness.is_exact() {
+                    if let Some(ty) = projected_member.value {
+                        let (optional, readonly, is_method) = match self.arena.get(resolved.node) {
+                            Node::Object(object) => object
+                                .properties
+                                .iter()
+                                .find(|property| property.name == member_name)
+                                .map(|property| {
+                                    (property.optional, property.readonly, property.is_method)
+                                })
+                                .unwrap_or((false, false, false)),
+                            _ => (false, false, false),
+                        };
+                        let member = ProjectedMember {
+                            name: member_name.to_string(),
+                            ty: project_to_type_expr(&self.arena, ty),
+                            optional,
+                            readonly,
+                            is_method,
+                        };
+                        let result_expr = projected_member_to_type_expr(&member);
+                        let visited_decls = self.visited_decls[visited_start..].to_vec();
+                        self.op_cache.insert(
+                            op_key,
+                            OpResult {
+                                result: SolverResult::exact_concrete(result_expr),
+                                visited_decls,
+                            },
+                        );
+                        return Some(member);
+                    }
+                    return None;
+                }
                 let surface = project::project_surface(&self.arena, resolved.node);
                 if !surface.exactness.is_exact() {
                     return None;
                 }
-                if let Some(member) = surface
+                let member = surface
                     .value
                     .properties
                     .iter()
                     .find(|property| property.name == member_name)
-                {
-                    return Some(ProjectedMember {
+                    .map(|member| ProjectedMember {
                         name: member.name.clone(),
                         ty: project_to_type_expr(&self.arena, member.ty),
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
                     });
+                if let Some(ref member) = member {
+                    let result_expr = projected_member_to_type_expr(member);
+                    let visited_decls = self.visited_decls[visited_start..].to_vec();
+                    self.op_cache.insert(
+                        op_key,
+                        OpResult {
+                            result: SolverResult::exact_concrete(result_expr),
+                            visited_decls,
+                        },
+                    );
                 }
-
-                let projected = project::project_member(
-                    &mut self.arena,
-                    &mut self.caches,
-                    resolved.node,
-                    member_name,
-                );
-                if !projected.exactness.is_exact() {
-                    return None;
-                }
-                projected.value.map(|ty| ProjectedMember {
-                    name: member_name.to_string(),
-                    ty: project_to_type_expr(&self.arena, ty),
-                    optional: false,
-                    readonly: false,
-                    is_method: false,
-                })
+                member
             }
             _ => None, // Other subject kinds not yet implemented
         }
@@ -560,6 +1103,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         let key = self.subject_key(subject)?.clone();
         match &key {
             SubjectKey::Decl { symbol_name, .. } => {
+                let visited_start = self.visited_decls.len();
                 let type_ref = TypeExpr::named(symbol_name);
                 let resolved =
                     self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, &type_ref);
@@ -571,7 +1115,18 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 if !projected.exactness.is_exact() {
                     return None;
                 }
-                Some(projected_keyspace_from_result(&projected.value))
+                let keyspace = projected_keyspace_from_result(&projected.value);
+                if let Some(result_expr) = projected_keyspace_to_type_expr(&keyspace) {
+                    let visited_decls = self.visited_decls[visited_start..].to_vec();
+                    self.op_cache.insert(
+                        op_key,
+                        OpResult {
+                            result: SolverResult::exact_concrete(result_expr),
+                            visited_decls,
+                        },
+                    );
+                }
+                Some(keyspace)
             }
             _ => None,
         }
@@ -593,7 +1148,22 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         match &key {
             SubjectKey::Decl { symbol_name, .. } => {
                 let type_ref = TypeExpr::named(symbol_name);
-                self.project_expr_surface(scoped_host, scope_canonical_id, &type_ref)
+                let visited_start = self.visited_decls.len();
+                let projected =
+                    self.project_expr_surface(scoped_host, scope_canonical_id, &type_ref);
+                if let Some(ref surface) = projected {
+                    if let Some(result_expr) = projected_surface_to_type_expr(surface) {
+                        let visited_decls = self.visited_decls[visited_start..].to_vec();
+                        self.op_cache.insert(
+                            op_key,
+                            OpResult {
+                                result: SolverResult::exact_concrete(result_expr),
+                                visited_decls,
+                            },
+                        );
+                    }
+                }
+                projected
             }
             _ => None,
         }
@@ -863,6 +1433,77 @@ fn projected_keyspace_from_result(keyspace: &super::result::Keyspace) -> Project
     }
 }
 
+fn projected_member_to_type_expr(member: &ProjectedMember) -> TypeExpr {
+    use crate::analysis::type_expr::{MethodSignature, ObjectExpr, ObjectMember, ObjectProperty};
+
+    let property = if member.is_method {
+        match &member.ty {
+            TypeExpr::Function(function) => ObjectMember::Method(MethodSignature {
+                name: member.name.clone(),
+                function: (**function).clone(),
+                optional: member.optional,
+            }),
+            _ => ObjectMember::Property(ObjectProperty {
+                name: member.name.clone(),
+                ty: member.ty.clone(),
+                optional: member.optional,
+                readonly: member.readonly,
+            }),
+        }
+    } else {
+        ObjectMember::Property(ObjectProperty {
+            name: member.name.clone(),
+            ty: member.ty.clone(),
+            optional: member.optional,
+            readonly: member.readonly,
+        })
+    };
+
+    TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+        properties: vec![property],
+    }))
+}
+
+fn projected_keyspace_to_type_expr(keyspace: &ProjectedKeyspace) -> Option<TypeExpr> {
+    use crate::analysis::type_expr::{
+        IndexSignature, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName,
+    };
+
+    if keyspace.members.is_empty() && !keyspace.has_index_signature {
+        return None;
+    }
+
+    let mut properties = keyspace
+        .members
+        .iter()
+        .map(|member| {
+            ObjectMember::Property(ObjectProperty {
+                name: member.clone(),
+                ty: TypeExpr::Unknown {
+                    raw: "projectedKeyspaceMember".to_string(),
+                },
+                optional: false,
+                readonly: false,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if keyspace.has_index_signature {
+        properties.push(ObjectMember::IndexSignature(IndexSignature {
+            key_name: "key".to_string(),
+            key_type: TypeExpr::Primitive(PrimitiveName::String),
+            value_type: TypeExpr::Unknown {
+                raw: "projectedOpenKeyspace".to_string(),
+            },
+            readonly: false,
+        }));
+    }
+
+    Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+        properties,
+    })))
+}
+
 fn projected_surface_from_shape(
     arena: &QueryArena,
     shape: &project::SurfaceShape,
@@ -1018,6 +1659,7 @@ mod tests {
     use crate::analysis::type_expr::PrimitiveName;
     use crate::analysis::type_solver::host::NoopSolverHost;
     use crate::analysis::type_solver::result::ExecutionStatus;
+    use std::cell::Cell;
 
     #[test]
     fn engine_solves_primitive() {
@@ -1166,6 +1808,24 @@ mod tests {
                 decls,
             }
         }
+
+        fn with_decls(decls_input: &[(&str, TypeExpr)]) -> Self {
+            let mut known = std::collections::HashSet::new();
+            let mut decls = rustc_hash::FxHashMap::default();
+            for (name, body) in decls_input {
+                known.insert((*name).to_string());
+                let prepared = PreparedTypeDecl::new(
+                    ResolvedRootIdentity::new("test_scope", *name),
+                    TypeDeclKind::Alias,
+                    body.clone(),
+                );
+                decls.insert((*name).to_string(), Arc::new(prepared));
+            }
+            Self {
+                known_bare_names: known,
+                decls,
+            }
+        }
     }
 
     impl TypeSolverHost for ScopedTestHost {
@@ -1197,6 +1857,367 @@ mod tests {
         }
     }
 
+    struct CountingPreserveHost {
+        root_identity_calls: Cell<usize>,
+        resolve_prepared_type_decl_calls: Cell<usize>,
+        canonical_id: &'static str,
+        prepared: Arc<PreparedTypeDecl>,
+    }
+
+    impl CountingPreserveHost {
+        fn new() -> Self {
+            Self::with_canonical("/pkg/index.d.ts")
+        }
+
+        fn new_package() -> Self {
+            Self::with_canonical("/node_modules/editor-lib/index.d.ts")
+        }
+
+        fn with_canonical(canonical_id: &'static str) -> Self {
+            let mut prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new(canonical_id, "DialogContentProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "id".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        },
+                    )],
+                })),
+            );
+            prepared.build_member_index();
+            prepared.classify_wrapper_shape();
+            prepared.classify_projection();
+            Self {
+                root_identity_calls: Cell::new(0),
+                resolve_prepared_type_decl_calls: Cell::new(0),
+                canonical_id,
+                prepared: Arc::new(prepared),
+            }
+        }
+    }
+
+    impl TypeSolverHost for CountingPreserveHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            self.resolve_prepared_type_decl_calls
+                .set(self.resolve_prepared_type_decl_calls.get() + 1);
+            (root_identity.canonical_id == self.canonical_id
+                && root_identity.symbol_name == "DialogContentProps")
+                .then(|| Arc::clone(&self.prepared))
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, name: &str) -> UtilitySource {
+            match name {
+                "Omit" | "Partial" => UtilitySource::Builtin,
+                _ => UtilitySource::Unknown,
+            }
+        }
+
+        fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+            match name {
+                "DialogContentProps" => BareRefOrigin::Imported,
+                _ => BareRefOrigin::Unknown,
+            }
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            assert!(
+                canonical_id.is_empty(),
+                "shallow preservation checks should resolve imported bare refs from the owner scope"
+            );
+            self.root_identity_calls
+                .set(self.root_identity_calls.get() + 1);
+            (symbol_name == "DialogContentProps")
+                .then(|| ResolvedRootIdentity::new(self.canonical_id, symbol_name))
+        }
+    }
+
+    struct TransitivePreserveHost {
+        decls: rustc_hash::FxHashMap<String, Arc<PreparedTypeDecl>>,
+    }
+
+    impl TransitivePreserveHost {
+        fn new() -> Self {
+            let mut decls = rustc_hash::FxHashMap::default();
+
+            let mut command_palette_group = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/CommandPalette.vue", "CommandPaletteGroup"),
+                TypeDeclKind::Interface,
+                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "items".to_string(),
+                            ty: TypeExpr::Array {
+                                element: std::sync::Arc::new(TypeExpr::named("T")),
+                                readonly: false,
+                            },
+                            optional: true,
+                            readonly: false,
+                        },
+                    )],
+                })),
+            );
+            command_palette_group.type_parameters =
+                vec![crate::analysis::type_expr::TypeParam {
+                    name: "T".to_string(),
+                    constraint: None,
+                    default: None,
+                }];
+            command_palette_group.build_member_index();
+            command_palette_group.classify_wrapper_shape();
+            command_palette_group.classify_projection();
+            decls.insert(
+                "CommandPaletteGroup".to_string(),
+                Arc::new(command_palette_group),
+            );
+
+            let mut content_search_item = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/ContentSearch.vue", "ContentSearchItem"),
+                TypeDeclKind::Interface,
+                TypeExpr::Intersection(std::sync::Arc::from(vec![
+                    TypeExpr::named_with_args(
+                        "Omit",
+                        vec![
+                            TypeExpr::named("LinkProps"),
+                            TypeExpr::string_literal("custom"),
+                        ],
+                    ),
+                    TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "badge".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        )],
+                    })),
+                ])),
+            );
+            content_search_item.build_member_index();
+            content_search_item.classify_wrapper_shape();
+            content_search_item.classify_projection();
+            decls.insert("ContentSearchItem".to_string(), Arc::new(content_search_item));
+
+            let mut link_props = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/Link.vue", "LinkProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::named_with_args(
+                    "Omit",
+                    vec![
+                        TypeExpr::named("RouterLinkProps"),
+                        TypeExpr::string_literal("to"),
+                    ],
+                ),
+            );
+            link_props.build_member_index();
+            link_props.classify_wrapper_shape();
+            link_props.classify_projection();
+            decls.insert("LinkProps".to_string(), Arc::new(link_props));
+
+            let mut router_link_props = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/node_modules/vue-router/index.d.ts", "RouterLinkProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "to".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: true,
+                                readonly: false,
+                            },
+                        ),
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "replace".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::Boolean),
+                                optional: true,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                })),
+            );
+            router_link_props.build_member_index();
+            router_link_props.classify_wrapper_shape();
+            router_link_props.classify_projection();
+            decls.insert("RouterLinkProps".to_string(), Arc::new(router_link_props));
+
+            Self { decls }
+        }
+    }
+
+    struct LocalTypeParameterPreserveHost {
+        imported_root_identity_calls: Cell<u32>,
+        imported_resolve_prepared_type_decl_calls: Cell<u32>,
+        local_prepared: Arc<PreparedTypeDecl>,
+        imported_prepared: Arc<PreparedTypeDecl>,
+    }
+
+    impl LocalTypeParameterPreserveHost {
+        fn new() -> Self {
+            let mut local_prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/App.vue", "T"),
+                TypeDeclKind::Alias,
+                TypeExpr::type_parameter(crate::analysis::type_expr::TypeParam {
+                    name: "T".to_string(),
+                    constraint: Some(std::sync::Arc::new(TypeExpr::named("DialogContentProps"))),
+                    default: None,
+                }),
+            );
+            local_prepared.build_member_index();
+            local_prepared.classify_wrapper_shape();
+            local_prepared.classify_projection();
+
+            let mut imported_prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/types.ts", "DialogContentProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::Object(std::sync::Arc::new(crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "id".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: true,
+                            readonly: false,
+                        },
+                    )],
+                })),
+            );
+            imported_prepared.build_member_index();
+            imported_prepared.classify_wrapper_shape();
+            imported_prepared.classify_projection();
+
+            Self {
+                imported_root_identity_calls: Cell::new(0),
+                imported_resolve_prepared_type_decl_calls: Cell::new(0),
+                local_prepared: Arc::new(local_prepared),
+                imported_prepared: Arc::new(imported_prepared),
+            }
+        }
+    }
+
+    impl TypeSolverHost for LocalTypeParameterPreserveHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            match (
+                root_identity.canonical_id.as_str(),
+                root_identity.symbol_name.as_str(),
+            ) {
+                ("/src/App.vue", "T") => Some(Arc::clone(&self.local_prepared)),
+                ("/src/types.ts", "DialogContentProps") => {
+                    self.imported_resolve_prepared_type_decl_calls.set(
+                        self.imported_resolve_prepared_type_decl_calls.get() + 1,
+                    );
+                    Some(Arc::clone(&self.imported_prepared))
+                }
+                _ => None,
+            }
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, _name: &str) -> UtilitySource {
+            UtilitySource::Unknown
+        }
+
+        fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+            match name {
+                "T" => BareRefOrigin::Local,
+                "DialogContentProps" => BareRefOrigin::Imported,
+                _ => BareRefOrigin::Unknown,
+            }
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            match (canonical_id, symbol_name) {
+                ("", "T") => Some(ResolvedRootIdentity::new("/src/App.vue", "T")),
+                ("", "DialogContentProps") => {
+                    self.imported_root_identity_calls
+                        .set(self.imported_root_identity_calls.get() + 1);
+                    Some(ResolvedRootIdentity::new("/src/types.ts", "DialogContentProps"))
+                }
+                _ => None,
+            }
+        }
+    }
+
+    impl TypeSolverHost for TransitivePreserveHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            self.decls.get(&root_identity.symbol_name).cloned()
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, name: &str) -> UtilitySource {
+            match name {
+                "Omit" => UtilitySource::Builtin,
+                _ => UtilitySource::Unknown,
+            }
+        }
+
+        fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+            match name {
+                "CommandPaletteGroup" | "LinkProps" | "RouterLinkProps" => {
+                    BareRefOrigin::Imported
+                }
+                "ContentSearchItem" => BareRefOrigin::Local,
+                _ => BareRefOrigin::Unknown,
+            }
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            if canonical_id.is_empty() {
+                self.decls.get(symbol_name).map(|decl| decl.root_identity.clone())
+            } else {
+                self.decls
+                    .get(symbol_name)
+                    .filter(|decl| decl.root_identity.canonical_id == canonical_id)
+                    .map(|decl| decl.root_identity.clone())
+            }
+        }
+    }
+
     #[test]
     fn solve_scoped_shares_engine_state() {
         // Two scoped solves in the same engine share caches/arena.
@@ -1222,6 +2243,138 @@ mod tests {
             "cached scoped solve should not add steps"
         );
         assert_eq!(r1.value, r2.value, "cached result must match");
+    }
+
+    #[test]
+    fn shallow_field_preservation_caches_imported_ref_probes() {
+        let host = CountingPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Intersection(std::sync::Arc::from(vec![
+            TypeExpr::named_with_args(
+                "Omit",
+                vec![
+                    TypeExpr::named("DialogContentProps"),
+                    TypeExpr::string_literal("as"),
+                ],
+            ),
+            TypeExpr::named_with_args(
+                "Partial",
+                vec![TypeExpr::named_with_args(
+                    "Omit",
+                    vec![
+                        TypeExpr::named("DialogContentProps"),
+                        TypeExpr::string_literal("forceMount"),
+                    ],
+                )],
+            ),
+        ]));
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "utility-wrapped imported object refs should stay shallow-symbolic"
+        );
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "repeating the same field expression should hit the request-local preserve cache"
+        );
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "repeated preserve checks should reuse one imported-root proof"
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            1,
+            "repeated preserve checks should reuse one prepared-decl lookup"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_skips_prepared_lookup_for_package_imports() {
+        let host = CountingPreserveHost::new_package();
+        let mut engine = TypeQueryEngine::new(&host);
+
+        assert!(
+            engine.should_preserve_imported_bare_ref(&TypeExpr::named("DialogContentProps")),
+            "package-backed imported refs should stay symbolic in shallow field evaluation"
+        );
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "package-backed preserve checks should still prove the direct import binding once"
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "package-backed preserve checks should not materialize the imported prepared decl just to keep it symbolic"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_keeps_package_member_paths_symbolic() {
+        let host = CountingPreserveHost::new_package();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(TypeExpr::named_with_args(
+                "DialogContentProps",
+                vec![TypeExpr::Primitive(PrimitiveName::String)],
+            )),
+            index: std::sync::Arc::new(TypeExpr::string_literal("state")),
+        };
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "package-backed indexed member paths should stay symbolic in shallow field evaluation"
+        );
+        assert_eq!(
+            host.root_identity_calls.get(),
+            1,
+            "package-backed member path preservation should prove the import root once"
+        );
+        assert_eq!(
+            host.resolve_prepared_type_decl_calls.get(),
+            0,
+            "package-backed member path preservation should not materialize the imported prepared decl"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_keeps_transitive_package_wrappers_symbolic() {
+        let host = TransitivePreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Array {
+            element: std::sync::Arc::new(TypeExpr::named_with_args(
+                "CommandPaletteGroup",
+                vec![TypeExpr::named("ContentSearchItem")],
+            )),
+            readonly: false,
+        };
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "local generic wrappers should stay shallow-symbolic when they flow into package-backed imported refs"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_keeps_local_type_params_symbolic_without_constraint_walk() {
+        let host = LocalTypeParameterPreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&TypeExpr::named("T")),
+            "local generic parameters should stay symbolic in shallow field evaluation"
+        );
+        assert_eq!(
+            host.imported_root_identity_calls.get(),
+            0,
+            "local generic parameters should not probe imported constraint roots just to stay symbolic"
+        );
+        assert_eq!(
+            host.imported_resolve_prepared_type_decl_calls.get(),
+            0,
+            "local generic parameters should not materialize imported constraint declarations during shallow preservation"
+        );
     }
 
     #[test]
@@ -1345,4 +2498,164 @@ mod tests {
             "single callable surface should stay a Function, got: {projected:?}"
         );
     }
+
+    #[test]
+    fn project_member_reuses_request_scoped_projection_cache() {
+        let host = NoopSolverHost;
+        let scoped_host = ScopedTestHost::with_decls(&[(
+            "Widget",
+            TypeExpr::Object(std::sync::Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "title".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                },
+            )),
+        )]);
+        let mut engine = TypeQueryEngine::new(&host);
+        let subject = engine.intern_subject(SubjectKey::Decl {
+            canonical_id: "scope_a".to_string(),
+            symbol_name: "Widget".to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        });
+
+        let first = engine
+            .project_member(subject, "title", &scoped_host, "scope_a")
+            .expect("first projected member should resolve");
+        let steps_after_first = engine.total_steps();
+        let solves_after_first = engine.solve_count();
+
+        let second = engine
+            .project_member(subject, "title", &scoped_host, "scope_a")
+            .expect("second projected member should reuse cache");
+
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.ty, second.ty);
+        assert_eq!(
+            engine.solve_count(),
+            solves_after_first,
+            "cached member projection should not trigger another scoped solve",
+        );
+        assert_eq!(
+            engine.total_steps(),
+            steps_after_first,
+            "cached member projection should not add solver steps",
+        );
+    }
+
+    #[test]
+    fn project_surface_reuses_request_scoped_projection_cache() {
+        let host = NoopSolverHost;
+        let scoped_host = ScopedTestHost::with_decls(&[(
+            "Widget",
+            TypeExpr::Object(std::sync::Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                        crate::analysis::type_expr::ObjectProperty {
+                            name: "title".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    )],
+                },
+            )),
+        )]);
+        let mut engine = TypeQueryEngine::new(&host);
+        let subject = engine.intern_subject(SubjectKey::Decl {
+            canonical_id: "scope_a".to_string(),
+            symbol_name: "Widget".to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        });
+
+        let first = engine
+            .project_surface(subject, &scoped_host, "scope_a")
+            .expect("first projected surface should resolve");
+        let steps_after_first = engine.total_steps();
+        let solves_after_first = engine.solve_count();
+
+        let second = engine
+            .project_surface(subject, &scoped_host, "scope_a")
+            .expect("second projected surface should reuse cache");
+
+        assert_eq!(first.members.len(), second.members.len());
+        assert_eq!(first.members[0].name, second.members[0].name);
+        assert_eq!(
+            engine.solve_count(),
+            solves_after_first,
+            "cached surface projection should not trigger another scoped solve",
+        );
+        assert_eq!(
+            engine.total_steps(),
+            steps_after_first,
+            "cached surface projection should not add solver steps",
+        );
+    }
+
+    #[test]
+    fn project_keyspace_reuses_request_scoped_projection_cache() {
+        let host = NoopSolverHost;
+        let scoped_host = ScopedTestHost::with_decls(&[(
+            "Widget",
+            TypeExpr::Object(std::sync::Arc::new(
+                crate::analysis::type_expr::ObjectExpr {
+                    properties: vec![
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "title".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                        crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "count".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::Number),
+                                optional: false,
+                                readonly: false,
+                            },
+                        ),
+                    ],
+                },
+            )),
+        )]);
+        let mut engine = TypeQueryEngine::new(&host);
+        let subject = engine.intern_subject(SubjectKey::Decl {
+            canonical_id: "scope_a".to_string(),
+            symbol_name: "Widget".to_string(),
+            args_hash: 0,
+            conditional_ctx_hash: 0,
+        });
+
+        let first = engine
+            .project_keyspace(subject, &scoped_host, "scope_a")
+            .expect("first projected keyspace should resolve");
+        let steps_after_first = engine.total_steps();
+        let solves_after_first = engine.solve_count();
+
+        let second = engine
+            .project_keyspace(subject, &scoped_host, "scope_a")
+            .expect("second projected keyspace should reuse cache");
+
+        assert_eq!(first.members, second.members);
+        assert_eq!(
+            engine.solve_count(),
+            solves_after_first,
+            "cached keyspace projection should not trigger another scoped solve",
+        );
+        assert_eq!(
+            engine.total_steps(),
+            steps_after_first,
+            "cached keyspace projection should not add solver steps",
+        );
+    }
+
 }

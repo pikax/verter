@@ -99,6 +99,9 @@ pub struct SolveState {
     pub diagnostics: Vec<SolverDiagnostic>,
     /// Count of diagnostics that were dropped after the cap was reached.
     pub diagnostics_truncated: usize,
+    /// When true, package-backed prepared refs stay symbolic instead of
+    /// materializing their declaration bodies.
+    pub preserve_package_symbolic_refs: bool,
 
     // -- Query audit / trace counters --
     /// Whether structured solver tracing is enabled for this query.
@@ -229,6 +232,22 @@ impl SolveState {
         relation_caches: SolverCaches,
         scope_canonical_id: String,
     ) -> Self {
+        Self::with_caches_and_scope_and_package_mode(
+            limits,
+            instantiation_cache,
+            relation_caches,
+            scope_canonical_id,
+            false,
+        )
+    }
+
+    pub fn with_caches_and_scope_and_package_mode(
+        limits: SolveLimits,
+        instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
+        relation_caches: SolverCaches,
+        scope_canonical_id: String,
+        preserve_package_symbolic_refs: bool,
+    ) -> Self {
         Self {
             depth: 0,
             steps: 0,
@@ -246,6 +265,7 @@ impl SolveState {
             conditional_context_base_stack: Vec::new(),
             diagnostics: Vec::new(),
             diagnostics_truncated: 0,
+            preserve_package_symbolic_refs,
             trace_enabled: solver_trace_enabled(),
             audit_prepared_ref_entries: rustc_hash::FxHashMap::default(),
             audit_prepared_ref_edges: rustc_hash::FxHashMap::default(),
@@ -2096,6 +2116,15 @@ fn resolve_prepared_ref(
         return arena.error(format!("missing: {}", root_id));
     };
     let effective_args = build_effective_args(arena, &prepared, parent_subst, args);
+
+    if state.preserve_package_symbolic_refs && root_id.canonical_id.contains("/node_modules/") {
+        state.mark_symbolic();
+        return arena.scoped_type_ref(
+            root_id.symbol_name.clone(),
+            effective_args,
+            Some(root_id.canonical_id.clone()),
+        );
+    }
 
     // Check recursion — have we already started resolving this exact
     // (identity, effective_args) combination?

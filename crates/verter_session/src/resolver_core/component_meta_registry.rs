@@ -127,9 +127,11 @@ pub(crate) fn should_collect_component_meta_registry_nested_refs(
     }
 }
 
-pub(crate) fn owner_component_meta_registry_import_binding(
+pub(crate) fn owner_component_meta_registry_import_root(
+    host: &VerterHost,
     snapshot: &FileAnalysisSnapshot,
     local_name: &str,
+    store_view: Option<&crate::resolver_store::HostStoreView>,
 ) -> Option<(String, String)> {
     snapshot.imports.iter().find_map(|import| {
         let canonical_id = import.resolved_canonical_id.as_ref()?;
@@ -141,7 +143,11 @@ pub(crate) fn owner_component_meta_registry_import_binding(
             .imported_name
             .clone()
             .unwrap_or_else(|| local_name.to_string());
-        Some((canonical_id.clone(), exported_name))
+        Some(host.resolve_imported_type_root_in_view(
+            canonical_id.as_str(),
+            exported_name.as_str(),
+            store_view,
+        ))
     })
 }
 
@@ -833,6 +839,23 @@ pub(crate) fn component_meta_registry_has_non_object_top_level_surface(
     }
 }
 
+pub(crate) fn component_meta_registry_has_explicit_object_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => {
+            component_meta_registry_has_explicit_object_surface(inner)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(component_meta_registry_has_explicit_object_surface),
+        TypeExpr::Object(_) => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn component_meta_registry_expr_references_name(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     target_name: &str,
@@ -1067,6 +1090,19 @@ pub(crate) fn collect_component_meta_registry_refs(
     use verter_semantic::analysis::type_expr::TypeExpr;
 
     if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr) {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            root_name.as_str(),
+            source_hint,
+            None,
+            route,
+        );
+        return;
+    }
+
+    if let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) {
         enqueue_component_meta_registry_ref(
             published_names,
             queued_names,
@@ -1353,6 +1389,21 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,
     source_hint: Option<&str>,
 ) {
+    fn direct_public_ref<'a>(
+        expr: &'a verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> Option<(&'a str, &'a [verter_semantic::analysis::type_expr::TypeExpr])> {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => Some((name.as_ref(), type_arguments.as_ref())),
+            TypeExpr::Parenthesized(inner) => direct_public_ref(inner),
+            _ => None,
+        }
+    }
+
     let parsed_raw = field
         .raw_type
         .as_deref()
@@ -1360,8 +1411,15 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
-        owner_component_meta_registry_import_binding(snapshot, name)
-            .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
+        host.prepared_type_decl_in_view(owner_canonical, name, store_view)
+            .is_some_and(|prepared| {
+                matches!(
+                    prepared.body,
+                    verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_)
+                )
+            })
+            || owner_component_meta_registry_import_root(host, snapshot, name, store_view)
+                .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
             || crate::meta_resolve::resolve_type_declaration_in_view(
                 host,
                 owner_canonical,
@@ -1371,7 +1429,26 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             .canonical_source
             .contains("/node_modules/")
     });
-    if !skip_direct_plain_ref {
+    let skip_imported_generic_non_object_ref =
+        direct_public_ref(expr).is_some_and(|(name, type_arguments)| {
+            if type_arguments.is_empty() {
+                return false;
+            }
+            let Some((canonical_id, exported_name)) =
+                owner_component_meta_registry_import_root(host, snapshot, name, store_view)
+            else {
+                return false;
+            };
+            if canonical_id.is_empty() || canonical_id.contains("/node_modules/") {
+                return false;
+            }
+            host.prepared_type_decl_in_view(canonical_id.as_str(), exported_name.as_str(), store_view)
+                .is_some_and(|prepared| {
+                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
+                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
+                })
+        });
+    if !skip_direct_plain_ref && !skip_imported_generic_non_object_ref {
         collect_component_meta_registry_public_surface_refs(
             expr,
             published_names,
@@ -1587,6 +1664,21 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
     allow_plain_refs: bool,
 ) {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    if let Some((root_name, route)) = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+    {
+        enqueue_component_meta_registry_ref(
+            published_names,
+            queued_names,
+            output,
+            root_name.as_str(),
+            source_hint,
+            None,
+            route,
+        );
+        return;
+    }
 
     match expr {
         TypeExpr::Ref {
@@ -1808,12 +1900,16 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
 
     use super::{
-        choose_preferred_imported_type_body, component_meta_registry_public_indexed_access_route,
-        imported_type_body_specificity_score, RouteDemand,
+        choose_preferred_imported_type_body, collect_component_meta_registry_refs,
+        component_meta_registry_public_indexed_access_route, imported_type_body_specificity_score,
+        owner_component_meta_registry_import_root, RouteDemand,
     };
+    use crate::types::{AnalysisLevel, DependencyResolution, HostConfig};
+    use crate::VerterHost;
     use verter_semantic::analysis::type_expr::{
         FunctionExpr, FunctionParam, LiteralValue, MethodSignature, ObjectExpr, ObjectMember,
         ObjectProperty, PrimitiveName, TypeExpr, ValueRef,
@@ -1853,6 +1949,137 @@ mod tests {
                 "Button".to_string(),
                 RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]),
             ))
+        );
+    }
+
+    #[test]
+    fn collect_registry_refs_preserves_indexed_access_member_path() {
+        let expr =
+            verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
+        let published_names = rustc_hash::FxHashSet::default();
+        let mut queued_names = rustc_hash::FxHashSet::default();
+        let mut output = VecDeque::new();
+
+        collect_component_meta_registry_refs(
+            &expr,
+            &published_names,
+            &mut queued_names,
+            &mut output,
+            Some("/src/Button.vue"),
+            false,
+        );
+
+        let pending = output
+            .pop_front()
+            .expect("indexed-access helper should enqueue a registry ref");
+        assert_eq!(pending.name, "Button");
+        assert_eq!(pending.source_hint.as_deref(), Some("/src/Button.vue"));
+        assert_eq!(pending.exported_name, None);
+        assert_eq!(
+            pending.route,
+            RouteDemand::MemberPath(vec!["ui".to_string()]),
+            "indexed-access helper refs should preserve the requested member path instead of widening to Whole",
+        );
+        assert!(
+            output.is_empty(),
+            "indexed-access helper refs should enqueue only the routed root helper"
+        );
+    }
+
+    #[test]
+    fn owner_import_root_resolves_named_imports_through_barrels() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { AvatarProps } from './types'
+
+export interface Props {
+  avatar?: AvatarProps
+}
+
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from("export * from './Alert.vue'\nexport * from './Avatar.vue'\n"),
+        );
+        ws.inject_file(
+            "/src/Alert.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+export interface AlertProps {
+  title?: string
+}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Avatar.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+export interface AvatarProps {
+  src?: string
+}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/types.ts",
+            vec![
+                DependencyResolution {
+                    specifier: "./Alert.vue".to_string(),
+                    resolved_canonical_id: Some("/src/Alert.vue".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                DependencyResolution {
+                    specifier: "./Avatar.vue".to_string(),
+                    resolved_canonical_id: Some("/src/Avatar.vue".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let snapshot = host
+            .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
+            .expect("app snapshot should exist");
+
+        let resolved = owner_component_meta_registry_import_root(
+            &host,
+            &snapshot,
+            "AvatarProps",
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            Some(("/src/Avatar.vue".to_string(), "AvatarProps".to_string())),
+            "registry import roots should collapse direct named owner imports to the canonical defining file instead of keeping the barrel canonical",
         );
     }
 

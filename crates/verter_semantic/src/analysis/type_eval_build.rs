@@ -1417,6 +1417,19 @@ fn expand_macro_types_impl(
         solver_result_to_normalized_expansion(result)
     }
 
+    fn expand_field_expr(
+        engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+        parsed: &TypeExpr,
+    ) -> ExpansionResult<ExpandedNormalizedExpr> {
+        if engine.should_preserve_shallow_field_expr(parsed) {
+            ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                expr: parsed.clone(),
+            })
+        } else {
+            solver_to_expr_result(engine.solve_preserving_package_refs(parsed))
+        }
+    }
+
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();
     let start_steps = debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0);
@@ -1447,8 +1460,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = engine.solve(&parsed);
-                    let expanded = solver_to_expr_result(solved);
+                    let expanded = expand_field_expr(engine, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1488,8 +1500,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let solved = engine.solve(&parsed);
-                    let expanded = solver_to_expr_result(solved);
+                    let expanded = expand_field_expr(engine, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1527,8 +1538,7 @@ fn expand_macro_types_impl(
                             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                         };
                         log_expand_stage_start(&stage_log);
-                        let solved = engine.solve(&parsed);
-                        let expanded = solver_to_expr_result(solved);
+                        let expanded = expand_field_expr(engine, &parsed);
                         log_expand_stage(
                             stage_log,
                             expanded.exactness,
@@ -1563,8 +1573,7 @@ fn expand_macro_types_impl(
             start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
         };
         log_expand_stage_start(&stage_log);
-        let solved = engine.solve(type_ann);
-        let expanded = solver_to_expr_result(solved);
+        let expanded = expand_field_expr(engine, type_ann);
         log_expand_stage(
             stage_log,
             expanded.exactness,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 use verter_semantic::analysis::type_solver::host::{
-    RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
+    BareRefOrigin, RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
 };
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
@@ -362,6 +362,21 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         } else {
             UtilitySource::Unknown
         }
+    }
+
+    fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+        if let Some(scope_payload) = self.scope_payload.as_ref() {
+            if scope_payload.import_bindings.contains_key(name) {
+                return BareRefOrigin::Imported;
+            }
+            if scope_payload.scope_type_bindings.contains_key(name)
+                || scope_payload.scope_type_names.contains(name)
+                || scope_payload.scope_value_names.contains(name)
+            {
+                return BareRefOrigin::Local;
+            }
+        }
+        BareRefOrigin::Unknown
     }
 
     fn root_identity(&self, canonical_id: &str, symbol_name: &str) -> Option<ResolvedRootIdentity> {

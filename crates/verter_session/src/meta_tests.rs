@@ -7020,6 +7020,89 @@ defineProps<{
 }
 
 #[test]
+fn resolve_component_meta_keeps_imported_generic_public_field_helpers_off_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types/utils.ts",
+            r#"
+export type GetItemKeys<T> = T extends readonly (infer U)[]
+  ? U extends Record<string, any> ? keyof U & string : never
+  : T extends Record<string, any> ? keyof T & string : never
+
+export type GetModelValue<T, VK, M extends boolean> = M extends true
+  ? Array<GetItemKeys<T> | VK>
+  : GetItemKeys<T> | VK
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { GetItemKeys, GetModelValue } from './types/utils'
+
+type Item = {
+  label?: string
+  value?: string
+}
+
+export interface Props<
+  T extends Item[] = Item[],
+  VK extends GetItemKeys<T> = 'value'
+> {
+  valueKey?: VK
+  labelKey?: GetItemKeys<T>
+  items?: T
+  modelValue?: GetModelValue<T, VK, true>
+}
+</script>
+<script setup lang="ts" generic="T extends Item[], VK extends GetItemKeys<T> = 'value'">
+defineProps<Props<T, VK>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types/utils".to_string(),
+            resolved_canonical_id: Some("/src/types/utils.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let registry_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+
+    assert!(
+        registry_names.contains("Props"),
+        "the queried props contract should still publish, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("GetItemKeys"),
+        "imported generic key helpers used only on public fields should stay off the registry, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("GetModelValue"),
+        "imported generic model helpers used only on public fields should stay off the registry, got {registry_names:?}"
+    );
+    assert!(
+        !registry_names.contains("T") && !registry_names.contains("VK"),
+        "generic public-field parameters should stay off the registry, got {registry_names:?}"
+    );
+}
+
+#[test]
 fn resolve_component_meta_skips_unreferenced_owner_local_registry_helpers() {
     let project = make_project();
     project
@@ -7935,30 +8018,18 @@ defineSlots<ButtonSlots>()
             button_entry.type_expr
         );
     };
-
-    let variants_member = button_shape
+    let member_names: std::collections::BTreeSet<_> = button_shape
         .properties
         .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "variants" => Some(&property.ty),
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
             _ => None,
         })
-        .expect("Button helper should keep a variants member");
-    let TypeExpr::Object(variants_shape) = variants_member else {
-        panic!(
-            "Button.variants should materialize as an object, got {:?}",
-            variants_member
-        );
-    };
-    let color_member = variants_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "color" => Some(&property.ty),
-            _ => None,
-        })
-        .expect("Button.variants should keep a color member");
-    assert_union_string_literals(color_member, &["primary", "secondary"]);
+        .collect();
+    assert!(
+        !member_names.contains("variants"),
+        "imported registry helpers should not widen to already-concrete sibling routes, got {member_names:?}"
+    );
 
     let ui_member = button_shape
         .properties
@@ -7988,21 +8059,328 @@ defineSlots<ButtonSlots>()
         "Button.ui should expose label, got {:?}",
         ui_member
     );
+}
 
-    let store_view = project.host().resolver_store_view();
-    let cached_surface = project.host().resolver_runtime().type_surfaces.get(
-        &crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/types.ts".to_string(),
-            symbol_name: "Button".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        }),
-        &store_view,
+#[test]
+fn resolve_component_meta_keeps_imported_registry_helpers_on_requested_member_paths() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"type ButtonShape = {
+  variants: {
+    color: 'primary' | 'secondary'
+  }
+  slots: {
+    base?: string
+    label?: string
+  }
+  ui: {
+    base?: (props?: { active?: boolean }) => string
+    label?: (props?: { active?: boolean }) => string
+  }
+}
+
+export type Button = Pick<ButtonShape, 'variants' | 'slots' | 'ui'>
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
+    let _guard =
+        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let button_entry = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "Button")
+        .expect("Button helper should be published in the resolved type registry");
+    let TypeExpr::Object(button_shape) = &button_entry.type_expr else {
+        panic!(
+            "imported Button helper should materialize as an object surface, got {:?}",
+            button_entry.type_expr
+        );
+    };
+
+    let member_names: std::collections::BTreeSet<_> = button_shape
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            ObjectMember::Property(property) => Some(property.name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        member_names,
+        std::collections::BTreeSet::from(["ui"]),
+        "imported registry helper should only materialize the requested member-path root, got {member_names:?}"
+    );
+
+    let ui_member = button_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("Button helper should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_member else {
+        panic!(
+            "Button.ui should materialize as an object, got {:?}",
+            ui_member
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "Button.ui should expose base, got {:?}",
+        ui_member
     );
     assert!(
-        matches!(cached_surface.as_deref(), Some(result) if result.as_surface().is_some()),
-        "component-meta should warm TypeSurfaceDb for imported registry helpers, got {:?}",
-        cached_surface.map(|result| result.is_miss())
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "Button.ui should expose label, got {:?}",
+        ui_member
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_transitive_nested_slot_param_helpers_off_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface DeepProps {
+  active?: boolean
+  theme?: {
+    dark?: boolean
+  }
+}
+
+type ButtonShape = {
+  ui: {
+    base?: (props?: DeepProps) => string
+    label?: (props?: DeepProps) => string
+  }
+}
+
+export type Button = Pick<ButtonShape, 'ui'>
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let _route_shadow_guard = crate::host_resolve::forbid_import_route_shadow_for_tests();
+    let _guard =
+        crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    assert!(
+        resolved
+            .resolved_type_registry
+            .iter()
+            .all(|entry| entry.name != "DeepProps"),
+        "requested member-path materialization should not publish transitive nested helper refs",
+    );
+
+    let button_slots = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ButtonSlots")
+        .expect("ButtonSlots should be published in the resolved type registry");
+    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
+        panic!(
+            "ButtonSlots should materialize as an object, got {:?}",
+            button_slots.type_expr
+        );
+    };
+    let default_method = button_slots_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            _ => None,
+        })
+        .expect("ButtonSlots should keep the default slot as a method signature");
+    let props_param = default_method
+        .parameters
+        .first()
+        .expect("default slot method should keep its props parameter");
+    let TypeExpr::Object(props_shape) = &props_param.ty else {
+        panic!(
+            "slot props should materialize as an object, got {:?}",
+            props_param.ty
+        );
+    };
+    let ui_prop = props_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("default slot props should keep a ui member");
+    let TypeExpr::Object(ui_shape) = ui_prop else {
+        panic!(
+            "slot props ui should be resolved as an object, got {:?}",
+            ui_prop
+        );
+    };
+    let base_prop = ui_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "base" => Some(property),
+            _ => None,
+        })
+        .expect("ui surface should keep a base member");
+    let TypeExpr::Function(base_fn) = &base_prop.ty else {
+        panic!("ui.base should stay callable, got {:?}", base_prop.ty);
+    };
+    let base_param = base_fn
+        .parameters
+        .first()
+        .expect("ui.base should keep its props parameter");
+    assert!(
+        matches!(&base_param.ty, TypeExpr::Ref { .. } | TypeExpr::Object(_)),
+        "ui.base should keep a structured props parameter, got {:?}",
+        base_param.ty
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_function_valued_registry_members_shallow() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export interface DeepProps {
+  active?: boolean
+  theme?: {
+    dark?: boolean
+  }
+}
+
+type ButtonShape = {
+  ui: {
+    base?: (props?: DeepProps) => string
+    label?: (props?: DeepProps) => string
+  }
+}
+
+export type Button = Pick<ButtonShape, 'ui'>
+
+export interface ButtonSlots {
+  default?(props: { ui: Button['ui'] }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    assert!(
+        resolved
+            .resolved_type_registry
+            .iter()
+            .all(|entry| entry.name != "DeepProps"),
+        "function-valued registry members should not publish transitive callable parameter helpers",
+    );
+
+    let button_slots = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ButtonSlots")
+        .expect("ButtonSlots should be published in the resolved type registry");
+    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
+        panic!(
+            "ButtonSlots should materialize as an object, got {:?}",
+            button_slots.type_expr
+        );
+    };
+    let default_method = button_slots_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            _ => None,
+        })
+        .expect("ButtonSlots should keep the default slot as a method signature");
+    let props_param = default_method
+        .parameters
+        .first()
+        .expect("default slot method should keep its props parameter");
+    let TypeExpr::Object(props_shape) = &props_param.ty else {
+        panic!(
+            "slot props should materialize as an object, got {:?}",
+            props_param.ty
+        );
+    };
+    let ui_prop = props_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("default slot props should keep a ui member");
+    assert!(
+        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
+        "function-valued projected members should keep imported member-path helpers symbolic, got {:?}",
+        ui_prop
     );
 }
 
@@ -9838,7 +10216,8 @@ defineSlots<ButtonSlots>()
             props_param.ty
         );
     };
-    // The ui prop is fully resolved inline as an Object (not an IndexedAccess)
+    // Imported slot param helpers now stay symbolic in the registry; the
+    // public slot binding contract still points at the requested member path.
     let ui_prop = props_shape
         .properties
         .iter()
@@ -9847,25 +10226,231 @@ defineSlots<ButtonSlots>()
             _ => None,
         })
         .expect("default slot props should keep a ui member");
-    let TypeExpr::Object(ui_shape) = ui_prop else {
+    assert!(
+        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
+        "slot props ui should stay on the requested member path instead of widening eagerly, got {:?}",
+        ui_prop
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_imported_slot_param_member_paths_symbolic_in_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+export type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"
+export const theme = {
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/button-types.ts",
+            r#"
+import type { ComponentConfig } from './types'
+import { theme } from './theme'
+
+export type Button = ComponentConfig<typeof theme>
+
+export interface ButtonSlots {
+  default?(props: {
+    ui: Button['ui']
+  }): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonSlots } from './button-types'
+
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("should resolve component meta state");
+
+    let button_slots = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ButtonSlots")
+        .expect("ButtonSlots should be published in the resolved type registry");
+    let TypeExpr::Object(button_slots_shape) = &button_slots.type_expr else {
         panic!(
-            "slot props ui should be resolved as an object, got {:?}",
-            ui_prop
+            "ButtonSlots should materialize as an object, got {:?}",
+            button_slots.type_expr
+        );
+    };
+    let default_method = button_slots_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            _ => None,
+        })
+        .expect("ButtonSlots should keep the default slot as a method signature");
+    let Some(props_param) = default_method.parameters.first() else {
+        panic!("default slot method should keep its props parameter");
+    };
+    let TypeExpr::Object(props_shape) = &props_param.ty else {
+        panic!(
+            "slot props should materialize as an object, got {:?}",
+            props_param.ty
+        );
+    };
+    let ui_prop = props_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(&property.ty),
+            _ => None,
+        })
+        .expect("default slot props should keep a ui member");
+    assert!(
+        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
+        "imported slot callable params should keep indexed member-path helpers symbolic, got {:?}",
+        ui_prop
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should still be extracted");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should still expose the ui binding");
+    assert!(
+        ui_binding.raw_type.as_deref() == Some("Button['ui']"),
+        "slot binding contract should still point at the requested helper route, got {:?}",
+        ui_binding.raw_type
+    );
+}
+
+#[test]
+fn resolve_component_meta_keeps_imported_intersection_slot_helpers_symbolic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface Item {
+  label?: string
+}
+
+export type DynamicSlots<T> = {
+  [name: string]: (props: { item: T }) => any
+}
+
+export type MergeTypes<T> = T & {
+  extra?: boolean
+}
+
+export type MenuSlots<T = Item> = {
+  default?(props?: {}): any
+  item?(props: { item: T }): any
+} & DynamicSlots<MergeTypes<T>>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { MenuSlots } from './types'
+
+defineSlots<MenuSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let registry_names: std::collections::BTreeSet<_> = resolved
+        .resolved_type_registry
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        !registry_names.contains("DynamicSlots") && !registry_names.contains("MergeTypes"),
+        "imported utility helpers should stay off the published registry, got {registry_names:?}"
+    );
+    let menu_slots = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "MenuSlots")
+        .expect("MenuSlots should be published in the resolved type registry");
+    let TypeExpr::Object(menu_slots_shape) = &menu_slots.type_expr else {
+        panic!(
+            "imported slot helpers should still expose their explicit slot members, got {:?}",
+            menu_slots.type_expr
         );
     };
     assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        menu_slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "default")
+                || matches!(member, ObjectMember::Method(method) if method.name == "default")
         ),
-        "resolved slot ui should expose base, got {:?}",
-        ui_prop
+        "MenuSlots should keep the explicit default slot member, got {:?}",
+        menu_slots.type_expr
     );
     assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        menu_slots_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "item")
+                || matches!(member, ObjectMember::Method(method) if method.name == "item")
         ),
-        "resolved slot ui should expose label, got {:?}",
-        ui_prop
+        "MenuSlots should keep the explicit item slot member, got {:?}",
+        menu_slots.type_expr
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let slot_names: std::collections::BTreeSet<_> =
+        meta.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert!(
+        slot_names.contains("default") && slot_names.contains("item"),
+        "explicit imported slot members should still be exposed, got {slot_names:?}"
     );
 }
 
@@ -10628,6 +11213,768 @@ defineProps<{
     assert!(
         !registry_names.contains(&"Editor"),
         "direct package-backed public field refs should stay symbolic on the prop instead of being published into the registry, got {registry_names:?}",
+    );
+}
+
+#[test]
+fn package_backed_object_prop_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  $doc(): string
+  chain(): string
+  active?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Editor } from 'editor-lib'
+
+defineProps<{
+  editor: Editor
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let editor_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
+        .expect("expanded evaluated types should keep the editor prop");
+
+    assert!(
+        matches!(
+            &editor_field.r#type,
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "Editor" && type_arguments.is_empty()
+        ),
+        "package-backed prop expansion should keep the raw symbolic ref instead of expanding the package object, got {:?}",
+        editor_field.r#type
+    );
+}
+
+#[test]
+fn package_backed_utility_wrapped_prop_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  $doc(): string
+  chain(): string
+  active?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Editor } from 'editor-lib'
+
+defineProps<{
+  editor?: Omit<Editor, 'active'>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let editor_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
+        .expect("expanded evaluated types should keep the editor prop");
+
+    assert!(
+        matches!(
+            &editor_field.r#type,
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "Omit"
+                    && type_arguments.len() == 2
+                    && matches!(
+                        &type_arguments[0],
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                            name,
+                            type_arguments
+                        } if name.as_ref() == "Editor" && type_arguments.is_empty()
+                    )
+        ),
+        "package-backed utility-wrapped props should keep the imported package ref symbolic instead of expanding the package object, got {:?}",
+        editor_field.r#type
+    );
+}
+
+#[test]
+fn package_backed_member_path_prop_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/table-lib/index.d.ts",
+            r#"
+export interface CoreOptions<T> {
+  state?: T
+}
+
+export interface RowState {
+  selected?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { CoreOptions, RowState } from 'table-lib'
+
+defineProps<{
+  state?: CoreOptions<RowState>['state']
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "table-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/table-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let state_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "state"))
+        .expect("expanded evaluated types should keep the state prop");
+
+    assert!(
+        matches!(
+            &state_field.r#type,
+            verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { object, index }
+                if matches!(
+                    object.as_ref(),
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "CoreOptions" && type_arguments.len() == 1
+                ) && matches!(
+                    index.as_ref(),
+                    verter_semantic::analysis::type_expr::TypeExpr::Literal(
+                        verter_semantic::analysis::type_expr::LiteralValue::String(key)
+                    ) if key == "state"
+                )
+        ),
+        "package-backed indexed member paths should stay symbolic instead of expanding through package declarations, got {:?}",
+        state_field.r#type
+    );
+}
+
+#[test]
+fn local_generic_wrapper_over_package_backed_props_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue-router/index.d.ts",
+            r#"
+export interface RouterLinkProps {
+  to?: string
+  replace?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Link.vue",
+            r#"<script lang="ts">
+import type { RouterLinkProps } from 'vue-router'
+
+export interface LinkProps extends Omit<RouterLinkProps, 'custom'> {
+  custom?: boolean
+  label?: string
+}
+</script>
+<script setup lang="ts">
+defineProps<LinkProps>()
+</script>
+<template><a /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/CommandPalette.vue",
+            r#"<script lang="ts">
+export interface CommandPaletteItem {
+  id?: string
+}
+
+export interface CommandPaletteGroup<T extends CommandPaletteItem = CommandPaletteItem> {
+  items?: T[]
+}
+</script>
+<script setup lang="ts">
+defineProps<CommandPaletteGroup>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { LinkProps } from './Link.vue'
+import type { CommandPaletteGroup } from './CommandPalette.vue'
+
+interface ContentSearchItem extends Omit<LinkProps, 'custom'> {
+  badge?: string
+}
+
+defineProps<{
+  groups?: CommandPaletteGroup<ContentSearchItem>[]
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./Link.vue".to_string(),
+                resolved_canonical_id: Some("/src/Link.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./CommandPalette.vue".to_string(),
+                resolved_canonical_id: Some("/src/CommandPalette.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+    project.host().set_import_dependencies(
+        "/src/Link.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue-router".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue-router/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let groups_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "groups"))
+        .expect("expanded evaluated types should keep the groups prop");
+
+    assert!(
+        matches!(
+            &groups_field.r#type,
+            verter_semantic::analysis::type_expr::TypeExpr::Array { element, .. }
+                if matches!(
+                    element.as_ref(),
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "CommandPaletteGroup"
+                            && type_arguments.len() == 1
+                            && matches!(
+                                &type_arguments[0],
+                                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                                    if name.as_ref() == "ContentSearchItem"
+                                        && type_arguments.is_empty()
+                            )
+                )
+        ),
+        "local generic wrappers should stay symbolic when they eventually flow into package-backed imported refs, got {:?}",
+        groups_field.r#type
+    );
+}
+
+#[test]
+fn imported_object_like_prop_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface ExternalProps {
+  id: string
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ExternalProps } from './types'
+
+defineProps<{
+  external?: ExternalProps
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let external_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "external"))
+        .expect("expanded evaluated types should keep the imported external prop");
+
+    assert!(
+        matches!(
+            &external_field.r#type,
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ExternalProps" && type_arguments.is_empty()
+        ),
+        "imported object-like prop expansion should keep the symbolic ref instead of expanding the imported object, got {:?}",
+        external_field.r#type
+    );
+}
+
+#[test]
+fn imported_union_field_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface TooltipProps {
+  text?: string
+  delay?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { TooltipProps } from './types'
+
+defineProps<{
+  tooltip?: boolean | TooltipProps
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let tooltip_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
+        .expect("expanded evaluated types should keep the tooltip prop");
+
+    let has_symbolic_tooltip = match &tooltip_field.r#type {
+        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+            members.iter().any(|member| {
+                matches!(
+                    member,
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
+                )
+            })
+        }
+        _ => false,
+    };
+
+    assert!(
+        has_symbolic_tooltip,
+        "imported unions should keep imported object refs symbolic instead of expanding them in shallow field evaluation, got {:?}",
+        tooltip_field.r#type
+    );
+}
+
+#[test]
+fn imported_utility_wrapped_field_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/button.ts",
+            r#"
+export interface ButtonProps {
+  href?: string
+  disabled?: boolean
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/src/keys.ts", "export type LinkPropsKeys = 'href'")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './button'
+import type { LinkPropsKeys } from './keys'
+
+defineProps<{
+  close?: boolean | Omit<ButtonProps, LinkPropsKeys>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./button".to_string(),
+                resolved_canonical_id: Some("/src/button.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./keys".to_string(),
+                resolved_canonical_id: Some("/src/keys.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let close_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "close"))
+        .expect("expanded evaluated types should keep the close prop");
+
+    let has_symbolic_omit = match &close_field.r#type {
+        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+            members.iter().any(|member| match member {
+                verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if name.as_ref() == "Omit" && type_arguments.len() == 2 => {
+                    matches!(
+                        &type_arguments[0],
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                            name,
+                            type_arguments
+                        } if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
+                    )
+                }
+                _ => false,
+            })
+        }
+        _ => false,
+    };
+
+    assert!(
+        has_symbolic_omit,
+        "utility wrappers around imported object refs should stay symbolic in shallow field evaluation, got {:?}",
+        close_field.r#type
+    );
+}
+
+#[test]
+fn local_alias_with_package_backed_union_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"
+export interface VNode {
+  component?: object
+  children?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+import type { VNode } from 'vue'
+
+export type StringOrVNode = string | VNode
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { StringOrVNode } from './types'
+
+defineProps<{
+  title?: StringOrVNode
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let store_view = project.host().resolver_store_view();
+    let prepared = project
+        .host()
+        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&store_view))
+        .expect("StringOrVNode should be present in the shallow prepared declarations");
+    assert!(
+        matches!(
+            &prepared.body,
+            verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+        ),
+        "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
+        prepared.body
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let title_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "title"))
+        .expect("expanded evaluated types should keep the title prop");
+
+    let has_symbolic_vnode = match &title_field.r#type {
+        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+            members.iter().any(|member| {
+                matches!(
+                    member,
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "VNode" && type_arguments.is_empty()
+                )
+            })
+        }
+        _ => false,
+    };
+
+    assert!(
+        has_symbolic_vnode,
+        "local aliases that wrap package-backed refs should keep those refs symbolic instead of expanding them, got {:?}",
+        title_field.r#type
+    );
+}
+
+#[test]
+fn imported_non_object_alias_with_package_refs_stays_symbolic_in_registry() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/vue/index.d.ts",
+            r#"
+export interface VNode {
+  component?: object
+  children?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+import type { VNode } from 'vue'
+
+export type StringOrVNode = string | VNode | (() => VNode)
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { StringOrVNode } from './types'
+
+defineProps<{
+  title?: StringOrVNode
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "vue".to_string(),
+            resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let store_view = project.host().resolver_store_view();
+    let prepared = project
+        .host()
+        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&store_view))
+        .expect("StringOrVNode should be present in the shallow prepared declarations");
+    assert!(
+        matches!(
+            &prepared.body,
+            verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+        ),
+        "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
+        prepared.body
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let string_or_vnode = resolved
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "StringOrVNode")
+        .expect("imported non-object alias should still publish in the registry");
+    let string_or_vnode_meta = resolved
+        .resolved_type_registry_meta
+        .iter()
+        .find(|entry| entry.name == "StringOrVNode")
+        .expect("imported non-object alias should keep registry metadata");
+
+    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &string_or_vnode.type_expr
+    else {
+        panic!(
+            "StringOrVNode should stay a symbolic union in the registry, got {:?} with declaration {:?}",
+            string_or_vnode.type_expr,
+            string_or_vnode_meta.declaration
+        );
+    };
+    assert!(
+        members.iter().any(|member| {
+            matches!(
+                member,
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "VNode" && type_arguments.is_empty()
+            )
+        }),
+        "imported non-object aliases should keep package-backed refs symbolic in the registry, got {:?}",
+        string_or_vnode.type_expr
+    );
+    assert!(
+        resolved
+            .resolved_type_registry
+            .iter()
+            .all(|entry| entry.name != "VNode"),
+        "publishing the alias should not recurse into package-backed helpers"
+    );
+
+    let surface_key = crate::resolver_core::TypeSurfaceOpKey::Surface(
+        crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/types.ts".to_string(),
+            symbol_name: "StringOrVNode".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        },
+    );
+    assert!(
+        project
+            .host()
+            .resolver_runtime()
+            .type_surfaces
+            .get(&surface_key, &store_view)
+            .is_none(),
+        "registry append should keep imported non-object package unions symbolic instead of projecting a whole surface"
     );
 }
 

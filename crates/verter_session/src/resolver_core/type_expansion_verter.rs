@@ -327,6 +327,7 @@ mod tests {
             macro_kind: AnalyzedMacroKind::DefineProps,
             type_name: "ButtonProps".to_string(),
             import_source: "./types".to_string(),
+            surface_is_authoritative: true,
             declaration: ResolvedTypeDeclaration {
                 requested_name: "ButtonProps".to_string(),
                 declaration_id: None,

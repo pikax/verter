@@ -8604,6 +8604,117 @@ defineProps<OtherProps>()
     );
 }
 
+#[test]
+fn unrelated_upsert_keeps_routed_member_type_surface_db_entries_warm() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export type ComponentConfig<T extends { slots: Record<string, any> }> = {
+  ui: T['slots']
+}
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/theme.ts",
+        r#"
+export const theme = {
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+    );
+    upsert_non_sfc(
+        &host,
+        "/src/button-types.ts",
+        r#"
+import type { ComponentConfig } from './types'
+import { theme } from './theme'
+
+export type Button = ComponentConfig<typeof theme>
+"#,
+    );
+    upsert_vue(
+        &host,
+        "/src/App.vue",
+        r#"<script setup lang="ts">
+import type { Button } from './button-types'
+
+defineProps<{ ui?: Button['ui'] }>()
+</script>
+<template><div /></template>"#,
+    );
+    upsert_non_sfc(&host, "/src/unrelated.ts", "export const unrelated = 1\n");
+
+    host.set_import_dependencies(
+        "/src/button-types.ts",
+        vec![
+            exact_dependency("./types", "/src/types.ts"),
+            exact_dependency("./theme", "/src/theme.ts"),
+        ],
+    );
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![exact_dependency("./button-types", "/src/button-types.ts")],
+    );
+
+    let view_before = host.resolver_store_view();
+    let solver_host = crate::resolver_core::SessionSolverHost::new(&host, Some(&view_before));
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        &host,
+        Some(&view_before),
+        &solver_host,
+    );
+    let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
+    let projected = engine.project_expr_surface_expr("/src/button-types.ts", &expr);
+    assert!(
+        projected.is_some(),
+        "projection should warm TypeSurfaceDb for the routed member surface before the unrelated mutation",
+    );
+
+    let cache_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
+        subject: crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/button-types.ts".to_string(),
+            symbol_name: "Button".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        },
+        route: crate::resolver_core::RouteDemand::MemberPath(vec!["ui".to_string()]),
+    };
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&cache_key, &view_before)
+                .as_deref(),
+            Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
+                verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+            ))
+        ),
+        "TypeSurfaceDb should be warm for routed member surfaces before the unrelated mutation",
+    );
+
+    upsert_non_sfc(&host, "/src/unrelated.ts", "export const unrelated = 1\n");
+
+    let view_after = host.resolver_store_view();
+    assert!(
+        matches!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&cache_key, &view_after)
+                .as_deref(),
+            Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
+                verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+            ))
+        ),
+        "byte-identical unrelated upserts must not clear warm routed member TypeSurfaceDb entries",
+    );
+}
+
 /// Regression guard 8: Declaration-scoped solving with local closure.
 ///
 /// Verify that local type aliases referencing other local types survive the

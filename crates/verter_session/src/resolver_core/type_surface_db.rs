@@ -39,6 +39,10 @@ pub enum TypeSurfaceOpKey {
         subject: TypeSurfaceKey,
         member_name: String,
     },
+    RoutedExpr {
+        subject: TypeSurfaceKey,
+        route: crate::resolver_core::RouteDemand,
+    },
 }
 
 impl TypeSurfaceOpKey {
@@ -47,6 +51,7 @@ impl TypeSurfaceOpKey {
             TypeSurfaceOpKey::Surface(s) => s,
             TypeSurfaceOpKey::Keyspace(s) => s,
             TypeSurfaceOpKey::Member { subject, .. } => subject,
+            TypeSurfaceOpKey::RoutedExpr { subject, .. } => subject,
         }
     }
 }
@@ -57,6 +62,7 @@ pub enum TypeSurfaceOpResult {
     Surface(ProjectedSurface),
     Keyspace(ProjectedKeyspace),
     Member(ProjectedMember),
+    Expr(verter_semantic::analysis::type_expr::TypeExpr),
     /// Stable miss — the projection yielded no result.
     Miss,
 }
@@ -79,6 +85,13 @@ impl TypeSurfaceOpResult {
     pub fn as_member(&self) -> Option<&ProjectedMember> {
         match self {
             TypeSurfaceOpResult::Member(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn as_expr(&self) -> Option<&verter_semantic::analysis::type_expr::TypeExpr> {
+        match self {
+            TypeSurfaceOpResult::Expr(expr) => Some(expr),
             _ => None,
         }
     }
