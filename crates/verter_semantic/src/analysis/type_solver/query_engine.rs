@@ -1433,7 +1433,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                     }
                     return None;
                 }
-                let surface = project::project_surface(&self.arena, resolved.node);
+                let surface = project::project_surface(&mut self.arena, resolved.node);
                 if !surface.exactness.is_exact() {
                     return None;
                 }
@@ -1485,9 +1485,6 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 let _ = symbol_name;
                 let resolved =
                     self.resolve_subject_node(subject, scoped_host, scope_canonical_id)?;
-                if !resolved.exactness.is_exact() {
-                    return None;
-                }
                 let projected =
                     project::project_keyspace(&self.arena, &mut self.caches, resolved.node);
                 if !projected.exactness.is_exact() {
@@ -1528,10 +1525,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 let visited_start = self.visited_decls.len();
                 let resolved =
                     self.resolve_subject_node(subject, scoped_host, scope_canonical_id)?;
-                if !resolved.exactness.is_exact() {
-                    return None;
-                }
-                let projected = project::project_surface(&self.arena, resolved.node);
+                let projected = project::project_surface(&mut self.arena, resolved.node);
                 if !projected.exactness.is_exact() {
                     return None;
                 }
@@ -1559,10 +1553,7 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         expr: &TypeExpr,
     ) -> Option<ProjectedSurface> {
         let resolved = self.resolve_expr_node_scoped(scoped_host, scope_canonical_id, expr);
-        if !resolved.exactness.is_exact() {
-            return None;
-        }
-        let projected = project::project_surface(&self.arena, resolved.node);
+        let projected = project::project_surface(&mut self.arena, resolved.node);
         if !projected.exactness.is_exact() {
             return None;
         }

@@ -1,8 +1,115 @@
 use super::*;
+use crate::HostConfig;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use verter_semantic::analysis::type_solver::host::NoopSolverHost;
 use verter_semantic::analysis::Hash16;
+
+struct CountingWorkspace {
+    inner: Arc<verter_workspace::MemoryWorkspace>,
+    read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
+}
+
+impl CountingWorkspace {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(verter_workspace::MemoryWorkspace::new(
+                verter_workspace::MemoryOptions::default(),
+            )),
+            read_counts: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+        }
+    }
+
+    fn inject_file(&self, path: &str, source: &str) {
+        self.inner
+            .inject_file(path.to_string(), Arc::<str>::from(source));
+    }
+
+    fn reset_reads(&self) {
+        self.read_counts.lock().clear();
+    }
+
+    fn read_count(&self, path: &str) -> u64 {
+        self.read_counts.lock().get(path).copied().unwrap_or(0)
+    }
+}
+
+impl verter_workspace::WorkspaceAccess for CountingWorkspace {
+    fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
+        *self
+            .read_counts
+            .lock()
+            .entry(canonical_id.to_string())
+            .or_default() += 1;
+        self.inner.read_file(canonical_id)
+    }
+
+    fn take_last_read_file_trace_detail(&self, canonical_id: &str) -> Option<String> {
+        self.inner.take_last_read_file_trace_detail(canonical_id)
+    }
+
+    fn file_exists(&self, canonical_id: &str) -> bool {
+        self.inner.file_exists(canonical_id)
+    }
+
+    fn realpath(&self, canonical_id: &str) -> Option<String> {
+        self.inner.realpath(canonical_id)
+    }
+
+    fn read_package_manifest(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::PackageManifest> {
+        self.inner.read_package_manifest(canonical_id)
+    }
+
+    fn classify_file(&self, canonical_id: &str) -> verter_workspace::FileKind {
+        self.inner.classify_file(canonical_id)
+    }
+
+    fn resolve_import(
+        &self,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_workspace::ResolutionContext,
+    ) -> Option<verter_workspace::ResolveResult> {
+        self.inner.resolve_import(importer_id, specifier, ctx)
+    }
+
+    fn walk(
+        &self,
+        root: &str,
+        filter_dir: &dyn Fn(&str) -> bool,
+        filter_file: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<String>, verter_workspace::VfsError> {
+        self.inner.walk(root, filter_dir, filter_file)
+    }
+
+    fn read_dir(
+        &self,
+        dir: &str,
+    ) -> Result<Vec<verter_workspace::DirEntry>, verter_workspace::VfsError> {
+        self.inner.read_dir(dir)
+    }
+}
+
+fn make_host_with_workspace(ws: Arc<CountingWorkspace>) -> VerterHost {
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    host
+}
 
 fn seed_ts_file(host: &VerterHost, canonical_id: &str, source: &str) {
     seed_ts_file_with_routes(host, canonical_id, source, FxHashMap::default());
@@ -303,6 +410,63 @@ export type FancyProps = Prettify<{ open: boolean }>
             .root_identity("/decl.d.ts", "Prettify")
             .is_none(),
         "canonical-scoped root lookups must stay cache-only and refuse uncached import routing",
+    );
+}
+
+#[test]
+fn explicit_canonical_root_identity_uses_warm_bundle_for_unresolved_globals_without_rereads() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/tsconfig.json",
+        r#"{"compilerOptions":{"strict":true}}"#,
+    );
+    ws.inject_file(
+        "/workspace/src/utils.ts",
+        r#"
+export type UsesGlobals<T> =
+  T extends Date | RegExp | Map<string, number> | Set<string> | Promise<string>
+    ? WeakMap<object, WeakSet<object>>
+    : Error
+"#,
+    );
+
+    let host = make_host_with_workspace(Arc::clone(&ws));
+    assert!(
+        host.ensure_loaded("/workspace/src/utils.ts"),
+        "utils fixture should load into the host",
+    );
+
+    let store_view = host.resolver_store_view();
+    let bundle = host
+        .prepared_decl_bundle_in_view("/workspace/src/utils.ts", Some(&store_view))
+        .expect("warming the prepared bundle should succeed");
+    assert!(
+        bundle.prepared_type_decls.contains_key("UsesGlobals"),
+        "fixture should publish the prepared type declaration before the root lookup test",
+    );
+
+    host.resolver
+        .runtime
+        .module_facts
+        .evict("/workspace/src/utils.ts");
+    ws.reset_reads();
+
+    let solver_host = SessionSolverHost::new(&host, Some(&store_view));
+    for builtin in [
+        "Date", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Error",
+    ] {
+        assert!(
+            solver_host
+                .root_identity("/workspace/src/utils.ts", builtin)
+                .is_none(),
+            "unresolved global {builtin} should stay a miss",
+        );
+    }
+
+    assert_eq!(
+        ws.read_count("/workspace/src/utils.ts"),
+        0,
+        "explicit-canonical unresolved globals should stay on the warm prepared bundle and not reread the file",
     );
 }
 

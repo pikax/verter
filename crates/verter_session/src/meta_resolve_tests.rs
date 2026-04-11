@@ -5112,11 +5112,27 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
 
 #[test]
 fn define_props_fields_fast_path_allows_direct_object_literals() {
+    let mac = verter_semantic::analysis::types::AnalyzedMacro {
+        kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        is_type_based: true,
+        type_references: Vec::new(),
+        binding_name: None,
+        model_name: None,
+        has_inherit_attrs_false: false,
+        prop_fields: Vec::new(),
+        emit_fields: Vec::new(),
+        slot_fields: Vec::new(),
+        default_keys: Vec::new(),
+        default_values: Vec::new(),
+        expose_fields: Vec::new(),
+        resolved_local_types: Vec::new(),
+        span: verter_span::Span::new(0, 0),
+    };
     let lowered =
         verter_semantic::analysis::type_expr_lower::parse_type_annotation("{ title: string }");
 
     assert!(
-        define_props_fields_fast_path_allowed(0, &[], Some(&lowered)),
+        define_props_fields_fast_path_allowed(&mac, 0, &[], Some(&lowered)),
         "direct object literals should keep using the fields fast path"
     );
 }
@@ -5188,7 +5204,12 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("LinkProps");
 
     assert!(
-        !define_props_fields_fast_path_allowed(0, &resolved_macros, Some(&lowered)),
+        !define_props_fields_fast_path_allowed(
+            &snapshot.macros[0],
+            0,
+            &resolved_macros,
+            Some(&lowered)
+        ),
         "utility/heritage refs should not use the fields fast path just because shallow prop_fields exist"
     );
     assert!(
@@ -5199,6 +5220,22 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
 
 #[test]
 fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
+    let mac = verter_semantic::analysis::types::AnalyzedMacro {
+        kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        is_type_based: true,
+        type_references: vec!["LinkProps".to_string()],
+        binding_name: None,
+        model_name: None,
+        has_inherit_attrs_false: false,
+        prop_fields: Vec::new(),
+        emit_fields: Vec::new(),
+        slot_fields: Vec::new(),
+        default_keys: Vec::new(),
+        default_values: Vec::new(),
+        expose_fields: Vec::new(),
+        resolved_local_types: Vec::new(),
+        span: verter_span::Span::new(0, 0),
+    };
     let resolved_macros = vec![
         ResolvedMacroMeta {
             macro_index: 0,
@@ -5264,7 +5301,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("LinkProps");
 
     assert!(
-        !define_props_fields_fast_path_allowed(0, &resolved_macros, Some(&lowered)),
+        !define_props_fields_fast_path_allowed(&mac, 0, &resolved_macros, Some(&lowered)),
         "a defineProps macro with multiple resolved surfaces should not collapse to a single fields-only shape"
     );
 }
@@ -7108,6 +7145,143 @@ defineProps<Props<T>>()
         query_engine.solve_count(),
         1,
         "generic solver-backed refs should not pay for a second projection pass when the solver already produced a usable shape"
+    );
+}
+
+#[test]
+fn produce_one_macro_object_shape_prefers_root_projection_for_generic_non_object_aliases() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/plugins.ts",
+            r#"
+export interface BubbleMenuPluginProps {
+  editor?: object
+  element?: object
+  appendTo?: object
+  pluginKey?: string
+  shouldShow?: (props: { editor: object }) => boolean
+  updateDelay?: number
+}
+
+export interface FloatingMenuPluginProps {
+  editor?: object
+  element?: object
+  options?: {
+    strategy?: 'absolute' | 'fixed'
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export type ArrayOrNested<T> = T[] | T[][]
+
+export interface ButtonProps {
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost' | 'soft'
+  size?: 'sm' | 'md'
+  class?: any
+  ui?: object
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { BubbleMenuPluginProps, FloatingMenuPluginProps } from './plugins'
+import type { ArrayOrNested, ButtonProps } from './types'
+
+type EditorToolbarItem = {
+  label?: string
+}
+
+type BaseProps<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>> = {
+  as?: any
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  size?: ButtonProps['size']
+  items?: T
+  editor: object
+  class?: any
+  ui?: ButtonProps['ui']
+}
+
+export type Props<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>>
+  = | (BaseProps<T> & { layout?: 'fixed' })
+    | (BaseProps<T> & Partial<Omit<BubbleMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'bubble'
+    })
+    | (BaseProps<T> & Partial<Omit<FloatingMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'floating'
+    })
+</script>
+<script setup lang=\"ts\" generic=\"T extends ArrayOrNested<EditorToolbarItem>\">
+defineProps<Props<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
+
+    let (shape, source) = produce_one_macro_object_shape(
+        &mut query_engine,
+        "/src/App.vue",
+        &lowered,
+        has_prop_shape_surface,
+    );
+    let shape =
+        shape.expect("generic non-object aliases should still produce a defineProps surface");
+    let prop_names: Vec<&str> = shape
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+
+    assert!(
+        matches!(source, MacroShapeSource::Projection),
+        "generic union/utility aliases should prefer the projected root surface"
+    );
+    assert!(
+        prop_names.contains(&"as")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"items")
+            && prop_names.contains(&"editor")
+            && prop_names.contains(&"ui")
+            && prop_names.contains(&"layout")
+            && prop_names.contains(&"appendTo")
+            && prop_names.contains(&"pluginKey")
+            && prop_names.contains(&"shouldShow")
+            && prop_names.contains(&"updateDelay")
+            && prop_names.contains(&"options"),
+        "projected root surface should preserve both shared and branch props, got {prop_names:?}"
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        1,
+        "generic non-object aliases that the projector can materialize should skip the extra solver pass and stay on one projected solve"
     );
 }
 

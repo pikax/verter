@@ -15049,6 +15049,453 @@ defineProps<ColorModeSelectProps>()
     );
 }
 
+#[test]
+fn get_component_meta_toolbar_items_do_not_flatten_nested_button_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"export interface LinkProps {
+  href?: string
+  target?: string
+  rel?: string
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'rel'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  icon?: string
+  avatar?: string
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost'
+}"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Toolbar.vue",
+            r#"<script lang="ts">
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+type ButtonItem = Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> & {
+  slot?: string
+}
+
+type ToolbarItem = ButtonItem | {
+  label?: string
+}
+
+export interface ToolbarProps {
+  color?: ButtonProps['color']
+  items?: ToolbarItem[]
+}
+</script>
+
+<script setup lang="ts">
+defineProps<ToolbarProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/Toolbar.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"color") && prop_names.contains(&"items"),
+        "Toolbar wrapper should keep its declared top-level props, got: {prop_names:?}"
+    );
+    assert!(
+        !prop_names.contains(&"icon")
+            && !prop_names.contains(&"avatar")
+            && !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"slot")
+            && !prop_names.contains(&"variant"),
+        "nested toolbar item helpers must stay nested instead of leaking to top level: {prop_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_editor_toolbar_union_keeps_base_and_plugin_props() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/@tiptap/extension-bubble-menu/index.d.ts",
+            r#"
+export interface BubbleMenuPluginProps {
+  editor?: object
+  element?: object
+  appendTo?: object
+  pluginKey?: string
+  shouldShow?: (props: { editor: object }) => boolean
+  updateDelay?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/@tiptap/extension-floating-menu/index.d.ts",
+            r#"
+export interface FloatingMenuPluginProps {
+  editor?: object
+  element?: object
+  options?: {
+    strategy?: 'absolute' | 'fixed'
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types.ts",
+            r#"
+export type ArrayOrNested<T> = T[] | T[][]
+
+export interface LinkProps {
+  to?: string
+  href?: string
+  target?: string
+  rel?: string
+  noRel?: boolean
+  external?: boolean
+  prefetch?: boolean
+  prefetchOn?: 'visibility' | 'interaction'
+  prefetchedClass?: string
+  noPrefetch?: boolean
+  trailingSlash?: 'append' | 'remove'
+  replace?: boolean
+  ariaCurrentValue?: string
+  active?: boolean
+  activeClass?: string
+  exact?: boolean
+  exactQuery?: boolean | 'partial'
+  exactHash?: boolean
+  inactiveClass?: string
+  download?: string
+  ping?: string
+  referrerpolicy?: string
+  hreflang?: string
+  media?: string
+}
+
+export type LinkPropsKeys =
+  | 'to'
+  | 'href'
+  | 'target'
+  | 'rel'
+  | 'noRel'
+  | 'external'
+  | 'prefetch'
+  | 'prefetchOn'
+  | 'prefetchedClass'
+  | 'noPrefetch'
+  | 'trailingSlash'
+  | 'replace'
+  | 'ariaCurrentValue'
+  | 'active'
+  | 'activeClass'
+  | 'exact'
+  | 'exactQuery'
+  | 'exactHash'
+  | 'inactiveClass'
+  | 'download'
+  | 'ping'
+  | 'referrerpolicy'
+  | 'hreflang'
+  | 'media'
+
+export interface ButtonProps {
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost' | 'soft'
+  size?: 'sm' | 'md'
+  class?: any
+  ui?: object
+  activeColor?: 'primary' | 'neutral'
+  activeVariant?: 'solid' | 'ghost' | 'soft'
+  type?: 'button' | 'submit'
+}
+
+export interface TooltipProps {
+  text?: string
+  portal?: boolean | string
+}
+
+export interface DropdownMenuItem {
+  label?: string
+  type?: 'label' | 'separator' | 'link'
+}
+
+export interface DropdownMenuProps<T extends ArrayOrNested<DropdownMenuItem> = ArrayOrNested<DropdownMenuItem>> {
+  items?: T
+  content?: { side?: 'bottom' | 'top' }
+  arrow?: boolean
+  portal?: boolean | string
+}
+
+export interface EditorHandler {
+  canExecute: (editor: object, cmd?: any) => boolean
+  execute: (editor: object, cmd?: any) => any
+  isActive: (editor: object, cmd?: any) => boolean
+}
+
+export type EditorCustomHandlers = Record<string, EditorHandler>
+
+export type EditorItem<H extends EditorCustomHandlers = EditorCustomHandlers>
+  = | { kind: 'mark', mark: 'bold' | 'italic' }
+    | { kind: 'link', href?: string }
+    | { kind: keyof H }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/theme.ts",
+            r#"
+const theme = {
+  slots: {
+    root: 'root'
+  },
+  variants: {
+    color: ['neutral', 'primary']
+  }
+} as const
+
+export default theme
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/tv.ts",
+            r#"
+export type ComponentConfig<
+  TTheme,
+  TAppConfig,
+  TKey extends string
+> = {
+  slots: TTheme extends { slots: infer TSlots } ? TSlots : never
+  AppConfig: TAppConfig
+  key: TKey
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/@nuxt/schema/index.d.ts",
+            r#"
+export interface AppConfig {
+  ui?: Record<string, unknown>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/node_modules/@tiptap/vue-3/index.d.ts",
+            r#"
+export interface Editor {
+  isEditable?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/EditorToolbar.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from '@nuxt/schema'
+import type { Editor } from '@tiptap/vue-3'
+import type { BubbleMenuPluginProps } from '@tiptap/extension-bubble-menu'
+import type { FloatingMenuPluginProps } from '@tiptap/extension-floating-menu'
+import theme from './theme'
+import type { ArrayOrNested, ButtonProps, DropdownMenuItem, DropdownMenuProps, EditorCustomHandlers, EditorItem, LinkPropsKeys, TooltipProps } from './types'
+import type { ComponentConfig } from './tv'
+
+type EditorToolbar = ComponentConfig<typeof theme, AppConfig, 'editorToolbar'>
+
+type ButtonItem = Omit<ButtonProps, 'type'> & {
+  slot?: string
+  tooltip?: TooltipProps
+  'aria-label'?: string
+}
+
+type EditorToolbarButtonItem<H extends EditorCustomHandlers = EditorCustomHandlers> = Omit<ButtonItem, LinkPropsKeys> & EditorItem<H>
+
+type EditorToolbarDropdownChildItem<H extends EditorCustomHandlers = EditorCustomHandlers>
+  = | DropdownMenuItem
+    | (Omit<DropdownMenuItem, 'type'> & EditorItem<H>)
+
+type EditorToolbarDropdownItem<H extends EditorCustomHandlers = EditorCustomHandlers> = ButtonItem & DropdownMenuProps<ArrayOrNested<EditorToolbarDropdownChildItem<H>>>
+
+export type EditorToolbarItem<H extends EditorCustomHandlers = EditorCustomHandlers>
+  = | ButtonItem
+    | EditorToolbarButtonItem<H>
+    | EditorToolbarDropdownItem<H>
+
+type BaseProps<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>> = {
+  as?: any
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  activeColor?: ButtonProps['color']
+  activeVariant?: ButtonProps['variant']
+  size?: ButtonProps['size']
+  items?: T
+  editor: Editor
+  class?: any
+  ui?: EditorToolbar['slots']
+}
+
+export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>>
+  = | (BaseProps<T> & { layout?: 'fixed' })
+    | (BaseProps<T> & Partial<Omit<BubbleMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'bubble'
+    })
+    | (BaseProps<T> & Partial<Omit<FloatingMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'floating'
+    })
+</script>
+
+<script setup lang="ts" generic="T extends ArrayOrNested<EditorToolbarItem>">
+withDefaults(defineProps<EditorToolbarProps<T>>(), {
+  layout: 'fixed'
+})
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/EditorToolbar.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "@nuxt/schema".to_string(),
+                resolved_canonical_id: Some("/node_modules/@nuxt/schema/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "@tiptap/vue-3".to_string(),
+                resolved_canonical_id: Some("/node_modules/@tiptap/vue-3/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "@tiptap/extension-bubble-menu".to_string(),
+                resolved_canonical_id: Some(
+                    "/node_modules/@tiptap/extension-bubble-menu/index.d.ts".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "@tiptap/extension-floating-menu".to_string(),
+                resolved_canonical_id: Some(
+                    "/node_modules/@tiptap/extension-floating-menu/index.d.ts".to_string(),
+                ),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let meta = get_meta(&project, "/EditorToolbar.vue");
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"as")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant")
+            && prop_names.contains(&"activeColor")
+            && prop_names.contains(&"activeVariant")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"items")
+            && prop_names.contains(&"editor")
+            && prop_names.contains(&"class")
+            && prop_names.contains(&"ui")
+            && prop_names.contains(&"layout"),
+        "EditorToolbar union must keep its base props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"appendTo")
+            && prop_names.contains(&"pluginKey")
+            && prop_names.contains(&"shouldShow")
+            && prop_names.contains(&"updateDelay")
+            && prop_names.contains(&"options"),
+        "EditorToolbar union must also keep branch-specific plugin props, got: {prop_names:?}"
+    );
+}
+
+#[test]
+fn get_component_meta_real_nuxt_ui_editor_toolbar_keeps_base_and_plugin_props() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.integration-tests/repos/nuxt-ui")
+        .canonicalize()
+        .expect("nuxt-ui integration fixture should exist");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
+    let component = format!("{repo_root}/src/runtime/components/EditorToolbar.vue");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            repo_root.clone(),
+            repo_root.clone(),
+            Some(format!("{repo_root}/tsconfig.json")),
+        ),
+    ]);
+    let project = Arc::new(MetaProject::new(host));
+
+    let meta = get_meta(&project, &component);
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"as")
+            && prop_names.contains(&"color")
+            && prop_names.contains(&"variant")
+            && prop_names.contains(&"activeColor")
+            && prop_names.contains(&"activeVariant")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"items")
+            && prop_names.contains(&"editor")
+            && prop_names.contains(&"class")
+            && prop_names.contains(&"ui")
+            && prop_names.contains(&"layout"),
+        "real nuxt-ui EditorToolbar must keep its base props, got: {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"appendTo")
+            && prop_names.contains(&"pluginKey")
+            && prop_names.contains(&"shouldShow")
+            && prop_names.contains(&"updateDelay")
+            && prop_names.contains(&"options"),
+        "real nuxt-ui EditorToolbar must also keep branch-specific plugin props, got: {prop_names:?}"
+    );
+}
+
 /// defineEmits: call-signature / overload form. Projection must preserve event
 /// names and payloads for callable emit declarations.
 #[test]

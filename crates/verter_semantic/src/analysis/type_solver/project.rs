@@ -248,7 +248,7 @@ pub fn project_keyspace(
 /// index signatures, and openness.
 ///
 /// Does not require full normalization of every nested child.
-pub fn project_surface(arena: &QueryArena, node: NodeId) -> SolverResult<SurfaceShape> {
+pub fn project_surface(arena: &mut QueryArena, node: NodeId) -> SolverResult<SurfaceShape> {
     match arena.get(node) {
         Node::Function(func) => {
             let call_signatures = func
@@ -378,6 +378,73 @@ pub fn project_surface(arena: &QueryArena, node: NodeId) -> SolverResult<Surface
         }
 
         // Unresolved — return empty symbolic surface
+        Node::Union(members) => {
+            let members = members.clone(); // Vec<NodeId>, cheap
+            let mut merged = SurfaceShape::empty();
+            let mut merged_props: FxHashMap<String, (SurfaceProperty, usize)> =
+                FxHashMap::default();
+            let mut exactness = SolverExactness::ExactConcrete;
+            let mut total_surface_variants = 0usize;
+
+            for &member in &members {
+                let sub = project_surface(arena, member);
+                exactness = exactness.merge(sub.exactness);
+                let shape = sub.value;
+                let has_surface = !shape.properties.is_empty()
+                    || !shape.call_signatures.is_empty()
+                    || !shape.construct_signatures.is_empty()
+                    || !shape.index_signatures.is_empty()
+                    || shape.is_open;
+                if !has_surface {
+                    continue;
+                }
+                total_surface_variants += 1;
+                for prop in shape.properties {
+                    match merged_props.entry(prop.name.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert((prop, 1));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            let (existing, count) = entry.get_mut();
+                            *count += 1;
+                            existing.optional = existing.optional || prop.optional;
+                            existing.readonly = existing.readonly && prop.readonly;
+                            existing.is_method = existing.is_method && prop.is_method;
+                            if existing.ty != prop.ty {
+                                existing.ty = arena.union(vec![existing.ty, prop.ty]);
+                            }
+                        }
+                    }
+                }
+                merged.call_signatures.extend(shape.call_signatures);
+                merged
+                    .construct_signatures
+                    .extend(shape.construct_signatures);
+                merged.index_signatures.extend(shape.index_signatures);
+                merged.is_open = merged.is_open || shape.is_open;
+            }
+
+            merged.properties = merged_props
+                .into_values()
+                .map(|(mut prop, seen_variants)| {
+                    if seen_variants < total_surface_variants {
+                        prop.optional = true;
+                    }
+                    prop
+                })
+                .collect();
+            merged.properties.sort_by(|a, b| a.name.cmp(&b.name));
+
+            SolverResult {
+                value: merged,
+                exactness,
+                execution_status: super::result::ExecutionStatus::Completed,
+                incomplete_reasons: Vec::new(),
+                diagnostics: Vec::new(),
+                steps: 0,
+            }
+        }
+
         Node::Ref { .. } | Node::Applied { .. } => {
             SolverResult::exact_symbolic(SurfaceShape::empty())
         }
@@ -538,7 +605,7 @@ mod tests {
         let str_ty = arena.primitive(PrimitiveKind::String);
         let obj = make_obj_with_props(&mut arena, &[("x", str_ty, false)]);
 
-        let result = project_surface(&arena, obj);
+        let result = project_surface(&mut arena, obj);
         assert_eq!(result.value.properties.len(), 1);
         assert_eq!(result.value.properties[0].name, "x");
         assert!(!result.value.is_open);
@@ -554,9 +621,43 @@ mod tests {
         let obj_b = make_obj_with_props(&mut arena, &[("y", num_ty, false)]);
         let inter = arena.intersection(vec![obj_a, obj_b]);
 
-        let result = project_surface(&arena, inter);
+        let result = project_surface(&mut arena, inter);
         assert_eq!(result.value.properties.len(), 2);
         assert!(!result.value.is_open);
+    }
+
+    #[test]
+    fn surface_of_union_keeps_common_and_branch_props() {
+        let mut arena = QueryArena::new();
+        let str_ty = arena.primitive(PrimitiveKind::String);
+        let num_ty = arena.primitive(PrimitiveKind::Number);
+
+        let obj_a = make_obj_with_props(
+            &mut arena,
+            &[("shared", str_ty, false), ("bubble", num_ty, false)],
+        );
+        let obj_b = make_obj_with_props(
+            &mut arena,
+            &[("shared", str_ty, false), ("floating", num_ty, false)],
+        );
+        let union = arena.union(vec![obj_a, obj_b]);
+
+        let result = project_surface(&mut arena, union);
+        let props: Vec<_> = result
+            .value
+            .properties
+            .iter()
+            .map(|prop| (prop.name.as_str(), prop.optional))
+            .collect();
+
+        assert!(
+            props.contains(&("shared", false)),
+            "shared union props should stay required, got {props:?}"
+        );
+        assert!(
+            props.contains(&("bubble", true)) && props.contains(&("floating", true)),
+            "branch-only union props should remain visible but optional, got {props:?}"
+        );
     }
 
     #[test]

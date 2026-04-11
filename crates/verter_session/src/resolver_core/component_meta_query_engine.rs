@@ -3200,6 +3200,172 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     }
 
     #[test]
+    fn project_type_surface_expr_generic_union_alias_keeps_base_and_branch_props() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/@tiptap/extension-bubble-menu/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface BubbleMenuPluginProps {
+  editor?: object
+  element?: object
+  appendTo?: object
+  pluginKey?: string
+  shouldShow?: (props: { editor: object }) => boolean
+  updateDelay?: number
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/node_modules/@tiptap/extension-floating-menu/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface FloatingMenuPluginProps {
+  editor?: object
+  element?: object
+  options?: {
+    strategy?: 'absolute' | 'fixed'
+  }
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+export type ArrayOrNested<T> = T[] | T[][]
+
+export interface ButtonProps {
+  color?: 'primary' | 'neutral'
+  variant?: 'solid' | 'ghost' | 'soft'
+  size?: 'sm' | 'md'
+  class?: any
+  ui?: object
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/EditorToolbar.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { BubbleMenuPluginProps } from '@tiptap/extension-bubble-menu'
+import type { FloatingMenuPluginProps } from '@tiptap/extension-floating-menu'
+import type { ArrayOrNested, ButtonProps } from './types'
+
+type EditorToolbarItem = {
+  label?: string
+}
+
+type BaseProps<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>> = {
+  as?: any
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  size?: ButtonProps['size']
+  items?: T
+  editor: object
+  class?: any
+  ui?: ButtonProps['ui']
+}
+
+export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = ArrayOrNested<EditorToolbarItem>>
+  = | (BaseProps<T> & { layout?: 'fixed' })
+    | (BaseProps<T> & Partial<Omit<BubbleMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'bubble'
+    })
+    | (BaseProps<T> & Partial<Omit<FloatingMenuPluginProps, 'editor' | 'element'>> & {
+      layout?: 'floating'
+    })
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/EditorToolbar.vue"));
+        host.set_import_dependencies(
+            "/src/EditorToolbar.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "@tiptap/extension-bubble-menu".to_string(),
+                    resolved_canonical_id: Some(
+                        "/src/node_modules/@tiptap/extension-bubble-menu/index.d.ts".to_string(),
+                    ),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "@tiptap/extension-floating-menu".to_string(),
+                    resolved_canonical_id: Some(
+                        "/src/node_modules/@tiptap/extension-floating-menu/index.d.ts".to_string(),
+                    ),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./types".to_string(),
+                    resolved_canonical_id: Some("/src/types.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let projected = query_engine
+            .project_type_surface_expr("/src/EditorToolbar.vue", "EditorToolbarProps")
+            .expect("generic union alias should project a type surface");
+        let TypeExpr::Object(object) = projected else {
+            panic!("projected surface should materialize as an object");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            member_names.contains("as")
+                && member_names.contains("color")
+                && member_names.contains("variant")
+                && member_names.contains("size")
+                && member_names.contains("items")
+                && member_names.contains("editor")
+                && member_names.contains("class")
+                && member_names.contains("ui")
+                && member_names.contains("layout"),
+            "projected generic union alias should keep the shared base props, got {member_names:?}",
+        );
+        assert!(
+            member_names.contains("appendTo")
+                && member_names.contains("pluginKey")
+                && member_names.contains("shouldShow")
+                && member_names.contains("updateDelay")
+                && member_names.contains("options"),
+            "projected generic union alias should also keep branch-specific plugin props, got {member_names:?}",
+        );
+        assert!(
+            !member_names.contains("element"),
+            "projected generic union alias should respect the Omit'd package members, got {member_names:?}",
+        );
+    }
+
+    #[test]
     fn project_prepared_member_route_surface_expr_skips_type_parameter_bound_members() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),

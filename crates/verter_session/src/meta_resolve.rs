@@ -33,6 +33,7 @@ use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+use verter_semantic::analysis::types::AnalyzedMacro;
 
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -478,11 +479,14 @@ fn produce_macro_object_shapes(
                             result: shape,
                         },
                     );
-                } else if define_props_fields_fast_path_allowed(
-                    macro_index,
-                    resolved_macros,
-                    params.define_props.get(define_props_index),
-                ) {
+                } else if !define_props_has_direct_local_root(mac)
+                    && define_props_fields_fast_path_allowed(
+                        mac,
+                        macro_index,
+                        resolved_macros,
+                        params.define_props.get(define_props_index),
+                    )
+                {
                     if let Some((shape, source)) =
                         synthesize_define_props_shape_from_known_surface_with_authority(
                             macro_index,
@@ -744,6 +748,7 @@ impl MacroShapeSource {
 }
 
 fn define_props_fields_fast_path_allowed(
+    mac: &AnalyzedMacro,
     macro_index: usize,
     resolved_macros: &[ResolvedMacroMeta],
     lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
@@ -770,19 +775,26 @@ fn define_props_fields_fast_path_allowed(
         _ => return false,
     }
 
-    let mut matching_macros = resolved_macros.iter().filter(|resolved| {
+    let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
         resolved.macro_index == macro_index
             && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
             && !resolved.props.is_empty()
     });
-    let Some(resolved_macro) = matching_macros.next() else {
+    let Some(first_surface) = macro_surfaces.next() else {
         return false;
     };
-    if matching_macros.next().is_some() {
+    if macro_surfaces.next().is_some() {
+        return false;
+    }
+    if !mac
+        .type_references
+        .iter()
+        .any(|type_name| type_name == &first_surface.type_name)
+    {
         return false;
     }
 
-    let Some(text) = resolved_macro.declaration.text.as_deref() else {
+    let Some(text) = first_surface.declaration.text.as_deref() else {
         return false;
     };
     let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
@@ -808,6 +820,27 @@ fn define_props_fields_fast_path_allowed(
         .any(|marker| compact.contains(marker))
 }
 
+fn define_props_has_direct_local_root(mac: &AnalyzedMacro) -> bool {
+    mac.resolved_local_types
+        .iter()
+        .enumerate()
+        .any(|(resolved_index, resolved)| {
+            is_direct_local_macro_type_reference(mac, resolved_index, resolved.name.as_str())
+        })
+}
+
+fn is_direct_local_macro_type_reference(
+    mac: &AnalyzedMacro,
+    resolved_index: usize,
+    resolved_name: &str,
+) -> bool {
+    resolved_index == 0
+        || mac
+            .type_references
+            .iter()
+            .any(|type_name| type_name == resolved_name)
+}
+
 fn synthesize_define_props_shape_from_known_surface_with_authority(
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
@@ -820,13 +853,32 @@ fn synthesize_define_props_shape_from_known_surface_with_authority(
     };
     use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
 
-    let resolved_macro = resolved_macros.iter().find(|resolved| {
-        resolved.macro_index == macro_index
-            && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-            && !resolved.props.is_empty()
-            && (!require_authoritative_surface || resolved.surface_is_authoritative)
-    });
-    let use_all_expanded_props = reuse_expanded_define_props_shape(snapshot, evaluated_types);
+    let mac = snapshot.macros.get(macro_index)?;
+    let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
+    let resolved_macro = if allow_known_surface_shortcuts {
+        let mut macro_surfaces = resolved_macros.iter().filter(|resolved| {
+            resolved.macro_index == macro_index
+                && resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                && !resolved.props.is_empty()
+                && (!require_authoritative_surface || resolved.surface_is_authoritative)
+        });
+        let first = macro_surfaces.next();
+        if macro_surfaces.next().is_none()
+            && first.is_some_and(|resolved| {
+                mac.type_references
+                    .iter()
+                    .any(|type_name| type_name == &resolved.type_name)
+            })
+        {
+            first
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let use_all_expanded_props = allow_known_surface_shortcuts
+        && reuse_expanded_define_props_shape(snapshot, evaluated_types);
 
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
@@ -1150,18 +1202,7 @@ fn type_expr_needs_projection_rescue(
     use verter_semantic::analysis::type_expr::TypeExpr;
 
     match expr {
-        TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } => true,
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            if type_arguments
-                .iter()
-                .any(|arg| type_expr_needs_projection_rescue(query_engine, owner_canonical, arg))
-            {
-                return true;
-            }
-
+        TypeExpr::Ref { name, .. } => {
             let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
             let scope_canonical = if declaration.canonical_source.is_empty() {
                 owner_canonical
@@ -1176,45 +1217,75 @@ fn type_expr_needs_projection_rescue(
             query_engine
                 .named_decl_body(scope_canonical, resolved_name)
                 .is_some_and(|body| {
-                    type_expr_needs_projection_rescue(query_engine, scope_canonical, &body)
+                    type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
                 })
         }
-        TypeExpr::Parenthesized(inner) | TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) => {
-            type_expr_needs_projection_rescue(query_engine, owner_canonical, inner)
-        }
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .any(|ty| type_expr_needs_projection_rescue(query_engine, owner_canonical, ty)),
-        TypeExpr::Object(_) => false,
-        TypeExpr::Function(_) => false,
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-            ..
-        } => {
-            type_expr_needs_projection_rescue(query_engine, owner_canonical, check)
-                || type_expr_needs_projection_rescue(query_engine, owner_canonical, extends)
-                || type_expr_needs_projection_rescue(query_engine, owner_canonical, true_type)
-                || type_expr_needs_projection_rescue(query_engine, owner_canonical, false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            type_expr_needs_projection_rescue(query_engine, owner_canonical, source)
-                || type_expr_needs_projection_rescue(query_engine, owner_canonical, value)
-                || name_type.as_ref().is_some_and(|name_type| {
-                    type_expr_needs_projection_rescue(query_engine, owner_canonical, name_type)
+        other => type_expr_has_non_object_top_level_surface(query_engine, owner_canonical, other),
+    }
+}
+
+fn type_expr_has_non_object_top_level_surface(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::TypeOf(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_)
+        | TypeExpr::TemplateLiteral { .. } => true,
+        TypeExpr::Ref { name, .. } => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+            let scope_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical
+            } else {
+                declaration.canonical_source.as_str()
+            };
+            let resolved_name = if declaration.resolved_name.is_empty() {
+                name.as_ref()
+            } else {
+                declaration.resolved_name.as_str()
+            };
+            query_engine
+                .named_decl_body(scope_canonical, resolved_name)
+                .is_some_and(|body| {
+                    type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
                 })
         }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .any(|expr| type_expr_needs_projection_rescue(query_engine, owner_canonical, expr)),
-        TypeExpr::Array { .. } | TypeExpr::Tuple { .. } => false,
+        TypeExpr::Parenthesized(inner) => {
+            type_expr_has_non_object_top_level_surface(query_engine, owner_canonical, inner)
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            let mut saw_object = false;
+            for ty in types.iter() {
+                match ty {
+                    TypeExpr::Parenthesized(inner) => {
+                        if type_expr_has_non_object_top_level_surface(
+                            query_engine,
+                            owner_canonical,
+                            inner.as_ref(),
+                        ) {
+                            return true;
+                        }
+                        if matches!(inner.as_ref(), TypeExpr::Object(_)) {
+                            saw_object = true;
+                        }
+                    }
+                    TypeExpr::Object(_) => saw_object = true,
+                    _ => return true,
+                }
+            }
+            !saw_object
+        }
+        TypeExpr::Object(_)
+        | TypeExpr::Function(_)
+        | TypeExpr::Array { .. }
+        | TypeExpr::Tuple { .. } => false,
         TypeExpr::Primitive(_)
         | TypeExpr::Literal(_)
         | TypeExpr::Unknown { .. }
@@ -1272,13 +1343,24 @@ fn produce_one_macro_object_shape(
     }
 
     // ── Non-object body: solver first, then projection on warm caches ─
+    if named_ref_prefers_root_projection_before_solver(query_engine, owner_canonical, lowered) {
+        if let Some(projected) = project_named_ref_surface_shape(
+            query_engine,
+            owner_canonical,
+            lowered,
+            &shape_is_usable,
+        ) {
+            return (Some(projected), MacroShapeSource::Projection);
+        }
+    }
+
     let solved = query_engine.owner_engine_mut().solve(lowered);
     let solver_result =
         verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
     let solver_count = shape_surface_count(&solver_result);
-    let projected = if solver_count == 0
-        || type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
-    {
+    let rescue_projection = solver_count == 0
+        || type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
+    let projected = if rescue_projection {
         query_engine
             .project_expr_surface_expr(owner_canonical, lowered)
             .and_then(|expr| {
@@ -1290,6 +1372,21 @@ fn produce_one_macro_object_shape(
             })
     } else {
         None
+    };
+    let root_projected = if rescue_projection {
+        project_named_ref_surface_shape(query_engine, owner_canonical, lowered, &shape_is_usable)
+    } else {
+        None
+    };
+    let projected = match (projected, root_projected) {
+        (Some(expr_proj), Some(root_proj))
+            if shape_surface_count(&root_proj) > shape_surface_count(&expr_proj) =>
+        {
+            Some(root_proj)
+        }
+        (Some(expr_proj), _) => Some(expr_proj),
+        (None, Some(root_proj)) => Some(root_proj),
+        (None, None) => None,
     };
 
     match projected {
@@ -1303,6 +1400,64 @@ fn produce_one_macro_object_shape(
             None => (None, MacroShapeSource::None),
         },
     }
+}
+
+fn named_ref_prefers_root_projection_before_solver(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+        return false;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let scope_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical
+    } else {
+        declaration.canonical_source.as_str()
+    };
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        name.as_ref()
+    } else {
+        declaration.resolved_name.as_str()
+    };
+
+    query_engine
+        .named_decl_body(scope_canonical, resolved_name)
+        .is_some_and(|body| component_meta_registry_has_non_object_top_level_surface(&body))
+}
+
+fn project_named_ref_surface_shape(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    shape_is_usable: &impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
+) -> Option<ShapeResult> {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+        return None;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+    let defining_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical
+    } else {
+        declaration.canonical_source.as_str()
+    };
+    let defining_name = if declaration.resolved_name.is_empty() {
+        name.as_ref()
+    } else {
+        declaration.resolved_name.as_str()
+    };
+
+    query_engine
+        .project_type_surface_expr(defining_canonical, defining_name)
+        .and_then(|expr| {
+            let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expr);
+            shape_is_usable(&shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+            })
+        })
 }
 
 /// Like `produce_one_macro_object_shape` but applies `deep_resolve_slot_function_refs`
