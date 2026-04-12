@@ -7280,8 +7280,639 @@ defineProps<Props<T>>()
     );
     assert_eq!(
         query_engine.solve_count(),
-        1,
-        "generic non-object aliases that the projector can materialize should skip the extra solver pass and stay on one projected solve"
+        0,
+        "generic non-object aliases that the prepared projector can materialize should stay shallow and avoid the semantic solver"
+    );
+}
+
+#[test]
+fn produce_one_macro_object_shape_prefers_root_projection_for_nested_pick_omit_generic_interface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/pkg.ts",
+            r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface HtmlAttrs {
+  id?: string
+  type?: string
+  disabled?: boolean
+  name?: string
+}
+
+export interface IconProps {
+  icon?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { RootProps } from './pkg'
+import type { HtmlAttrs, IconProps } from './types'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'>, IconProps, Omit<HtmlAttrs, 'type' | 'disabled' | 'name'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<script setup lang="ts">
+defineProps<ColorModeSelectProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let lowered =
+        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+
+    let (shape, source) = produce_one_macro_object_shape(
+        &mut query_engine,
+        "/src/App.vue",
+        &lowered,
+        has_prop_shape_surface,
+    );
+
+    assert!(shape.is_some(), "color-mode-style props should materialize");
+    assert!(
+        matches!(source, MacroShapeSource::Projection),
+        "nested pick/omit generic interfaces should stay on the projection path",
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "nested pick/omit generic interfaces should use the prepared shallow projector before the solver",
+    );
+}
+
+#[test]
+fn produce_one_macro_object_shape_prefers_projection_for_dual_heritage_omit_with_imported_key_alias(
+) {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface LinkProps {
+  href?: string
+  target?: string
+  rel?: string
+  active?: boolean
+  class?: any
+}
+
+export type LinkPropsKeys = 'href' | 'target' | 'rel' | 'active'
+
+export interface ButtonProps extends Omit<LinkProps, 'href'> {
+  label?: string
+  color?: string
+  variant?: string
+  ui?: object
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/drag.ts",
+            r#"
+export interface DragHandleProps {
+  class?: any
+  computePositionConfig?: unknown
+  editor?: object
+  element?: object
+  onNodeChange?: () => void
+  pluginKey?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { DragHandleProps } from './drag'
+import type { ButtonProps, LinkPropsKeys } from './types'
+
+export interface Props extends Omit<DragHandleProps, 'editor' | 'element' | 'onNodeChange' | 'computePositionConfig' | 'class'>, Omit<ButtonProps, LinkPropsKeys | 'color' | 'variant'> {
+  color?: ButtonProps['color']
+  variant?: ButtonProps['variant']
+  options?: object
+  editor: object
+  ui?: ButtonProps['ui']
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
+
+    let (shape, source) = produce_one_macro_object_shape(
+        &mut query_engine,
+        "/src/App.vue",
+        &lowered,
+        has_prop_shape_surface,
+    );
+    let shape = shape.expect("dual-heritage alias-key props should materialize");
+    let prop_names: Vec<&str> = shape
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+
+    assert!(
+        matches!(source, MacroShapeSource::Projection),
+        "dual-heritage omit with imported key aliases should stay on the prepared projection path",
+    );
+    assert!(
+        prop_names.contains(&"label")
+            && prop_names.contains(&"pluginKey")
+            && prop_names.contains(&"editor")
+            && prop_names.contains(&"options")
+            && prop_names.contains(&"ui"),
+        "projected dual-heritage surface should keep both drag and button props, got {prop_names:?}",
+    );
+    assert!(
+        !prop_names.contains(&"href")
+            && !prop_names.contains(&"target")
+            && !prop_names.contains(&"rel")
+            && !prop_names.contains(&"active"),
+        "projected dual-heritage surface should drop alias-derived link keys, got {prop_names:?}",
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "dual-heritage omit with imported key aliases should avoid the semantic solver",
+    );
+}
+
+#[test]
+fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solver() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.integration-tests/repos/nuxt-ui")
+        .canonicalize()
+        .expect("nuxt-ui integration fixture should exist");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
+    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            repo_root.clone(),
+            repo_root.clone(),
+            Some(format!("{repo_root}/tsconfig.json")),
+        ),
+    ]);
+
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            &host,
+            Some(&store_view),
+            &component,
+        );
+    let mut direct_query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        &host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let select_menu_component = format!("{repo_root}/src/runtime/components/SelectMenu.vue");
+    let combobox_root_decl =
+        direct_query_engine.resolve_type_declaration(&select_menu_component, "ComboboxRootProps");
+    assert!(
+        !combobox_root_decl.canonical_source.is_empty(),
+        "real ComboboxRootProps should resolve to a prepared declaration source",
+    );
+    let listbox_root_decl = direct_query_engine
+        .resolve_type_declaration(&combobox_root_decl.canonical_source, "ListboxRootProps");
+    assert!(
+        !listbox_root_decl.canonical_source.is_empty(),
+        "real ListboxRootProps should resolve to a prepared declaration source",
+    );
+    let listbox_root_prepared = direct_query_engine.project_prepared_type_surface_expr(
+        &listbox_root_decl.canonical_source,
+        &listbox_root_decl.resolved_name,
+    );
+    assert!(
+        listbox_root_prepared.is_some(),
+        "real ListboxRootProps should have a prepared-only root surface projection available",
+    );
+    let (combobox_root_target_source, combobox_root_target_name) = host
+        .resolve_named_type_export_target_in_view(
+            &combobox_root_decl.canonical_source,
+            &combobox_root_decl.resolved_name,
+            Some(&store_view),
+        )
+        .unwrap_or((
+            combobox_root_decl.canonical_source.clone(),
+            combobox_root_decl.resolved_name.clone(),
+        ));
+    let combobox_root_prepared = direct_query_engine.project_prepared_type_surface_expr(
+        &combobox_root_target_source,
+        &combobox_root_target_name,
+    );
+    assert!(
+        combobox_root_prepared.is_some(),
+        "real ComboboxRootProps routed target should have a prepared-only root surface projection available",
+    );
+    let button_html_decl = direct_query_engine
+        .resolve_type_declaration(&select_menu_component, "ButtonHTMLAttributes");
+    assert!(
+        !button_html_decl.canonical_source.is_empty(),
+        "real ButtonHTMLAttributes should resolve to a prepared declaration source",
+    );
+    let button_html_prepared = direct_query_engine.project_prepared_type_surface_expr(
+        &button_html_decl.canonical_source,
+        &button_html_decl.resolved_name,
+    );
+    assert!(
+        button_html_prepared.is_some(),
+        "real ButtonHTMLAttributes should have a prepared-only root surface projection available",
+    );
+    let select_menu_prepared = direct_query_engine
+        .project_prepared_type_surface_expr(&select_menu_component, "SelectMenuProps");
+    assert!(
+        select_menu_prepared.is_some(),
+        "real SelectMenuProps should have a prepared-only root surface projection available",
+    );
+    let prepared_only =
+        direct_query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
+    assert!(
+        prepared_only.is_some(),
+        "real ColorModeSelectProps should have a prepared-only root surface projection available",
+    );
+    assert_eq!(
+        direct_query_engine.solve_count(),
+        0,
+        "prepared-only real ColorModeSelectProps projection must not invoke the semantic solver",
+    );
+
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        &host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let lowered =
+        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+
+    let (shape, source) = produce_one_macro_object_shape(
+        &mut query_engine,
+        &component,
+        &lowered,
+        has_prop_shape_surface,
+    );
+
+    assert!(
+        shape.is_some(),
+        "real ColorModeSelectProps should materialize"
+    );
+    assert!(
+        matches!(source, MacroShapeSource::Projection),
+        "real ColorModeSelectProps should still prefer the projection path",
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "real ColorModeSelectProps should stay on the shallow projection path without a semantic solve",
+    );
+}
+
+#[test]
+fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritative_surface_without_solves(
+) {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.integration-tests/repos/nuxt-ui")
+        .canonicalize()
+        .expect("nuxt-ui integration fixture should exist");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
+    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            repo_root.clone(),
+            repo_root.clone(),
+            Some(format!("{repo_root}/tsconfig.json")),
+        ),
+    ]);
+
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            &host,
+            Some(&store_view),
+            &component,
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host: &host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        &component,
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    assert!(
+        parts.resolved_macros.iter().all(|resolved| {
+            !(resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                && resolved.type_name == "SelectMenuProps")
+        }),
+        "real ColorModeSelect should keep the imported SelectMenuProps macro root off resolved_macros when the owner-local wrapper can be projected lazily: {:?}",
+        parts.resolved_macros
+            .iter()
+            .map(|resolved| (resolved.macro_kind, resolved.type_name.as_str()))
+            .collect::<Vec<_>>()
+    );
+    if let Some(define_props) = parts.resolved_macros.iter().find(|resolved| {
+        resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+    }) {
+        assert!(
+            define_props.surface_is_authoritative,
+            "if a defineProps resolved macro is present it should already be authoritative before macro-shape synthesis",
+        );
+    }
+
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        &host,
+        Some(&store_view),
+        owner_engine,
+    );
+    let prepared_overlay_surface =
+        query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
+    assert!(
+        prepared_overlay_surface.is_some(),
+        "overlay-backed ColorModeSelectProps should still have a prepared-only root surface available",
+    );
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "overlay-backed prepared root-surface lookup must stay off the semantic solver before macro-shape synthesis",
+    );
+    let overlay_declaration =
+        query_engine.resolve_type_declaration(&component, "ColorModeSelectProps");
+    assert_eq!(
+        overlay_declaration.canonical_source,
+        component,
+        "overlay-backed ColorModeSelectProps should still resolve to the owner-local declaration before macro-shape synthesis",
+    );
+    assert_eq!(
+        overlay_declaration.resolved_name,
+        "ColorModeSelectProps",
+        "overlay-backed ColorModeSelectProps should keep its local symbol name before macro-shape synthesis",
+    );
+    host.append_component_meta_registry_entries(
+        &component,
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+    let facts = host
+        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .expect("component facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+    let solves_before = query_engine.solve_count();
+
+    produce_macro_object_shapes(
+        &component,
+        &snapshot,
+        &parts.resolved_macros,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count().saturating_sub(solves_before),
+        0,
+        "real ColorModeSelect should reuse its authoritative local defineProps surface instead of triggering another projection solve during macro-shape synthesis",
+    );
+}
+
+#[test]
+fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_stays_off_solver() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.integration-tests/repos/nuxt-ui")
+        .canonicalize()
+        .expect("nuxt-ui integration fixture should exist");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
+    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+    let source = std::fs::read_to_string(&component)
+        .expect("real ColorModeSelect source should be readable from the fixture");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            repo_root.clone(),
+            repo_root.clone(),
+            Some(format!("{repo_root}/tsconfig.json")),
+        ),
+    ]);
+    let _ = host
+        .upsert(crate::types::UpsertRequest {
+            canonical_id: Some(component.clone()),
+            input_id: component.clone(),
+            source: Arc::from(source),
+            file_kind: crate::types::FileKind::from_path(&component),
+            aliases: Vec::new(),
+        })
+        .expect("overlay-style upsert should succeed");
+
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .expect("overlay-backed raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            &host,
+            Some(&store_view),
+            &component,
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host: &host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        &component,
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        &host,
+        Some(&store_view),
+        owner_engine,
+    );
+    host.append_component_meta_registry_entries(
+        &component,
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+    let prepared_overlay_shape = query_engine
+        .project_prepared_type_surface_shape(&component, "ColorModeSelectProps")
+        .expect("overlay-backed prepared root surface should still materialize a shape after registry append");
+    assert!(
+        has_prop_shape_surface(&prepared_overlay_shape),
+        "overlay-backed prepared root surface should still expose props after registry append",
+    );
+    let lowered =
+        verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
+    let direct_solves_before = query_engine.solve_count();
+    let (direct_shape, direct_source) = produce_one_macro_object_shape(
+        &mut query_engine,
+        &component,
+        &lowered,
+        has_prop_shape_surface,
+    );
+    assert!(
+        direct_shape.is_some(),
+        "overlay-backed direct macro object shape should still materialize after registry append",
+    );
+    assert!(
+        matches!(direct_source, MacroShapeSource::Projection),
+        "overlay-backed direct macro object shape should stay on the projection path after registry append",
+    );
+    assert_eq!(
+        query_engine
+            .solve_count()
+            .saturating_sub(direct_solves_before),
+        0,
+        "overlay-backed direct macro object shape should stay solve-free after registry append",
+    );
+    let facts = host
+        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .expect("overlay-backed component facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+    let solves_before = query_engine.solve_count();
+
+    produce_macro_object_shapes(
+        &component,
+        &snapshot,
+        &parts.resolved_macros,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count().saturating_sub(solves_before),
+        0,
+        "overlay-style owner upserts should keep ColorModeSelect on the shallow projection path instead of falling back into a semantic solve",
     );
 }
 

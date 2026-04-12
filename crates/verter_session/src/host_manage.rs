@@ -159,6 +159,19 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
         || dep_canonical.ends_with(".cjs");
 
     let mut candidates = Vec::new();
+    for (suffix, companion_suffix) in [
+        (".esm-bundler.js", ".d.ts"),
+        (".esm-browser.js", ".d.ts"),
+        (".esm-browser.prod.js", ".d.ts"),
+        (".global.js", ".d.ts"),
+        (".global.prod.js", ".d.ts"),
+        (".cjs.js", ".d.ts"),
+        (".cjs.prod.js", ".d.ts"),
+    ] {
+        if let Some(stem) = dep_canonical.strip_suffix(suffix) {
+            candidates.push(format!("{stem}{companion_suffix}"));
+        }
+    }
     if let Some(stem) = dep_canonical.strip_suffix(".js") {
         candidates.push(format!("{stem}.d.ts"));
     }
@@ -2783,7 +2796,7 @@ impl VerterHost {
         let bundle = std::sync::Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
-                state.as_ref(),
+                std::sync::Arc::clone(state),
                 dep_edges,
                 script_setup_type_bindings,
             ),
@@ -2846,7 +2859,7 @@ impl VerterHost {
             Some(&owned_view)
         };
         let bundle = self.prepared_decl_bundle_in_view(canonical_id, current_view)?;
-        let result = bundle.prepared_type_decls.get(symbol_name).cloned();
+        let result = bundle.prepared_type_decls.get(symbol_name);
         component_meta_trace_event!(
             "prepared_type_decl_in_view_result",
             format!(
@@ -2874,7 +2887,7 @@ impl VerterHost {
             Some(&owned_view)
         };
         let bundle = self.prepared_decl_bundle_in_view(canonical_id, current_view)?;
-        bundle.prepared_value_decls.get(symbol_name).cloned()
+        bundle.prepared_value_decls.get(symbol_name)
     }
 
     /// Route-aware required-import closure.

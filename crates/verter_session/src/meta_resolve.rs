@@ -1314,6 +1314,12 @@ fn produce_one_macro_object_shape(
     shape_is_usable: impl Fn(&verter_semantic::analysis::type_expand::ExpandedObjectShape) -> bool,
 ) -> (Option<ShapeResult>, MacroShapeSource) {
     // ── Fast path: direct Object body → DB-backed projection ──────────
+    if let Some(projected) =
+        project_named_ref_prepared_surface_shape(query_engine, owner_canonical, lowered)
+    {
+        return (Some(projected), MacroShapeSource::Projection);
+    }
+
     if let verter_semantic::analysis::type_expr::TypeExpr::Ref {
         name,
         type_arguments,
@@ -1323,12 +1329,9 @@ fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                if let Some(projected) =
-                    query_engine.project_type_surface_expr(&def_canonical, &def_name)
+                if let Some(shape) =
+                    query_engine.project_type_surface_shape(&def_canonical, &def_name)
                 {
-                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                        &projected,
-                    );
                     if shape_is_usable(&shape) {
                         return (
                             Some(
@@ -1343,17 +1346,6 @@ fn produce_one_macro_object_shape(
     }
 
     // ── Non-object body: solver first, then projection on warm caches ─
-    if named_ref_prefers_root_projection_before_solver(query_engine, owner_canonical, lowered) {
-        if let Some(projected) = project_named_ref_surface_shape(
-            query_engine,
-            owner_canonical,
-            lowered,
-            &shape_is_usable,
-        ) {
-            return (Some(projected), MacroShapeSource::Projection);
-        }
-    }
-
     let solved = query_engine.owner_engine_mut().solve(lowered);
     let solver_result =
         verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
@@ -1362,10 +1354,8 @@ fn produce_one_macro_object_shape(
         || type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
         query_engine
-            .project_expr_surface_expr(owner_canonical, lowered)
-            .and_then(|expr| {
-                let shape =
-                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expr);
+            .project_expr_surface_shape(owner_canonical, lowered)
+            .and_then(|shape| {
                 shape_is_usable(&shape).then(|| {
                     verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
                 })
@@ -1402,13 +1392,13 @@ fn produce_one_macro_object_shape(
     }
 }
 
-fn named_ref_prefers_root_projection_before_solver(
+fn project_named_ref_prepared_surface_shape(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     lowered: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> bool {
+) -> Option<ShapeResult> {
     let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
-        return false;
+        return None;
     };
 
     let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
@@ -1424,8 +1414,12 @@ fn named_ref_prefers_root_projection_before_solver(
     };
 
     query_engine
-        .named_decl_body(scope_canonical, resolved_name)
-        .is_some_and(|body| component_meta_registry_has_non_object_top_level_surface(&body))
+        .project_prepared_type_surface_shape(scope_canonical, resolved_name)
+        .and_then(|shape| {
+            has_prop_shape_surface(&shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+            })
+        })
 }
 
 fn project_named_ref_surface_shape(
@@ -1451,9 +1445,8 @@ fn project_named_ref_surface_shape(
     };
 
     query_engine
-        .project_type_surface_expr(defining_canonical, defining_name)
-        .and_then(|expr| {
-            let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expr);
+        .project_type_surface_shape(defining_canonical, defining_name)
+        .and_then(|shape| {
             shape_is_usable(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
             })
@@ -1477,12 +1470,9 @@ fn produce_one_macro_object_shape_for_slots(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
-                if let Some(projected) =
-                    query_engine.project_type_surface_expr(&def_canonical, &def_name)
+                if let Some(shape) =
+                    query_engine.project_type_surface_shape(&def_canonical, &def_name)
                 {
-                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
-                        &projected,
-                    );
                     if has_shape_surface(&shape) {
                         return (
                             Some(
@@ -1507,9 +1497,8 @@ fn produce_one_macro_object_shape_for_slots(
     let solver_count = shape_surface_count(&solver_result);
 
     let projected = query_engine
-        .project_expr_surface_expr(owner_canonical, lowered)
-        .and_then(|expr| {
-            let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expr);
+        .project_expr_surface_shape(owner_canonical, lowered)
+        .and_then(|shape| {
             has_shape_surface(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
             })

@@ -1289,6 +1289,93 @@ type Props = {
     }
 
     #[test]
+    fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_local_wrapper_type_expr_is_available(
+    ) {
+        let source = r#"
+type Props = Omit<ImportedBase, 'hidden'>
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("label".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "Omit<ImportedBase, 'hidden'>".to_string(),
+                    type_expr: Some(
+                        verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                            "Omit<ImportedBase, 'hidden'>",
+                        ),
+                    ),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "local wrapper type_expr should keep direct imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
         let host = TestHost {
             source: String::new(),
@@ -1644,8 +1731,20 @@ fn macro_has_authoritative_resolved_local_surface(mac: &AnalyzedMacro) -> bool {
                         || !projected.emits.is_empty()
                         || !projected.slots.is_empty()
                 },
-            )
+            ) || resolved_local_type_expr_can_drive_authoritative_projection(mac.kind, resolved)
         })
+}
+
+fn resolved_local_type_expr_can_drive_authoritative_projection(
+    macro_kind: AnalyzedMacroKind,
+    resolved: &verter_semantic::analysis::types::ResolvedLocalType,
+) -> bool {
+    matches!(
+        macro_kind,
+        AnalyzedMacroKind::DefineProps
+            | AnalyzedMacroKind::WithDefaults
+            | AnalyzedMacroKind::DefineModel
+    ) && resolved.type_expr.is_some()
 }
 
 fn macro_dep_exported_type_name<'a>(

@@ -4696,6 +4696,44 @@ fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before
 }
 
 #[test]
+fn resolve_eval_dependency_canonical_in_view_prefers_bundle_entry_declaration_companion_shallowly()
+{
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js",
+        "export { useId } from './runtime-core.js'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/@vue/runtime-core/dist/runtime-core.d.ts",
+        "export declare function useId(): string\n",
+    );
+
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+
+    ws.reset_reads();
+    let resolved = host.resolve_eval_dependency_canonical_in_view(
+        "/workspace/node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js",
+        None,
+    );
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some("/workspace/node_modules/@vue/runtime-core/dist/runtime-core.d.ts"),
+        "bundle entry runtime scripts should prefer the shared declaration companion when present",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js"),
+        0,
+        "bundle companion selection should stay on shallow existence probes for the runtime bundle",
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/@vue/runtime-core/dist/runtime-core.d.ts"),
+        0,
+        "bundle companion selection should stay on shallow existence probes for the declaration companion",
+    );
+}
+
+#[test]
 fn current_eval_state_in_view_normalizes_extensionless_canonical_before_fallback_load() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -8510,6 +8548,56 @@ fn bundle_fact_validation_round_trip() {
         !body_debug.contains("label"),
         "updated prepared decl body should NOT contain the old property 'label', got: {}",
         body_debug
+    );
+}
+
+#[test]
+fn prepared_type_decl_in_view_only_prepares_requested_symbol_on_first_lookup() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        r#"
+export interface Alpha { alpha: string }
+export interface Beta { beta: string }
+export interface Gamma { gamma: string }
+export interface Delta { delta: string }
+"#,
+    );
+    let _ = host
+        .ensure_module_facts_in_view("/src/types.ts", None)
+        .expect("types dependency should materialize");
+
+    crate::resolver_core::prepared_decl::reset_prepared_type_decl_build_count_for_tests();
+
+    let gamma = host
+        .prepared_type_decl_in_view("/src/types.ts", "Gamma", None)
+        .expect("Gamma should prepare");
+    assert_eq!(gamma.root_identity.symbol_name, "Gamma");
+    assert_eq!(
+        crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
+        1,
+        "first lookup should prepare only the requested symbol",
+    );
+
+    let gamma_again = host
+        .prepared_type_decl_in_view("/src/types.ts", "Gamma", None)
+        .expect("Gamma should stay cached");
+    assert_eq!(gamma_again.root_identity.symbol_name, "Gamma");
+    assert_eq!(
+        crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
+        1,
+        "repeat lookup should reuse the prepared symbol cache",
+    );
+
+    let alpha = host
+        .prepared_type_decl_in_view("/src/types.ts", "Alpha", None)
+        .expect("Alpha should prepare");
+    assert_eq!(alpha.root_identity.symbol_name, "Alpha");
+    assert_eq!(
+        crate::resolver_core::prepared_decl::prepared_type_decl_build_count_for_tests(),
+        2,
+        "looking up a second symbol should prepare only that symbol",
     );
 }
 

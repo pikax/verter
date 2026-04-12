@@ -1685,7 +1685,7 @@ impl VerterHost {
         let bundle = Arc::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
-                shallow_state.as_ref(),
+                Arc::clone(&shallow_state),
                 dep_edges,
                 FxHashMap::default(),
             ),

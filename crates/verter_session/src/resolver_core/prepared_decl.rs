@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_solver::prepared::PreparedExternalDep;
@@ -63,6 +63,9 @@ pub fn prepare_local_type_decl(
     if state.is_import_local(symbol_name) {
         return None;
     }
+
+    #[cfg(test)]
+    PREPARED_TYPE_DECL_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
@@ -218,6 +221,70 @@ pub fn prepare_exported_value_decl(
     Some(prepared)
 }
 
+#[derive(Clone)]
+pub struct PreparedTypeDeclCache {
+    canonical_id: Arc<str>,
+    state: Arc<ShallowFileState>,
+    dep_edges: Arc<FxHashMap<String, String>>,
+    slots: Arc<FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>>>,
+}
+
+impl PreparedTypeDeclCache {
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn contains_key(&self, symbol_name: &str) -> bool {
+        self.slots.contains_key(symbol_name)
+    }
+
+    pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedTypeDecl>> {
+        let slot = self.slots.get(symbol_name)?;
+        slot.get_or_init(|| {
+            prepare_local_type_decl(
+                self.canonical_id.as_ref(),
+                self.state.as_ref(),
+                symbol_name,
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+            )
+            .map(Arc::new)
+        })
+        .clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct PreparedValueDeclCache {
+    canonical_id: Arc<str>,
+    state: Arc<ShallowFileState>,
+    dep_edges: Arc<FxHashMap<String, String>>,
+    slots: Arc<FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedValueDecl>>>>>>,
+}
+
+impl PreparedValueDeclCache {
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn contains_key(&self, symbol_name: &str) -> bool {
+        self.slots.contains_key(symbol_name)
+    }
+
+    pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedValueDecl>> {
+        let slot = self.slots.get(symbol_name)?;
+        slot.get_or_init(|| {
+            prepare_local_value_decl(
+                self.canonical_id.as_ref(),
+                self.state.as_ref(),
+                symbol_name,
+                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+            )
+            .map(Arc::new)
+        })
+        .clone()
+    }
+}
+
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -225,12 +292,12 @@ pub fn prepare_exported_value_decl(
 /// import graph or file content changes.
 #[derive(Clone)]
 pub struct PreparedDeclBundle {
-    pub prepared_type_decls: FxHashMap<String, Arc<PreparedTypeDecl>>,
-    pub prepared_value_decls: FxHashMap<String, Arc<PreparedValueDecl>>,
+    pub prepared_type_decls: PreparedTypeDeclCache,
+    pub prepared_value_decls: PreparedValueDeclCache,
     /// The dep_edges snapshot used to build this bundle.
     /// Stored so `SessionSolverHost::with_declaration_scope` can read it
     /// instead of recomputing dependency resolutions from the store view.
-    pub dep_edges: FxHashMap<String, String>,
+    pub dep_edges: Arc<FxHashMap<String, String>>,
     /// Resolved import bindings: local name → (canonical_id, exported_name).
     /// Built from the owner file's import targets + dep_edges during
     /// bundle materialization.
@@ -253,11 +320,11 @@ pub struct PreparedDeclBundle {
 /// session-level concern. For non-Vue files the caller passes an empty map.
 pub fn build_prepared_decl_bundle(
     canonical_id: &str,
-    state: &ShallowFileState,
+    state: Arc<ShallowFileState>,
     dep_edges: FxHashMap<String, String>,
     script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
 ) -> PreparedDeclBundle {
-    let dep_edges_ref = (!dep_edges.is_empty()).then_some(&dep_edges);
+    let dep_edges = Arc::new(dep_edges);
 
     // Build import bindings from shallow state import_targets + dep_edges.
     let mut import_bindings = FxHashMap::default();
@@ -283,8 +350,16 @@ pub fn build_prepared_decl_bundle(
     let scope_value_names: FxHashSet<String> = state.value_symbols.keys().cloned().collect();
 
     PreparedDeclBundle {
-        prepared_type_decls: build_prepared_type_decl_cache(canonical_id, state, dep_edges_ref),
-        prepared_value_decls: build_prepared_value_decl_cache(canonical_id, state, dep_edges_ref),
+        prepared_type_decls: build_prepared_type_decl_cache(
+            canonical_id,
+            Arc::clone(&state),
+            Arc::clone(&dep_edges),
+        ),
+        prepared_value_decls: build_prepared_value_decl_cache(
+            canonical_id,
+            Arc::clone(&state),
+            Arc::clone(&dep_edges),
+        ),
         dep_edges,
         import_bindings,
         scope_type_names,
@@ -296,33 +371,57 @@ pub fn build_prepared_decl_bundle(
 /// Build the host-owned prepared type declaration cache for one defining file.
 pub fn build_prepared_type_decl_cache(
     canonical_id: &str,
-    state: &ShallowFileState,
-    dep_edges: Option<&FxHashMap<String, String>>,
-) -> FxHashMap<String, Arc<PreparedTypeDecl>> {
-    state
+    state: Arc<ShallowFileState>,
+    dep_edges: Arc<FxHashMap<String, String>>,
+) -> PreparedTypeDeclCache {
+    let slots = state
         .symbols
         .keys()
-        .filter_map(|symbol_name| {
-            prepare_local_type_decl(canonical_id, state, symbol_name, dep_edges)
-                .map(|prepared| (symbol_name.clone(), Arc::new(prepared)))
-        })
-        .collect()
+        .filter(|symbol_name| !state.is_import_local(symbol_name))
+        .map(|symbol_name| (symbol_name.clone(), Arc::new(OnceLock::new())))
+        .collect();
+
+    PreparedTypeDeclCache {
+        canonical_id: Arc::from(canonical_id),
+        state,
+        dep_edges,
+        slots: Arc::new(slots),
+    }
 }
 
 /// Build the host-owned prepared value declaration cache for one defining file.
 pub fn build_prepared_value_decl_cache(
     canonical_id: &str,
-    state: &ShallowFileState,
-    dep_edges: Option<&FxHashMap<String, String>>,
-) -> FxHashMap<String, Arc<PreparedValueDecl>> {
-    state
+    state: Arc<ShallowFileState>,
+    dep_edges: Arc<FxHashMap<String, String>>,
+) -> PreparedValueDeclCache {
+    let slots = state
         .value_symbols
         .keys()
-        .filter_map(|symbol_name| {
-            prepare_local_value_decl(canonical_id, state, symbol_name, dep_edges)
-                .map(|prepared| (symbol_name.clone(), Arc::new(prepared)))
-        })
-        .collect()
+        .filter(|symbol_name| !state.is_import_local(symbol_name))
+        .map(|symbol_name| (symbol_name.clone(), Arc::new(OnceLock::new())))
+        .collect();
+
+    PreparedValueDeclCache {
+        canonical_id: Arc::from(canonical_id),
+        state,
+        dep_edges,
+        slots: Arc::new(slots),
+    }
+}
+
+#[cfg(test)]
+static PREPARED_TYPE_DECL_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_prepared_type_decl_build_count_for_tests() {
+    PREPARED_TYPE_DECL_BUILD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn prepared_type_decl_build_count_for_tests() -> usize {
+    PREPARED_TYPE_DECL_BUILD_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[cfg(test)]
@@ -520,8 +619,16 @@ export const defaults: Props = { label: 'ok' }
         let env = parse_and_build_env(source);
         let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
 
-        let type_cache = build_prepared_type_decl_cache("/src/types.ts", &state, None);
-        let value_cache = build_prepared_value_decl_cache("/src/types.ts", &state, None);
+        let type_cache = build_prepared_type_decl_cache(
+            "/src/types.ts",
+            Arc::new(state.clone()),
+            Arc::new(FxHashMap::default()),
+        );
+        let value_cache = build_prepared_value_decl_cache(
+            "/src/types.ts",
+            Arc::new(state),
+            Arc::new(FxHashMap::default()),
+        );
 
         assert!(type_cache.contains_key("Props"));
         assert!(value_cache.contains_key("defaults"));
