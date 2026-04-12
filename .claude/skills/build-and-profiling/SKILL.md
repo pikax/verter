@@ -125,3 +125,69 @@ pnpm --filter @verter/benchmark bench:meta:ui -- --backends=verter --scenarios=s
 ```
 
 CI uses `.github/workflows/meta-benchmark.yml` to pin the latest `nuxt/ui` `v4` SHA once, run the backend/scenario matrix, and aggregate JSON artifacts into one markdown report.
+
+### Component-Meta Trace / No-Trace Workflow
+
+For component-meta optimization work, use the trace runner directly instead of guessing from ad-hoc requests.
+
+```bash
+# Ground-truth request timing for one real component
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-notrace \
+  --filter=Accordion.vue \
+  --no-trace
+
+# Traced run for route correctness + stage attribution
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-trace \
+  --filter=Accordion.vue
+
+# Full corpus timing sweep
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-full \
+  --no-trace
+```
+
+Interpretation:
+
+- `query_ms_from_stdout` is the best lightweight request-latency number.
+- `wall_ms` includes Node/bootstrap/teardown overhead.
+- `trace_resolve_ms` is only the primary `resolve_component_meta` root span.
+- `trace_query_ms` is the sum of all traced root spans in the request and is better when secondary extraction/fallthrough/imported-local work matters.
+
+The trace checker can validate both performance rules and expected metadata artifacts:
+
+```bash
+npx tsx packages/benchmark/src/trace-check.ts \
+  tmp/cm-trace \
+  --batch "Accordion,Alert,App" \
+  --strict \
+  --check-expected
+```
+
+### Real Component-Meta Profiler
+
+For real-project native hotspot attribution, use the dedicated profiler example:
+
+```bash
+cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
+```
+
+Useful environment variables:
+
+- `VERTER_PROFILE_PROJECT_ROOT` - override the project root
+- `VERTER_PROFILE_REPEATS` - repeat the request multiple times
+- `HOTPATH_METRICS_PORT` - select a different hotpath port when another profiling run is active
+- `HOTPATH_METRICS_SERVER_OFF=1` - disable the hotpath HTTP metrics server when only local output is needed
+
+Practical guidance:
+
+- first use `trace-component-corpus.mjs --no-trace` to confirm a real regression
+- then use traced runs to identify the owning stage
+- only then use `profile_real_component_meta` or an external sampler for native call-tree attribution
+
+### External Sampling Profilers
+
+- `samply` is useful for sampling native + Node-backed component-meta work on supported platforms.
+- On Windows, `samply` requires the Windows Performance Toolkit (`xperf`). Without `xperf`, sampling capture will fail even if `samply` itself is installed.
+- After the first `cargo run ... profile_real_component_meta ...` build, prefer running the built example binary directly from `target/release/examples/` during iteration so Cargo rebuild cost does not pollute profiling sessions.

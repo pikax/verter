@@ -289,8 +289,9 @@ where
         {
             continue;
         }
-        if expanded
-            && macros.get(dep.macro_index).is_some_and(|mac| {
+        let direct_macro_reference = is_direct_macro_type_reference(macros, dep);
+        if expanded {
+            if let Some(mac) = macros.get(dep.macro_index) {
                 let authoritative_owner = macro_has_authoritative_owner_surface(
                     mac,
                     eval_outputs.evaluated_types.as_ref(),
@@ -298,12 +299,28 @@ where
                 );
                 let authoritative_resolved_local =
                     macro_has_authoritative_resolved_local_surface(mac);
-                (!is_direct_macro_type_reference(macros, dep)
-                    && (authoritative_owner || authoritative_resolved_local))
+                let local_type_root = macro_has_direct_local_type_root(mac);
+                let skip_non_direct_dep = !direct_macro_reference
+                    && (authoritative_owner || authoritative_resolved_local);
+                let skip_fallthrough_define_emits = purpose
+                    == ComponentMetaResolutionPurpose::Fallthrough
+                    && dep.macro_kind == AnalyzedMacroKind::DefineEmits
+                    && mac.is_type_based
+                    && (!direct_macro_reference || authoritative_owner || local_type_root);
+                if skip_non_direct_dep
                     || authoritative_resolved_local
-            })
-        {
-            continue;
+                    || skip_fallthrough_define_emits
+                {
+                    if skip_fallthrough_define_emits {
+                        if let Some(dep_canonical) = host
+                            .resolve_type_dependency_canonical(owner_canonical, &dep.import_source)
+                        {
+                            tracked_deps.insert(dep_canonical);
+                        }
+                    }
+                    continue;
+                }
+            }
         }
         let macro_index = dep.macro_index;
         let dep_exported_name = macro_dep_exported_type_name(imports, dep);
@@ -740,6 +757,7 @@ mod tests {
     struct CombinedSurfaceTestHost {
         source: String,
         imported_surface_calls: std::cell::Cell<usize>,
+        eval_outputs: ComponentMetaEvalOutputs,
     }
 
     impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHost {
@@ -816,7 +834,7 @@ mod tests {
             _eval_context: Option<&Self::EvalContext>,
             _purpose: ComponentMetaResolutionPurpose,
         ) -> ComponentMetaEvalOutputs {
-            ComponentMetaEvalOutputs::default()
+            self.eval_outputs.clone()
         }
 
         fn resolve_macro_elements(
@@ -915,6 +933,7 @@ mod tests {
         let host = CombinedSurfaceTestHost {
             source: "export interface Props { label: string }".to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: vec![AnalyzedImport {
@@ -983,6 +1002,7 @@ mod tests {
         let host = CombinedSurfaceTestHost {
             source: "export type Emits = { save: [value: string] }".to_string(),
             imported_surface_calls: std::cell::Cell::new(0),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
         };
         let snapshot = TestSnapshot {
             imports: vec![AnalyzedImport {
@@ -1044,6 +1064,212 @@ mod tests {
         assert_eq!(
             resolved.resolved_macros[0].declaration.canonical_source, "",
             "fallthrough should still skip declaration ownership materialization",
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eval_shape_exists()
+    {
+        let host = CombinedSurfaceTestHost {
+            source: "export type Emits = { save: [value: string] }".to_string(),
+            imported_surface_calls: std::cell::Cell::new(0),
+            eval_outputs: ComponentMetaEvalOutputs {
+                evaluated_types: Some(
+                    verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                        props: Vec::new(),
+                        define_props: Vec::new(),
+                        define_emits: vec![
+                            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                macro_index: 0,
+                                result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                    verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                                        properties: vec![
+                                            verter_semantic::analysis::type_expand::ExpandedProperty {
+                                                name: "save".to_string(),
+                                                ty: verter_semantic::analysis::type_expr::TypeExpr::Tuple {
+                                                    elements: std::sync::Arc::from(vec![
+                                                        verter_semantic::analysis::type_expr::TupleElement {
+                                                            label: Some("value".to_string()),
+                                                            ty: verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                                                                verter_semantic::analysis::type_expr::PrimitiveName::String,
+                                                            ),
+                                                            optional: false,
+                                                            rest: false,
+                                                        },
+                                                    ]),
+                                                    readonly: false,
+                                                },
+                                                optional: false,
+                                                readonly: false,
+                                            },
+                                        ],
+                                        index_signatures: Vec::new(),
+                                        call_signatures: Vec::new(),
+                                    },
+                                ),
+                            },
+                        ],
+                        emits: Vec::new(),
+                        define_slots: Vec::new(),
+                        slot_bindings: Vec::new(),
+                        bindings: Vec::new(),
+                    },
+                ),
+                tracked_dependencies: BTreeSet::new(),
+            },
+        };
+        let snapshot = TestSnapshot {
+            imports: vec![AnalyzedImport {
+                source: "./dep".to_string(),
+                is_type_only: true,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "Emits".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: Some("Emits".to_string()),
+                    is_type_only: true,
+                    vue_api: None,
+                    span: Span::new(0, 5),
+                }],
+                span: Span::new(0, 26),
+                resolved_canonical_id: Some("/dep.ts".to_string()),
+            }],
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["Emits".to_string()],
+                binding_name: Some("emit".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(0, 20),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                macro_index: 0,
+                import_source: "./dep".to_string(),
+                type_name: "Emits".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineEmits,
+                macro_span: Span::new(0, 20),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Fallthrough,
+        );
+
+        assert_eq!(
+            host.imported_surface_calls.get(),
+            0,
+            "fallthrough should keep type-based imported defineEmits on the evaluated shape path when that shape is already authoritative",
+        );
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "Emits"),
+            "fallthrough should not materialize an imported defineEmits surface when evaluated_types already provide the declared events"
+        );
+        let evaluated = resolved
+            .evaluated_types
+            .as_ref()
+            .expect("the authoritative evaluated defineEmits shape should be preserved");
+        assert_eq!(
+            evaluated.define_emits.len(),
+            1,
+            "the evaluated defineEmits shape should still drive downstream extraction",
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_for_local_wrapper_root()
+    {
+        let source = r#"
+import type { RootEmits } from './dep'
+
+interface Emits extends RootEmits {}
+
+defineEmits<Emits>()
+"#;
+        let host = CombinedSurfaceTestHost {
+            source: source.to_string(),
+            imported_surface_calls: std::cell::Cell::new(0),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+        };
+        let snapshot = TestSnapshot {
+            imports: vec![AnalyzedImport {
+                source: "./dep".to_string(),
+                is_type_only: true,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "RootEmits".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: Some("RootEmits".to_string()),
+                    is_type_only: true,
+                    vue_api: None,
+                    span: Span::new(0, 9),
+                }],
+                span: Span::new(0, 34),
+                resolved_canonical_id: Some("/dep.ts".to_string()),
+            }],
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["Emits".to_string()],
+                binding_name: Some("emit".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Emits".to_string(),
+                    expanded: "interface Emits extends RootEmits {}".to_string(),
+                    type_expr: None,
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                macro_index: 0,
+                import_source: "./dep".to_string(),
+                type_name: "RootEmits".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineEmits,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Fallthrough,
+        );
+
+        assert_eq!(
+            host.imported_surface_calls.get(),
+            0,
+            "fallthrough should leave transitive imported defineEmits deps lazy when an owner-local wrapper root will drive object-shape projection later",
+        );
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "RootEmits"),
+            "fallthrough should keep the imported defineEmits root off resolved_macros when the owner-local wrapper is the requested route",
         );
     }
 
@@ -2155,6 +2381,15 @@ fn macro_has_authoritative_resolved_local_surface(mac: &AnalyzedMacro) -> bool {
                         || !projected.slots.is_empty()
                 },
             ) || resolved_local_type_expr_can_drive_authoritative_projection(mac.kind, resolved)
+        })
+}
+
+fn macro_has_direct_local_type_root(mac: &AnalyzedMacro) -> bool {
+    mac.resolved_local_types
+        .iter()
+        .enumerate()
+        .any(|(resolved_index, resolved)| {
+            is_direct_local_macro_type_reference(mac, resolved_index, resolved.name.as_str())
         })
 }
 

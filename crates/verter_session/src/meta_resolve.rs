@@ -426,6 +426,7 @@ fn enrich_missing_slot_bindings(
 /// The production pipeline is projection-first so one phase owns object-shape
 /// materialization. The solver is used only as the terminal fallback when
 /// projection cannot produce a usable shape.
+#[cfg_attr(not(test), allow(dead_code))]
 fn produce_macro_object_shapes(
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -435,6 +436,30 @@ fn produce_macro_object_shapes(
     eval_source: &str,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    produce_macro_object_shapes_for_purpose(
+        owner_canonical,
+        snapshot,
+        resolved_macros,
+        resolved_type_registry,
+        resolved_type_registry_meta,
+        eval_source,
+        evaluated_types,
+        query_engine,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+}
+
+fn produce_macro_object_shapes_for_purpose(
+    owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_macros: &[ResolvedMacroMeta],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+    eval_source: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
 ) {
     let params =
         verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
@@ -450,6 +475,20 @@ fn produce_macro_object_shapes(
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if !mac.is_type_based {
             continue;
+        }
+
+        if purpose == crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough {
+            match mac.kind {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                    define_props_index += 1;
+                    continue;
+                }
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                    define_slots_index += 1;
+                    continue;
+                }
+                _ => {}
+            }
         }
 
         match mac.kind {
@@ -611,12 +650,21 @@ fn produce_macro_object_shapes(
                 define_props_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                if let Some((shape, source)) = synthesize_define_emits_shape_from_known_surface(
-                    macro_index,
-                    snapshot,
-                    resolved_macros,
-                    evaluated_types,
-                ) {
+                if evaluated_types.define_emits.iter().any(|entry| {
+                    entry.macro_index == macro_index
+                        && verter_semantic::analysis::type_eval_build::has_named_shape_surface(
+                            &entry.result.value,
+                        )
+                }) {
+                    projection_hits += 1;
+                } else if let Some((shape, source)) =
+                    synthesize_define_emits_shape_from_known_surface(
+                        macro_index,
+                        snapshot,
+                        resolved_macros,
+                        evaluated_types,
+                    )
+                {
                     projection_hits += 1;
                     let count = shape.value.properties.len() + shape.value.call_signatures.len();
                     component_meta_trace_event!(
@@ -1551,25 +1599,96 @@ fn project_named_ref_prepared_surface_shape(
         return None;
     };
 
-    let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
-    let scope_canonical = if declaration.canonical_source.is_empty() {
-        owner_canonical
-    } else {
-        declaration.canonical_source.as_str()
-    };
-    let resolved_name = if declaration.resolved_name.is_empty() {
-        name.as_ref()
-    } else {
-        declaration.resolved_name.as_str()
-    };
+    let (scope_canonical, resolved_name) =
+        resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
 
     query_engine
-        .project_prepared_type_surface_shape(scope_canonical, resolved_name)
+        .project_prepared_type_surface_shape(scope_canonical.as_str(), resolved_name.as_str())
         .and_then(|shape| {
             has_prop_shape_surface(&shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
             })
         })
+}
+
+fn resolve_named_ref_prepared_projection_target(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    requested_name: &str,
+) -> Option<(String, String)> {
+    if query_engine
+        .host()
+        .prepared_type_decl_in_view(owner_canonical, requested_name, query_engine.store_view())
+        .is_some()
+    {
+        return Some((owner_canonical.to_string(), requested_name.to_string()));
+    }
+
+    if let Some(state) = query_engine
+        .host()
+        .route_owned_shallow_state_in_view(owner_canonical, query_engine.store_view())
+    {
+        if state.symbol(requested_name).is_some() {
+            return Some((owner_canonical.to_string(), requested_name.to_string()));
+        }
+
+        if let Some(import_target) = state.import_target(requested_name) {
+            let target_canonical = if import_target.canonical_id.is_empty() {
+                query_engine.host().resolve_route_type_edge_in_view(
+                    owner_canonical,
+                    import_target.source_specifier.as_str(),
+                    query_engine.store_view(),
+                )?
+            } else {
+                import_target.canonical_id.clone()
+            };
+            let target_name = import_target.imported_name.clone();
+            if let Some((routed_canonical, routed_name)) = query_engine
+                .host()
+                .resolve_named_type_export_target_shallow_in_view(
+                    target_canonical.as_str(),
+                    target_name.as_str(),
+                    query_engine.store_view(),
+                )
+            {
+                if query_engine
+                    .host()
+                    .prepared_type_decl_in_view(
+                        routed_canonical.as_str(),
+                        routed_name.as_str(),
+                        query_engine.store_view(),
+                    )
+                    .is_some()
+                {
+                    return Some((routed_canonical, routed_name));
+                }
+            }
+            if query_engine
+                .host()
+                .prepared_type_decl_in_view(
+                    target_canonical.as_str(),
+                    target_name.as_str(),
+                    query_engine.store_view(),
+                )
+                .is_some()
+            {
+                return Some((target_canonical, target_name));
+            }
+        }
+    }
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, requested_name);
+    let scope_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        requested_name.to_string()
+    } else {
+        declaration.resolved_name
+    };
+    Some((scope_canonical, resolved_name))
 }
 
 fn project_named_ref_surface_shape(
@@ -2013,7 +2132,9 @@ impl VerterHost {
         }
         let registry_before = parts.resolved_type_registry.len();
         let append_start = std::time::Instant::now();
-        let solver_audit = if registry_materialization == RegistryMaterialization::Full {
+        let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
+        let should_produce_macro_object_shapes = mode == ResolverMode::Expanded;
+        let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
             let owner_engine = resolver_host
                 .shared_owner_engine
                 .take()
@@ -2029,17 +2150,19 @@ impl VerterHost {
                     store_view,
                     owner_engine,
                 );
-            self.append_component_meta_registry_entries(
-                canonical,
-                &snapshot,
-                parts.evaluated_types.as_ref(),
-                &mut parts.resolved_type_registry,
-                &mut parts.resolved_type_registry_meta,
-                &mut parts.tracked_dependencies,
-                store_view,
-                &mut query_engine,
-            );
-            if mode == ResolverMode::Expanded {
+            if should_materialize_registry {
+                self.append_component_meta_registry_entries(
+                    canonical,
+                    &snapshot,
+                    parts.evaluated_types.as_ref(),
+                    &mut parts.resolved_type_registry,
+                    &mut parts.resolved_type_registry_meta,
+                    &mut parts.tracked_dependencies,
+                    store_view,
+                    &mut query_engine,
+                );
+            }
+            if should_produce_macro_object_shapes {
                 if let Some(eval_source) = captured
                     .and_then(|captured| captured.owner_eval_source.as_deref())
                     .map(str::to_string)
@@ -2054,7 +2177,7 @@ impl VerterHost {
                     })
                 {
                     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-                    produce_macro_object_shapes(
+                    produce_macro_object_shapes_for_purpose(
                         canonical,
                         &snapshot,
                         &parts.resolved_macros,
@@ -2063,6 +2186,7 @@ impl VerterHost {
                         &eval_source,
                         &mut evaluated_types,
                         &mut query_engine,
+                        purpose,
                     );
                     if !evaluated_types.is_empty() {
                         enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
@@ -2114,7 +2238,7 @@ impl VerterHost {
             crate::host_manage::component_meta_trace_event!(
                 "solver_trace_summary",
                 format!(
-                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 proj_cache_hits=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped",
+                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 proj_cache_hits=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped macro_shapes=skipped",
                     canonical,
                 ),
             );
@@ -2965,6 +3089,80 @@ impl VerterHost {
                     ),
                 );
                 return Some(snapshot);
+            }
+        }
+
+        if let Some(view) = store_view {
+            if self
+                .resolver
+                .runtime
+                .module_facts
+                .get(canonical, view)
+                .is_none()
+            {
+                if !view.tracks_whole_hash(canonical) {
+                    if let Some(raw_snapshot) =
+                        self.cached_route_owned_snapshot_in_view(canonical, Some(view))
+                    {
+                        self.provenance
+                            .route_owned_snapshot_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let mut snapshot = (*raw_snapshot).clone();
+                        self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+                        self.enrich_destructured_bindings(&mut snapshot);
+                        if self.config.effective_scope().needs_template_analysis() {
+                            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                        }
+                        component_meta_trace_event!(
+                            "get_raw_analysis_snapshot_result",
+                            format!(
+                                "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_snapshot_cache",
+                                canonical,
+                                snapshot.imports.len(),
+                                snapshot.macros.len(),
+                                snapshot.bindings.len(),
+                                snapshot.template.is_some(),
+                            ),
+                        );
+                        return Some(snapshot);
+                    }
+                }
+
+                if let Some((raw_source, cached_parse, whole_hash)) =
+                    self.cached_route_owned_eval_state_in_view(canonical, Some(view))
+                {
+                    if !self.store_view_allows_current_whole_hash(canonical, whole_hash, Some(view))
+                    {
+                        return None;
+                    }
+                    if cached_parse.is_some() {
+                        self.provenance
+                            .route_owned_snapshot_cached_parse_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let mut snapshot = self.build_snapshot_from_source_state(
+                        canonical,
+                        &raw_source,
+                        cached_parse.as_deref(),
+                    );
+                    self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+                    self.enrich_destructured_bindings(&mut snapshot);
+                    if self.config.effective_scope().needs_template_analysis() {
+                        self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                    }
+                    component_meta_trace_event!(
+                        "get_raw_analysis_snapshot_result",
+                        format!(
+                            "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_cache",
+                            canonical,
+                            snapshot.imports.len(),
+                            snapshot.macros.len(),
+                            snapshot.bindings.len(),
+                            snapshot.template.is_some(),
+                        ),
+                    );
+                    return Some(snapshot);
+                }
             }
         }
 

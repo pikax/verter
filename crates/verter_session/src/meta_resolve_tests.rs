@@ -6298,6 +6298,207 @@ defineEmits<Emits>()
 }
 
 #[test]
+fn compute_component_meta_state_for_fallthrough_keeps_imported_define_emits_on_eval_shape_path() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface Emits {
+  (e: 'open', value: boolean): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Child.vue",
+            r#"<script setup lang="ts">
+import type { Emits } from './types'
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    host.set_import_dependencies(
+        "/src/Child.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    let store_view = host.resolver_store_view();
+    let whole_hash = store_view
+        .whole_hash("/src/Child.vue")
+        .expect("whole hash should exist for the owner");
+
+    host.provenance().reset();
+
+    let fallthrough = host
+        .compute_component_meta_state_for_fallthrough(
+            "/src/Child.vue",
+            whole_hash,
+            Some(&store_view),
+        )
+        .expect("fallthrough-expanded state should resolve");
+
+    let provenance = host.provenance().snapshot();
+    assert_eq!(
+        provenance.resolved_external_type_cache_misses, 0,
+        "fallthrough-expanded state should not re-enter imported macro-element resolution for type-based defineEmits when the evaluated shape is authoritative",
+    );
+    assert!(
+        fallthrough
+            .resolved_macros
+            .iter()
+            .filter(|entry| entry.type_name == "Emits")
+            .all(|entry| entry.declaration.canonical_source.is_empty()),
+        "fallthrough-expanded state should not materialize imported declaration ownership for type-based defineEmits when the evaluated shape already supplies the declared events",
+    );
+
+    let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
+        fallthrough.snapshot.macros.as_ref(),
+        &fallthrough.resolved_macros,
+    );
+    let resolved_type_registry =
+        crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
+    let base_meta = verter_semantic::analysis::component_meta::extract_component_meta(
+        verter_semantic::analysis::component_meta::ComponentMetaInput {
+            macros: &fallthrough.snapshot.macros,
+            bindings: &fallthrough.snapshot.bindings,
+            imports: &fallthrough.snapshot.imports,
+            template: fallthrough.snapshot.template.as_deref(),
+            options_api: fallthrough.snapshot.options_api.as_ref(),
+            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+                fallthrough.snapshot.script_flags,
+            ),
+            styles: &fallthrough.snapshot.styles,
+            vue_api_calls: &fallthrough.snapshot.vue_api_calls,
+            store_usages: &fallthrough.snapshot.store_usages,
+            resolved_macros: &resolved_macros,
+            resolved_type_registry: &resolved_type_registry,
+            evaluated_types: fallthrough.evaluated_types.as_ref(),
+            file_path: "/src/Child.vue",
+        },
+    );
+    assert!(
+        base_meta.events.iter().any(|event| event.name == "open"),
+        "fallthrough-expanded extraction must still preserve declared events from the authoritative evaluated defineEmits shape",
+    );
+}
+
+#[test]
+fn compute_component_meta_state_for_fallthrough_keeps_local_define_emits_wrapper_on_query_projection_path(
+) {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export interface RootEmits {
+  (e: 'open', value: boolean): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Child.vue",
+            r#"<script setup lang="ts">
+import type { RootEmits } from './types'
+
+interface Emits extends RootEmits {}
+
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    host.set_import_dependencies(
+        "/src/Child.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    let store_view = host.resolver_store_view();
+    let whole_hash = store_view
+        .whole_hash("/src/Child.vue")
+        .expect("whole hash should exist for the owner");
+
+    host.provenance().reset();
+
+    let fallthrough = host
+        .compute_component_meta_state_for_fallthrough(
+            "/src/Child.vue",
+            whole_hash,
+            Some(&store_view),
+        )
+        .expect("fallthrough-expanded state should resolve");
+
+    let provenance = host.provenance().snapshot();
+    assert_eq!(
+        provenance.resolved_external_type_cache_misses, 0,
+        "fallthrough-expanded state should keep local defineEmits wrappers on the query-engine projection path instead of materializing imported macro elements",
+    );
+    let evaluated = fallthrough
+        .evaluated_types
+        .as_ref()
+        .expect("fallthrough-expanded state should still preserve evaluated macro shapes");
+    assert!(
+        evaluated
+            .define_emits
+            .iter()
+            .any(|entry| entry.macro_index == 0),
+        "fallthrough-expanded state should synthesize a defineEmits object shape for the local wrapper",
+    );
+    assert!(
+        fallthrough
+            .resolved_macros
+            .iter()
+            .all(|entry| entry.type_name != "RootEmits"),
+        "fallthrough-expanded state should keep the transitive imported defineEmits root off resolved_macros when the owner-local wrapper is sufficient",
+    );
+
+    let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
+        fallthrough.snapshot.macros.as_ref(),
+        &fallthrough.resolved_macros,
+    );
+    let resolved_type_registry =
+        crate::resolver_core::component_meta_type_registry(&fallthrough.resolved_type_registry);
+    let base_meta = verter_semantic::analysis::component_meta::extract_component_meta(
+        verter_semantic::analysis::component_meta::ComponentMetaInput {
+            macros: &fallthrough.snapshot.macros,
+            bindings: &fallthrough.snapshot.bindings,
+            imports: &fallthrough.snapshot.imports,
+            template: fallthrough.snapshot.template.as_deref(),
+            options_api: fallthrough.snapshot.options_api.as_ref(),
+            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+                fallthrough.snapshot.script_flags,
+            ),
+            styles: &fallthrough.snapshot.styles,
+            vue_api_calls: &fallthrough.snapshot.vue_api_calls,
+            store_usages: &fallthrough.snapshot.store_usages,
+            resolved_macros: &resolved_macros,
+            resolved_type_registry: &resolved_type_registry,
+            evaluated_types: fallthrough.evaluated_types.as_ref(),
+            file_path: "/src/Child.vue",
+        },
+    );
+    assert!(
+        base_meta.events.iter().any(|event| event.name == "open"),
+        "fallthrough-expanded extraction must still preserve declared events from the local defineEmits wrapper",
+    );
+}
+
+#[test]
 fn produce_macro_object_shapes_reuses_resolved_define_emits_surface() {
     let project = make_project();
     project
@@ -6549,6 +6750,114 @@ defineEmits<Emits>()
         .map(|property| property.name.as_str())
         .collect();
     assert_eq!(emit_names, vec!["save", "update:open"]);
+}
+
+#[test]
+fn produce_macro_object_shapes_reuses_preseeded_define_emits_shape_without_solves() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+type Emits = {
+  save: [id: number]
+  'update:open': [value: boolean]
+}
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let snapshot = FileAnalysisSnapshot {
+        macros: vec![verter_semantic::analysis::AnalyzedMacro {
+            kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+            is_type_based: true,
+            type_references: vec!["Emits".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = Vec::new();
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        define_emits: vec![
+            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                macro_index: 0,
+                result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                    verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                        properties: vec![
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "save".to_string(),
+                            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                                "[id: number]",
+                            ),
+                            optional: false,
+                            readonly: false,
+                        },
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "update:open".to_string(),
+                            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                                "[value: boolean]",
+                            ),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                        index_signatures: Vec::new(),
+                        call_signatures: Vec::new(),
+                    },
+                ),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+
+    produce_macro_object_shapes(
+        "/src/App.vue",
+        &snapshot,
+        &resolved_macros,
+        &[],
+        &[],
+        "defineEmits<Emits>()",
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.solve_count(),
+        0,
+        "preseeded defineEmits macro shapes should be reused directly instead of triggering another projection/solve pass"
+    );
+    assert_eq!(
+        evaluated_types.define_emits.len(),
+        1,
+        "preseeded defineEmits macro shapes should not be duplicated"
+    );
 }
 
 #[test]

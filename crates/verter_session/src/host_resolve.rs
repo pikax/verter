@@ -304,13 +304,14 @@ fn external_type_frontier_layer_result_detail(
 struct RouteOwnedShallowStateCacheKey {
     host_instance_id: u64,
     canonical_id: String,
-    view_epoch: u64,
-    workspace_generation: u64,
 }
 
 #[derive(Clone)]
 struct RouteOwnedShallowStateCacheEntry {
     whole_hash: Hash16,
+    raw_source: Arc<str>,
+    cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    raw_snapshot: Arc<crate::types::FileAnalysisSnapshot>,
     shallow_state: Arc<crate::resolver_core::ShallowFileState>,
 }
 
@@ -575,18 +576,27 @@ impl VerterHost {
         import_source: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<crate::types::DependencyResolution> {
-        let resolution = self
-            .ensure_module_facts_in_view(owner_canonical, store_view)?
-            .import_routes
-            .get(import_source)
-            .cloned();
+        let (resolution, source_kind) = if let Some(resolution) =
+            self.cached_import_route_resolution_in_view(owner_canonical, import_source, store_view)
+        {
+            (Some(resolution), "host-cache")
+        } else {
+            (
+                self.ensure_module_facts_in_view(owner_canonical, store_view)?
+                    .import_routes
+                    .get(import_source)
+                    .cloned(),
+                "module_facts",
+            )
+        };
 
         component_meta_trace_event!(
             "authoritative_import_route_in_view_result",
             format!(
-                "owner={} import={} source=module_facts target={}",
+                "owner={} import={} source={} target={}",
                 owner_canonical,
                 import_source,
+                source_kind,
                 resolution
                     .as_ref()
                     .and_then(Self::import_route_target)
@@ -1544,8 +1554,11 @@ impl VerterHost {
         let cache_key = (dep_canonical.clone(), type_name.to_string());
         if let Some(cached) = cache.get(&cache_key).cloned() {
             let elements = cached?;
-            let (target_canonical, target_name) =
-                self.resolve_imported_type_root_in_view(dep_canonical.as_str(), type_name, store_view);
+            let (target_canonical, target_name) = self.resolve_imported_type_root_in_view(
+                dep_canonical.as_str(),
+                type_name,
+                store_view,
+            );
             tracked_deps.insert(target_canonical.clone());
             resolution_deps.insert(target_canonical.clone());
             return Some((dep_canonical, target_canonical, target_name, elements));
@@ -2413,16 +2426,12 @@ impl VerterHost {
     fn route_owned_shallow_state_cache_key(
         &self,
         canonical_id: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-        workspace_generation: u64,
+        _store_view: Option<&crate::resolver_store::HostStoreView>,
+        _workspace_generation: u64,
     ) -> RouteOwnedShallowStateCacheKey {
         RouteOwnedShallowStateCacheKey {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
-            view_epoch: store_view
-                .map(|view| view.mutation_epoch())
-                .unwrap_or_else(|| self.current_store_view_epoch()),
-            workspace_generation,
         }
     }
 
@@ -2432,6 +2441,20 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         workspace_generation: u64,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        self.cached_route_owned_shallow_state_entry_in_view(
+            canonical_id,
+            store_view,
+            workspace_generation,
+        )
+        .map(|entry| entry.shallow_state)
+    }
+
+    fn cached_route_owned_shallow_state_entry_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+        workspace_generation: u64,
+    ) -> Option<RouteOwnedShallowStateCacheEntry> {
         let key = self.route_owned_shallow_state_cache_key(
             canonical_id,
             store_view,
@@ -2460,7 +2483,79 @@ impl VerterHost {
             return None;
         }
 
-        Some(entry.shallow_state)
+        Some(entry)
+    }
+
+    pub(crate) fn has_cached_route_owned_shallow_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> bool {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let workspace_generation = self.ws().content_generation();
+        self.cached_route_owned_shallow_state_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+        )
+        .is_some()
+    }
+
+    pub(crate) fn cached_route_owned_shallow_whole_hash_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Hash16> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let workspace_generation = self.ws().content_generation();
+        self.cached_route_owned_shallow_state_entry_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+        )
+        .map(|entry| entry.whole_hash)
+    }
+
+    pub(crate) fn cached_route_owned_eval_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<(
+        Arc<str>,
+        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        Hash16,
+    )> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let workspace_generation = self.ws().content_generation();
+        self.cached_route_owned_shallow_state_entry_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+        )
+        .map(|entry| (entry.raw_source, entry.cached_parse, entry.whole_hash))
+    }
+
+    pub(crate) fn cached_route_owned_snapshot_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::types::FileAnalysisSnapshot>> {
+        let normalized_canonical = self
+            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
+            .unwrap_or_else(|| canonical_id.to_string());
+        let workspace_generation = self.ws().content_generation();
+        self.cached_route_owned_shallow_state_entry_in_view(
+            normalized_canonical.as_str(),
+            store_view,
+            workspace_generation,
+        )
+        .map(|entry| entry.raw_snapshot)
     }
 
     fn cache_route_owned_shallow_state_in_view(
@@ -2469,6 +2564,9 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
         workspace_generation: u64,
         whole_hash: Hash16,
+        raw_source: Arc<str>,
+        cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        raw_snapshot: Arc<crate::types::FileAnalysisSnapshot>,
         shallow_state: Arc<crate::resolver_core::ShallowFileState>,
     ) {
         let key = self.route_owned_shallow_state_cache_key(
@@ -2481,6 +2579,9 @@ impl VerterHost {
                 key,
                 RouteOwnedShallowStateCacheEntry {
                     whole_hash,
+                    raw_source,
+                    cached_parse,
+                    raw_snapshot,
                     shallow_state,
                 },
             );
@@ -2550,6 +2651,12 @@ impl VerterHost {
             raw_source.as_ref(),
             cached_parse.as_deref(),
         ));
+        let raw_snapshot = Arc::new(self.build_route_owned_snapshot_from_source_state(
+            normalized_canonical.as_str(),
+            &raw_source,
+            cached_parse.as_deref(),
+            whole_hash,
+        ));
         let (eval_env, external_type_analysis) = self.build_eval_env_and_external_type_analysis(
             normalized_canonical.as_str(),
             whole_hash,
@@ -2571,6 +2678,9 @@ impl VerterHost {
             store_view,
             workspace_generation,
             whole_hash,
+            Arc::clone(&raw_source),
+            cached_parse.clone(),
+            Arc::clone(&raw_snapshot),
             Arc::clone(&shallow_state),
         );
         Some(shallow_state)
@@ -2695,7 +2805,7 @@ impl VerterHost {
         Some((route_result, facts))
     }
 
-    pub(crate) fn resolve_named_type_export_target_in_view(
+    fn resolve_named_type_export_target_uncached_in_view(
         &self,
         dep_canonical: &str,
         requested_name: &str,
@@ -2728,16 +2838,57 @@ impl VerterHost {
                     )
                 },
             )?;
-        let result = cached_route
+        cached_route
             .resolved()
             .map(|(defining_canonical, defining_symbol)| {
                 (defining_canonical.to_owned(), defining_symbol.to_owned())
-            })?;
+            })
+    }
+
+    pub(crate) fn resolve_named_type_export_target_shallow_in_view(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<(String, String)> {
+        let result = self.resolve_named_type_export_target_uncached_in_view(
+            dep_canonical,
+            requested_name,
+            store_view,
+        )?;
+        component_meta_trace_event!(
+            "resolve_named_type_export_target_in_view_result",
+            format!(
+                "owner={} requested={} source=route_db target={} exported={} materialized=false",
+                dep_canonical, requested_name, result.0, result.1
+            ),
+        );
+        Some(result)
+    }
+
+    pub(crate) fn resolve_named_type_export_target_in_view(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<(String, String)> {
+        let owned_view;
+        let current_view = if let Some(view) = store_view {
+            view
+        } else {
+            owned_view = self.resolver_store_view();
+            &owned_view
+        };
+        let result = self.resolve_named_type_export_target_uncached_in_view(
+            dep_canonical,
+            requested_name,
+            Some(current_view),
+        )?;
         let _ = self.ensure_module_facts_in_view(result.0.as_str(), Some(current_view));
         component_meta_trace_event!(
             "resolve_named_type_export_target_in_view_result",
             format!(
-                "owner={} requested={} source=route_db target={} exported={}",
+                "owner={} requested={} source=route_db target={} exported={} materialized=true",
                 dep_canonical, requested_name, result.0, result.1
             ),
         );

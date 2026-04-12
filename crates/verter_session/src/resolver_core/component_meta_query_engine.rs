@@ -11,6 +11,7 @@
 //! type reference within one request.
 
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_eval::DeclarationId;
@@ -117,6 +118,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
     store_view: Option<&'a HostStoreView>,
     owner_engine: TypeQueryEngine<'a>,
+    current_prepared_request_root: Option<String>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
     imported_registry_symbols: FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>,
     /// Cached type declarations.
@@ -151,6 +153,10 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_type_decl_query_count: usize,
     #[cfg(test)]
     prepared_root_surface_projection_count: usize,
+    #[cfg(test)]
+    prepared_shared_surface_hit_count: usize,
+    #[cfg(test)]
+    prepared_shared_member_hit_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
 }
@@ -267,6 +273,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             host,
             store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
+            current_prepared_request_root: None,
             scoped_cache: FxHashMap::default(),
             imported_registry_symbols: FxHashMap::default(),
             declarations: FxHashMap::default(),
@@ -282,6 +289,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
             prepared_root_surface_projection_count: 0,
+            #[cfg(test)]
+            prepared_shared_surface_hit_count: 0,
+            #[cfg(test)]
+            prepared_shared_member_hit_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -296,6 +307,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             host,
             store_view,
             owner_engine,
+            current_prepared_request_root: None,
             scoped_cache: FxHashMap::default(),
             imported_registry_symbols: FxHashMap::default(),
             declarations: FxHashMap::default(),
@@ -311,6 +323,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
             prepared_root_surface_projection_count: 0,
+            #[cfg(test)]
+            prepared_shared_surface_hit_count: 0,
+            #[cfg(test)]
+            prepared_shared_member_hit_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -699,6 +715,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.prepared_root_surface_projection_count
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_prepared_shared_surface_hit_count(&self) -> usize {
+        self.prepared_shared_surface_hit_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_prepared_shared_member_hit_count(&self) -> usize {
+        self.prepared_shared_member_hit_count
+    }
+
     fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
@@ -725,6 +751,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &self,
     ) -> &verter_semantic::analysis::type_solver::query_engine::SolverTraceSummary {
         &self.owner_engine.trace_summary
+    }
+
+    pub(crate) fn host(&self) -> &VerterHost {
+        self.host
+    }
+
+    pub(crate) fn store_view(&self) -> Option<&HostStoreView> {
+        self.store_view
     }
 
     // -------------------------------------------------------------------
@@ -868,7 +902,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<TypeExpr> {
-        self.project_prepared_root_surface(scope_canonical_id, symbol_name)
+        self.cached_prepared_root_surface(scope_canonical_id, symbol_name)
             .and_then(|surface| projected_surface_to_type_expr(&surface))
     }
 
@@ -877,11 +911,74 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        self.project_prepared_root_surface(scope_canonical_id, symbol_name)
+        self.cached_prepared_root_surface(scope_canonical_id, symbol_name)
             .map(|surface| projected_surface_to_expanded_shape(&surface))
     }
 
+    fn cached_prepared_root_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ProjectedSurface> {
+        use crate::resolver_core::type_surface_db::{
+            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
+        };
+
+        let Some(store_view) = self.store_view else {
+            return self
+                .project_prepared_root_surface(scope_canonical_id, symbol_name)
+                .map(projected_surface_unwrap_or_clone);
+        };
+
+        let host = self.host;
+        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+        let facts = self
+            .type_surface_facts(scope_canonical_id)
+            .unwrap_or_default();
+        let cached = host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get_or_project_with_facts(op_key, store_view, || {
+                if host
+                    .prepared_type_decl_in_view(scope_canonical_id, symbol_name, Some(store_view))
+                    .is_none()
+                {
+                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                }
+                self.project_prepared_root_surface(scope_canonical_id, symbol_name)
+                    .map(|surface| {
+                        (
+                            TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(
+                                surface,
+                            )),
+                            facts.clone(),
+                        )
+                    })
+                    .or_else(|| Some((TypeSurfaceOpResult::Miss, facts.clone())))
+            })?;
+        cached.as_surface().cloned()
+    }
+
     fn project_prepared_root_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<std::sync::Arc<ProjectedSurface>> {
+        let previous_root = self
+            .current_prepared_request_root
+            .replace(scope_canonical_id.to_string());
+        let result = self.project_prepared_root_surface_inner(scope_canonical_id, symbol_name);
+        self.current_prepared_request_root = previous_root;
+        result
+    }
+
+    fn project_prepared_root_surface_inner(
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
@@ -922,6 +1019,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached.clone();
         }
 
+        if let Some(cached) =
+            self.cached_prepared_surface(scope_canonical_id, symbol_name, substitutions)
+        {
+            let cached = PreparedSurfaceProjection::Surface(cached);
+            self.prepared_surface_cache
+                .insert(cache_key.clone(), cached.clone());
+            return cached;
+        }
+
         let key = (scope_canonical_id.to_string(), symbol_name.to_string());
         if !active.insert(key.clone()) {
             return PreparedSurfaceProjection::Unsupported;
@@ -941,6 +1047,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .unwrap_or(PreparedSurfaceProjection::Unsupported);
 
         active.remove(&key);
+        self.cache_prepared_surface_projection(
+            scope_canonical_id,
+            symbol_name,
+            substitutions,
+            &result,
+        );
         self.prepared_surface_cache
             .insert(cache_key, result.clone());
         result
@@ -1214,6 +1326,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached.clone();
         }
 
+        if let Some(cached) = self.cached_prepared_requested_member(
+            scope_canonical_id,
+            symbol_name,
+            member_name,
+            substitutions,
+        ) {
+            self.prepared_member_cache
+                .insert(cache_key, Some(cached.clone()));
+            return Some(cached);
+        }
+
         let visit_key = (scope_canonical_id.to_string(), symbol_name.to_string());
         if !active.insert(visit_key.clone()) {
             return None;
@@ -1223,14 +1346,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .prepared_type_decl(scope_canonical_id, symbol_name)
             .and_then(|prepared| {
                 if let Some(member) = prepared.member(member_name) {
-                    let projected_ty = substitute_type_expr_if_needed(&member.ty, substitutions);
-                    return Some(ProjectedMember {
+                    let projected_member = ProjectedMember {
                         name: member_name.to_string(),
-                        ty: projected_ty,
+                        ty: substitute_type_expr_if_needed(&member.ty, substitutions),
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
-                    });
+                    };
+                    if !type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+                        self.cache_prepared_requested_member(
+                            scope_canonical_id,
+                            symbol_name,
+                            &projected_member,
+                            substitutions,
+                        );
+                    }
+                    return Some(projected_member);
                 }
 
                 self.project_prepared_requested_member_from_expr(
@@ -1463,7 +1594,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 if canonical_source != scope_canonical_id {
                     if let Some((routed_source, routed_name)) =
-                        this.host.resolve_named_type_export_target_in_view(
+                        this.host.resolve_named_type_export_target_shallow_in_view(
                             canonical_source.as_str(),
                             resolved_name.as_str(),
                             this.store_view,
@@ -2096,6 +2227,187 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    fn cached_prepared_requested_member(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+    ) -> Option<ProjectedMember> {
+        if !self.prepared_requested_member_shared_cache_enabled(scope_canonical_id, substitutions) {
+            return None;
+        }
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
+
+        let store_view = self.store_view?;
+        let op_key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: scope_canonical_id.to_owned(),
+                symbol_name: symbol_name.to_owned(),
+                instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
+                context_hash: 0,
+            },
+            member_name: member_name.to_owned(),
+        };
+        let cached = self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .and_then(|cached| cached.as_member().cloned());
+        #[cfg(test)]
+        if cached.is_some() {
+            self.prepared_shared_member_hit_count += 1;
+        }
+        cached
+    }
+
+    fn cached_prepared_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+    ) -> Option<std::sync::Arc<ProjectedSurface>> {
+        if !self.prepared_surface_shared_cache_enabled(scope_canonical_id, substitutions) {
+            return None;
+        }
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
+
+        let store_view = self.store_view?;
+        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
+            context_hash: 0,
+        });
+        let cached = self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .and_then(|cached| cached.as_surface().cloned())
+            .map(std::sync::Arc::new);
+        #[cfg(test)]
+        if cached.is_some() {
+            self.prepared_shared_surface_hit_count += 1;
+        }
+        cached
+    }
+
+    fn cache_prepared_surface_projection(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+        projection: &PreparedSurfaceProjection,
+    ) {
+        if !self.prepared_surface_shared_cache_enabled(scope_canonical_id, substitutions) {
+            return;
+        }
+        let PreparedSurfaceProjection::Surface(surface) = projection else {
+            return;
+        };
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+
+        let Some(store_view) = self.store_view else {
+            return;
+        };
+        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: scope_canonical_id.to_owned(),
+            symbol_name: symbol_name.to_owned(),
+            instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
+            context_hash: 0,
+        });
+        if self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .is_none()
+        {
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                op_key,
+                TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(surface.clone())),
+                facts,
+            );
+        }
+    }
+
+    fn cache_prepared_requested_member(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        projected_member: &ProjectedMember,
+        substitutions: &FxHashMap<String, TypeExpr>,
+    ) {
+        if !self.prepared_requested_member_shared_cache_enabled(scope_canonical_id, substitutions) {
+            return;
+        }
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+
+        let Some(store_view) = self.store_view else {
+            return;
+        };
+        let op_key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: scope_canonical_id.to_owned(),
+                symbol_name: symbol_name.to_owned(),
+                instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
+                context_hash: 0,
+            },
+            member_name: projected_member.name.clone(),
+        };
+        if self
+            .host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get(&op_key, store_view)
+            .is_none()
+        {
+            let facts = self
+                .type_surface_facts(scope_canonical_id)
+                .unwrap_or_default();
+            self.host.resolver.runtime.type_surfaces.publish_with_facts(
+                op_key,
+                TypeSurfaceOpResult::Member(projected_member.clone()),
+                facts,
+            );
+        }
+    }
+
+    fn prepared_requested_member_shared_cache_enabled(
+        &self,
+        scope_canonical_id: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+    ) -> bool {
+        !substitutions.is_empty()
+            && self.store_view.is_some()
+            && self
+                .current_prepared_request_root
+                .as_deref()
+                .is_some_and(|request_root| request_root != scope_canonical_id)
+    }
+
+    fn prepared_surface_shared_cache_enabled(
+        &self,
+        scope_canonical_id: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+    ) -> bool {
+        !substitutions.is_empty()
+            && self.store_view.is_some()
+            && self
+                .current_prepared_request_root
+                .as_deref()
+                .is_some_and(|request_root| request_root != scope_canonical_id)
+    }
+
     fn project_prepared_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -2580,6 +2892,16 @@ fn prepared_substitution_key(
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     PreparedSubstitutionKey::Entries(entries)
+}
+
+fn prepared_substitution_instantiation_hash(substitutions: &FxHashMap<String, TypeExpr>) -> u64 {
+    if substitutions.is_empty() {
+        return 0;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    prepared_substitution_key(substitutions).hash(&mut hasher);
+    hasher.finish()
 }
 
 fn projected_surface_is_empty(surface: &ProjectedSurface) -> bool {
@@ -3664,7 +3986,11 @@ where
         if !allow_route() {
             return None;
         }
-        host.resolve_named_type_export_target_in_view(canonical_id, exported_name, store_view)?
+        host.resolve_named_type_export_target_shallow_in_view(
+            canonical_id,
+            exported_name,
+            store_view,
+        )?
     };
 
     let prepared = host.prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)?;
@@ -3827,11 +4153,12 @@ mod tests {
     use super::ComponentMetaQueryEngine;
     use super::{
         forbid_prepared_structural_substitution_slow_lane_for_tests,
-        type_expr_references_type_params,
+        prepared_substitution_instantiation_hash, type_expr_references_type_params,
     };
     use crate::resolver_core::solver_host::SessionSolverHost;
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::VerterHost;
+    use rustc_hash::FxHashMap;
     use std::sync::Arc;
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
@@ -4103,6 +4430,102 @@ export interface Props {
             engine.solve_count(),
             0,
             "package-backed prepared member routes should stay shallow instead of invoking solver projection",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_shape_keeps_imported_package_projection_off_module_facts() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/workspace/node_modules/pkg/package.json".to_string(),
+            Arc::from(
+                r#"{ "name": "pkg", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts" } } }"#,
+            ),
+        );
+        ws.inject_file(
+            "/workspace/node_modules/pkg/dist/index.d.ts".to_string(),
+            Arc::from("export type { PackageProps } from './index3.d.ts'\n"),
+        );
+        ws.inject_file(
+            "/workspace/node_modules/pkg/dist/index3.d.ts".to_string(),
+            Arc::from(
+                "import type { Payload } from './payload.d.ts'\nexport interface PackageProps {\n  open?: Payload\n}\n",
+            ),
+        );
+        ws.inject_file(
+            "/workspace/node_modules/pkg/dist/payload.d.ts".to_string(),
+            Arc::from("export interface Payload { value: string }\n"),
+        );
+        ws.inject_file(
+            "/workspace/src/Child.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { PackageProps } from 'pkg'
+
+export interface Wrapper extends PackageProps {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        host.configure_projects(vec![
+            verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+                "/workspace".to_string(),
+                "/workspace".to_string(),
+                Some("/workspace/tsconfig.json".to_string()),
+            ),
+        ]);
+        assert!(host.ensure_loaded("/workspace/src/Child.vue"));
+
+        let view = host.resolver_store_view();
+        let solver_host = SessionSolverHost::new(&host, Some(&view));
+        let mut engine = ComponentMetaQueryEngine::new(&host, Some(&view), &solver_host);
+
+        let shape = engine
+            .project_prepared_type_surface_shape("/workspace/src/Child.vue", "Wrapper")
+            .expect("prepared package wrapper projection should resolve");
+
+        assert!(
+            shape.properties.iter().any(|property| property.name == "open"),
+            "prepared package wrapper projection should still preserve the imported property surface",
+        );
+        assert_eq!(
+            engine.solve_count(),
+            0,
+            "prepared package wrapper projection should stay on shallow projection without solver fallback",
+        );
+        assert!(
+            host.resolver
+                .runtime
+                .module_facts
+                .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
+                .is_none(),
+            "prepared package projection should keep the provider barrel off ModuleFactsDb",
+        );
+        assert!(
+            host.resolver
+                .runtime
+                .module_facts
+                .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+                .is_none(),
+            "prepared package projection should keep the routed package target off ModuleFactsDb",
+        );
+        assert!(
+            host.resolver
+                .runtime
+                .module_facts
+                .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
+                .is_none(),
+            "prepared package projection should keep imported helper edges shallow too",
         );
     }
 
@@ -4404,6 +4827,103 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     }
 
     #[test]
+    fn project_prepared_type_surface_expr_reuses_shared_root_surface_cache_across_requests() {
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/base.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+
+        let mut first_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let first = first_query
+            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+            .expect("first prepared projection should succeed");
+        assert_eq!(
+            first_query.debug_prepared_root_surface_projection_count(),
+            1,
+            "first query should compute the prepared root surface once",
+        );
+
+        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: "/src/App.vue".to_string(),
+            symbol_name: "ColorModeSelectProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+        assert!(
+            matches!(
+                host.resolver_runtime()
+                    .type_surfaces
+                    .get(&stable_surface_key, &store_view)
+                    .as_deref(),
+                Some(TypeSurfaceOpResult::Surface(_))
+            ),
+            "prepared root surfaces should publish into the shared type-surface DB for later requests",
+        );
+
+        let mut second_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let second = second_query
+            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+            .expect("repeat prepared projection should reuse the shared cache");
+
+        assert_eq!(second, first);
+        assert_eq!(
+            second_query.debug_prepared_root_surface_projection_count(),
+            0,
+            "warm prepared root-surface lookups should reuse the shared DB instead of recomputing the projection",
+        );
+        assert_eq!(
+            second_query.solve_count(),
+            0,
+            "shared prepared root-surface reuse must stay off the semantic solver",
+        );
+    }
+
+    #[test]
     fn project_prepared_type_surface_shape_matches_expr_roundtrip_without_solver() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
@@ -4608,6 +5128,526 @@ export type IdentityProps<T> = RootProps<T>
             query_engine.solve_count(),
             0,
             "identity-forwarded cache reuse must stay solver-free",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_publishes_stable_imported_generic_members_for_cross_request_reuse(
+    ) {
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+        use verter_semantic::analysis::type_expr::TypeExpr as MetaTypeExpr;
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/base.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RootProps<T> {
+  open?: boolean
+  disabled?: boolean
+  value?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/shared.ts".to_string(),
+            Arc::from(
+                r#"
+import type { RootProps } from './base'
+
+export interface SelectMenuProps<T> extends Pick<RootProps<T>, 'open' | 'disabled'> {
+  items?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/ColorModeSelect.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SelectMenuProps } from './shared'
+
+type Item = { label?: string }
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/InputMenu.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SelectMenuProps } from './shared'
+
+type Item = { label?: string }
+
+export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
+        assert!(host.ensure_loaded("/src/InputMenu.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+
+        let mut first_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let first = first_query
+            .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
+            .expect("first query should project the imported generic pick members");
+        assert!(
+            matches!(first, TypeExpr::Object(_)),
+            "first query should still materialize the prepared object surface",
+        );
+        let mut substitutions = FxHashMap::default();
+        substitutions.insert(
+            "T".to_string(),
+            MetaTypeExpr::Array {
+                element: std::sync::Arc::new(MetaTypeExpr::named("Item")),
+                readonly: false,
+            },
+        );
+        let instantiation_hash = prepared_substitution_instantiation_hash(&substitutions);
+
+        let stable_member_key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: "/src/base.ts".to_string(),
+                symbol_name: "RootProps".to_string(),
+                instantiation_hash,
+                context_hash: 0,
+            },
+            member_name: "open".to_string(),
+        };
+        assert!(
+            matches!(
+                host.resolver_runtime()
+                    .type_surfaces
+                    .get(&stable_member_key, &store_view)
+                    .as_deref(),
+                Some(TypeSurfaceOpResult::Member(_))
+            ),
+            "stable imported generic members should publish into the shared type-surface DB after the first query",
+        );
+
+        let dependent_member_key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: "/src/base.ts".to_string(),
+                symbol_name: "RootProps".to_string(),
+                instantiation_hash,
+                context_hash: 0,
+            },
+            member_name: "value".to_string(),
+        };
+        assert!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&dependent_member_key, &store_view)
+                .is_none(),
+            "generic-dependent members must stay out of the shared cache because their projected meaning depends on the caller substitutions",
+        );
+
+        let mut second_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let second = second_query
+            .project_prepared_type_surface_expr("/src/InputMenu.vue", "InputMenuProps")
+            .expect("second query should reuse the cached imported member route");
+        let TypeExpr::Object(object) = second else {
+            panic!("second query should still project an object surface");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    Some(method.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["open"]),
+            "cross-request reuse should stay on the requested imported member route only",
+        );
+        assert_eq!(
+            second_query.debug_prepared_shared_member_hit_count(),
+            1,
+            "the second query should hit the shared imported member cache exactly once for RootProps['open']",
+        );
+        assert_eq!(
+            second_query.solve_count(),
+            0,
+            "cross-request member reuse must stay off the semantic solver",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_publishes_stable_imported_generic_surfaces_for_cross_request_reuse(
+    ) {
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+        use verter_semantic::analysis::type_expr::TypeExpr as MetaTypeExpr;
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/base.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RootProps<T> {
+  open?: boolean
+  disabled?: boolean
+  value?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/shared.ts".to_string(),
+            Arc::from(
+                r#"
+import type { RootProps } from './base'
+
+export interface SelectMenuProps<T> extends Pick<RootProps<T>, 'open' | 'disabled'> {
+  items?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/ColorModeSelect.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SelectMenuProps } from './shared'
+
+type Item = { label?: string }
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/ColorModeSelectCopy.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SelectMenuProps } from './shared'
+
+type Item = { label?: string }
+
+export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
+        assert!(host.ensure_loaded("/src/ColorModeSelectCopy.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+
+        let mut first_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let first = first_query
+            .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
+            .expect("first query should project the imported generic omit surface");
+        assert!(
+            matches!(first, TypeExpr::Object(_)),
+            "first query should still materialize the prepared object surface",
+        );
+
+        let mut substitutions = FxHashMap::default();
+        substitutions.insert(
+            "T".to_string(),
+            MetaTypeExpr::Array {
+                element: std::sync::Arc::new(MetaTypeExpr::named("Item")),
+                readonly: false,
+            },
+        );
+        let instantiation_hash = prepared_substitution_instantiation_hash(&substitutions);
+        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: "/src/shared.ts".to_string(),
+            symbol_name: "SelectMenuProps".to_string(),
+            instantiation_hash,
+            context_hash: 0,
+        });
+        assert!(
+            matches!(
+                host.resolver_runtime()
+                    .type_surfaces
+                    .get(&stable_surface_key, &store_view)
+                    .as_deref(),
+                Some(TypeSurfaceOpResult::Surface(_))
+            ),
+            "stable imported generic surfaces should publish into the shared type-surface DB after the first query",
+        );
+
+        let mut second_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let second = second_query
+            .project_prepared_type_surface_expr(
+                "/src/ColorModeSelectCopy.vue",
+                "ColorModeSelectCopyProps",
+            )
+            .expect("second query should reuse the cached imported generic surface");
+        let TypeExpr::Object(object) = second else {
+            panic!("second query should still project an object surface");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    Some(method.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["disabled", "open"]),
+            "cross-request reuse should keep the imported generic whole-surface projection exact",
+        );
+        assert!(
+            second_query.debug_prepared_shared_surface_hit_count() > 0,
+            "second query should reuse at least one shared imported generic surface instead of reprojecting it request-locally",
+        );
+        assert_eq!(
+            second_query.solve_count(),
+            0,
+            "cross-request whole-surface reuse must stay off the semantic solver",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_keeps_non_generic_imported_surfaces_request_local() {
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/shared.ts".to_string(),
+            Arc::from(
+                r#"
+export interface SharedProps {
+  open?: boolean
+  disabled?: boolean
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/A.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SharedProps } from './shared'
+
+export interface AProps extends SharedProps {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/B.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SharedProps } from './shared'
+
+export interface BProps extends SharedProps {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/A.vue"));
+        assert!(host.ensure_loaded("/src/B.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+
+        let mut first_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let first = first_query
+            .project_prepared_type_surface_expr("/src/A.vue", "AProps")
+            .expect("first query should project the imported surface");
+        assert!(
+            matches!(first, TypeExpr::Object(_)),
+            "first query should still materialize the prepared object surface",
+        );
+
+        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: "/src/shared.ts".to_string(),
+            symbol_name: "SharedProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+        assert!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&stable_surface_key, &store_view)
+                .is_none(),
+            "non-generic imported whole surfaces should stay request-local instead of prepublishing root-cache entries from nested projection",
+        );
+
+        let mut second_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let second = second_query
+            .project_prepared_type_surface_expr("/src/B.vue", "BProps")
+            .expect("second query should still project the imported surface");
+        let TypeExpr::Object(object) = second else {
+            panic!("second query should still project an object surface");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    Some(method.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["disabled", "open"]),
+            "non-generic imported whole-surface projection should stay exact even without shared nested-surface reuse",
+        );
+        assert!(
+            second_query.debug_prepared_shared_surface_hit_count() == 0,
+            "non-generic imported whole surfaces should not hit the shared nested-surface cache",
+        );
+        assert_eq!(
+            second_query.solve_count(),
+            0,
+            "request-local non-generic imported whole-surface projection must stay off the semantic solver",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_keeps_local_generic_members_request_local() {
+        use crate::resolver_core::type_surface_db::{TypeSurfaceKey, TypeSurfaceOpKey};
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+interface RootProps<T> {
+  open?: boolean
+  value?: T
+}
+
+type Item = { label?: string }
+
+export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query = ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let projected = query
+            .project_prepared_type_surface_expr("/src/App.vue", "AppProps")
+            .expect("local prepared pick should still project");
+        let TypeExpr::Object(object) = projected else {
+            panic!("local prepared pick should project an object surface");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Property(property) => Some(property.name.as_str()),
+                ObjectMember::Method(method) => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["open"]),
+            "local generic picks should still stay on the requested member route",
+        );
+
+        let mut substitutions = FxHashMap::default();
+        substitutions.insert(
+            "T".to_string(),
+            TypeExpr::Array {
+                element: std::sync::Arc::new(TypeExpr::named("Item")),
+                readonly: false,
+            },
+        );
+        let key = TypeSurfaceOpKey::Member {
+            subject: TypeSurfaceKey {
+                canonical_owner: "/src/App.vue".to_string(),
+                symbol_name: "RootProps".to_string(),
+                instantiation_hash: prepared_substitution_instantiation_hash(&substitutions),
+                context_hash: 0,
+            },
+            member_name: "open".to_string(),
+        };
+        assert!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&key, &store_view)
+                .is_none(),
+            "same-file generic members should stay request-local instead of publishing into the shared type-surface DB",
+        );
+        assert_eq!(
+            query.debug_prepared_shared_member_hit_count(),
+            0,
+            "same-file generic member projection should not consult the shared imported-member cache",
         );
     }
 

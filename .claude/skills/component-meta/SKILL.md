@@ -122,4 +122,77 @@ All type expansion for component-meta goes through the native `type_solver::solv
 | `crates/verter_session/src/host_resolve.rs` | `HostFrontierAdapter`, cross-file type resolution |
 | `crates/verter_session/src/resolver_core/component_meta_query_engine.rs` | `TypeQueryEngine` request-scoped solver owner |
 
+## Component-Meta Perf / Debug Workflow
+
+When debugging component-meta performance or validating resolver invariants, use the repository-owned benchmark and trace workflow first and treat trace as a correctness/attribution tool, not as the final latency source of truth.
+
+### Tool order
+
+1. Use no-trace benchmark runs to measure real request latency.
+2. Use trace runs to validate resolver rules and identify which stage owns the time.
+3. Use native profiling only after trace/no-trace runs identify a stable hotspot.
+
+### Benchmark authority
+
+- `query_ms_from_stdout` from `scripts/benchmark/trace-component-corpus.mjs --no-trace` is the best lightweight request-latency number for component-meta iteration work.
+- `wall_ms` includes Node/process/bootstrap/teardown overhead and is useful for harness cost, not resolver-only cost.
+- Traced runs add overhead; use them to understand route behavior and stage ownership, then confirm wins again with `--no-trace`.
+
+### Trace interpretation
+
+- `trace_resolve_ms` is the primary root `resolve_component_meta` span only.
+- `trace_query_ms` is the sum of all root traced spans in the request. Use this when later imported-local work or extraction/fallthrough work is not inside the primary resolve span.
+- Trace logs under `<trace-dir>/traces/` are the authority for route correctness:
+  - imported files should stay shallow-first
+  - imports should deepen only on the requested symbol route
+  - wildcard barrels should stay BFS by layer
+  - unrelated imported siblings should not be promoted/materialized
+
+### Real-project component-meta commands
+
+```bash
+# Targeted no-trace timing for a real nuxt-ui component
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-notrace \
+  --filter=Accordion.vue \
+  --no-trace
+
+# Targeted traced run for route validation and stage attribution
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-trace \
+  --filter=Accordion.vue
+
+# Full no-trace corpus run
+node scripts/benchmark/trace-component-corpus.mjs \
+  --output-dir=tmp/cm-full \
+  --no-trace
+
+# Validate traced output against strict rules / expected artifacts
+npx tsx packages/benchmark/src/trace-check.ts \
+  tmp/cm-trace \
+  --batch "Accordion" \
+  --strict \
+  --check-expected
+```
+
+### Native profiling
+
+For native hotspot attribution on a real `nuxt/ui` component, use the real-project profiler:
+
+```bash
+cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
+```
+
+Useful environment variables:
+
+- `VERTER_PROFILE_PROJECT_ROOT` - override the project root (defaults to `.integration-tests/repos/nuxt-ui`)
+- `VERTER_PROFILE_REPEATS` - repeat the request multiple times
+- `HOTPATH_METRICS_PORT` - choose a non-default hotpath port if another run is active
+- `HOTPATH_METRICS_SERVER_OFF=1` - disable the HTTP metrics server when only local timing output is needed
+
+Practical rule:
+
+- use hotpath/native profiling for relative attribution inside one run
+- use the no-trace benchmark as the final guard against real-world perf regressions
+
 For repository-owned component-meta benchmark and profiling commands, see `/build-and-profiling`.

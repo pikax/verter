@@ -1477,6 +1477,8 @@ pub struct MetaProvenance {
     pub bundle_materializations: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
+    pub route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64,
+    pub route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1510,6 +1512,8 @@ impl Default for MetaProvenance {
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
+            route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1618,6 +1622,14 @@ impl std::fmt::Debug for MetaProvenance {
                 "imported_macro_declaration_builds",
                 &self.imported_macro_declaration_builds.load(Relaxed),
             )
+            .field(
+                "route_owned_snapshot_cache_hits",
+                &self.route_owned_snapshot_cache_hits.load(Relaxed),
+            )
+            .field(
+                "route_owned_snapshot_cached_parse_hits",
+                &self.route_owned_snapshot_cached_parse_hits.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1663,6 +1675,10 @@ impl MetaProvenance {
             bundle_materializations: self.bundle_materializations.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
             imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
+            route_owned_snapshot_cache_hits: self.route_owned_snapshot_cache_hits.load(Relaxed),
+            route_owned_snapshot_cached_parse_hits: self
+                .route_owned_snapshot_cached_parse_hits
+                .load(Relaxed),
         }
     }
 
@@ -1698,6 +1714,9 @@ impl MetaProvenance {
         self.bundle_materializations.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
         self.imported_macro_declaration_builds.store(0, Relaxed);
+        self.route_owned_snapshot_cache_hits.store(0, Relaxed);
+        self.route_owned_snapshot_cached_parse_hits
+            .store(0, Relaxed);
     }
 }
 
@@ -1756,6 +1775,8 @@ pub struct MetaProvenanceSnapshot {
     pub bundle_materializations: u64,
     pub dep_resolution_calls: u64,
     pub imported_macro_declaration_builds: u64,
+    pub route_owned_snapshot_cache_hits: u64,
+    pub route_owned_snapshot_cached_parse_hits: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

@@ -1123,6 +1123,103 @@ fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materializati
     );
 }
 
+#[cfg(feature = "scheduler")]
+#[test]
+fn prepared_type_decl_in_view_reuses_route_owned_package_shallow_state_without_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export type { PackageEmits } from './index3.d.ts'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "import type { Payload } from './payload.d.ts'\nexport interface PackageEmits {\n  (e: 'open', value?: Payload): void\n}\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/payload.d.ts",
+        "export interface Payload { value: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./index3.d.ts",
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        vec![exact_dependency(
+            "./payload.d.ts",
+            "/workspace/node_modules/pkg/dist/payload.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    let (target_canonical, target_name) = host.resolve_imported_type_root_in_view(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "PackageEmits",
+        Some(&view),
+    );
+    assert_eq!(
+        target_canonical, "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "route-owned shallow lookup should still normalize the package export target first",
+    );
+    assert_eq!(target_name, "PackageEmits");
+
+    ws.reset_reads();
+
+    let prepared = host
+        .prepared_type_decl_in_view(target_canonical.as_str(), target_name.as_str(), Some(&view))
+        .expect("prepared package declaration should reuse the warmed route-owned shallow state");
+
+    let payload = prepared
+        .name_resolution
+        .get("Payload")
+        .expect("prepared package declaration should still resolve imported helper names");
+    assert_eq!(
+        payload.canonical_id, "/workspace/node_modules/pkg/dist/payload.d.ts",
+        "prepared package declaration should canonicalize imported helper edges from the warmed shallow state",
+    );
+    assert_eq!(payload.symbol_name, "Payload");
+    assert!(
+        ws.read_count("/workspace/node_modules/pkg/dist/index3.d.ts") <= 1,
+        "prepared package declaration lookup should pay at most one shallow package target read for the active route",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
+            .is_none(),
+        "provider barrels should stay off ModuleFactsDb on the prepared package declaration fast path",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_none(),
+        "active package targets should stay off ModuleFactsDb on the prepared package declaration fast path",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
+            .is_none(),
+        "imported helper edges should stay shallow too; prepared lookup should not materialize helper module facts",
+    );
+}
+
 #[test]
 fn prepared_type_decl_in_view_backfills_missing_local_symbol_when_cache_is_partial() {
     let host = make_host();
@@ -1587,6 +1684,424 @@ fn store_view_imported_seed_reuses_cached_source_for_snapshot_and_env() {
         ws.read_count(canonical_id),
         1,
         "eval env build should not reread the imported file once seeded",
+    );
+}
+
+#[test]
+fn store_view_warm_imported_eval_env_hit_reuses_route_owned_shallow_hash_without_reread() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "route-owned shallow state should seed the imported declaration lazily",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "route-owned shallow seeding should read the imported file once",
+    );
+
+    let env = host
+        .base_eval_env_in_view(canonical_id, Some(&view))
+        .expect("first eval env build should succeed from the routed imported file");
+    assert!(
+        env.type_symbols.contains_key("Alpha"),
+        "first eval env build should expose the imported declaration symbol",
+    );
+
+    ws.reset_reads();
+
+    let env = host
+        .base_eval_env_in_view(canonical_id, Some(&view))
+        .expect("warm eval env lookup should reuse the cached env");
+    assert!(
+        env.type_symbols.contains_key("Alpha"),
+        "warm eval env lookup should still expose the imported declaration symbol",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        0,
+        "warm eval env lookup should not reread the imported file once the route-owned shallow hash and env are cached",
+    );
+}
+
+#[test]
+fn store_view_route_owned_imported_seed_reuses_cached_source_for_snapshot_and_env() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "route-owned shallow seeding should load the imported dependency state",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "route-owned shallow seeding should read the imported file once",
+    );
+
+    assert!(
+        host.read_analysis_source_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "read_analysis_source_in_view should reuse route-owned imported source once seeded",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "read_analysis_source_in_view should not reread the imported file once route-owned state is cached",
+    );
+
+    assert!(
+        host.current_eval_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "current_eval_state should reuse the route-owned imported source once seeded",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "current_eval_state should not reread the imported file once route-owned state is cached",
+    );
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(canonical_id, Some(&view))
+        .expect("snapshot build should reuse the route-owned imported source");
+    assert!(
+        snapshot.bindings.is_empty(),
+        "simple declaration file should still produce a valid snapshot",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "snapshot materialization should not reread the imported file once route-owned state is cached",
+    );
+
+    let analysis = host
+        .external_type_analysis_in_view(canonical_id, Some(&view))
+        .expect("external type analysis should reuse the route-owned imported source");
+    assert!(
+        analysis.local_type_symbol("Alpha").is_some(),
+        "external type analysis should still expose the imported declaration symbol",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "external type analysis should not reread the imported file once route-owned state is cached",
+    );
+
+    let env = host
+        .base_eval_env_in_view(canonical_id, Some(&view))
+        .expect("eval env build should reuse the route-owned imported source");
+    assert!(
+        env.type_symbols.contains_key("Alpha"),
+        "eval env should expose the imported declaration symbol",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "eval env build should not reread the imported file once route-owned state is cached",
+    );
+}
+
+#[test]
+fn route_owned_imported_vue_snapshot_reuses_cached_parse() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/Button.vue";
+    ws.inject_file(
+        canonical_id,
+        r#"<script setup lang="ts">
+const props = defineProps<{ label: string }>()
+</script>
+<template><button>{{ props.label }}</button></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "route-owned shallow seeding should cache the imported Vue file parse state",
+    );
+    host.provenance().reset();
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(canonical_id, Some(&view))
+        .expect("snapshot build should succeed from route-owned imported Vue state");
+    assert!(
+        snapshot.template.is_some(),
+        "imported Vue snapshot should still include template data",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any(canonical_id)
+            .is_none(),
+        "route-owned imported Vue snapshots should stay off full ModuleFacts materialization",
+    );
+
+    let provenance = host.provenance().snapshot();
+    assert_eq!(
+        provenance.route_owned_snapshot_cache_hits, 1,
+        "route-owned imported Vue snapshots should reuse cached raw snapshot state instead of rebuilding from source",
+    );
+    assert_eq!(
+        provenance.route_owned_snapshot_cached_parse_hits, 0,
+        "route-owned imported Vue snapshots should no longer fall back to rebuilding from the cached parsed SFC",
+    );
+}
+
+#[test]
+fn route_owned_imported_non_sfc_snapshot_reuses_cached_snapshot_state() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view))
+            .is_some(),
+        "route-owned shallow seeding should cache imported declaration state",
+    );
+    host.provenance().reset();
+
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(canonical_id, Some(&view))
+        .expect("snapshot build should succeed from route-owned imported declaration state");
+    assert!(
+        snapshot.bindings.is_empty(),
+        "simple declaration file should still produce a valid snapshot",
+    );
+    assert!(
+        host.resolver.runtime.module_facts.get_any(canonical_id).is_none(),
+        "route-owned imported declaration snapshots should stay off full ModuleFacts materialization",
+    );
+
+    let provenance = host.provenance().snapshot();
+    assert_eq!(
+        provenance.route_owned_snapshot_cache_hits, 1,
+        "route-owned imported declaration snapshots should reuse cached raw snapshot state instead of rebuilding from source"
+    );
+    assert_eq!(
+        provenance.route_owned_snapshot_cached_parse_hits, 0,
+        "non-SFC route-owned snapshots should not need the cached SFC parse fallback"
+    );
+}
+
+#[test]
+fn route_owned_imported_cache_reuses_current_version_across_store_views() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let canonical_id = "/workspace/node_modules/pkg/dist/shared.d.ts";
+    ws.inject_file(canonical_id, "export interface Alpha { alpha?: string }");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+
+    let view1 = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view1))
+            .is_some(),
+        "initial route-owned imported seed should succeed",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        1,
+        "initial route-owned imported seed should read the imported file once",
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/Unrelated.ts",
+        "export const changed = 1",
+    );
+    let view2 = host.resolver_store_view();
+    assert!(
+        host.view_mutation_epoch(&view2) > host.view_mutation_epoch(&view1),
+        "the second store view should reflect the unrelated host mutation",
+    );
+
+    ws.reset_reads();
+
+    assert!(
+        host.route_owned_shallow_state_in_view(canonical_id, Some(&view2))
+            .is_some(),
+        "unchanged imported files should reuse route-owned shallow state across store views",
+    );
+    assert_eq!(
+        ws.read_count(canonical_id),
+        0,
+        "route-owned shallow cache should be keyed by the imported file version, not the store-view epoch",
+    );
+}
+
+#[test]
+fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_bumps() {
+    let ws = Arc::new(CountingWorkspace::new());
+    let provider = "/workspace/node_modules/pkg/dist/index.d.ts";
+    let target = "/workspace/node_modules/pkg/dist/inner.d.ts";
+    ws.inject_file(provider, "export type { InnerProps } from './inner.d.ts'\n");
+    ws.inject_file(target, "export interface InnerProps { label: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.set_import_dependencies(provider, vec![exact_dependency("./inner.d.ts", target)]);
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(provider, Some(&view))
+            .is_some(),
+        "route-owned seeding should build the current provider surface after the view snapshot",
+    );
+
+    let resolved =
+        host.cached_import_route_resolution_in_view(provider, "./inner.d.ts", Some(&view));
+    assert_eq!(
+        resolved
+            .as_ref()
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some(target),
+        "the untracked current-version import-route cache should resolve before any unrelated host mutation",
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/Unrelated.ts",
+        "export const changed = 1",
+    );
+
+    let resolved =
+        host.cached_import_route_resolution_in_view(provider, "./inner.d.ts", Some(&view));
+    assert_eq!(
+        resolved
+            .as_ref()
+            .and_then(|resolution| resolution.resolved_canonical_id.as_deref()),
+        Some(target),
+        "unchanged imported providers loaded after the view snapshot should keep reusing their current import-route cache across unrelated epoch bumps",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn store_view_external_type_analysis_keeps_tracked_imported_dependency_off_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { PackageEmits } from './types'
+
+const emit = defineEmits<PackageEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts",
+        "export type { PackageEmits } from 'pkg'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export type { PackageEmits } from './index3.d.ts'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "export interface PackageEmits {\n  (e: 'open', value?: string): void\n}\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/workspace/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/workspace/src/Consumer.vue",
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/workspace/src/types.ts",
+        vec![exact_dependency(
+            "pkg",
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./index3.d.ts",
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    assert!(
+        host.route_owned_shallow_state_in_view(
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+            Some(&view),
+        )
+        .is_some(),
+        "active route traversal should be able to build the target's shallow state first",
+    );
+
+    assert!(
+        host.external_type_analysis_in_view("/workspace/node_modules/pkg/dist/index3.d.ts", Some(&view))
+            .is_some(),
+        "tracked imported declarations should expose external type analysis from the shallow source path",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_none(),
+        "tracked imported declarations should not require full ModuleFacts materialization just to build external type analysis",
     );
 }
 
@@ -6246,7 +6761,10 @@ export interface Props {
 fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_hash_only() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/src/index.ts", "export { Props } from './target'\n");
-    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+    ws.inject_file(
+        "/src/target.ts",
+        "export interface Props { label: string }\n",
+    );
 
     let host = VerterHost::new(
         HostConfig {
@@ -6317,7 +6835,10 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
         "/src/index.ts",
         "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
     );
-    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+    ws.inject_file(
+        "/src/target.ts",
+        "export interface Props { label: string }\n",
+    );
 
     let host = VerterHost::new(
         HostConfig {
@@ -6334,7 +6855,9 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
     let view = host.resolver_store_view();
     let (resolved, facts) = host
         .resolve_direct_imported_type_root_fast_path_in_view("/src/index.ts", "Props", Some(&view))
-        .expect("fast imported-root proof should resolve cold child hashes under a current store view");
+        .expect(
+            "fast imported-root proof should resolve cold child hashes under a current store view",
+        );
 
     assert_eq!(
         resolved,
@@ -6359,7 +6882,10 @@ fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provide
         "/src/index.ts",
         "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
     );
-    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+    ws.inject_file(
+        "/src/target.ts",
+        "export interface Props { label: string }\n",
+    );
 
     let host = VerterHost::new(
         HostConfig {
@@ -6392,7 +6918,10 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
         "/src/index.ts",
         "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
     );
-    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+    ws.inject_file(
+        "/src/target.ts",
+        "export interface Props { label: string }\n",
+    );
 
     let host = VerterHost::new(
         HostConfig {
@@ -7843,7 +8372,10 @@ defineProps<ButtonProps>()
 </script>
 <template><div /></template>"#,
     );
-    ws.inject_file("/src/types.ts", "export { ButtonProps } from './Button.vue'\n");
+    ws.inject_file(
+        "/src/types.ts",
+        "export { ButtonProps } from './Button.vue'\n",
+    );
     ws.inject_file(
         "/src/Button.vue",
         r#"<script lang="ts">
@@ -7918,8 +8450,7 @@ export interface ButtonProps {
 
     let after_surface = host.provenance().snapshot();
     assert_eq!(
-        after_surface.imported_macro_declaration_builds,
-        1,
+        after_surface.imported_macro_declaration_builds, 1,
         "combined imported macro resolution should still build declaration ownership once",
     );
 }
@@ -7968,7 +8499,10 @@ const emit = defineEmits<PackageEmits>()
     );
     host.set_import_dependencies(
         "/workspace/src/types.ts",
-        vec![exact_dependency("pkg", "/workspace/node_modules/pkg/dist/index.d.ts")],
+        vec![exact_dependency(
+            "pkg",
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+        )],
     );
     host.set_import_dependencies(
         "/workspace/node_modules/pkg/dist/index.d.ts",
@@ -8001,9 +8535,118 @@ const emit = defineEmits<PackageEmits>()
         host.resolver
             .runtime
             .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
+            .is_none(),
+        "package provider barrels should resolve from the host-owned import-route cache without forcing full ModuleFacts materialization",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
             .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_none(),
         "active imported package targets should resolve from the shallow current-state/type-context path without forcing full ModuleFacts materialization",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_macro_surface_keeps_active_package_target_off_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { PackageEmits } from './types'
+
+const emit = defineEmits<PackageEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts",
+        "export type { PackageEmits } from 'pkg'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export type { PackageEmits } from './index3.d.ts'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "export interface PackageEmits {\n  (e: 'open', value?: string): void\n}\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/workspace/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/workspace/src/Consumer.vue",
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/workspace/src/types.ts",
+        vec![exact_dependency(
+            "pkg",
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./index3.d.ts",
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    let resolved = host.resolve_component_meta_macro_surface_in_view(
+        "/workspace/src/Consumer.vue",
+        "./types",
+        "PackageEmits",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved.is_some(),
+        "component-meta macro surface resolution should still resolve the package reexported emits surface",
+    );
+    assert!(
+        resolved
+            .as_ref()
+            .and_then(|surface| surface.declaration.declaration_id)
+            .is_some(),
+        "package macro declaration ownership should still expose a stable declaration id",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
+            .is_none(),
+        "package provider barrels should stay on the host-owned import-route cache during surface resolution too",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_none(),
+        "active imported package targets should stay off full ModuleFacts materialization even when building macro declaration ownership",
     );
 }
 
