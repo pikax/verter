@@ -318,12 +318,31 @@ struct ParsedTypeResolutionContextCacheEntry {
     type_context: Rc<crate::ParsedTypeResolutionContext>,
 }
 
+#[derive(Clone)]
+struct ExternalTypeAnalysisCacheEntry {
+    whole_hash: Hash16,
+    analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+}
+
+#[derive(Clone)]
+struct ExternalTypeResolutionInputs {
+    raw_source: Arc<str>,
+    cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    whole_hash: Hash16,
+    eval_source: Arc<str>,
+    analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+    analysis_cache_hit: bool,
+}
+
 thread_local! {
     static HOST_PARSED_EVAL_PROGRAM_CACHE: RefCell<
         rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ParsedEvalProgramCacheEntry>
     > = RefCell::new(rustc_hash::FxHashMap::default());
     static HOST_PARSED_TYPE_CONTEXT_CACHE: RefCell<
         rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ParsedTypeResolutionContextCacheEntry>
+    > = RefCell::new(rustc_hash::FxHashMap::default());
+    static HOST_EXTERNAL_TYPE_ANALYSIS_CACHE: RefCell<
+        rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ExternalTypeAnalysisCacheEntry>
     > = RefCell::new(rustc_hash::FxHashMap::default());
 }
 
@@ -1997,6 +2016,162 @@ impl VerterHost {
         })
     }
 
+    fn cached_external_type_analysis_entry(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        raw_source: &str,
+        cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
+        eval_source: &Arc<str>,
+    ) -> (
+        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+        bool,
+    ) {
+        let cache_key = ParsedEvalProgramCacheKey {
+            host_instance_id: self.instance_id,
+            canonical_id: canonical_id.to_string(),
+            source_type: Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
+        };
+        HOST_EXTERNAL_TYPE_ANALYSIS_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.whole_hash == whole_hash {
+                    return (Arc::clone(&entry.analysis), true);
+                }
+            }
+
+            let analysis = self.build_external_type_analysis(
+                canonical_id,
+                whole_hash,
+                raw_source,
+                cached_parse,
+                eval_source,
+            );
+            cache.insert(
+                cache_key,
+                ExternalTypeAnalysisCacheEntry {
+                    whole_hash,
+                    analysis: Arc::clone(&analysis),
+                },
+            );
+            (analysis, false)
+        })
+    }
+
+    fn external_type_resolution_inputs_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<ExternalTypeResolutionInputs> {
+        let normalized_canonical_id =
+            self.normalized_analysis_canonical_in_view(canonical_id, store_view);
+        let canonical_id = normalized_canonical_id.as_ref();
+
+        let cached_facts = if let Some(sv) = store_view {
+            self.resolver.runtime.module_facts.get(canonical_id, sv)
+        } else {
+            self.resolver.runtime.module_facts.get_any(canonical_id)
+        };
+        if let Some(facts) = cached_facts {
+            if store_view.is_none()
+                || self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    facts.whole_hash,
+                    store_view,
+                )
+            {
+                return Some(ExternalTypeResolutionInputs {
+                    raw_source: Arc::clone(&facts.raw_source),
+                    cached_parse: facts.cached_parse.clone(),
+                    whole_hash: facts.whole_hash,
+                    eval_source: Arc::clone(&facts.eval_source),
+                    analysis: Arc::clone(&facts.external_type_analysis),
+                    analysis_cache_hit: true,
+                });
+            }
+        }
+
+        let (raw_source, cached_parse, whole_hash) =
+            if let Some(state) = self.current_eval_state_in_view(canonical_id, store_view) {
+                state
+            } else {
+                #[cfg(feature = "scheduler")]
+                if let Some(state) = self.effective_file_state(canonical_id, None) {
+                    if !self.store_view_allows_current_whole_hash(
+                        canonical_id,
+                        state.whole_hash,
+                        store_view,
+                    ) {
+                        return None;
+                    }
+                    (
+                        state.source,
+                        state.cached_parse,
+                        state.whole_hash,
+                    )
+                } else {
+                    let raw_source = self.read_analysis_source(canonical_id)?;
+                    let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+                    if !self.store_view_allows_current_whole_hash(
+                        canonical_id,
+                        whole_hash,
+                        store_view,
+                    ) {
+                        return None;
+                    }
+                    let cached_parse = canonical_id.ends_with(".vue").then(|| {
+                        Arc::new(verter_compiler::compile::parse_sfc(
+                            raw_source.as_ref(),
+                            None,
+                            None,
+                        ))
+                    });
+                    (raw_source, cached_parse, whole_hash)
+                }
+
+                #[cfg(not(feature = "scheduler"))]
+                {
+                    let raw_source = self.read_analysis_source(canonical_id)?;
+                    let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
+                    if !self.store_view_allows_current_whole_hash(
+                        canonical_id,
+                        whole_hash,
+                        store_view,
+                    ) {
+                        return None;
+                    }
+                    let cached_parse = canonical_id.ends_with(".vue").then(|| {
+                        Arc::new(verter_compiler::compile::parse_sfc(
+                            raw_source.as_ref(),
+                            None,
+                            None,
+                        ))
+                    });
+                    (raw_source, cached_parse, whole_hash)
+                }
+            };
+
+        let eval_source = Arc::<str>::from(Self::build_eval_script_source(
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+        ));
+        let (analysis, analysis_cache_hit) = self.cached_external_type_analysis_entry(
+            canonical_id,
+            whole_hash,
+            raw_source.as_ref(),
+            cached_parse.as_deref(),
+            &eval_source,
+        );
+        Some(ExternalTypeResolutionInputs {
+            raw_source,
+            cached_parse,
+            whole_hash,
+            eval_source,
+            analysis,
+            analysis_cache_hit,
+        })
+    }
+
     pub(crate) fn clear_thread_local_parsed_eval_program_cache(&self) {
         let host_instance_id = self.instance_id;
         HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
@@ -2005,6 +2180,11 @@ impl VerterHost {
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
         HOST_PARSED_TYPE_CONTEXT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .retain(|key, _| key.host_instance_id != host_instance_id);
+        });
+        HOST_EXTERNAL_TYPE_ANALYSIS_CACHE.with(|cache| {
             cache
                 .borrow_mut()
                 .retain(|key, _| key.host_instance_id != host_instance_id);
@@ -2905,8 +3085,7 @@ impl VerterHost {
         use crate::resolver_core::shallow_file_state::ExportTarget;
         use crate::resolver_core::RouteDemand;
 
-        if let Some(facts) = self.ensure_module_facts_in_view(canonical_id, store_view) {
-            let state = &facts.shallow_state;
+        if let Some(state) = self.route_owned_shallow_state_in_view(canonical_id, store_view) {
             let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
                 .local_closure_steps;
             if let Some((symbol_name, _is_alias_export)) = state
@@ -3106,24 +3285,6 @@ impl VerterHost {
         dependencies
     }
 
-    fn clone_cached_external_type_analysis(
-        &self,
-        canonical_id: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>>
-    {
-        if let Some(sv) = store_view {
-            if let Some(facts) = self.resolver.runtime.module_facts.get(canonical_id, sv) {
-                return Some(Arc::clone(&facts.external_type_analysis));
-            }
-        }
-        self.resolver
-            .runtime
-            .module_facts
-            .get_any(canonical_id)
-            .map(|facts| Arc::clone(&facts.external_type_analysis))
-    }
-
     pub(crate) fn external_type_analysis_in_view(
         &self,
         canonical_id: &str,
@@ -3134,23 +3295,10 @@ impl VerterHost {
             "external_type_analysis_in_view",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
-        let resolved_canonical_id = self
-            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
-            .unwrap_or_else(|| canonical_id.to_string());
-        if let Some(cached) = self
-            .clone_cached_external_type_analysis(canonical_id, store_view)
-            .or_else(|| {
-                if resolved_canonical_id != canonical_id {
-                    self.clone_cached_external_type_analysis(
-                        resolved_canonical_id.as_str(),
-                        store_view,
-                    )
-                } else {
-                    None
-                }
-            })
-        {
-            let stats = cached.stats();
+        let inputs = self.external_type_resolution_inputs_in_view(canonical_id, store_view)?;
+        let analysis = Arc::clone(&inputs.analysis);
+        let stats = analysis.stats();
+        if inputs.analysis_cache_hit {
             component_meta_trace_event!(
                 "external_type_analysis_cache_hit",
                 format!(
@@ -3165,26 +3313,22 @@ impl VerterHost {
                     stats.local_export_symbol_count,
                 ),
             );
-            return Some(cached);
+        } else {
+            component_meta_trace_event!(
+                "external_type_analysis_built",
+                format!(
+                    "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
+                    canonical_id,
+                    stats.top_level_statement_count,
+                    stats.binding_count,
+                    stats.direct_reexport_count,
+                    stats.wildcard_reexport_count,
+                    stats.import_local_count,
+                    stats.local_type_symbol_count,
+                    stats.local_export_symbol_count,
+                ),
+            );
         }
-
-        let facts = self.ensure_module_facts_in_view(resolved_canonical_id.as_str(), store_view)?;
-        let analysis = Arc::clone(&facts.external_type_analysis);
-        let stats = analysis.stats();
-        component_meta_trace_event!(
-            "external_type_analysis_built",
-            format!(
-                "owner={} statements={} bindings={} reexports={} wildcards={} import_locals={} local_type_symbols={} local_export_symbols={}",
-                canonical_id,
-                stats.top_level_statement_count,
-                stats.binding_count,
-                stats.direct_reexport_count,
-                stats.wildcard_reexport_count,
-                stats.import_local_count,
-                stats.local_type_symbol_count,
-                stats.local_export_symbol_count,
-            ),
-        );
         Some(analysis)
     }
 
@@ -3639,21 +3783,19 @@ impl VerterHost {
                 store_view.is_some()
             ),
         );
-        let facts = self.ensure_module_facts_in_view(dep_canonical, store_view)?;
-        let analysis = &facts.external_type_analysis;
-        let eval_source = Arc::clone(&facts.eval_source);
+        let inputs = self.external_type_resolution_inputs_in_view(dep_canonical, store_view)?;
         let normalized_canonical_id =
             self.normalized_analysis_canonical_in_view(dep_canonical, store_view);
         let canonical_id_for_source_type = normalized_canonical_id.as_ref();
         let source_type = Self::imported_eval_source_type(
             canonical_id_for_source_type,
-            facts.raw_source.as_ref(),
-            facts.cached_parse.as_deref(),
+            inputs.raw_source.as_ref(),
+            inputs.cached_parse.as_deref(),
         );
         let Some(type_context) = self.cached_type_resolution_context_entry(
             canonical_id_for_source_type,
-            facts.whole_hash,
-            &eval_source,
+            inputs.whole_hash,
+            &inputs.eval_source,
             source_type,
         ) else {
             component_meta_trace_event!(
@@ -3662,7 +3804,7 @@ impl VerterHost {
                     "owner={} type={} hit=false local_symbol_target={} parse_failed_or_missing_type_context=true",
                     dep_canonical,
                     type_name,
-                    analysis.has_local_symbol_target(type_name),
+                    inputs.analysis.has_local_symbol_target(type_name),
                 ),
             );
             return None;
@@ -3674,7 +3816,7 @@ impl VerterHost {
             program,
             type_context.borrow_owner().source_bytes(),
             base_ctx,
-            analysis.as_ref(),
+            inputs.analysis.as_ref(),
             imported_companions,
         );
         component_meta_trace_event!(
@@ -3684,7 +3826,7 @@ impl VerterHost {
                 dep_canonical,
                 type_name,
                 resolved.is_some(),
-                analysis.has_local_symbol_target(type_name),
+                inputs.analysis.has_local_symbol_target(type_name),
             ),
         );
         resolved
@@ -3723,6 +3865,135 @@ impl VerterHost {
             ),
         );
         Some((next_canonical, original_name.clone()))
+    }
+
+    fn current_or_read_whole_hash_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Hash16> {
+        let cached_hash = store_view
+            .and_then(|view| view.whole_hash(canonical_id))
+            .or_else(|| self.get_whole_hash(canonical_id))
+            ;
+        if cached_hash.is_some() {
+            return cached_hash;
+        }
+
+        let source = self.read_analysis_source(canonical_id)?;
+        let whole_hash = crate::hash::hash_16(source.as_bytes());
+        self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
+            .then_some(whole_hash)
+    }
+
+    fn append_file_whole_and_route_fact_versions_in_view(
+        &self,
+        canonical_id: &str,
+        known_shallow: Option<&crate::resolver_core::ShallowFileState>,
+        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) {
+        let whole_hash = store_view
+            .and_then(|view| view.whole_hash(canonical_id))
+            .or_else(|| self.get_whole_hash(canonical_id))
+            .or_else(|| known_shallow.map(|state| state.whole_hash))
+            .or_else(|| {
+                let source = self.read_analysis_source(canonical_id)?;
+                let whole_hash = crate::hash::hash_16(source.as_bytes());
+                self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
+                    .then_some(whole_hash)
+            });
+        if let Some(hash) = whole_hash {
+            let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_id.to_string(),
+                hash,
+            };
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
+            }
+        }
+
+        let route_hash = store_view
+            .and_then(|view| view.derived_hash(canonical_id, crate::resolver_core::DerivedFactKind::Route))
+            .or_else(|| {
+                known_shallow.map(crate::resolver_store::hash_route_surface)
+            })
+            .or_else(|| {
+                self.route_owned_shallow_state_in_view(canonical_id, store_view)
+                    .map(|state| crate::resolver_store::hash_route_surface(&state))
+            });
+        if let Some(hash) = route_hash {
+            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id: canonical_id.to_string(),
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                hash,
+            };
+            if seen.insert(fact.clone()) {
+                facts.push(fact);
+            }
+        }
+    }
+
+    fn resolve_direct_imported_type_root_fast_path_in_view(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<((String, String), Vec<crate::resolver_core::FactVersionRef>)> {
+        let shallow = self.route_owned_shallow_state_in_view(dep_canonical, store_view)?;
+        let (target_canonical, target_symbol) = match shallow.export_target(imported_name)? {
+            crate::resolver_core::ExportTarget::Reexport {
+                source_specifier,
+                original_name,
+                canonical_id,
+                ..
+            } => {
+                let next_canonical = if canonical_id.is_empty() {
+                    self.resolve_route_type_edge_in_view(dep_canonical, source_specifier, store_view)?
+                } else {
+                    canonical_id.clone()
+                };
+                (next_canonical, original_name.clone())
+            }
+            crate::resolver_core::ExportTarget::Local { symbol_name } => {
+                let import_target = shallow.import_target(symbol_name.as_str())?;
+                let next_canonical = if import_target.canonical_id.is_empty() {
+                    self.resolve_route_type_edge_in_view(
+                        dep_canonical,
+                        import_target.source_specifier.as_str(),
+                        store_view,
+                    )?
+                } else {
+                    import_target.canonical_id.clone()
+                };
+                (next_canonical, import_target.imported_name.clone())
+            }
+        };
+        let normalized_target = self
+            .resolve_eval_dependency_canonical_in_view(target_canonical.as_str(), store_view)
+            .unwrap_or(target_canonical);
+
+        let mut facts = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+        self.append_file_whole_and_route_fact_versions_in_view(
+            dep_canonical,
+            Some(shallow.as_ref()),
+            &mut facts,
+            &mut seen,
+            store_view,
+        );
+        let target_hash =
+            self.current_or_read_whole_hash_in_view(normalized_target.as_str(), store_view)?;
+        let target_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: normalized_target.clone(),
+            hash: target_hash,
+        };
+        if seen.insert(target_fact.clone()) {
+            facts.push(target_fact);
+        }
+
+        Some(((normalized_target, target_symbol), facts))
     }
 
     pub(crate) fn resolve_local_import_symbol_target_in_view(
@@ -3818,6 +4089,21 @@ impl VerterHost {
                 imported_name,
                 current_view,
                 || {
+                    if let Some((resolved, facts)) = self
+                        .resolve_direct_imported_type_root_fast_path_in_view(
+                            normalized_canonical.as_str(),
+                            imported_name,
+                            Some(current_view),
+                        )
+                    {
+                        return Some((
+                            crate::resolver_core::ImportedRootResult::Resolved {
+                                canonical_source: resolved.0,
+                                resolved_symbol: resolved.1,
+                            },
+                            facts,
+                        ));
+                    }
                     // Use resolve_named_type_export_target_in_view which checks
                     // the RouteDb before doing the barrel walk. This avoids
                     // redundant barrel walks when the route has already been

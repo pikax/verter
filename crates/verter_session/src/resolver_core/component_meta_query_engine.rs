@@ -149,6 +149,8 @@ pub struct ComponentMetaQueryEngine<'a> {
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
+    #[cfg(test)]
+    prepared_root_surface_projection_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
 }
@@ -278,6 +280,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
+            #[cfg(test)]
+            prepared_root_surface_projection_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -305,6 +309,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decls: FxHashMap::default(),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
+            #[cfg(test)]
+            prepared_root_surface_projection_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
         }
@@ -688,6 +694,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.prepared_type_decl_query_count
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_prepared_root_surface_projection_count(&self) -> usize {
+        self.prepared_root_surface_projection_count
+    }
+
     fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
@@ -777,7 +788,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     if let Some(surface) =
                         self.project_prepared_root_surface(scope_canonical_id, symbol_name)
                     {
-                        return Some((TypeSurfaceOpResult::Surface(surface), facts.clone()));
+                        return Some((
+                            TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(
+                                surface,
+                            )),
+                            facts.clone(),
+                        ));
                     }
                     let subject_key = SubjectKey::Decl {
                         canonical_id: scope_canonical_id.to_string(),
@@ -804,7 +820,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         if let Some(surface) = self.project_prepared_root_surface(scope_canonical_id, symbol_name) {
-            return Some(surface);
+            return Some(projected_surface_unwrap_or_clone(surface));
         }
 
         let owned_view = self.host.resolver_store_view();
@@ -869,7 +885,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         symbol_name: &str,
-    ) -> Option<ProjectedSurface> {
+    ) -> Option<std::sync::Arc<ProjectedSurface>> {
+        #[cfg(test)]
+        {
+            self.prepared_root_surface_projection_count += 1;
+        }
         let mut active = FxHashSet::default();
         match self.project_prepared_surface_from_symbol(
             scope_canonical_id,
@@ -942,19 +962,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 substitutions,
                 active,
             ),
-            TypeExpr::Object(object) => PreparedSurfaceProjection::Surface(
+            TypeExpr::Object(object) => PreparedSurfaceProjection::Surface(std::sync::Arc::new(
                 projected_surface_from_object_expr_with_substitutions(
                     object,
                     &prepared.type_parameters,
                     substitutions,
                 ),
-            ),
+            )),
             TypeExpr::Function(function) => PreparedSurfaceProjection::Surface(
-                projected_surface_from_function_expr_with_substitutions(
+                std::sync::Arc::new(projected_surface_from_function_expr_with_substitutions(
                     function,
                     &prepared.type_parameters,
                     substitutions,
-                ),
+                )),
             ),
             TypeExpr::Intersection(parts) => {
                 let mut surfaces = Vec::with_capacity(parts.len());
@@ -998,12 +1018,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 name,
                 type_arguments,
             } => {
-                if let Some(substituted) = substituted_ref_expr_if_needed(
-                    expr,
-                    name.as_ref(),
-                    &prepared.type_parameters,
-                    substitutions,
-                ) {
+                if let Some(substituted) =
+                    substituted_ref_expr_if_needed(expr, name.as_ref(), substitutions)
+                {
                     return self.project_prepared_surface_from_expr(
                         scope_canonical_id,
                         prepared,
@@ -1170,12 +1187,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             members.push(projected_member);
         }
 
-        PreparedSurfaceProjection::Surface(ProjectedSurface {
+        PreparedSurfaceProjection::Surface(std::sync::Arc::new(ProjectedSurface {
             members,
             call_signatures: Vec::new(),
             construct_signatures: Vec::new(),
             has_index_signature: false,
-        })
+        }))
     }
 
     fn project_prepared_requested_member_from_symbol(
@@ -1206,11 +1223,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .prepared_type_decl(scope_canonical_id, symbol_name)
             .and_then(|prepared| {
                 if let Some(member) = prepared.member(member_name) {
-                    let projected_ty = substitute_type_expr_if_needed(
-                        &member.ty,
-                        &prepared.type_parameters,
-                        substitutions,
-                    );
+                    let projected_ty = substitute_type_expr_if_needed(&member.ty, substitutions);
                     return Some(ProjectedMember {
                         name: member_name.to_string(),
                         ty: projected_ty,
@@ -1269,11 +1282,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ObjectMember::Property(property) if property.name == member_name => {
                     Some(ProjectedMember {
                         name: property.name.clone(),
-                        ty: substitute_type_expr_if_needed(
-                            &property.ty,
-                            &prepared.type_parameters,
-                            substitutions,
-                        ),
+                        ty: substitute_type_expr_if_needed(&property.ty, substitutions),
                         optional: property.optional,
                         readonly: property.readonly,
                         is_method: false,
@@ -1283,11 +1292,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     Some(ProjectedMember {
                         name: method.name.clone(),
                         ty: TypeExpr::Function(std::sync::Arc::new(
-                            substitute_function_expr_if_needed(
-                                &method.function,
-                                &prepared.type_parameters,
-                                substitutions,
-                            ),
+                            substitute_function_expr_if_needed(&method.function, substitutions),
                         )),
                         optional: method.optional,
                         readonly: false,
@@ -1300,12 +1305,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 name,
                 type_arguments,
             } => {
-                if let Some(substituted) = substituted_ref_expr_if_needed(
-                    expr,
-                    name.as_ref(),
-                    &prepared.type_parameters,
-                    substitutions,
-                ) {
+                if let Some(substituted) =
+                    substituted_ref_expr_if_needed(expr, name.as_ref(), substitutions)
+                {
                     return self.project_prepared_requested_member_from_expr(
                         scope_canonical_id,
                         prepared,
@@ -2560,7 +2562,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
 #[derive(Debug, Clone)]
 enum PreparedSurfaceProjection {
-    Surface(ProjectedSurface),
+    Surface(std::sync::Arc<ProjectedSurface>),
     Empty,
     Unsupported,
 }
@@ -2634,7 +2636,7 @@ fn projected_surface_from_object_expr(
 
 fn projected_surface_from_object_expr_with_substitutions(
     object: &verter_semantic::analysis::type_expr::ObjectExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    _type_params: &[verter_semantic::analysis::type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> ProjectedSurface {
     use verter_semantic::analysis::type_expr::ObjectMember;
@@ -2652,7 +2654,7 @@ fn projected_surface_from_object_expr_with_substitutions(
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
                 name: property.name.clone(),
-                ty: substitute_type_expr_if_needed(&property.ty, type_params, substitutions),
+                ty: substitute_type_expr_if_needed(&property.ty, substitutions),
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
@@ -2661,21 +2663,18 @@ fn projected_surface_from_object_expr_with_substitutions(
                 name: method.name.clone(),
                 ty: TypeExpr::Function(std::sync::Arc::new(substitute_function_expr_if_needed(
                     &method.function,
-                    type_params,
                     substitutions,
                 ))),
                 optional: method.optional,
                 readonly: false,
                 is_method: true,
             }),
-            ObjectMember::CallSignature(function) => {
-                call_signatures.push(TypeExpr::Function(std::sync::Arc::new(
-                    substitute_function_expr_if_needed(function, type_params, substitutions),
-                )))
-            }
+            ObjectMember::CallSignature(function) => call_signatures.push(TypeExpr::Function(
+                std::sync::Arc::new(substitute_function_expr_if_needed(function, substitutions)),
+            )),
             ObjectMember::ConstructSignature(function) => {
                 construct_signatures.push(TypeExpr::Function(std::sync::Arc::new(
-                    substitute_function_expr_if_needed(function, type_params, substitutions),
+                    substitute_function_expr_if_needed(function, substitutions),
                 )))
             }
             ObjectMember::IndexSignature(_) => has_index_signature = true,
@@ -2703,7 +2702,7 @@ fn projected_surface_from_function_expr(
 
 fn projected_surface_from_function_expr_with_substitutions(
     function: &verter_semantic::analysis::type_expr::FunctionExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    _type_params: &[verter_semantic::analysis::type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> ProjectedSurface {
     if substitutions.is_empty() {
@@ -2713,7 +2712,7 @@ fn projected_surface_from_function_expr_with_substitutions(
     ProjectedSurface {
         members: Vec::new(),
         call_signatures: vec![TypeExpr::Function(std::sync::Arc::new(
-            substitute_function_expr_if_needed(function, type_params, substitutions),
+            substitute_function_expr_if_needed(function, substitutions),
         ))],
         construct_signatures: Vec::new(),
         has_index_signature: false,
@@ -2721,7 +2720,7 @@ fn projected_surface_from_function_expr_with_substitutions(
 }
 
 fn projected_surface_from_parts_intersection(
-    parts: Vec<ProjectedSurface>,
+    parts: Vec<std::sync::Arc<ProjectedSurface>>,
 ) -> PreparedSurfaceProjection {
     if parts.is_empty() {
         return PreparedSurfaceProjection::Empty;
@@ -2733,6 +2732,7 @@ fn projected_surface_from_parts_intersection(
     let mut has_index_signature = false;
 
     for surface in parts {
+        let surface = projected_surface_unwrap_or_clone(surface);
         for member in surface.members {
             merged_members.entry(member.name.clone()).or_insert(member);
         }
@@ -2744,15 +2744,17 @@ fn projected_surface_from_parts_intersection(
     let mut members = merged_members.into_values().collect::<Vec<_>>();
     members.sort_by(|left, right| left.name.cmp(&right.name));
 
-    PreparedSurfaceProjection::Surface(ProjectedSurface {
+    PreparedSurfaceProjection::Surface(std::sync::Arc::new(ProjectedSurface {
         members,
         call_signatures,
         construct_signatures,
         has_index_signature,
-    })
+    }))
 }
 
-fn projected_surface_from_parts_union(parts: Vec<ProjectedSurface>) -> PreparedSurfaceProjection {
+fn projected_surface_from_parts_union(
+    parts: Vec<std::sync::Arc<ProjectedSurface>>,
+) -> PreparedSurfaceProjection {
     if parts.is_empty() {
         return PreparedSurfaceProjection::Empty;
     }
@@ -2764,6 +2766,7 @@ fn projected_surface_from_parts_union(parts: Vec<ProjectedSurface>) -> PreparedS
     let mut total_surface_variants = 0usize;
 
     for surface in parts {
+        let surface = projected_surface_unwrap_or_clone(surface);
         if projected_surface_is_empty(&surface) {
             continue;
         }
@@ -2805,12 +2808,12 @@ fn projected_surface_from_parts_union(parts: Vec<ProjectedSurface>) -> PreparedS
         .collect::<Vec<_>>();
     members.sort_by(|left, right| left.name.cmp(&right.name));
 
-    PreparedSurfaceProjection::Surface(ProjectedSurface {
+    PreparedSurfaceProjection::Surface(std::sync::Arc::new(ProjectedSurface {
         members,
         call_signatures,
         construct_signatures,
         has_index_signature,
-    })
+    }))
 }
 
 fn apply_surface_member_modifier(
@@ -2818,11 +2821,12 @@ fn apply_surface_member_modifier(
     mut mutate: impl FnMut(&mut ProjectedMember),
 ) -> PreparedSurfaceProjection {
     match projection {
-        PreparedSurfaceProjection::Surface(mut surface) => {
+        PreparedSurfaceProjection::Surface(surface) => {
+            let mut surface = projected_surface_unwrap_or_clone(surface);
             for member in &mut surface.members {
                 mutate(member);
             }
-            PreparedSurfaceProjection::Surface(surface)
+            PreparedSurfaceProjection::Surface(std::sync::Arc::new(surface))
         }
         PreparedSurfaceProjection::Empty => PreparedSurfaceProjection::Empty,
         PreparedSurfaceProjection::Unsupported => PreparedSurfaceProjection::Unsupported,
@@ -2834,12 +2838,13 @@ fn apply_surface_member_filter(
     keep: impl Fn(&str) -> bool,
 ) -> PreparedSurfaceProjection {
     match projection {
-        PreparedSurfaceProjection::Surface(mut surface) => {
+        PreparedSurfaceProjection::Surface(surface) => {
+            let mut surface = projected_surface_unwrap_or_clone(surface);
             surface.members.retain(|member| keep(member.name.as_str()));
             if projected_surface_is_empty(&surface) {
                 PreparedSurfaceProjection::Empty
             } else {
-                PreparedSurfaceProjection::Surface(surface)
+                PreparedSurfaceProjection::Surface(std::sync::Arc::new(surface))
             }
         }
         PreparedSurfaceProjection::Empty => PreparedSurfaceProjection::Empty,
@@ -2847,21 +2852,10 @@ fn apply_surface_member_filter(
     }
 }
 
-fn string_literal_keys(expr: &TypeExpr) -> Option<Vec<String>> {
-    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
-
-    match expr {
-        TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
-        TypeExpr::Union(types) => {
-            let mut keys = Vec::with_capacity(types.len());
-            for ty in types.iter() {
-                keys.extend(string_literal_keys(ty)?);
-            }
-            Some(keys)
-        }
-        TypeExpr::Parenthesized(inner) => string_literal_keys(inner),
-        _ => None,
-    }
+fn projected_surface_unwrap_or_clone(
+    surface: std::sync::Arc<ProjectedSurface>,
+) -> ProjectedSurface {
+    std::sync::Arc::try_unwrap(surface).unwrap_or_else(|shared| shared.as_ref().clone())
 }
 
 fn prepared_type_param_substitutions(
@@ -2879,19 +2873,31 @@ fn prepared_type_param_substitutions(
         } else if let Some(default) = type_parameter.default.as_deref() {
             default.clone()
         } else {
-            TypeExpr::named(type_parameter.name.clone())
+            continue;
         };
+        if is_identity_type_param_binding(&arg, &type_parameter.name) {
+            continue;
+        }
         substitutions.insert(type_parameter.name.clone(), arg);
     }
     Some(substitutions)
 }
 
+fn is_identity_type_param_binding(expr: &TypeExpr, param_name: &str) -> bool {
+    matches!(
+        expr,
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() && name.as_ref() == param_name
+    )
+}
+
 fn substitute_type_expr_if_needed(
     expr: &TypeExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> TypeExpr {
-    if substitutions.is_empty() || !type_expr_references_type_params(expr, type_params) {
+    if substitutions.is_empty() || !type_expr_references_substitutions(expr, substitutions) {
         expr.clone()
     } else {
         substitute_type_expr(expr, substitutions)
@@ -2900,10 +2906,10 @@ fn substitute_type_expr_if_needed(
 
 fn substitute_function_expr_if_needed(
     function: &verter_semantic::analysis::type_expr::FunctionExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> verter_semantic::analysis::type_expr::FunctionExpr {
-    if substitutions.is_empty() || !function_expr_references_type_params(function, type_params) {
+    if substitutions.is_empty() || !function_expr_references_substitutions(function, substitutions)
+    {
         function.clone()
     } else {
         substitute_function_expr(function, substitutions)
@@ -2913,7 +2919,6 @@ fn substitute_function_expr_if_needed(
 fn substituted_ref_expr_if_needed(
     expr: &TypeExpr,
     name: &str,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> Option<TypeExpr> {
     if substitutions.is_empty() {
@@ -2922,7 +2927,7 @@ fn substituted_ref_expr_if_needed(
     if let Some(substituted) = substitutions.get(name) {
         return Some(substituted.clone());
     }
-    if !type_expr_references_type_params(expr, type_params) {
+    if !type_expr_references_substitutions(expr, substitutions) {
         return None;
     }
     assert_prepared_structural_substitution_slow_lane_allowed(expr);
@@ -3145,27 +3150,26 @@ fn substitute_function_expr(
     function
 }
 
-fn function_expr_references_type_params(
+fn function_expr_references_substitutions(
     function: &verter_semantic::analysis::type_expr::FunctionExpr,
-    type_params: &[verter_semantic::analysis::type_expr::TypeParam],
+    substitutions: &FxHashMap<String, TypeExpr>,
 ) -> bool {
     function.type_parameters.iter().any(|parameter| {
         parameter
             .constraint
             .as_deref()
-            .is_some_and(|constraint| type_expr_references_type_params(constraint, type_params))
+            .is_some_and(|constraint| type_expr_references_substitutions(constraint, substitutions))
             || parameter
                 .default
                 .as_deref()
-                .is_some_and(|default| type_expr_references_type_params(default, type_params))
+                .is_some_and(|default| type_expr_references_substitutions(default, substitutions))
     }) || function
         .parameters
         .iter()
-        .any(|parameter| type_expr_references_type_params(&parameter.ty, type_params))
-        || function
-            .return_type
-            .as_deref()
-            .is_some_and(|return_type| type_expr_references_type_params(return_type, type_params))
+        .any(|parameter| type_expr_references_substitutions(&parameter.ty, substitutions))
+        || function.return_type.as_deref().is_some_and(|return_type| {
+            type_expr_references_substitutions(return_type, substitutions)
+        })
 }
 
 fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
@@ -3680,9 +3684,20 @@ fn type_expr_references_type_params(
     expr: &TypeExpr,
     type_params: &[verter_semantic::analysis::type_expr::TypeParam],
 ) -> bool {
-    use rustc_hash::FxHashSet;
+    type_expr_references_names(expr, &|name| {
+        type_params.iter().any(|param| param.name == name)
+    })
+}
 
-    fn visit(expr: &TypeExpr, type_param_names: &FxHashSet<&str>) -> bool {
+fn type_expr_references_substitutions(
+    expr: &TypeExpr,
+    substitutions: &FxHashMap<String, TypeExpr>,
+) -> bool {
+    type_expr_references_names(expr, &|name| substitutions.contains_key(name))
+}
+
+fn type_expr_references_names(expr: &TypeExpr, contains_name: &impl Fn(&str) -> bool) -> bool {
+    fn visit(expr: &TypeExpr, contains_name: &impl Fn(&str) -> bool) -> bool {
         match expr {
             TypeExpr::Primitive(_)
             | TypeExpr::Literal(_)
@@ -3694,41 +3709,39 @@ fn type_expr_references_type_params(
                 name,
                 type_arguments,
             } => {
-                type_param_names.contains(name.as_ref())
-                    || type_arguments
-                        .iter()
-                        .any(|arg| visit(arg, type_param_names))
+                contains_name(name.as_ref())
+                    || type_arguments.iter().any(|arg| visit(arg, contains_name))
             }
             TypeExpr::TypeParameter(param) => {
-                type_param_names.contains(param.name.as_str())
+                contains_name(param.name.as_str())
                     || param
                         .constraint
                         .as_deref()
-                        .is_some_and(|constraint| visit(constraint, type_param_names))
+                        .is_some_and(|constraint| visit(constraint, contains_name))
                     || param
                         .default
                         .as_deref()
-                        .is_some_and(|default| visit(default, type_param_names))
+                        .is_some_and(|default| visit(default, contains_name))
             }
             TypeExpr::Parenthesized(inner)
             | TypeExpr::Array { element: inner, .. }
             | TypeExpr::KeyOf(inner)
-            | TypeExpr::Rest(inner) => visit(inner, type_param_names),
+            | TypeExpr::Rest(inner) => visit(inner, contains_name),
             TypeExpr::Tuple { elements, .. } => elements
                 .iter()
-                .any(|element| visit(&element.ty, type_param_names)),
+                .any(|element| visit(&element.ty, contains_name)),
             TypeExpr::Union(types)
             | TypeExpr::Intersection(types)
             | TypeExpr::TemplateLiteral {
                 expressions: types, ..
-            } => types.iter().any(|ty| visit(ty, type_param_names)),
+            } => types.iter().any(|ty| visit(ty, contains_name)),
             TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
                 verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                    visit(&property.ty, type_param_names)
+                    visit(&property.ty, contains_name)
                 }
                 verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
-                    visit(&signature.key_type, type_param_names)
-                        || visit(&signature.value_type, type_param_names)
+                    visit(&signature.key_type, contains_name)
+                        || visit(&signature.value_type, contains_name)
                 }
                 verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
                 | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
@@ -3737,47 +3750,47 @@ fn type_expr_references_type_params(
                     function
                         .parameters
                         .iter()
-                        .any(|parameter| visit(&parameter.ty, type_param_names))
+                        .any(|parameter| visit(&parameter.ty, contains_name))
                         || function
                             .return_type
                             .as_deref()
-                            .is_some_and(|return_type| visit(return_type, type_param_names))
+                            .is_some_and(|return_type| visit(return_type, contains_name))
                 }
                 verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
                     method
                         .function
                         .parameters
                         .iter()
-                        .any(|parameter| visit(&parameter.ty, type_param_names))
+                        .any(|parameter| visit(&parameter.ty, contains_name))
                         || method
                             .function
                             .return_type
                             .as_deref()
-                            .is_some_and(|return_type| visit(return_type, type_param_names))
+                            .is_some_and(|return_type| visit(return_type, contains_name))
                 }
             }),
             TypeExpr::Function(function) => {
                 function
                     .parameters
                     .iter()
-                    .any(|parameter| visit(&parameter.ty, type_param_names))
+                    .any(|parameter| visit(&parameter.ty, contains_name))
                     || function
                         .return_type
                         .as_deref()
-                        .is_some_and(|return_type| visit(return_type, type_param_names))
+                        .is_some_and(|return_type| visit(return_type, contains_name))
                     || function.type_parameters.iter().any(|parameter| {
                         parameter
                             .constraint
                             .as_deref()
-                            .is_some_and(|constraint| visit(constraint, type_param_names))
+                            .is_some_and(|constraint| visit(constraint, contains_name))
                             || parameter
                                 .default
                                 .as_deref()
-                                .is_some_and(|default| visit(default, type_param_names))
+                                .is_some_and(|default| visit(default, contains_name))
                     })
             }
             TypeExpr::IndexedAccess { object, index } => {
-                visit(object, type_param_names) || visit(index, type_param_names)
+                visit(object, contains_name) || visit(index, contains_name)
             }
             TypeExpr::Conditional {
                 check,
@@ -3785,10 +3798,10 @@ fn type_expr_references_type_params(
                 true_type,
                 false_type,
             } => {
-                visit(check, type_param_names)
-                    || visit(extends, type_param_names)
-                    || visit(true_type, type_param_names)
-                    || visit(false_type, type_param_names)
+                visit(check, contains_name)
+                    || visit(extends, contains_name)
+                    || visit(true_type, contains_name)
+                    || visit(false_type, contains_name)
             }
             TypeExpr::Mapped {
                 source,
@@ -3796,20 +3809,16 @@ fn type_expr_references_type_params(
                 name_type,
                 ..
             } => {
-                visit(source, type_param_names)
-                    || visit(value, type_param_names)
+                visit(source, contains_name)
+                    || visit(value, contains_name)
                     || name_type
                         .as_deref()
-                        .is_some_and(|name_type| visit(name_type, type_param_names))
+                        .is_some_and(|name_type| visit(name_type, contains_name))
             }
         }
     }
 
-    let type_param_names: FxHashSet<&str> = type_params
-        .iter()
-        .map(|param| param.name.as_str())
-        .collect();
-    !type_param_names.is_empty() && visit(expr, &type_param_names)
+    visit(expr, contains_name)
 }
 
 #[cfg(test)]
@@ -4327,6 +4336,74 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     }
 
     #[test]
+    fn project_prepared_root_surface_reuses_cached_surface_instance() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/base.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let first = query_engine
+            .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
+            .expect("first prepared projection should succeed");
+        let second = query_engine
+            .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
+            .expect("repeat prepared projection should hit the request-local cache");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeat prepared root-surface projections should reuse the same cached surface handle instead of cloning the full projected surface",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "shared prepared surface handles must stay off the semantic solver",
+        );
+    }
+
+    #[test]
     fn project_prepared_type_surface_shape_matches_expr_roundtrip_without_solver() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
@@ -4463,6 +4540,74 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             query_engine.solve_count(),
             0,
             "prepared projection must stay solver-free while collapsing duplicate decl lookups",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_reuses_empty_substitution_cache_for_identity_forwarding()
+    {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/base.ts".to_string(),
+            Arc::from(
+                r#"
+export interface RootProps<T> {
+  open?: boolean
+  value?: T
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { RootProps } from './base'
+
+export type IdentityProps<T> = RootProps<T>
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let identity_surface = query_engine
+            .project_prepared_type_surface_expr("/src/App.vue", "IdentityProps")
+            .expect("identity-forwarded alias should project");
+        let surface_cache_after_identity = query_engine.debug_prepared_surface_cache_len();
+
+        let root_surface = query_engine
+            .project_prepared_type_surface_expr("/src/base.ts", "RootProps")
+            .expect("direct root surface should project");
+
+        assert_eq!(
+            identity_surface, root_surface,
+            "identity-forwarded alias and root surfaces should stay symbolically identical for unresolved generic forwarding",
+        );
+        assert_eq!(
+            query_engine.debug_prepared_surface_cache_len(),
+            surface_cache_after_identity,
+            "identity-forwarded unresolved generic args should reuse the canonical empty-substitution surface cache entry",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "identity-forwarded cache reuse must stay solver-free",
         );
     }
 
@@ -5542,6 +5687,50 @@ export interface Props<T extends { base?: string } = { base?: string }> {
     }
 
     #[test]
+    fn project_prepared_type_surface_expr_skips_noop_unbound_type_param_substitution() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+export type Wrapper<T, U> = U
+export type Concrete = Wrapper<string>
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+        assert!(
+            query_engine
+                .project_prepared_type_surface_expr("/src/App.vue", "Concrete")
+                .is_none(),
+            "unbound generic forwarding should stay symbolic instead of taking the structural substitution slow lane",
+        );
+        assert_eq!(
+            query_engine.solve_count(),
+            0,
+            "no-op unbound generic forwarding must remain solver-free",
+        );
+    }
+
+    #[test]
     fn type_expr_references_type_params_detects_nested_member_routes() {
         let expr = TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::named("Button")),
@@ -5556,6 +5745,20 @@ export interface Props<T extends { base?: string } = { base?: string }> {
         assert!(
             type_expr_references_type_params(&expr, &params),
             "type-parameter detection should reject member routes rooted at a type parameter",
+        );
+    }
+
+    #[test]
+    fn type_expr_references_substitutions_ignores_unbound_type_params() {
+        let expr = TypeExpr::named("U");
+        let substitutions = rustc_hash::FxHashMap::from_iter([(
+            "T".to_string(),
+            TypeExpr::Primitive(verter_semantic::analysis::type_expr::PrimitiveName::String),
+        )]);
+
+        assert!(
+            !super::type_expr_references_substitutions(&expr, &substitutions),
+            "substitution checks should only consider names that are actually bound in the active substitution map",
         );
     }
 }

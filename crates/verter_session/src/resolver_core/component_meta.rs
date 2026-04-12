@@ -56,6 +56,12 @@ pub struct ResolvedMacroMeta {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedImportedMacroSurface {
+    pub declaration: ResolvedTypeDeclaration,
+    pub elements: ResolvedElements,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedJsdocBlock {
     pub description: Option<String>,
     pub tags: Vec<ResolvedJsdocTag>,
@@ -162,6 +168,38 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         visiting: &mut FxHashSet<(String, String)>,
     ) -> Option<ResolvedElements>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_imported_macro_surface(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        exported_name: &str,
+        tracked_deps: &mut BTreeSet<String>,
+        resolution_deps: &mut BTreeSet<String>,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+        visiting: &mut FxHashSet<(String, String)>,
+    ) -> Option<ResolvedImportedMacroSurface>
+    where
+        Self: Sized,
+    {
+        let dep_canonical =
+            self.resolve_type_dependency_canonical(owner_canonical, import_source)?;
+        let declaration = self.resolve_type_declaration(dep_canonical.as_str(), exported_name);
+        let elements = self.resolve_macro_elements(
+            owner_canonical,
+            import_source,
+            exported_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            visiting,
+        )?;
+        Some(ResolvedImportedMacroSurface {
+            declaration,
+            elements,
+        })
+    }
+
     fn resolve_jsdoc_block(
         &self,
         canonical_source: &str,
@@ -194,6 +232,25 @@ fn raw_macro_surface_is_authoritative(mac: &AnalyzedMacro) -> bool {
         AnalyzedMacroKind::DefineSlots => false,
         AnalyzedMacroKind::DefineExpose => !mac.expose_fields.is_empty(),
         AnalyzedMacroKind::DefineOptions => false,
+    }
+}
+
+fn skip_macro_declaration_metadata_for_purpose(purpose: ComponentMetaResolutionPurpose) -> bool {
+    purpose == ComponentMetaResolutionPurpose::Fallthrough
+}
+
+fn placeholder_type_declaration(
+    requested_name: &str,
+    resolved_name: &str,
+) -> ResolvedTypeDeclaration {
+    ResolvedTypeDeclaration {
+        requested_name: requested_name.to_string(),
+        declaration_id: None,
+        resolved_name: resolved_name.to_string(),
+        canonical_source: String::new(),
+        span: verter_span::Span::default(),
+        kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
+        text: None,
     }
 }
 
@@ -253,20 +310,47 @@ where
         let dep_canonical = host
             .resolve_type_dependency_canonical(owner_canonical, &dep.import_source)
             .unwrap_or_default();
-        let declaration = host.resolve_type_declaration(&dep_canonical, dep_exported_name.as_ref());
-        let jsdoc = host.resolve_jsdoc_block(
-            declaration.canonical_source.as_str(),
-            declaration.span,
-            expanded,
-            &mut tracked_deps,
-            &mut cache,
-            &mut visiting,
-        );
+        let skip_declaration_metadata = skip_macro_declaration_metadata_for_purpose(purpose);
+        let mut resolution_deps = BTreeSet::new();
+        let mut imported_surface = if expanded && !should_ignore_external_macro_type(dep) {
+            host.resolve_imported_macro_surface(
+                owner_canonical,
+                &dep.import_source,
+                dep_exported_name.as_ref(),
+                &mut tracked_deps,
+                &mut resolution_deps,
+                &mut cache,
+                &mut visiting,
+            )
+        } else {
+            None
+        };
+        let declaration = if skip_declaration_metadata {
+            placeholder_type_declaration(dep_exported_name.as_ref(), dep_exported_name.as_ref())
+        } else if let Some(surface) = imported_surface.as_ref() {
+            surface.declaration.clone()
+        } else {
+            host.resolve_type_declaration(&dep_canonical, dep_exported_name.as_ref())
+        };
+        let jsdoc = if skip_declaration_metadata {
+            None
+        } else {
+            host.resolve_jsdoc_block(
+                declaration.canonical_source.as_str(),
+                declaration.span,
+                expanded,
+                &mut tracked_deps,
+                &mut cache,
+                &mut visiting,
+            )
+        };
 
         if !dep_canonical.is_empty() {
             tracked_deps.insert(dep_canonical.clone());
         }
-        if !declaration.canonical_source.is_empty() && declaration.canonical_source != dep_canonical
+        if !skip_declaration_metadata
+            && !declaration.canonical_source.is_empty()
+            && declaration.canonical_source != dep_canonical
         {
             tracked_deps.insert(declaration.canonical_source.clone());
         }
@@ -305,17 +389,26 @@ where
             continue;
         }
 
-        let mut resolution_deps = BTreeSet::new();
-        if let Some(elements) = host.resolve_macro_elements(
-            owner_canonical,
-            &dep.import_source,
-            dep_exported_name.as_ref(),
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-        ) {
-            let declaration_source = host.read_source(declaration.canonical_source.as_str());
+        let imported_elements = imported_surface
+            .take()
+            .map(|surface| surface.elements)
+            .or_else(|| {
+                host.resolve_macro_elements(
+                    owner_canonical,
+                    &dep.import_source,
+                    dep_exported_name.as_ref(),
+                    &mut tracked_deps,
+                    &mut resolution_deps,
+                    &mut cache,
+                    &mut visiting,
+                )
+            });
+        if let Some(elements) = imported_elements {
+            let declaration_source = if skip_declaration_metadata {
+                None
+            } else {
+                host.read_source(declaration.canonical_source.as_str())
+            };
             let projected =
                 project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
             let package_backed_dep = dep_canonical.contains("/node_modules/")
@@ -404,20 +497,32 @@ where
                             || !projected.slots.is_empty()
                             || !projected.native_props.is_empty()
                         {
-                            let declaration = resolve_local_type_declaration(
-                                host,
-                                owner_canonical,
-                                resolved.name.as_str(),
-                                resolved.span,
-                            );
-                            let jsdoc = host.resolve_jsdoc_block(
-                                owner_canonical,
-                                resolved.span,
-                                true,
-                                &mut tracked_deps,
-                                &mut cache,
-                                &mut visiting,
-                            );
+                            let declaration =
+                                if skip_macro_declaration_metadata_for_purpose(purpose) {
+                                    placeholder_type_declaration(
+                                        resolved.name.as_str(),
+                                        resolved.name.as_str(),
+                                    )
+                                } else {
+                                    resolve_local_type_declaration(
+                                        host,
+                                        owner_canonical,
+                                        resolved.name.as_str(),
+                                        resolved.span,
+                                    )
+                                };
+                            let jsdoc = if skip_macro_declaration_metadata_for_purpose(purpose) {
+                                None
+                            } else {
+                                host.resolve_jsdoc_block(
+                                    owner_canonical,
+                                    resolved.span,
+                                    true,
+                                    &mut tracked_deps,
+                                    &mut cache,
+                                    &mut visiting,
+                                )
+                            };
                             resolved_macros.push(ResolvedMacroMeta {
                                 macro_index,
                                 macro_kind: mac.kind,
@@ -452,12 +557,19 @@ where
                     });
                     resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
                         name: resolved.name.clone(),
-                        declaration: resolve_local_type_declaration(
-                            host,
-                            owner_canonical,
-                            resolved.name.as_str(),
-                            resolved.span,
-                        ),
+                        declaration: if skip_macro_declaration_metadata_for_purpose(purpose) {
+                            placeholder_type_declaration(
+                                resolved.name.as_str(),
+                                resolved.name.as_str(),
+                            )
+                        } else {
+                            resolve_local_type_declaration(
+                                host,
+                                owner_canonical,
+                                resolved.name.as_str(),
+                                resolved.span,
+                            )
+                        },
                     });
                 }
             }
@@ -492,12 +604,13 @@ mod tests {
     use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
     use std::collections::BTreeMap;
     use verter_compiler::utils::oxc::vue::resolve_type::{
-        ResolvedMemberVisibility, ResolvedProp, RuntimeType,
+        ResolvedEmit, ResolvedEmitSignature, ResolvedMemberVisibility, ResolvedProp, RuntimeType,
     };
     use verter_semantic::analysis::type_eval::DeclarationId;
     use verter_semantic::analysis::type_expr::PrimitiveName;
     use verter_semantic::analysis::types::{
-        AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, ResolvedLocalType,
+        AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
+        ResolvedLocalType,
     };
     use verter_span::Span;
 
@@ -622,6 +735,316 @@ mod tests {
         ) -> Vec<FactVersionRef> {
             Vec::new()
         }
+    }
+
+    struct CombinedSurfaceTestHost {
+        source: String,
+        imported_surface_calls: std::cell::Cell<usize>,
+    }
+
+    impl crate::resolver_core::DeclarationMetadataResolver for CombinedSurfaceTestHost {
+        fn resolve_export_target(
+            &self,
+            _dep_canonical: &str,
+            _requested_name: &str,
+        ) -> Option<ResolvedExportTarget> {
+            None
+        }
+
+        fn get_export_span_follow_reexports(
+            &self,
+            _dep_canonical: &str,
+            _requested_name: &str,
+        ) -> Option<Span> {
+            None
+        }
+
+        fn read_source(&self, _canonical_source: &str) -> Option<String> {
+            Some(self.source.clone())
+        }
+
+        fn type_declaration_id(
+            &self,
+            _canonical_source: &str,
+            _resolved_name: &str,
+        ) -> Option<DeclarationId> {
+            None
+        }
+
+        fn resolve_type_dependency_canonical(
+            &self,
+            _from_canonical: &str,
+            _import_source: &str,
+        ) -> Option<String> {
+            Some("/dep.ts".to_string())
+        }
+    }
+
+    impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
+        type Snapshot = TestSnapshot;
+        type EvalContext = ();
+
+        fn resolve_type_declaration(
+            &self,
+            _dep_canonical: &str,
+            _requested_name: &str,
+        ) -> ResolvedTypeDeclaration {
+            panic!(
+                "resolve_component_meta_parts should use the combined imported-macro surface path"
+            );
+        }
+
+        fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport] {
+            &snapshot.imports
+        }
+
+        fn snapshot_macros<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedMacro] {
+            &snapshot.macros
+        }
+
+        fn snapshot_macro_type_deps<'a>(
+            &self,
+            snapshot: &'a Self::Snapshot,
+        ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
+            &snapshot.macro_type_deps
+        }
+
+        fn build_eval_outputs(
+            &self,
+            _owner_canonical: &str,
+            _snapshot: &Self::Snapshot,
+            _eval_context: Option<&Self::EvalContext>,
+            _purpose: ComponentMetaResolutionPurpose,
+        ) -> ComponentMetaEvalOutputs {
+            ComponentMetaEvalOutputs::default()
+        }
+
+        fn resolve_macro_elements(
+            &self,
+            _owner_canonical: &str,
+            _import_source: &str,
+            _exported_name: &str,
+            _tracked_deps: &mut BTreeSet<String>,
+            _resolution_deps: &mut BTreeSet<String>,
+            _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+            _visiting: &mut FxHashSet<(String, String)>,
+        ) -> Option<ResolvedElements> {
+            panic!("resolve_component_meta_parts should not separately ask for imported macro elements");
+        }
+
+        fn resolve_imported_macro_surface(
+            &self,
+            _owner_canonical: &str,
+            _import_source: &str,
+            exported_name: &str,
+            _tracked_deps: &mut BTreeSet<String>,
+            _resolution_deps: &mut BTreeSet<String>,
+            _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+            _visiting: &mut FxHashSet<(String, String)>,
+        ) -> Option<ResolvedImportedMacroSurface> {
+            self.imported_surface_calls
+                .set(self.imported_surface_calls.get() + 1);
+            Some(ResolvedImportedMacroSurface {
+                declaration: ResolvedTypeDeclaration {
+                    requested_name: exported_name.to_string(),
+                    declaration_id: None,
+                    resolved_name: "Props".to_string(),
+                    canonical_source: "/dep.ts".to_string(),
+                    span: Span::new(0, 29),
+                    kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+                    text: Some("export interface Props { label: string }".to_string()),
+                },
+                elements: ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 29),
+                        key: Span::new(24, 29),
+                        key_name: Some("label".to_string()),
+                        optional: false,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: Some(Span::new(31, 37)),
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    emits: vec![ResolvedEmit {
+                        span: Span::new(0, 24),
+                        name: "save".to_string(),
+                        name_span: None,
+                        signature: ResolvedEmitSignature::Tuple {
+                            tuple_text: "[value: string]".to_string(),
+                        },
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            })
+        }
+
+        fn resolve_jsdoc_block(
+            &self,
+            _canonical_source: &str,
+            _span: Span,
+            _expanded: bool,
+            _tracked_deps: &mut BTreeSet<String>,
+            _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+            _visiting: &mut FxHashSet<(String, String)>,
+        ) -> Option<ResolvedJsdocBlock> {
+            None
+        }
+
+        fn sync_transitive_macro_type_dependencies(
+            &self,
+            _canonical_id: &str,
+            _tracked_deps: &BTreeSet<String>,
+        ) {
+        }
+
+        fn current_dependency_fact_versions(
+            &self,
+            _canonical: &str,
+            _tracked_deps: &BTreeSet<String>,
+        ) -> Vec<FactVersionRef> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
+        let host = CombinedSurfaceTestHost {
+            source: "export interface Props { label: string }".to_string(),
+            imported_surface_calls: std::cell::Cell::new(0),
+        };
+        let snapshot = TestSnapshot {
+            imports: vec![AnalyzedImport {
+                source: "./dep".to_string(),
+                is_type_only: true,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "Props".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: Some("Props".to_string()),
+                    is_type_only: true,
+                    vue_api: None,
+                    span: Span::new(0, 5),
+                }],
+                span: Span::new(0, 26),
+                resolved_canonical_id: Some("/dep.ts".to_string()),
+            }],
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string()],
+                binding_name: None,
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(0, 20),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                macro_index: 0,
+                import_source: "./dep".to_string(),
+                type_name: "Props".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_span: Span::new(0, 20),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert_eq!(
+            host.imported_surface_calls.get(),
+            1,
+            "expanded imported-macro resolution should use the combined surface path exactly once",
+        );
+        assert_eq!(resolved.resolved_macros.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].props[0].name, "label");
+        assert_eq!(
+            resolved.resolved_macros[0].declaration.canonical_source, "/dep.ts",
+            "combined imported-macro resolution should still preserve declaration ownership",
+        );
+    }
+
+    #[test]
+    fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surface() {
+        let host = CombinedSurfaceTestHost {
+            source: "export type Emits = { save: [value: string] }".to_string(),
+            imported_surface_calls: std::cell::Cell::new(0),
+        };
+        let snapshot = TestSnapshot {
+            imports: vec![AnalyzedImport {
+                source: "./dep".to_string(),
+                is_type_only: true,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "Emits".to_string(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: Some("Emits".to_string()),
+                    is_type_only: true,
+                    vue_api: None,
+                    span: Span::new(0, 5),
+                }],
+                span: Span::new(0, 26),
+                resolved_canonical_id: Some("/dep.ts".to_string()),
+            }],
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["Emits".to_string()],
+                binding_name: Some("emit".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(0, 20),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                macro_index: 0,
+                import_source: "./dep".to_string(),
+                type_name: "Emits".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineEmits,
+                macro_span: Span::new(0, 20),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Fallthrough,
+        );
+
+        assert_eq!(
+            host.imported_surface_calls.get(),
+            1,
+            "fallthrough imported-macro resolution should still use the combined surface path",
+        );
+        assert_eq!(resolved.resolved_macros.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].emits.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].emits[0].name, "save");
+        assert_eq!(
+            resolved.resolved_macros[0].declaration.canonical_source, "",
+            "fallthrough should still skip declaration ownership materialization",
+        );
     }
 
     #[test]

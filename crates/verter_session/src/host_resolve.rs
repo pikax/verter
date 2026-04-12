@@ -61,6 +61,83 @@ type FrontierCompanionPlanCache = rustc_hash::FxHashMap<
     Arc<[PlannedFrontierCompanion]>,
 >;
 
+struct DirectComponentMetaDeclarationResolver<'a> {
+    host: &'a VerterHost,
+    store_view: Option<&'a crate::resolver_store::HostStoreView>,
+}
+
+impl crate::resolver_core::DeclarationMetadataResolver
+    for DirectComponentMetaDeclarationResolver<'_>
+{
+    fn resolve_export_target(
+        &self,
+        _dep_canonical: &str,
+        _requested_name: &str,
+    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+        None
+    }
+
+    fn get_export_span_follow_reexports(
+        &self,
+        _dep_canonical: &str,
+        _requested_name: &str,
+    ) -> Option<verter_span::Span> {
+        None
+    }
+
+    fn read_source(&self, canonical_source: &str) -> Option<String> {
+        self.host
+            .read_analysis_source_in_view(canonical_source, self.store_view)
+            .map(|source| source.to_string())
+    }
+
+    fn type_declaration_id(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+        self.host.local_type_declaration_id_in_view(
+            canonical_source,
+            resolved_name,
+            self.store_view,
+        )
+    }
+
+    fn resolve_type_dependency_canonical(
+        &self,
+        _from_canonical: &str,
+        _import_source: &str,
+    ) -> Option<String> {
+        None
+    }
+
+    fn resolve_local_type_symbol_metadata(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
+        let analysis = self
+            .host
+            .external_type_analysis_in_view(canonical_source, self.store_view)?;
+        let symbol = analysis.local_type_symbol(resolved_name)?;
+        let kind = match symbol.kind {
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
+                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+            }
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Interface => {
+                crate::resolver_core::ResolvedDeclarationKind::Interface
+            }
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::Class => {
+                crate::resolver_core::ResolvedDeclarationKind::Class
+            }
+        };
+        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
+            kind,
+            span: symbol.span,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedFrontierCompanion {
     alias: String,
@@ -1439,7 +1516,7 @@ impl VerterHost {
         Ok(resolved)
     }
 
-    pub(crate) fn resolve_component_meta_macro_elements_in_view(
+    fn resolve_component_meta_macro_elements_target_in_view(
         &self,
         owner_canonical: &str,
         import_source: &str,
@@ -1448,19 +1525,12 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
         store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
-        let _trace = component_meta_trace_scope!(
-            "resolve_component_meta_macro_elements",
-            format!(
-                "owner={} import={} type={} store_view={} cache_entries={}",
-                owner_canonical,
-                import_source,
-                type_name,
-                store_view.is_some(),
-                cache.len(),
-            ),
-        );
-
+    ) -> Option<(
+        String,
+        String,
+        String,
+        verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements,
+    )> {
         let dep_canonical = self.resolve_loaded_dependency_canonical_in_view(
             owner_canonical,
             import_source,
@@ -1472,8 +1542,13 @@ impl VerterHost {
         resolution_deps.insert(dep_canonical.clone());
 
         let cache_key = (dep_canonical.clone(), type_name.to_string());
-        if let Some(cached) = cache.get(&cache_key) {
-            return cached.clone();
+        if let Some(cached) = cache.get(&cache_key).cloned() {
+            let elements = cached?;
+            let (target_canonical, target_name) =
+                self.resolve_imported_type_root_in_view(dep_canonical.as_str(), type_name, store_view);
+            tracked_deps.insert(target_canonical.clone());
+            resolution_deps.insert(target_canonical.clone());
+            return Some((dep_canonical, target_canonical, target_name, elements));
         }
 
         let (seed_canonical, seed_type_name) =
@@ -1484,7 +1559,8 @@ impl VerterHost {
         let seed_target_key = (seed_canonical.clone(), seed_type_name.clone());
         if let Some(cached) = cache.get(&seed_target_key).cloned() {
             cache.insert(cache_key, cached.clone());
-            return cached;
+            let elements = cached?;
+            return Some((dep_canonical, seed_canonical, seed_type_name, elements));
         }
 
         let mut requested_routes = FrontierRequestedRoutes::default();
@@ -1525,7 +1601,13 @@ impl VerterHost {
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key, cached.clone());
-            return cached;
+            let elements = cached?;
+            return Some((
+                dep_canonical,
+                effective_dep_canonical,
+                effective_type_name,
+                elements,
+            ));
         }
 
         let resolved = self
@@ -1550,7 +1632,118 @@ impl VerterHost {
 
         cache.insert(cache_key, resolved.clone());
         cache.insert(final_target_key, resolved.clone());
-        resolved
+        resolved.map(|elements| {
+            (
+                dep_canonical,
+                effective_dep_canonical,
+                effective_type_name,
+                elements,
+            )
+        })
+    }
+
+    fn build_imported_macro_declaration_from_target_in_view(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+        target_canonical: &str,
+        target_name: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+        self.provenance
+            .imported_macro_declaration_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let resolver = DirectComponentMetaDeclarationResolver {
+            host: self,
+            store_view,
+        };
+        let mut declaration = crate::resolver_core::resolve_direct_local_type_declaration(
+            &resolver,
+            target_canonical,
+            target_name,
+        )
+        .unwrap_or_else(|| {
+            crate::meta_resolve::resolve_type_declaration_in_view(
+                self,
+                dep_canonical,
+                requested_name,
+                store_view,
+            )
+        });
+        declaration.requested_name = requested_name.to_string();
+        if declaration.resolved_name.is_empty() {
+            declaration.resolved_name = target_name.to_string();
+        }
+        if declaration.canonical_source.is_empty() {
+            declaration.canonical_source = target_canonical.to_string();
+        }
+        declaration
+    }
+
+    pub(crate) fn resolve_component_meta_macro_surface_in_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
+        let _trace = component_meta_trace_scope!(
+            "resolve_component_meta_macro_elements",
+            format!(
+                "owner={} import={} type={} store_view={} cache_entries={}",
+                owner_canonical,
+                import_source,
+                type_name,
+                store_view.is_some(),
+                cache.len(),
+            ),
+        );
+
+        let (dep_canonical, effective_dep_canonical, effective_type_name, elements) = self
+            .resolve_component_meta_macro_elements_target_in_view(
+                owner_canonical,
+                import_source,
+                type_name,
+                tracked_deps,
+                resolution_deps,
+                cache,
+                store_view,
+            )?;
+        Some(crate::resolver_core::ResolvedImportedMacroSurface {
+            declaration: self.build_imported_macro_declaration_from_target_in_view(
+                dep_canonical.as_str(),
+                type_name,
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                store_view,
+            ),
+            elements,
+        })
+    }
+
+    pub(crate) fn resolve_component_meta_macro_elements_in_view(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        type_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut ExternalTypeCache,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
+        self.resolve_component_meta_macro_elements_target_in_view(
+            owner_canonical,
+            import_source,
+            type_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            store_view,
+        )
+        .map(|(_, _, _, elements)| elements)
     }
 
     fn current_type_resolution_hash_in_view(
@@ -2381,6 +2574,15 @@ impl VerterHost {
             Arc::clone(&shallow_state),
         );
         Some(shallow_state)
+    }
+
+    pub(crate) fn route_owned_shallow_state_in_view(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        let mut route_shallow_cache = RouteShallowStateCache::default();
+        self.route_shallow_state_in_view(canonical_id, store_view, &mut route_shallow_cache)
     }
 
     fn resolve_named_type_export_route_uncached_in_view(

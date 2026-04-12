@@ -5603,6 +5603,8 @@ defineProps<Props>()
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineProps<Props>()",
         &mut evaluated_types,
         &mut query_engine,
@@ -5812,6 +5814,8 @@ defineModel<boolean>('open')
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineProps<Props>()\ndefineModel<boolean>('open')",
         &mut evaluated_types,
         &mut query_engine,
@@ -6196,6 +6200,104 @@ defineExpose({ exposed })
 }
 
 #[test]
+fn compute_component_meta_state_for_fallthrough_skips_imported_declaration_metadata_and_jsdoc() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+/** Shared props docs */
+export interface Props {
+  label: string
+}
+
+/** Shared emits docs */
+export interface Emits {
+  (e: 'open', value: boolean): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Emits, Props } from './types'
+
+defineProps<Props>()
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    let store_view = host.resolver_store_view();
+    let whole_hash = store_view
+        .whole_hash("/src/App.vue")
+        .expect("whole hash should exist for the owner");
+
+    let full = host
+        .compute_component_meta_state(
+            "/src/App.vue",
+            super::ResolverMode::Expanded,
+            whole_hash,
+            Some(&store_view),
+        )
+        .expect("full expanded state should resolve");
+    let fallthrough = host
+        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .expect("fallthrough-expanded state should resolve");
+
+    let full_props = full
+        .resolved_macros
+        .iter()
+        .find(|entry| entry.type_name == "Props")
+        .expect("full state should resolve imported defineProps metadata");
+    assert_eq!(
+        full_props.declaration.canonical_source, "/src/types.ts",
+        "full expanded state should still retain imported declaration ownership",
+    );
+    assert_eq!(
+        full_props
+            .jsdoc
+            .as_ref()
+            .and_then(|block| block.description.as_deref()),
+        Some("Shared props docs"),
+        "full expanded state should still preserve imported JSDoc",
+    );
+
+    let fallthrough_props = fallthrough
+        .resolved_macros
+        .iter()
+        .find(|entry| entry.type_name == "Props")
+        .expect("fallthrough state should still materialize the imported props surface");
+    assert!(
+        fallthrough_props
+            .props
+            .iter()
+            .any(|prop| prop.name == "label"),
+        "fallthrough-expanded state must still preserve the requested defineProps surface",
+    );
+    assert!(
+        fallthrough_props.declaration.canonical_source.is_empty(),
+        "fallthrough-expanded state should skip imported declaration metadata when only the surface is needed",
+    );
+    assert!(
+        fallthrough_props.jsdoc.is_none(),
+        "fallthrough-expanded state should skip imported JSDoc resolution entirely",
+    );
+}
+
+#[test]
 fn produce_macro_object_shapes_reuses_resolved_define_emits_surface() {
     let project = make_project();
     project
@@ -6307,6 +6409,8 @@ defineEmits<Emits>()
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineEmits<Emits>()",
         &mut evaluated_types,
         &mut query_engine,
@@ -6420,6 +6524,8 @@ defineEmits<Emits>()
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineEmits<Emits>()",
         &mut evaluated_types,
         &mut query_engine,
@@ -6552,6 +6658,8 @@ defineModel<string>('searchTerm')
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineEmits<Emits>()\ndefineModel<string>('searchTerm')",
         &mut evaluated_types,
         &mut query_engine,
@@ -6727,6 +6835,8 @@ defineEmits<Emits>()
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineEmits<Emits>()",
         &mut evaluated_types,
         &mut query_engine,
@@ -6858,6 +6968,8 @@ defineSlots<Slots>()
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         "defineSlots<Slots>()",
         &mut evaluated_types,
         &mut query_engine,
@@ -7060,6 +7172,8 @@ withDefaults(defineProps<Props>(), {
         "/src/App.vue",
         &snapshot,
         &resolved_macros,
+        &[],
+        &[],
         &eval_source,
         &mut evaluated_types,
         &mut query_engine,
@@ -7764,6 +7878,8 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         &component,
         &snapshot,
         &parts.resolved_macros,
+        &parts.resolved_type_registry,
+        &parts.resolved_type_registry_meta,
         &eval_source,
         &mut evaluated_types,
         &mut query_engine,
@@ -7904,6 +8020,8 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         &component,
         &snapshot,
         &parts.resolved_macros,
+        &parts.resolved_type_registry,
+        &parts.resolved_type_registry_meta,
         &eval_source,
         &mut evaluated_types,
         &mut query_engine,
@@ -7913,6 +8031,130 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         query_engine.solve_count().saturating_sub(solves_before),
         0,
         "overlay-style owner upserts should keep ColorModeSelect on the shallow projection path instead of falling back into a semantic solve",
+    );
+}
+
+#[test]
+fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appended_registry_root_is_empty_shell(
+) {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.integration-tests/repos/nuxt-ui")
+        .canonicalize()
+        .expect("nuxt-ui integration fixture should exist");
+    let repo_root = repo_root.to_string_lossy().replace('\\', "/");
+    let component = format!("{repo_root}/src/runtime/components/color-mode/ColorModeSelect.vue");
+
+    let ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            repo_root.clone(),
+            repo_root.clone(),
+            Some(format!("{repo_root}/tsconfig.json")),
+        ),
+    ]);
+
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .expect("raw snapshot should exist");
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            &host,
+            Some(&store_view),
+            &component,
+        );
+    let mut resolver_host = super::HostComponentMetaResolver {
+        host: &host,
+        store_view: Some(&store_view),
+        shared_owner_engine: Some(std::cell::RefCell::new(
+            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
+                &owner_solver_host,
+            ),
+        )),
+    };
+    let mut parts = crate::resolver_core::resolve_component_meta_parts(
+        &resolver_host,
+        &component,
+        &snapshot,
+        true,
+        None,
+        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+    );
+    let owner_engine = resolver_host
+        .shared_owner_engine
+        .take()
+        .map(std::cell::RefCell::into_inner)
+        .expect("shared owner engine should still exist after part resolution");
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
+        &host,
+        Some(&store_view),
+        owner_engine,
+    );
+    host.append_component_meta_registry_entries(
+        &component,
+        &snapshot,
+        parts.evaluated_types.as_ref(),
+        &mut parts.resolved_type_registry,
+        &mut parts.resolved_type_registry_meta,
+        &mut parts.tracked_dependencies,
+        Some(&store_view),
+        &mut query_engine,
+    );
+    let registry_root = parts
+        .resolved_type_registry
+        .iter()
+        .find(|entry| entry.name == "ColorModeSelectProps")
+        .expect("direct macro-local root should stay seeded in the registry");
+    assert!(
+        matches!(
+            registry_root.type_expr,
+            verter_semantic::analysis::type_expr::TypeExpr::Object(_)
+        ),
+        "appended registry root should still lower to an object shell for ColorModeSelectProps",
+    );
+    let registry_root_shape = registry_entry_to_expanded_shape(&registry_root.type_expr)
+        .expect("object shell should still lower into an expanded shape");
+    assert!(
+        !has_prop_shape_surface(&registry_root_shape),
+        "the real ColorModeSelect local seed is an empty shell; if this changes, tighten the registry shortcut instead of silently trusting every object seed",
+    );
+    let facts = host
+        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .expect("component facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+    let prepared_projection_before = query_engine.debug_prepared_root_surface_projection_count();
+
+    produce_macro_object_shapes(
+        &component,
+        &snapshot,
+        &parts.resolved_macros,
+        &parts.resolved_type_registry,
+        &parts.resolved_type_registry_meta,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    assert_eq!(
+        query_engine.debug_prepared_root_surface_projection_count() - prepared_projection_before,
+        1,
+        "empty-shell registry roots must fall back to prepared projection instead of producing an empty defineProps surface",
+    );
+    assert_eq!(
+        evaluated_types.define_props.len(),
+        1,
+        "projection fallback should still synthesize the real defineProps shape",
     );
 }
 

@@ -176,7 +176,8 @@ describe("runComponentInIsolation", () => {
     expect(result.wall_ms).toBeGreaterThanOrEqual(200);
     expect(result.saw_done_line).toBe(false);
     expect(result.exit_code).toBeNull();
-  });
+    expect(result.wall_ms).toBeLessThan(2_000);
+  }, 15_000);
 
   it("returns crash for a child that exits with nonzero code", async () => {
     const tmpDir = mkdtempSync(resolve(tmpdir(), "verter-corpus-runner-"));

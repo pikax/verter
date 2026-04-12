@@ -1476,6 +1476,7 @@ pub struct MetaProvenance {
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
     pub bundle_materializations: std::sync::atomic::AtomicU64,
     pub dep_resolution_calls: std::sync::atomic::AtomicU64,
+    pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MetaProvenance {
@@ -1508,6 +1509,7 @@ impl Default for MetaProvenance {
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
+            imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1612,6 +1614,10 @@ impl std::fmt::Debug for MetaProvenance {
                 "dep_resolution_calls",
                 &self.dep_resolution_calls.load(Relaxed),
             )
+            .field(
+                "imported_macro_declaration_builds",
+                &self.imported_macro_declaration_builds.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1656,6 +1662,7 @@ impl MetaProvenance {
             bundle_cache_hits: self.bundle_cache_hits.load(Relaxed),
             bundle_materializations: self.bundle_materializations.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
+            imported_macro_declaration_builds: self.imported_macro_declaration_builds.load(Relaxed),
         }
     }
 
@@ -1690,6 +1697,7 @@ impl MetaProvenance {
         self.bundle_cache_hits.store(0, Relaxed);
         self.bundle_materializations.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
+        self.imported_macro_declaration_builds.store(0, Relaxed);
     }
 }
 
@@ -1747,6 +1755,7 @@ pub struct MetaProvenanceSnapshot {
     pub bundle_cache_hits: u64,
     pub bundle_materializations: u64,
     pub dep_resolution_calls: u64,
+    pub imported_macro_declaration_builds: u64,
 }
 
 /// Point-in-time snapshot of host performance metrics.

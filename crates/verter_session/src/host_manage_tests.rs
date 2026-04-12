@@ -6243,6 +6243,220 @@ export interface Props {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_hash_only() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file("/src/index.ts", "export { Props } from './target'\n");
+    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./target", "/src/target.ts")],
+    );
+
+    let (resolved, facts) = host
+        .resolve_direct_imported_type_root_fast_path_in_view("/src/index.ts", "Props", None)
+        .expect("direct named reexport should resolve through the fast imported-root path");
+
+    assert_eq!(
+        resolved,
+        ("/src/target.ts".to_string(), "Props".to_string()),
+        "fast imported-root proof should preserve the exact child target tuple",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/index.ts"
+        )),
+        "fast imported-root proof must track the provider file content hash",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/src/index.ts"
+        )),
+        "fast imported-root proof must track the provider route surface hash",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/target.ts"
+        )),
+        "fast imported-root proof must track the direct child file content hash",
+    );
+    assert!(
+        !facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/src/target.ts"
+        )),
+        "direct imported-root proof should not need the child's route hash when the parent directly names the target reexport",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/index.ts",
+        "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
+    );
+    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./target", "/src/target.ts")],
+    );
+
+    let view = host.resolver_store_view();
+    let (resolved, facts) = host
+        .resolve_direct_imported_type_root_fast_path_in_view("/src/index.ts", "Props", Some(&view))
+        .expect("fast imported-root proof should resolve cold child hashes under a current store view");
+
+    assert_eq!(
+        resolved,
+        ("/src/target.ts".to_string(), "Props".to_string()),
+        "store-view fast path should keep the same routed child tuple",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/target.ts"
+        )),
+        "store-view fast path must still track the cold child file content hash",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provider_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/index.ts",
+        "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
+    );
+    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./target", "/src/target.ts")],
+    );
+
+    let _ = host
+        .resolve_direct_imported_type_root_fast_path_in_view("/src/index.ts", "Props", None)
+        .expect("exported local imports should resolve through the fast imported-root path");
+
+    assert_eq!(
+        ws.read_count("/src/index.ts"),
+        1,
+        "fast imported-root proof should reuse the provider's existing route-owned shallow read when collecting provider facts",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn imported_type_root_fast_path_follows_exported_local_import_without_child_route_hash() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/index.ts",
+        "import { Props as InnerProps } from './target'\nexport { InnerProps as Props }\n",
+    );
+    ws.inject_file("/src/target.ts", "export interface Props { label: string }\n");
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    host.set_import_dependencies(
+        "/src/index.ts",
+        vec![exact_dependency("./target", "/src/target.ts")],
+    );
+
+    let (resolved, facts) = host
+        .resolve_direct_imported_type_root_fast_path_in_view("/src/index.ts", "Props", None)
+        .expect("exported local imports should resolve through the fast imported-root path");
+
+    assert_eq!(
+        resolved,
+        ("/src/target.ts".to_string(), "Props".to_string()),
+        "fast imported-root proof should follow the exported local import to the exact child target tuple",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/index.ts"
+        )),
+        "fast imported-root proof must track the provider file content hash",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/src/index.ts"
+        )),
+        "fast imported-root proof must track the provider route surface hash",
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == "/src/target.ts"
+        )),
+        "fast imported-root proof must track the direct child file content hash",
+    );
+    assert!(
+        !facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind: crate::resolver_core::DerivedFactKind::Route,
+                ..
+            } if canonical_id == "/src/target.ts"
+        )),
+        "direct imported-root proof should not need the child's route hash when the provider only re-exports the imported local binding",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
@@ -7511,6 +7725,285 @@ export interface IconProps {
             .get_any("/src/Avatar.vue")
             .is_none(),
         "symbolic imported object props should stay off ModuleFactsDb",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_macro_elements_cached_lookup_tracks_routed_target_dependencies() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/src/types.ts",
+        "export { ButtonProps } from './Button.vue'\n",
+    );
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./Button.vue", "/src/Button.vue")],
+    );
+
+    let view = host.resolver_store_view();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    let mut tracked_deps_first = std::collections::BTreeSet::new();
+    let mut resolution_deps_first = std::collections::BTreeSet::new();
+    let resolved_first = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ButtonProps",
+        &mut tracked_deps_first,
+        &mut resolution_deps_first,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved_first.is_some(),
+        "the first imported macro lookup should resolve ButtonProps",
+    );
+    assert!(
+        tracked_deps_first.contains("/src/Button.vue"),
+        "the first lookup should track the routed target canonical",
+    );
+    assert!(
+        resolution_deps_first.contains("/src/Button.vue"),
+        "the first lookup should record the routed target canonical in resolution deps",
+    );
+
+    let mut tracked_deps_second = std::collections::BTreeSet::new();
+    let mut resolution_deps_second = std::collections::BTreeSet::new();
+    let resolved_second = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ButtonProps",
+        &mut tracked_deps_second,
+        &mut resolution_deps_second,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved_second.is_some(),
+        "the warm imported macro lookup should still resolve ButtonProps",
+    );
+    assert!(
+        tracked_deps_second.contains("/src/Button.vue"),
+        "the warm lookup must keep tracking the routed target canonical, not just the barrel file",
+    );
+    assert!(
+        resolution_deps_second.contains("/src/Button.vue"),
+        "the warm lookup must keep the routed target in resolution deps for downstream fact tracking",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_macro_elements_skip_imported_declaration_builds() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+
+defineProps<ButtonProps>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file("/src/types.ts", "export { ButtonProps } from './Button.vue'\n");
+    ws.inject_file(
+        "/src/Button.vue",
+        r#"<script lang="ts">
+export interface ButtonProps {
+  label?: string
+}
+</script>
+<template><div /></template>"#,
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/src/Consumer.vue",
+        vec![exact_dependency("./types", "/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/src/types.ts",
+        vec![exact_dependency("./Button.vue", "/src/Button.vue")],
+    );
+
+    let view = host.resolver_store_view();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+
+    host.provenance().reset();
+    let resolved_elements = host.resolve_component_meta_macro_elements_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ButtonProps",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+    assert!(
+        resolved_elements.is_some(),
+        "element-only imported macro resolution should still resolve ButtonProps",
+    );
+
+    let after_elements = host.provenance().snapshot();
+    assert_eq!(
+        after_elements.imported_macro_declaration_builds,
+        0,
+        "element-only imported macro resolution should not build declaration ownership it immediately discards",
+    );
+
+    let resolved_surface = host.resolve_component_meta_macro_surface_in_view(
+        "/src/Consumer.vue",
+        "./types",
+        "ButtonProps",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+    assert!(
+        resolved_surface.is_some(),
+        "combined imported macro resolution should still resolve ButtonProps with declaration ownership",
+    );
+
+    let after_surface = host.provenance().snapshot();
+    assert_eq!(
+        after_surface.imported_macro_declaration_builds,
+        1,
+        "combined imported macro resolution should still build declaration ownership once",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn resolve_component_meta_macro_elements_keeps_active_package_target_off_module_facts() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { PackageEmits } from './types'
+
+const emit = defineEmits<PackageEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts",
+        "export type { PackageEmits } from 'pkg'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export type { PackageEmits } from './index3.d.ts'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "export interface PackageEmits {\n  (e: 'open', value?: string): void\n}\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/workspace/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/workspace/src/Consumer.vue",
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/workspace/src/types.ts",
+        vec![exact_dependency("pkg", "/workspace/node_modules/pkg/dist/index.d.ts")],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./index3.d.ts",
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    let mut tracked_deps = std::collections::BTreeSet::new();
+    let mut resolution_deps = std::collections::BTreeSet::new();
+    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
+
+    let resolved = host.resolve_component_meta_macro_elements_in_view(
+        "/workspace/src/Consumer.vue",
+        "./types",
+        "PackageEmits",
+        &mut tracked_deps,
+        &mut resolution_deps,
+        &mut cache,
+        Some(&view),
+    );
+
+    assert!(
+        resolved.is_some(),
+        "component-meta macro resolution should still resolve the package reexported emits surface",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_none(),
+        "active imported package targets should resolve from the shallow current-state/type-context path without forcing full ModuleFacts materialization",
     );
 }
 

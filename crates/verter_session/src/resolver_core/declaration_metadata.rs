@@ -321,6 +321,20 @@ pub fn resolve_local_type_declaration<R: DeclarationMetadataResolver>(
     }
 }
 
+pub fn resolve_direct_local_type_declaration<R: DeclarationMetadataResolver>(
+    resolver: &R,
+    canonical_source: &str,
+    resolved_name: &str,
+) -> Option<ResolvedTypeDeclaration> {
+    let metadata = resolver.resolve_local_type_symbol_metadata(canonical_source, resolved_name)?;
+    Some(resolve_local_type_declaration(
+        resolver,
+        canonical_source,
+        resolved_name,
+        metadata.span,
+    ))
+}
+
 fn follow_direct_type_reexport_chain<R: DeclarationMetadataResolver>(
     resolver: &R,
     dep_canonical: &str,

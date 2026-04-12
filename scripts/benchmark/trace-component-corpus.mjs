@@ -16,12 +16,11 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -89,13 +88,20 @@ function discoverVueFiles(rootDir) {
 // Process tree killing (same as run-hard-timeout.mjs)
 // ---------------------------------------------------------------------------
 
+function killWindowsProcessTree(pid) {
+  if (!pid) return;
+  const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+    detached: true,
+  });
+  killer.unref();
+}
+
 function killProcessTree(pid) {
   if (!pid) return;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
+    killWindowsProcessTree(pid);
     return;
   }
   try {
@@ -132,17 +138,49 @@ function classifyExitStatus({ exitCode, signal, timedOut, sawDoneLine, sawClosed
 }
 
 // ---------------------------------------------------------------------------
-// Parse trace log for resolve_component_meta duration
+// Parse trace log timings
 // ---------------------------------------------------------------------------
 
-function parseTraceResolveMs(tracePath) {
-  if (!existsSync(tracePath)) return null;
+const TRACE_END_LINE_RE =
+  /event=end\s+trace=\d+\s+span=\d+\s+parent=([^\s]+).*name="([^"]+)".*dur_ms=([0-9.]+)/;
+
+export function parseTraceTimingsFromContent(content) {
+  let traceResolveMs = null;
+  let traceQueryMs = 0;
+  let sawRootSpan = false;
+
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(TRACE_END_LINE_RE);
+    if (!match) {
+      continue;
+    }
+    const [, parent, name, durMsRaw] = match;
+    const durMs = Number.parseFloat(durMsRaw);
+    if (!Number.isFinite(durMs) || parent !== "-") {
+      continue;
+    }
+
+    sawRootSpan = true;
+    traceQueryMs += durMs;
+    if (name === "resolve_component_meta" && traceResolveMs === null) {
+      traceResolveMs = durMs;
+    }
+  }
+
+  return {
+    traceResolveMs,
+    traceQueryMs: sawRootSpan ? traceQueryMs : null,
+  };
+}
+
+export function parseTraceTimings(tracePath) {
+  if (!existsSync(tracePath)) {
+    return { traceResolveMs: null, traceQueryMs: null };
+  }
   try {
-    const content = readFileSync(tracePath, "utf8");
-    const match = content.match(/name="resolve_component_meta".*dur_ms=([0-9.]+)/);
-    return match ? Number.parseFloat(match[1]) : null;
+    return parseTraceTimingsFromContent(readFileSync(tracePath, "utf8"));
   } catch {
-    return null;
+    return { traceResolveMs: null, traceQueryMs: null };
   }
 }
 
@@ -192,14 +230,12 @@ async function runComponent(componentRelPath, componentToken, config) {
 
   const startMs = performance.now();
 
-  const nodeExe = process.platform === "win32" ? `"${process.execPath}"` : process.execPath;
-
   const child = spawn(
-    nodeExe,
+    process.execPath,
     ["--expose-gc", "--import", tsxLoaderPath, traceComponentPath, componentToken],
     {
       cwd: repoRoot,
-      shell: process.platform === "win32",
+      shell: false,
       detached: process.platform !== "win32",
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -217,15 +253,40 @@ async function runComponent(componentRelPath, componentToken, config) {
   });
 
   let timedOut = false;
+  let childClosed = false;
+  let windowsTreeKillFallback = null;
   const timer = setTimeout(() => {
     timedOut = true;
+    if (process.platform === "win32") {
+      try {
+        if (child.pid) {
+          process.kill(child.pid, "SIGKILL");
+        }
+      } catch {
+        killWindowsProcessTree(child.pid);
+        return;
+      }
+      windowsTreeKillFallback = setTimeout(() => {
+        if (!childClosed) {
+          killWindowsProcessTree(child.pid);
+        }
+      }, 250);
+      windowsTreeKillFallback.unref();
+      return;
+    }
     killProcessTree(child.pid);
   }, config.timeoutMs);
   timer.unref();
 
   const { exitCode, signal } = await new Promise((resolvePromise) => {
     child.once("error", () => resolvePromise({ exitCode: 1, signal: null }));
-    child.once("close", (code, sig) => resolvePromise({ exitCode: code, signal: sig }));
+    child.once("close", (code, sig) => {
+      childClosed = true;
+      if (windowsTreeKillFallback) {
+        clearTimeout(windowsTreeKillFallback);
+      }
+      resolvePromise({ exitCode: code, signal: sig });
+    });
   });
 
   clearTimeout(timer);
@@ -244,7 +305,7 @@ async function runComponent(componentRelPath, componentToken, config) {
     sawClosedLine: stdoutFields.sawClosedLine,
   });
 
-  const traceResolveMs = parseTraceResolveMs(tracePath);
+  const { traceResolveMs, traceQueryMs } = parseTraceTimings(tracePath);
 
   return {
     component: componentRelPath,
@@ -252,6 +313,7 @@ async function runComponent(componentRelPath, componentToken, config) {
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
     trace_resolve_ms: traceResolveMs,
+    trace_query_ms: traceQueryMs,
     exit_code: exitCode,
     signal,
     stdout_path: stdoutPath,
@@ -268,7 +330,7 @@ async function runComponent(componentRelPath, componentToken, config) {
 // Main
 // ---------------------------------------------------------------------------
 
-async function main() {
+export async function main() {
   const config = parseArgs(process.argv.slice(2));
 
   const componentsDir = resolve(config.uiRoot, "src", "runtime", "components");
@@ -344,7 +406,9 @@ async function main() {
   process.exit(failCount > 0 ? 1 : 0);
 }
 
-main().catch((err) => {
-  console.error("FATAL:", err);
-  process.exit(2);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error("FATAL:", err);
+    process.exit(2);
+  });
+}

@@ -8,7 +8,7 @@
 
 import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ export interface CorpusTraceResult {
   wall_ms: number;
   query_ms_from_stdout: number | null;
   trace_resolve_ms: number | null;
+  trace_query_ms: number | null;
   exit_code: number | null;
   signal: string | null;
   stdout_path: string;
@@ -108,15 +109,24 @@ export function parseStdoutFields(stdout: string): StdoutFields {
 // killProcessTree — hard kill for child process group
 // ---------------------------------------------------------------------------
 
+function killWindowsProcessTree(pid: number | undefined): void {
+  if (!pid) {
+    return;
+  }
+  const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+    detached: true,
+  });
+  killer.unref();
+}
+
 function killProcessTree(pid: number | undefined): void {
   if (!pid) {
     return;
   }
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
+    killWindowsProcessTree(pid);
     return;
   }
   try {
@@ -168,10 +178,9 @@ export async function runComponentInIsolation(
 
   const startMs = performance.now();
 
-  const command = process.platform === "win32" ? `"${options.command}"` : options.command;
-  const child = spawn(command, options.args, {
+  const child = spawn(options.command, options.args, {
     cwd: process.cwd(),
-    shell: process.platform === "win32",
+    shell: false,
     detached: process.platform !== "win32",
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -195,8 +204,27 @@ export async function runComponentInIsolation(
   });
 
   let timedOut = false;
+  let childClosed = false;
+  let windowsTreeKillFallback: NodeJS.Timeout | null = null;
   const timer = setTimeout(() => {
     timedOut = true;
+    if (process.platform === "win32") {
+      try {
+        if (child.pid) {
+          process.kill(child.pid, "SIGKILL");
+        }
+      } catch {
+        killWindowsProcessTree(child.pid);
+        return;
+      }
+      windowsTreeKillFallback = setTimeout(() => {
+        if (!childClosed) {
+          killWindowsProcessTree(child.pid);
+        }
+      }, 250);
+      windowsTreeKillFallback.unref();
+      return;
+    }
     killProcessTree(child.pid);
   }, options.timeoutMs);
   timer.unref();
@@ -206,7 +234,13 @@ export async function runComponentInIsolation(
     signal: string | null;
   }>((resolveResult) => {
     child.once("error", () => resolveResult({ exitCode: 1, signal: null }));
-    child.once("close", (code, sig) => resolveResult({ exitCode: code, signal: sig }));
+    child.once("close", (code, sig) => {
+      childClosed = true;
+      if (windowsTreeKillFallback) {
+        clearTimeout(windowsTreeKillFallback);
+      }
+      resolveResult({ exitCode: code, signal: sig });
+    });
   });
 
   clearTimeout(timer);
@@ -232,6 +266,7 @@ export async function runComponentInIsolation(
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
     trace_resolve_ms: null, // Populated by trace log parsing if needed
+    trace_query_ms: null, // Populated by trace log parsing if needed
     exit_code: normalizedExitCode,
     signal,
     stdout_path: stdoutPath,

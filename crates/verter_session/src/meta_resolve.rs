@@ -430,6 +430,8 @@ fn produce_macro_object_shapes(
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
     eval_source: &str,
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -439,6 +441,7 @@ fn produce_macro_object_shapes(
     let mut define_props_index = 0usize;
     let mut define_emits_index = 0usize;
     let mut define_slots_index = 0usize;
+    let mut registry_hits = 0u32;
     let mut projection_hits = 0u32;
     let mut solver_fallbacks = 0u32;
     let shapes_started = std::time::Instant::now();
@@ -546,6 +549,34 @@ fn produce_macro_object_shapes(
                             );
                         }
                     }
+                } else if let Some((shape, source)) =
+                    synthesize_define_props_shape_from_registry_root(
+                        owner_canonical,
+                        macro_index,
+                        snapshot,
+                        resolved_type_registry,
+                        resolved_type_registry_meta,
+                    )
+                {
+                    registry_hits += 1;
+                    let count = shape.value.properties.len();
+                    component_meta_trace_event!(
+                        "macro_object_shape",
+                        format!(
+                            "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                            owner_canonical,
+                            macro_index,
+                            source.label(),
+                            count,
+                            std::time::Duration::ZERO,
+                        ),
+                    );
+                    evaluated_types.define_props.push(
+                        verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                            macro_index,
+                            result: shape,
+                        },
+                    );
                 } else if let Some(lowered) = params.define_props.get(define_props_index) {
                     let item_started = std::time::Instant::now();
                     let (shape, source) = produce_one_macro_object_shape(
@@ -706,11 +737,12 @@ fn produce_macro_object_shapes(
     component_meta_trace_event!(
         "produce_macro_object_shapes",
         format!(
-            "owner={} define_props={} define_emits={} define_slots={} projection_hits={} solver_fallbacks={} solves_delta={} took={:?}",
+            "owner={} define_props={} define_emits={} define_slots={} registry_hits={} projection_hits={} solver_fallbacks={} solves_delta={} took={:?}",
             owner_canonical,
             evaluated_types.define_props.len(),
             evaluated_types.define_emits.len(),
             evaluated_types.define_slots.len(),
+            registry_hits,
             projection_hits,
             solver_fallbacks,
             solves_after.saturating_sub(solves_before),
@@ -724,6 +756,7 @@ fn produce_macro_object_shapes(
 enum MacroShapeSource {
     Fields,
     ResolvedMacro,
+    Registry,
     Projection,
     Solver,
     None,
@@ -740,6 +773,7 @@ impl MacroShapeSource {
         match self {
             Self::Fields => "fields",
             Self::ResolvedMacro => "resolved-macro",
+            Self::Registry => "registry",
             Self::Projection => "projection",
             Self::Solver => "solver",
             Self::None => "none",
@@ -954,6 +988,40 @@ fn synthesize_define_props_shape_from_known_surface_with_authority(
         } else {
             MacroShapeSource::ResolvedMacro
         },
+    ))
+}
+
+fn synthesize_define_props_shape_from_registry_root(
+    owner_canonical: &str,
+    macro_index: usize,
+    snapshot: &FileAnalysisSnapshot,
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+) -> Option<(ShapeResult, MacroShapeSource)> {
+    let mac = snapshot.macros.get(macro_index)?;
+    let root_name = mac.resolved_local_types.first()?.name.as_str();
+
+    let mut matches = resolved_type_registry
+        .iter()
+        .zip(resolved_type_registry_meta.iter())
+        .filter(|(entry, meta)| {
+            entry.name == root_name
+                && meta.name == root_name
+                && meta.declaration.canonical_source == owner_canonical
+        });
+    let (entry, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    let shape = registry_entry_to_expanded_shape(&entry.type_expr)?;
+    if !has_prop_shape_surface(&shape) {
+        return None;
+    }
+
+    Some((
+        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
+        MacroShapeSource::Registry,
     ))
 }
 
@@ -1188,6 +1256,88 @@ fn merge_expansion_execution_status(
     } else {
         current
     }
+}
+
+fn registry_entry_to_expanded_shape(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    use verter_semantic::analysis::type_expand::{
+        ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
+        ExpandedProperty,
+    };
+    use verter_semantic::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+
+    let TypeExpr::Object(object) = expr else {
+        return None;
+    };
+
+    let mut properties = Vec::new();
+    let mut call_signatures = Vec::new();
+    let mut index_signatures = Vec::new();
+
+    for member in &object.properties {
+        match member {
+            ObjectMember::Property(property) => properties.push(ExpandedProperty {
+                name: property.name.clone(),
+                ty: property.ty.clone(),
+                optional: property.optional,
+                readonly: property.readonly,
+            }),
+            ObjectMember::Method(method) => call_signatures.push(ExpandedCallSignature {
+                parameters: method
+                    .function
+                    .parameters
+                    .iter()
+                    .map(|parameter| ExpandedParameter {
+                        name: parameter.name.clone().unwrap_or_default(),
+                        ty: parameter.ty.clone(),
+                        optional: parameter.optional,
+                        rest: parameter.rest,
+                    })
+                    .collect(),
+                return_type: method
+                    .function
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| return_type.as_ref().clone())
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Void)),
+                type_parameters: method.function.type_parameters.clone(),
+            }),
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                call_signatures.push(ExpandedCallSignature {
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|parameter| ExpandedParameter {
+                            name: parameter.name.clone().unwrap_or_default(),
+                            ty: parameter.ty.clone(),
+                            optional: parameter.optional,
+                            rest: parameter.rest,
+                        })
+                        .collect(),
+                    return_type: function
+                        .return_type
+                        .as_ref()
+                        .map(|return_type| return_type.as_ref().clone())
+                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Void)),
+                    type_parameters: function.type_parameters.clone(),
+                });
+            }
+            ObjectMember::IndexSignature(signature) => {
+                index_signatures.push(ExpandedIndexSignature {
+                    key_type: signature.key_type.clone(),
+                    value_type: signature.value_type.clone(),
+                    readonly: signature.readonly,
+                });
+            }
+        }
+    }
+
+    Some(ExpandedObjectShape {
+        properties,
+        index_signatures,
+        call_signatures,
+    })
 }
 
 type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
@@ -1908,6 +2058,8 @@ impl VerterHost {
                         canonical,
                         &snapshot,
                         &parts.resolved_macros,
+                        &parts.resolved_type_registry,
+                        &parts.resolved_type_registry_meta,
                         &eval_source,
                         &mut evaluated_types,
                         &mut query_engine,
@@ -4355,6 +4507,28 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements> {
         let _ = visiting;
         self.host.resolve_component_meta_macro_elements_in_view(
+            owner_canonical,
+            import_source,
+            exported_name,
+            tracked_deps,
+            resolution_deps,
+            cache,
+            self.store_view,
+        )
+    }
+
+    fn resolve_imported_macro_surface(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+        exported_name: &str,
+        tracked_deps: &mut std::collections::BTreeSet<String>,
+        resolution_deps: &mut std::collections::BTreeSet<String>,
+        cache: &mut crate::resolver_core::ExternalTypeBodyCache,
+        visiting: &mut rustc_hash::FxHashSet<(String, String)>,
+    ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
+        let _ = visiting;
+        self.host.resolve_component_meta_macro_surface_in_view(
             owner_canonical,
             import_source,
             exported_name,

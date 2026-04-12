@@ -8,6 +8,8 @@ export default defineConfig({
       "**/dist/**",
       "**/e2e/**",
       "**/.claude/worktrees/**",
+      "**/tmp/**",
+      "tmp/**",
       ".integration-tests/**",
       "packages/playground/**",
       // packages/types has its own vitest.config.ts with typecheck: { only: true }
@@ -22,6 +24,7 @@ export default defineConfig({
         "**/node_modules/**",
         "**/dist/**",
         "**/e2e/**",
+        "**/tmp/**",
         "**/*.spec.ts",
         "**/*.test.ts",
         "**/__tests__/**",
