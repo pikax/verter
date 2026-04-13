@@ -2400,12 +2400,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
     ) -> bool {
-        !substitutions.is_empty()
-            && self.store_view.is_some()
+        self.store_view.is_some()
             && self
                 .current_prepared_request_root
                 .as_deref()
                 .is_some_and(|request_root| request_root != scope_canonical_id)
+            && (!substitutions.is_empty() || is_package_source(Some(scope_canonical_id)))
     }
 
     fn project_prepared_member_route_projection(
@@ -5559,6 +5559,141 @@ export interface BProps extends SharedProps {}
             second_query.solve_count(),
             0,
             "request-local non-generic imported whole-surface projection must stay off the semantic solver",
+        );
+    }
+
+    #[test]
+    fn project_prepared_type_surface_expr_publishes_package_backed_non_generic_surfaces_for_cross_request_reuse(
+    ) {
+        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
+
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/pkg/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface SharedProps {
+  open?: boolean
+  disabled?: boolean
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/A.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SharedProps } from 'pkg'
+
+export interface AProps extends SharedProps {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/B.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { SharedProps } from 'pkg'
+
+export interface BProps extends SharedProps {}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/A.vue"));
+        assert!(host.ensure_loaded("/src/B.vue"));
+        host.set_import_dependencies(
+            "/src/A.vue",
+            vec![crate::DependencyResolution {
+                specifier: "pkg".to_string(),
+                resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/B.vue",
+            vec![crate::DependencyResolution {
+                specifier: "pkg".to_string(),
+                resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+
+        let mut first_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let first = first_query
+            .project_prepared_type_surface_expr("/src/A.vue", "AProps")
+            .expect("first query should project the imported package surface");
+        assert!(
+            matches!(first, TypeExpr::Object(_)),
+            "first query should still materialize the prepared object surface",
+        );
+
+        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
+            canonical_owner: "/src/node_modules/pkg/index.d.ts".to_string(),
+            symbol_name: "SharedProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+        assert!(
+            matches!(
+                host.resolver_runtime()
+                    .type_surfaces
+                    .get(&stable_surface_key, &store_view)
+                    .as_deref(),
+                Some(TypeSurfaceOpResult::Surface(_))
+            ),
+            "package-backed imported whole surfaces should publish into the shared type-surface DB after the first query",
+        );
+
+        let mut second_query =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let second = second_query
+            .project_prepared_type_surface_expr("/src/B.vue", "BProps")
+            .expect("second query should reuse the cached imported package surface");
+        let TypeExpr::Object(object) = second else {
+            panic!("second query should still project an object surface");
+        };
+        let member_names: std::collections::BTreeSet<_> = object
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                    Some(property.name.as_str())
+                }
+                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                    Some(method.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            member_names,
+            std::collections::BTreeSet::from(["disabled", "open"]),
+            "cross-request package-backed whole-surface reuse should keep the imported projection exact",
+        );
+        assert!(
+            second_query.debug_prepared_shared_surface_hit_count() > 0,
+            "second query should reuse at least one shared imported package surface instead of reprojecting it request-locally",
+        );
+        assert_eq!(
+            second_query.solve_count(),
+            0,
+            "cross-request package-backed whole-surface reuse must stay off the semantic solver",
         );
     }
 
