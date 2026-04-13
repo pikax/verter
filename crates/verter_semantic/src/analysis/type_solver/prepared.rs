@@ -697,7 +697,8 @@ fn is_param_or_param_intersect_string(expr: &TypeExpr, param: &str) -> bool {
 /// Classify the projection class for a prepared type declaration.
 ///
 /// Priority order:
-/// 1. If `member_index` is non-empty → `DirectMembers` (interfaces, object aliases).
+/// 1. If `member_index` is non-empty and the body only contains direct object
+///    members → `DirectMembers` (interfaces, object aliases).
 /// 2. If `wrapper_shape.kind` is a recognized structural wrapper → `Wrapper`.
 /// 3. If the body is a single `Ref` (possibly parenthesized) → `ForwardSubject`.
 /// 4. Otherwise → `Opaque`.
@@ -708,7 +709,7 @@ fn classify_projection_inner(
     wrapper_shape: &PreparedWrapperShape,
 ) -> PreparedProjectionClass {
     // 1. Direct members — interfaces and object-bodied aliases.
-    if !member_index.is_empty() {
+    if !member_index.is_empty() && body_supports_direct_member_projection(body) {
         return PreparedProjectionClass::DirectMembers;
     }
 
@@ -723,6 +724,15 @@ fn classify_projection_inner(
     }
 
     PreparedProjectionClass::Opaque
+}
+
+fn body_supports_direct_member_projection(body: &TypeExpr) -> bool {
+    match body {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Intersection(parts) => parts.iter().all(body_supports_direct_member_projection),
+        TypeExpr::Parenthesized(inner) => body_supports_direct_member_projection(inner),
+        _ => false,
+    }
 }
 
 /// Try to extract a forward-subject payload from a declaration body.
@@ -1620,6 +1630,28 @@ mod tests {
         let mut decl = PreparedTypeDecl::new(
             ResolvedRootIdentity::new("/t.ts", "A"),
             TypeDeclKind::Alias,
+            body,
+        );
+        decl.build_member_index();
+        decl.classify_wrapper_shape();
+        decl.classify_projection();
+
+        assert!(matches!(
+            decl.projection_class,
+            PreparedProjectionClass::Opaque
+        ));
+    }
+
+    #[test]
+    fn projection_interface_with_heritage_and_own_members_is_opaque() {
+        // interface Props extends Base { own: string }
+        let body = TypeExpr::intersection(vec![
+            TypeExpr::named("Base"),
+            make_object(&[("own", TypeExpr::Primitive(PrimitiveName::String), false)]),
+        ]);
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/t.ts", "Props"),
+            TypeDeclKind::Interface,
             body,
         );
         decl.build_member_index();

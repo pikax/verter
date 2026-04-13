@@ -866,4 +866,205 @@ defineSlots<ButtonSlots>()
     expect(defaultSlot!.type).toContain("base");
     expect(typeof defaultSlot!.schema).not.toBe("string");
   });
+
+  it("keeps realistic generic tabs helper routes concrete in generated output", async () => {
+    const checker = await createRuntimeChecker("native-eval-realistic-tabs");
+
+    checker.updateFile(
+      "node_modules/reka-ui/index.d.ts",
+      `export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}`,
+    );
+    checker.updateFile(
+      "utils.ts",
+      `export type DynamicSlotsKeys<Name extends string | undefined, Suffix extends string | undefined = undefined> = (
+  Name extends string
+    ? Suffix extends string
+      ? Name | \`\${Name}-\${Suffix}\`
+      : Name
+    : never
+)
+
+export type DynamicSlots<
+  T extends { slot?: string },
+  Suffix extends string | undefined = undefined,
+  ExtraProps extends object = {}
+> = {
+  [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
+    props: { item: Extract<T, { slot: K extends \`\${infer Base}-\${Suffix}\` ? Base : K }> } & ExtraProps
+  ) => any
+}
+
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+
+type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
+  ? true
+  : false
+
+type IsPlainObject<T> = IsPrimitive<T> extends true
+  ? false
+  : T extends readonly any[] | ((...args: any[]) => any)
+    ? false
+    : T extends object ? true
+      : false
+
+type DotPathKeys<T> = IsPlainObject<T> extends true
+  ? {
+      [K in keyof T & string]:
+      IsPlainObject<NonNullable<T[K]>> extends true
+        ? K | \`\${K}.\${DotPathKeys<NonNullable<T[K]>>}\`
+        : K
+    }[keyof T & string]
+  : never
+
+export type GetItemKeys<
+  I,
+  T extends NestedItem<I> = NestedItem<I>
+> = (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>`,
+    );
+    checker.updateFile(
+      "tv.ts",
+      `type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}`,
+    );
+    checker.updateFile(
+      "theme.ts",
+      `export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { pill: '', link: '' },
+    size: { sm: '', md: '' },
+    orientation: { horizontal: '', vertical: '' }
+  },
+  slots: {
+    root: '',
+    list: '',
+    trigger: '',
+    label: '',
+    content: ''
+  }
+} as const`,
+    );
+    checker.updateFile(
+      "Tabs.vue",
+      `<script lang="ts">
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import type { DynamicSlots, GetItemKeys } from './utils'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  label?: string
+  value?: string | number
+  slot?: string
+  nested?: {
+    path?: string
+  }
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  items?: T[]
+  color?: Tabs['variants']['color']
+  variant?: Tabs['variants']['variant']
+  size?: Tabs['variants']['size']
+  orientation?: Tabs['variants']['orientation']
+  valueKey?: GetItemKeys<T>
+  labelKey?: GetItemKeys<T>
+  ui?: Tabs['slots']
+}
+
+export interface TabsEmits extends TabsRootEmits<string | number> {}
+
+type SlotProps<T extends TabsItem> = (props: { item: T, index: number, ui: Tabs['ui'] }) => any
+
+export type TabsSlots<T extends TabsItem = TabsItem> = {
+  leading?: SlotProps<T>
+  default?(props: { item: T, index: number }): any
+  trailing?: SlotProps<T>
+  content?: SlotProps<T>
+} & DynamicSlots<T, undefined, { index: number, ui: Tabs['ui'] }>
+</script>
+<script setup lang="ts" generic="T extends TabsItem">
+withDefaults(defineProps<TabsProps<T>>(), {
+  defaultValue: '0',
+  orientation: 'horizontal',
+  unmountOnHide: true,
+  valueKey: 'value',
+  labelKey: 'label'
+})
+defineEmits<TabsEmits>()
+defineSlots<TabsSlots<T>>()
+</script>
+<template><div /></template>`,
+    );
+
+    await settleNativeProject();
+
+    const meta = await checker.getComponentMeta("Tabs.vue");
+    const nativeMeta = (checker as any)._session.getComponentMeta(
+      resolve((checker as any).projectRoot ?? "", "Tabs.vue"),
+    );
+
+    const color = meta.props.find((prop) => prop.name === "color");
+    expect(color).toBeDefined();
+    expect(color!.type).toContain("primary");
+    expect(color!.type).toContain("secondary");
+    expect(JSON.stringify(color!.schema)).not.toContain("graphNode(");
+
+    const valueKey = meta.props.find((prop) => prop.name === "valueKey");
+    expect(valueKey).toBeDefined();
+    expect(JSON.stringify(valueKey!.schema)).not.toContain("never");
+
+    const ui = meta.props.find((prop) => prop.name === "ui");
+    expect(ui).toBeDefined();
+    expect(ui!.type).toContain("root");
+    expect(ui!.type).toContain("content");
+    expect(JSON.stringify(ui!.schema)).not.toContain("graphNode(");
+
+    const nativeContentSlot = nativeMeta?.slots?.find((slot: any) => slot.name === "content");
+    expect(nativeContentSlot).toBeDefined();
+    expect(nativeContentSlot.bindings.map((binding: any) => binding.name)).toEqual([
+      "item",
+      "index",
+      "ui",
+    ]);
+
+    const contentSlot = meta.slots.find((slot) => slot.name === "content");
+    expect(contentSlot).toBeDefined();
+    expect(contentSlot!.type).toContain("item");
+    expect(contentSlot!.type).toContain("ui");
+    expect(JSON.stringify(contentSlot!.schema)).not.toContain("graphNode(");
+
+    const leadingSlot = meta.slots.find((slot) => slot.name === "leading");
+    expect(leadingSlot).toBeDefined();
+    expect(leadingSlot!.type).toContain("item");
+    expect(leadingSlot!.type).toContain("ui");
+  });
 });

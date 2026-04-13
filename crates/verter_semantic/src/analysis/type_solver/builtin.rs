@@ -487,6 +487,24 @@ fn expand_extract_exclude(
     filter_arg: NodeId,
     is_extract: bool,
 ) -> NodeId {
+    fn unresolved_extract_exclude_conditional(
+        arena: &mut QueryArena,
+        type_arg: NodeId,
+        filter_arg: NodeId,
+        is_extract: bool,
+    ) -> NodeId {
+        let never = arena.primitive(PrimitiveKind::Never);
+        let distributive = matches!(
+            arena.get(type_arg),
+            super::arena::Node::TypeParam { .. } | super::arena::Node::Infer { .. }
+        );
+        if is_extract {
+            arena.conditional(type_arg, filter_arg, type_arg, never, distributive)
+        } else {
+            arena.conditional(type_arg, filter_arg, never, type_arg, distributive)
+        }
+    }
+
     let node = arena.get(type_arg).clone();
 
     match node {
@@ -498,7 +516,7 @@ fn expand_extract_exclude(
 
             let filtered: Vec<NodeId> = members
                 .into_iter()
-                .filter(|&m| {
+                .filter_map(|m| {
                     let result = super::relate::relate(
                         arena,
                         &mut caches,
@@ -507,11 +525,26 @@ fn expand_extract_exclude(
                         super::result::RelationMode::Assignable,
                         &mut rel_state,
                     );
-                    let assignable = result == super::result::RelationResult::Assignable;
-                    if is_extract {
-                        assignable
-                    } else {
-                        !assignable
+                    match result {
+                        super::result::RelationResult::Assignable => {
+                            if is_extract {
+                                Some(m)
+                            } else {
+                                None
+                            }
+                        }
+                        super::result::RelationResult::NotAssignable => {
+                            if is_extract {
+                                None
+                            } else {
+                                Some(m)
+                            }
+                        }
+                        super::result::RelationResult::Unknown => {
+                            Some(unresolved_extract_exclude_conditional(
+                                arena, m, filter_arg, is_extract,
+                            ))
+                        }
                     }
                 })
                 .collect();
@@ -530,17 +563,24 @@ fn expand_extract_exclude(
                 super::result::RelationMode::Assignable,
                 &mut rel_state,
             );
-            let assignable = result == super::result::RelationResult::Assignable;
-            if is_extract {
-                if assignable {
-                    type_arg
-                } else {
-                    arena.primitive(PrimitiveKind::Never)
+            match result {
+                super::result::RelationResult::Assignable => {
+                    if is_extract {
+                        type_arg
+                    } else {
+                        arena.primitive(PrimitiveKind::Never)
+                    }
                 }
-            } else if assignable {
-                arena.primitive(PrimitiveKind::Never)
-            } else {
-                type_arg
+                super::result::RelationResult::NotAssignable => {
+                    if is_extract {
+                        arena.primitive(PrimitiveKind::Never)
+                    } else {
+                        type_arg
+                    }
+                }
+                super::result::RelationResult::Unknown => {
+                    unresolved_extract_exclude_conditional(arena, type_arg, filter_arg, is_extract)
+                }
             }
         }
     }
@@ -1191,6 +1231,54 @@ mod tests {
             }
             _ => panic!("expected union, got: {:?}", arena.get(result)),
         }
+    }
+
+    #[test]
+    fn extract_unknown_relation_stays_conditional() {
+        let mut arena = QueryArena::new();
+        let constraint = arena.alloc(Node::Ref {
+            name: "NestedItem".into(),
+            type_arguments: vec![],
+            scope_canonical_id: None,
+        });
+        let type_param = arena.alloc(Node::TypeParam {
+            name: "T".into(),
+            constraint: Some(constraint),
+            default: None,
+        });
+        let filter = arena.primitive(PrimitiveKind::Object);
+
+        let result =
+            expand_builtin(&mut arena, BuiltinUtility::Extract, &[type_param, filter]).unwrap();
+        assert!(
+            matches!(arena.get(result), Node::Conditional { .. }),
+            "unknown Extract relation should stay conditional, got {:?}",
+            arena.get(result)
+        );
+    }
+
+    #[test]
+    fn exclude_unknown_relation_stays_conditional() {
+        let mut arena = QueryArena::new();
+        let constraint = arena.alloc(Node::Ref {
+            name: "NestedItem".into(),
+            type_arguments: vec![],
+            scope_canonical_id: None,
+        });
+        let type_param = arena.alloc(Node::TypeParam {
+            name: "T".into(),
+            constraint: Some(constraint),
+            default: None,
+        });
+        let filter = arena.primitive(PrimitiveKind::Object);
+
+        let result =
+            expand_builtin(&mut arena, BuiltinUtility::Exclude, &[type_param, filter]).unwrap();
+        assert!(
+            matches!(arena.get(result), Node::Conditional { .. }),
+            "unknown Exclude relation should stay conditional, got {:?}",
+            arena.get(result)
+        );
     }
 
     #[test]

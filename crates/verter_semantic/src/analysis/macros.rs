@@ -437,22 +437,24 @@ fn resolve_type_to_prop_fields(
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
-                            continue;
+                            return None;
                         };
-                        if let Some(parent_decl) = registry.get(&parent_name) {
-                            if let Some(parent_fields) = resolve_interface_decl(
-                                &parent_name,
-                                parent_decl,
-                                registry,
-                                source,
-                                comments,
-                                visited,
-                            ) {
-                                for field in parent_fields {
-                                    if seen_names.insert(field.name.clone()) {
-                                        all_fields.push(field);
-                                    }
-                                }
+                        let Some(parent_decl) = registry.get(&parent_name) else {
+                            return None;
+                        };
+                        let Some(parent_fields) = resolve_interface_decl(
+                            &parent_name,
+                            parent_decl,
+                            registry,
+                            source,
+                            comments,
+                            visited,
+                        ) else {
+                            return None;
+                        };
+                        for field in parent_fields {
+                            if seen_names.insert(field.name.clone()) {
+                                all_fields.push(field);
                             }
                         }
                     }
@@ -679,6 +681,17 @@ fn resolve_local_define_props(
                 }
             }
             mac.prop_fields = fields;
+        } else {
+            visited.clear();
+            if let Some(fields) = resolve_type_to_local_own_prop_fields(
+                type_param.1,
+                registry,
+                source,
+                comments,
+                &mut visited,
+            ) {
+                mac.prop_fields = fields;
+            }
         }
     } else {
         // Fallback: resolve individual type references (single ref case)
@@ -702,12 +715,102 @@ fn resolve_local_define_props(
                         span,
                     });
                     mac.prop_fields = fields;
+                } else {
+                    visited.clear();
+                    if let Some(fields) = resolve_local_decl_own_prop_fields(
+                        decl,
+                        registry,
+                        source,
+                        comments,
+                        &mut visited,
+                    ) {
+                        mac.prop_fields = fields;
+                    }
                 }
             }
         }
     }
 
     mac.resolved_local_types = resolved_types;
+}
+
+fn resolve_local_decl_own_prop_fields(
+    decl: &LocalTypeDecl<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedPropField>> {
+    match decl {
+        LocalTypeDecl::Interface { body, .. } => {
+            Some(extract_fields_from_interface_body(body, source, comments))
+        }
+        LocalTypeDecl::Alias(aliased_type) => {
+            resolve_type_to_local_own_prop_fields(aliased_type, registry, source, comments, visited)
+        }
+        LocalTypeDecl::Class => None,
+    }
+}
+
+fn resolve_type_to_local_own_prop_fields(
+    ts_type: &TSType<'_>,
+    registry: &FxHashMap<String, LocalTypeDecl<'_>>,
+    source: &str,
+    comments: &[Comment],
+    visited: &mut FxHashSet<String>,
+) -> Option<Vec<AnalyzedPropField>> {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => Some(extract_fields_from_interface_body_like(
+            &literal.members,
+            source,
+            comments,
+        )),
+        TSType::TSParenthesizedType(parenthesized) => resolve_type_to_local_own_prop_fields(
+            &parenthesized.type_annotation,
+            registry,
+            source,
+            comments,
+            visited,
+        ),
+        TSType::TSTypeReference(type_ref) => {
+            let name = type_name_to_string(&type_ref.type_name);
+            if name.is_empty() || !visited.insert(name.clone()) {
+                return None;
+            }
+            let result = match registry.get(&name) {
+                Some(LocalTypeDecl::Interface { body, .. }) => {
+                    Some(extract_fields_from_interface_body(body, source, comments))
+                }
+                Some(LocalTypeDecl::Alias(aliased_type)) => resolve_type_to_local_own_prop_fields(
+                    aliased_type,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                ),
+                Some(LocalTypeDecl::Class) | None => None,
+            };
+            visited.remove(&name);
+            result
+        }
+        TSType::TSIntersectionType(intersection) => {
+            let mut all_fields = Vec::new();
+            let mut seen_names = FxHashSet::default();
+            for ty in &intersection.types {
+                if let Some(fields) =
+                    resolve_type_to_local_own_prop_fields(ty, registry, source, comments, visited)
+                {
+                    for field in fields {
+                        if seen_names.insert(field.name.clone()) {
+                            all_fields.push(field);
+                        }
+                    }
+                }
+            }
+            (!all_fields.is_empty()).then_some(all_fields)
+        }
+        _ => None,
+    }
 }
 
 /// Resolve local types for a defineEmits macro.
@@ -859,22 +962,24 @@ fn resolve_interface_decl(
 
             for heritage in *extends {
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
-                    continue;
+                    return None;
                 };
-                if let Some(parent_decl) = registry.get(&parent_name) {
-                    if let Some(parent_fields) = resolve_interface_decl(
-                        &parent_name,
-                        parent_decl,
-                        registry,
-                        source,
-                        comments,
-                        visited,
-                    ) {
-                        for field in parent_fields {
-                            if seen_names.insert(field.name.clone()) {
-                                fields.push(field);
-                            }
-                        }
+                let Some(parent_decl) = registry.get(&parent_name) else {
+                    return None;
+                };
+                let Some(parent_fields) = resolve_interface_decl(
+                    &parent_name,
+                    parent_decl,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                ) else {
+                    return None;
+                };
+                for field in parent_fields {
+                    if seen_names.insert(field.name.clone()) {
+                        fields.push(field);
                     }
                 }
             }
@@ -957,23 +1062,25 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
-                            continue;
+                            return None;
                         };
-                        if let Some(parent_decl) = registry.get(&parent_name) {
-                            if let Some(parent_fields) = resolve_interface_decl_generic(
-                                &parent_name,
-                                parent_decl,
-                                registry,
-                                source,
-                                comments,
-                                visited,
-                                extract_from_members,
-                            ) {
-                                for field in parent_fields {
-                                    if seen_names.insert(field.field_name().to_string()) {
-                                        all_fields.push(field);
-                                    }
-                                }
+                        let Some(parent_decl) = registry.get(&parent_name) else {
+                            return None;
+                        };
+                        let Some(parent_fields) = resolve_interface_decl_generic(
+                            &parent_name,
+                            parent_decl,
+                            registry,
+                            source,
+                            comments,
+                            visited,
+                            extract_from_members,
+                        ) else {
+                            return None;
+                        };
+                        for field in parent_fields {
+                            if seen_names.insert(field.field_name().to_string()) {
+                                all_fields.push(field);
                             }
                         }
                     }
@@ -1044,23 +1151,25 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
             let mut seen_names = FxHashSet::default();
             for heritage in *extends {
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
-                    continue;
+                    return None;
                 };
-                if let Some(parent_decl) = registry.get(&parent_name) {
-                    if let Some(parent_fields) = resolve_interface_decl_generic(
-                        &parent_name,
-                        parent_decl,
-                        registry,
-                        source,
-                        comments,
-                        visited,
-                        extract_from_members,
-                    ) {
-                        for field in parent_fields {
-                            if seen_names.insert(field.field_name().to_string()) {
-                                fields.push(field);
-                            }
-                        }
+                let Some(parent_decl) = registry.get(&parent_name) else {
+                    return None;
+                };
+                let Some(parent_fields) = resolve_interface_decl_generic(
+                    &parent_name,
+                    parent_decl,
+                    registry,
+                    source,
+                    comments,
+                    visited,
+                    extract_from_members,
+                ) else {
+                    return None;
+                };
+                for field in parent_fields {
+                    if seen_names.insert(field.field_name().to_string()) {
+                        fields.push(field);
                     }
                 }
             }
@@ -1361,9 +1470,10 @@ fn extract_define_model_type(
         return Vec::new();
     }
     let name = model_name.as_deref().unwrap_or("modelValue").to_string();
+    let is_optional = !define_model_is_required(call);
     vec![AnalyzedPropField {
         name,
-        is_optional: false,
+        is_optional,
         span: first.span().into(),
         type_annotation: Some(type_text.to_string()),
         description: None,
@@ -1413,6 +1523,33 @@ fn extract_define_model_default_keys(
     } else {
         Vec::new()
     }
+}
+
+fn define_model_is_required(call: &CallExpression<'_>) -> bool {
+    let options_obj = call.arguments.iter().find_map(|arg| {
+        if let Argument::ObjectExpression(obj) = arg {
+            Some(obj)
+        } else {
+            None
+        }
+    });
+
+    let Some(obj) = options_obj else {
+        return false;
+    };
+
+    obj.properties.iter().any(|prop| {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            return false;
+        };
+        let is_required_key =
+            matches!(&p.key, PropertyKey::StaticIdentifier(id) if id.name == "required");
+        let is_true = matches!(
+            &p.value,
+            Expression::BooleanLiteral(lit) if lit.value
+        );
+        is_required_key && is_true
+    })
 }
 
 /// Result of extracting prop fields from a `defineProps` call.

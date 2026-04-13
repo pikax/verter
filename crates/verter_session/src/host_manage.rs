@@ -8485,6 +8485,233 @@ fn extract_component_meta_from_inputs(
     meta
 }
 
+fn choose_less_symbolic_component_meta_type_expr(
+    current: &verter_semantic::analysis::type_expr::TypeExpr,
+    raw_type: Option<&str>,
+    owner_canonical: &str,
+    preferred_scope_canonical_ids: &[String],
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    fn component_meta_type_expr_root_name(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> Option<String> {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => {
+                Some(name.to_string())
+            }
+            _ => crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(expr)
+                .or_else(|| {
+                    crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(expr)
+                })
+                .map(|(root_name, _)| root_name),
+        }
+    }
+
+    fn push_scope(scopes: &mut Vec<String>, scope: &str) {
+        if !scope.is_empty() && !scopes.iter().any(|existing| existing == scope) {
+            scopes.push(scope.to_string());
+        }
+    }
+
+    fn candidate_beats_current(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        candidate: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        match (current, candidate) {
+            (
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
+                | verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. },
+                verter_semantic::analysis::type_expr::TypeExpr::Object(object),
+            ) if !object.properties.is_empty() => true,
+            _ => {
+                crate::meta_resolve::component_meta_type_expr_symbolic_score(candidate)
+                    < crate::meta_resolve::component_meta_type_expr_symbolic_score(current)
+            }
+        }
+    }
+
+    let mut best = current.clone();
+    let mut scopes = Vec::new();
+    let mut seed_exprs = vec![current.clone()];
+    push_scope(&mut scopes, owner_canonical);
+    for preferred_scope_canonical_id in preferred_scope_canonical_ids {
+        push_scope(&mut scopes, preferred_scope_canonical_id);
+    }
+
+    if let Some(raw_type) = raw_type {
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        seed_exprs.push(parsed);
+    }
+
+    for expr in &seed_exprs {
+        let known_scopes = scopes.clone();
+        for scope in known_scopes {
+            let Some(root_name) = component_meta_type_expr_root_name(expr) else {
+                continue;
+            };
+            let declaration = query_engine.resolve_type_declaration(scope.as_str(), &root_name);
+            push_scope(&mut scopes, declaration.canonical_source.as_str());
+        }
+    }
+
+    for expr in &seed_exprs {
+        for scope in &scopes {
+            for candidate in [
+                Some(expr.clone()),
+                query_engine.project_expr_surface_expr(scope.as_str(), expr),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let materialized =
+                    crate::meta_resolve::materialize_component_meta_type_expr_until_stable(
+                        &candidate,
+                        scope.as_str(),
+                        query_engine,
+                    );
+                if candidate_beats_current(&best, &materialized) {
+                    best = materialized;
+                }
+            }
+        }
+    }
+
+    best
+}
+
+fn rematerialize_public_component_meta_types(
+    host: &VerterHost,
+    owner_canonical: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    store_view: Option<&HostStoreView>,
+) {
+    let has_candidates = meta.props.iter().any(|prop| prop.raw_type.is_some())
+        || meta
+            .slots
+            .iter()
+            .flat_map(|slot| slot.bindings.iter())
+            .any(|binding| binding.raw_type.is_some());
+    if !has_candidates {
+        return;
+    }
+
+    let solver_host = crate::resolver_core::SessionSolverHost::new(host, store_view);
+    let mut query_engine =
+        crate::resolver_core::ComponentMetaQueryEngine::new(host, store_view, &solver_host);
+    let mut prop_scope_hints = rustc_hash::FxHashMap::default();
+    let mut slot_binding_scope_hints = rustc_hash::FxHashMap::default();
+    let mut define_props_scopes = Vec::new();
+    let mut define_slots_scopes = Vec::new();
+    let mut registry_scopes = Vec::new();
+    for meta_entry in &resolved.resolved_type_registry_meta {
+        let declaration_scope = meta_entry.declaration.canonical_source.as_str();
+        if !declaration_scope.is_empty()
+            && !registry_scopes
+                .iter()
+                .any(|scope: &String| scope == declaration_scope)
+        {
+            registry_scopes.push(declaration_scope.to_string());
+        }
+    }
+    for resolved_macro in &resolved.resolved_macros {
+        let declaration_scope = resolved_macro.declaration.canonical_source.as_str();
+        if declaration_scope.is_empty() {
+            continue;
+        }
+        match resolved_macro.macro_kind {
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                if !define_props_scopes
+                    .iter()
+                    .any(|scope: &String| scope == declaration_scope)
+                {
+                    define_props_scopes.push(declaration_scope.to_string());
+                }
+                for prop in &resolved_macro.props {
+                    prop_scope_hints
+                        .entry(prop.name.clone())
+                        .or_insert_with(|| declaration_scope.to_string());
+                }
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                if !define_slots_scopes
+                    .iter()
+                    .any(|scope: &String| scope == declaration_scope)
+                {
+                    define_slots_scopes.push(declaration_scope.to_string());
+                }
+                for slot in &resolved_macro.slots {
+                    for binding in &slot.bindings {
+                        slot_binding_scope_hints
+                            .entry((slot.name.clone(), binding.name.clone()))
+                            .or_insert_with(|| declaration_scope.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut changed = false;
+
+    for prop in &mut meta.props {
+        let mut candidate_scopes = define_props_scopes.clone();
+        for scope in &registry_scopes {
+            if !candidate_scopes.iter().any(|existing| existing == scope) {
+                candidate_scopes.push(scope.clone());
+            }
+        }
+        if let Some(scope_hint) = prop_scope_hints.get(&prop.name) {
+            if !candidate_scopes.iter().any(|scope| scope == scope_hint) {
+                candidate_scopes.insert(0, scope_hint.clone());
+            }
+        }
+        let next = choose_less_symbolic_component_meta_type_expr(
+            &prop.type_expr,
+            prop.raw_type.as_deref(),
+            owner_canonical,
+            &candidate_scopes,
+            &mut query_engine,
+        );
+        if next != prop.type_expr {
+            prop.type_expr = next;
+            changed = true;
+        }
+    }
+
+    for slot in &mut meta.slots {
+        for binding in &mut slot.bindings {
+            let mut candidate_scopes = define_slots_scopes.clone();
+            for scope in &registry_scopes {
+                if !candidate_scopes.iter().any(|existing| existing == scope) {
+                    candidate_scopes.push(scope.clone());
+                }
+            }
+            if let Some(scope_hint) =
+                slot_binding_scope_hints.get(&(slot.name.clone(), binding.name.clone()))
+            {
+                if !candidate_scopes.iter().any(|scope| scope == scope_hint) {
+                    candidate_scopes.insert(0, scope_hint.clone());
+                }
+            }
+            let next = choose_less_symbolic_component_meta_type_expr(
+                &binding.type_expr,
+                binding.raw_type.as_deref(),
+                owner_canonical,
+                &candidate_scopes,
+                &mut query_engine,
+            );
+            if next != binding.type_expr {
+                binding.type_expr = next;
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        populate_public_instance_sidecar(meta);
+    }
+}
+
 fn parse_annotation_or_unknown_for_public_instance(
     raw: &str,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
@@ -8776,6 +9003,13 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
     );
+    rematerialize_public_component_meta_types(
+        host,
+        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        &mut meta,
+        resolved,
+        store_view,
+    );
     if include_fallthrough {
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
         let mut visiting = rustc_hash::FxHashSet::default();
@@ -8820,6 +9054,13 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         &resolved_macros,
         &resolved_type_registry,
         resolved.evaluated_types.as_ref(),
+    );
+    rematerialize_public_component_meta_types(
+        host,
+        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        &mut meta,
+        resolved,
+        store_view,
     );
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let mut visiting = rustc_hash::FxHashSet::default();

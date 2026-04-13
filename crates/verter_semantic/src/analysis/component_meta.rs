@@ -2006,6 +2006,86 @@ fn event_raw_signature_from_evaluated_and_source(
     }
 }
 
+fn event_payload_raw_signature_from_type_expr(payload: &TypeExpr) -> Option<String> {
+    use crate::analysis::type_expr::LiteralValue;
+
+    fn render_type_expr(expr: &TypeExpr) -> Option<String> {
+        match expr {
+            TypeExpr::Primitive(name) => Some(match name {
+                crate::analysis::type_expr::PrimitiveName::String => "string".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Number => "number".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Boolean => "boolean".to_string(),
+                crate::analysis::type_expr::PrimitiveName::BigInt => "bigint".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Symbol => "symbol".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Null => "null".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Undefined => "undefined".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Void => "void".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Any => "any".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Unknown => "unknown".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Never => "never".to_string(),
+                crate::analysis::type_expr::PrimitiveName::Object => "object".to_string(),
+            }),
+            TypeExpr::Literal(LiteralValue::String(value)) => Some(format!("{value:?}")),
+            TypeExpr::Literal(LiteralValue::Number(value)) => Some(value.to_string()),
+            TypeExpr::Literal(LiteralValue::Boolean(value)) => Some(value.to_string()),
+            TypeExpr::Literal(LiteralValue::BigInt(value)) => Some(value.clone()),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                if type_arguments.is_empty() {
+                    Some(name.to_string())
+                } else {
+                    let args = type_arguments
+                        .iter()
+                        .map(render_type_expr)
+                        .collect::<Option<Vec<_>>>()?;
+                    Some(format!("{}<{}>", name, args.join(", ")))
+                }
+            }
+            TypeExpr::Union(types) => Some(
+                types
+                    .iter()
+                    .map(render_type_expr)
+                    .collect::<Option<Vec<_>>>()?
+                    .join(" | "),
+            ),
+            TypeExpr::Intersection(types) => Some(
+                types
+                    .iter()
+                    .map(render_type_expr)
+                    .collect::<Option<Vec<_>>>()?
+                    .join(" & "),
+            ),
+            TypeExpr::Tuple { elements, .. } => Some(format!(
+                "[{}]",
+                elements
+                    .iter()
+                    .map(|element| {
+                        let mut rendered = String::new();
+                        if let Some(label) = &element.label {
+                            rendered.push_str(label);
+                            if element.optional {
+                                rendered.push('?');
+                            }
+                            rendered.push_str(": ");
+                        }
+                        if element.rest {
+                            rendered.push_str("...");
+                        }
+                        rendered.push_str(&render_type_expr(&element.ty)?);
+                        Some(rendered)
+                    })
+                    .collect::<Option<Vec<_>>>()?
+                    .join(", ")
+            )),
+            _ => None,
+        }
+    }
+
+    render_type_expr(payload).filter(|rendered| rendered.starts_with('['))
+}
+
 fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
     let trimmed = raw_type.trim();
     if trimmed.starts_with('[') && trimmed.ends_with(']') {
@@ -2016,9 +2096,14 @@ fn preserve_or_wrap_event_payload(raw_type: &str) -> String {
 }
 
 fn source_payload_beats_backend_event_display(raw_type: &str, source_payload: &str) -> bool {
+    let raw_inner = strip_event_tuple_wrapper(raw_type).unwrap_or(raw_type);
     let source_inner = strip_event_tuple_wrapper(source_payload).unwrap_or(source_payload);
     source_annotation_beats_placeholder_backend_type(source_inner)
         && (prop_raw_type_is_placeholder(raw_type)
+            || (backend_raw_type_is_suspicious_identifier(raw_inner)
+                && normalize_type_text_for_compare(raw_inner)
+                    != normalize_type_text_for_compare(source_inner))
+            || backend_optionalizes_source_annotation(source_inner, raw_inner)
             || (source_annotation_contains_conditional(source_inner)
                 && !source_annotation_contains_conditional(raw_type))
             || (source_annotation_contains_indexed_access(source_inner)
@@ -2053,13 +2138,15 @@ fn extract_events_from_macro(
                         .iter()
                         .find(|candidate| candidate.name == event.name)
                 });
+                let expanded_raw_signature =
+                    event_payload_raw_signature_from_type_expr(&event.payload);
                 out.push(EventAnalysis {
                     name: event.name,
                     payload: event.payload,
                     payload_expansion: event.payload_expansion,
                     raw_signature: event_raw_signature_from_evaluated_and_source(
                         evaluated_field.and_then(|candidate| candidate.raw_type.as_deref()),
-                        None,
+                        expanded_raw_signature.as_deref(),
                     ),
                     description: None,
                     tags: Vec::new(),
@@ -2084,6 +2171,7 @@ fn extract_events_from_macro(
                     Some(raw) => (parse_annotation_or_unknown(raw), None),
                     None => (unknown_type("unknown".to_string()), None),
                 });
+            let expanded_raw_signature = event_payload_raw_signature_from_type_expr(&payload);
 
             out.push(EventAnalysis {
                 name: field.name.clone(),
@@ -2096,7 +2184,9 @@ fn extract_events_from_macro(
                             .find(|candidate| candidate.name == field.name)
                             .and_then(|candidate| candidate.raw_type.as_deref())
                     }),
-                    field.payload_type.as_deref(),
+                    expanded_raw_signature
+                        .as_deref()
+                        .or(field.payload_type.as_deref()),
                 ),
                 description: field.description.clone(),
                 tags: field.tags.clone(),
@@ -2505,6 +2595,25 @@ fn collect_slot_binding_param_types<'a>(ty: &'a TypeExpr, out: &mut Vec<&'a Type
                 out.push(&first.ty);
             }
         }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    crate::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | crate::analysis::type_expr::ObjectMember::ConstructSignature(function) => {
+                        if let Some(first) = function.parameters.first() {
+                            out.push(&first.ty);
+                        }
+                    }
+                    crate::analysis::type_expr::ObjectMember::Method(method) => {
+                        if let Some(first) = method.function.parameters.first() {
+                            out.push(&first.ty);
+                        }
+                    }
+                    crate::analysis::type_expr::ObjectMember::Property(_)
+                    | crate::analysis::type_expr::ObjectMember::IndexSignature(_) => {}
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2657,53 +2766,54 @@ fn synthesize_model_prop_and_event(
         .clone()
         .unwrap_or_else(|| "modelValue".to_string());
     let has_default = mac.default_keys.iter().any(|key| key == &name);
-    let raw_type = prop_fields
-        .iter()
-        .find(|field| field.name == name)
-        .and_then(|field| field.type_annotation.clone());
+    let source_prop = prop_fields.iter().find(|field| field.name == name);
+    let raw_type = source_prop.and_then(|field| field.type_annotation.clone());
+    let evaluated_prop =
+        evaluated.and_then(|eval| eval.props.iter().find(|field| field.name == name));
+    let is_optional = source_prop
+        .map(|field| field.is_optional)
+        .or_else(|| evaluated_prop.map(|field| field.optional))
+        .unwrap_or(false);
+    let mut prop_type_expr = evaluated_prop
+        .map(|field| field.r#type.clone())
+        .or_else(|| {
+            raw_type
+                .as_ref()
+                .map(|raw| parse_annotation_or_unknown(raw))
+        })
+        .unwrap_or_else(|| unknown_type("unknown".to_string()));
 
-    if !props.iter().any(|prop| prop.name == name) {
-        let mut type_expr = evaluated
-            .and_then(|eval| {
+    if has_default || is_optional {
+        prop_type_expr = add_top_level_undefined_to_type_expr(prop_type_expr);
+    }
+
+    if let Some(existing_prop) = props.iter_mut().find(|prop| prop.name == name) {
+        existing_prop.type_expr = prop_type_expr.clone();
+        existing_prop.type_expansion = existing_prop.type_expansion.clone().or_else(|| {
+            evaluated.and_then(|eval| {
                 eval.props
                     .iter()
                     .find(|field| field.name == name)
-                    .map(|field| field.r#type.clone())
+                    .map(field_expansion_metadata)
             })
-            .or_else(|| {
-                raw_type
-                    .as_ref()
-                    .map(|raw| parse_annotation_or_unknown(raw))
-            })
-            .unwrap_or_else(|| unknown_type("unknown".to_string()));
-
-        let prop_raw_type = if has_default {
-            raw_type.as_ref().map(|raw| format!("{raw} | undefined"))
-        } else {
-            raw_type.clone()
-        };
-
-        if has_default {
-            type_expr = match type_expr {
-                TypeExpr::Unknown { .. } => type_expr,
-                other => TypeExpr::union(vec![
-                    other,
-                    TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined),
-                ]),
-            };
+        });
+        if existing_prop.raw_type.is_none() {
+            existing_prop.raw_type = raw_type.clone();
         }
-
+        existing_prop.required = !has_default && !is_optional;
+        existing_prop.has_default |= has_default;
+    } else {
         props.push(PropAnalysis {
             name: name.clone(),
-            type_expr,
+            type_expr: prop_type_expr.clone(),
             type_expansion: evaluated.and_then(|eval| {
                 eval.props
                     .iter()
                     .find(|field| field.name == name)
                     .map(field_expansion_metadata)
             }),
-            raw_type: prop_raw_type,
-            required: !has_default,
+            raw_type: raw_type.clone(),
+            required: !has_default && !is_optional,
             has_default,
             default_value: None,
             description: None,
@@ -2712,34 +2822,118 @@ fn synthesize_model_prop_and_event(
     }
 
     let event_name = format!("update:{name}");
-    if events.iter().any(|event| event.name == event_name) {
-        return;
+    let evaluated_event =
+        evaluated.and_then(|eval| eval.emits.iter().find(|field| field.name == event_name));
+    let source_payload_type = raw_type.as_deref().map(|raw| {
+        if has_default || is_optional {
+            optionalize_model_source_type_text(raw)
+        } else {
+            raw.to_string()
+        }
+    });
+    let raw_signature = event_raw_signature_from_evaluated_and_source(
+        evaluated_event.and_then(|field| field.raw_type.as_deref()),
+        source_payload_type
+            .as_deref()
+            .map(|raw| format!("[value: {raw}]"))
+            .as_deref(),
+    );
+    let payload = {
+        let payload = evaluated_event
+            .map(|field| field.r#type.clone())
+            .or_else(|| raw_signature.as_ref().map(|raw| unknown_type(raw.clone())))
+            .unwrap_or_else(|| unknown_type("unknown".to_string()));
+        if has_default || is_optional {
+            add_top_level_undefined_to_model_event_payload(payload)
+        } else {
+            payload
+        }
+    };
+
+    if let Some(existing_event) = events.iter_mut().find(|event| event.name == event_name) {
+        existing_event.payload = payload;
+        existing_event.payload_expansion = existing_event
+            .payload_expansion
+            .clone()
+            .or_else(|| evaluated_event.map(field_expansion_metadata));
+        if existing_event.raw_signature.is_none() {
+            existing_event.raw_signature = raw_signature;
+        }
+    } else {
+        events.push(EventAnalysis {
+            name: event_name.clone(),
+            payload,
+            payload_expansion: evaluated_event.map(field_expansion_metadata),
+            raw_signature,
+            description: None,
+            tags: Vec::new(),
+        });
+    }
+}
+
+fn add_top_level_undefined_to_type_expr(type_expr: TypeExpr) -> TypeExpr {
+    if matches!(
+        type_expr,
+        TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined)
+    ) {
+        return type_expr;
     }
 
-    let raw_signature = raw_type.as_ref().map(|raw| format!("[value: {raw}]"));
-    let payload = evaluated
-        .and_then(|eval| {
-            eval.emits
-                .iter()
-                .find(|field| field.name == event_name)
-                .map(|field| field.r#type.clone())
-        })
-        .or_else(|| raw_signature.as_ref().map(|raw| unknown_type(raw.clone())))
-        .unwrap_or_else(|| unknown_type("unknown".to_string()));
+    if let TypeExpr::Union(members) = &type_expr {
+        if members.iter().any(|member| {
+            matches!(
+                member,
+                TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined)
+            )
+        }) {
+            return type_expr;
+        }
+    }
 
-    events.push(EventAnalysis {
-        name: event_name.clone(),
-        payload,
-        payload_expansion: evaluated.and_then(|eval| {
-            eval.emits
+    match type_expr {
+        TypeExpr::Unknown { .. } => type_expr,
+        other => TypeExpr::union(vec![
+            other,
+            TypeExpr::Primitive(crate::analysis::type_expr::PrimitiveName::Undefined),
+        ]),
+    }
+}
+
+fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr {
+    match payload {
+        TypeExpr::Tuple { elements, readonly } => {
+            let updated = elements
                 .iter()
-                .find(|field| field.name == event_name)
-                .map(field_expansion_metadata)
-        }),
-        raw_signature,
-        description: None,
-        tags: Vec::new(),
-    });
+                .enumerate()
+                .map(
+                    |(index, element)| crate::analysis::type_expr::TupleElement {
+                        label: element.label.clone(),
+                        ty: if index == 0 {
+                            add_top_level_undefined_to_type_expr(element.ty.clone())
+                        } else {
+                            element.ty.clone()
+                        },
+                        optional: element.optional,
+                        rest: element.rest,
+                    },
+                )
+                .collect::<Vec<_>>();
+            TypeExpr::Tuple {
+                elements: std::sync::Arc::from(updated),
+                readonly,
+            }
+        }
+        other => add_top_level_undefined_to_type_expr(other),
+    }
+}
+
+fn optionalize_model_source_type_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains("undefined") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed} | undefined")
+    }
 }
 
 fn extract_exposed_from_macro(

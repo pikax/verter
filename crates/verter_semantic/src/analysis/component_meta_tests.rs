@@ -1127,6 +1127,116 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
 }
 
 #[test]
+fn define_slots_extract_bindings_from_call_signature_object_types() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            name: "content".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: Vec::new(),
+            return_type: Some("any".to_string()),
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
+                        name: "content".to_string(),
+                        ty: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                            properties: vec![crate::analysis::type_expr::ObjectMember::CallSignature(
+                                crate::analysis::type_expr::FunctionExpr {
+                                    parameters: vec![crate::analysis::type_expr::FunctionParam {
+                                        name: Some("props".to_string()),
+                                        ty: TypeExpr::Object(Arc::new(
+                                            crate::analysis::type_expr::ObjectExpr {
+                                                properties: vec![
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "item".to_string(),
+                                                            ty: TypeExpr::named("T"),
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "index".to_string(),
+                                                            ty: TypeExpr::Primitive(
+                                                                PrimitiveName::Number,
+                                                            ),
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                    crate::analysis::type_expr::ObjectMember::Property(
+                                                        crate::analysis::type_expr::ObjectProperty {
+                                                            name: "ui".to_string(),
+                                                            ty: TypeExpr::IndexedAccess {
+                                                                object: Arc::new(TypeExpr::named(
+                                                                    "Tabs",
+                                                                )),
+                                                                index: Arc::new(
+                                                                    TypeExpr::string_literal("ui"),
+                                                                ),
+                                                            },
+                                                            optional: false,
+                                                            readonly: false,
+                                                        },
+                                                    ),
+                                                ],
+                                            },
+                                        )),
+                                        optional: false,
+                                        rest: false,
+                                    }],
+                                    return_type: Some(Arc::new(TypeExpr::Primitive(
+                                        PrimitiveName::Any,
+                                    ))),
+                                    type_parameters: Vec::new(),
+                                },
+                            )],
+                        })),
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should be extracted");
+    let binding_names: Vec<_> = slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+
+    assert_eq!(binding_names, vec!["item", "index", "ui"]);
+}
+
+#[test]
 fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_contract() {
     let macros = vec![make_define_props(vec![make_prop(
         "ui",
@@ -2206,6 +2316,155 @@ fn extracts_model_from_define_model() {
         "defineModel should synthesize an update event"
     );
     assert_eq!(result.events[0].name, "update:modelValue");
+}
+
+#[test]
+fn define_model_without_default_stays_optional_in_component_meta() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: None, // default model → "modelValue"
+        prop_fields: vec![make_prop("modelValue", Some("string"), true)],
+        ..make_define_props(vec![])
+    }];
+
+    let result = extract_component_meta(empty_input(&macros));
+    let model_prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "modelValue")
+        .expect("defineModel should synthesize a model prop");
+    let model_event = result
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("defineModel should synthesize an update event");
+
+    assert!(
+        !model_prop.required,
+        "defineModel without required/default should keep modelValue optional"
+    );
+    assert_eq!(
+        model_prop.raw_type.as_deref(),
+        Some("string"),
+        "defineModel should preserve the declared prop raw type"
+    );
+    assert_eq!(
+        model_event.raw_signature.as_deref(),
+        Some("[value: string | undefined]"),
+        "defineModel should keep the update event raw signature aligned with the declared model payload"
+    );
+}
+
+#[test]
+fn define_model_reconciles_existing_model_value_prop_from_define_props() {
+    let macros = vec![
+        AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            ..make_define_props(vec![])
+        },
+        AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineModel,
+            model_name: None,
+            prop_fields: vec![make_prop("modelValue", Some("string"), true)],
+            ..make_define_props(vec![])
+        },
+    ];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            crate::analysis::type_expand::ExpandedField {
+                name: "modelValue".to_string(),
+                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                raw_type: Some("string".to_string()),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            crate::analysis::type_expand::ExpandedField {
+                name: "label".to_string(),
+                r#type: TypeExpr::Primitive(PrimitiveName::String),
+                raw_type: Some("string".to_string()),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact_symbolic(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "label".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "modelValue".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: vec![crate::analysis::type_expand::ExpandedField {
+            name: "update:modelValue".to_string(),
+            r#type: TypeExpr::Tuple {
+                elements: Arc::from(vec![crate::analysis::type_expr::TupleElement {
+                    label: Some("value".to_string()),
+                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                    optional: false,
+                    rest: false,
+                }]),
+                readonly: false,
+            },
+            raw_type: Some("[value: string]".to_string()),
+            optional: false,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+        }],
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let model_prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "modelValue")
+        .expect("modelValue prop should be present");
+    let model_event = result
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("update:modelValue event should be present");
+
+    assert!(
+        !model_prop.required,
+        "defineModel should reconcile an existing modelValue prop back to optional"
+    );
+    assert_eq!(
+        model_prop.raw_type.as_deref(),
+        Some("string"),
+        "defineModel should keep the symbolic model raw type on the reconciled prop"
+    );
+    assert_eq!(
+        model_event.raw_signature.as_deref(),
+        Some("[value: string | undefined]"),
+        "defineModel should keep the reconciled update event signature"
+    );
 }
 
 #[test]

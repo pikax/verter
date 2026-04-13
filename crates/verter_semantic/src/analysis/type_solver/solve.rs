@@ -1891,28 +1891,41 @@ fn collect_structural_ref_properties(
         }
     }
 
-    let mut merged: rustc_hash::FxHashMap<String, StructuralPropertyDescriptor> = prepared
-        .member_index
-        .iter()
-        .map(|(name, member)| {
-            (
-                name.clone(),
-                StructuralPropertyDescriptor {
-                    name: name.clone(),
-                    optional: member.optional,
-                    readonly: member.readonly,
-                    is_method: member.is_method,
-                },
-            )
-        })
-        .collect();
+    let all_required_covered_by_member_index = required_keys
+        .map(|keys| keys.iter().all(|k| prepared.member_index.contains_key(k)))
+        .unwrap_or(false);
+    let can_seed_from_member_index = matches!(
+        prepared.projection_class,
+        PreparedProjectionClass::DirectMembers
+    ) || all_required_covered_by_member_index;
+    let mut merged: rustc_hash::FxHashMap<String, StructuralPropertyDescriptor> =
+        if can_seed_from_member_index {
+            prepared
+                .member_index
+                .iter()
+                .map(|(name, member)| {
+                    (
+                        name.clone(),
+                        StructuralPropertyDescriptor {
+                            name: name.clone(),
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            is_method: member.is_method,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
 
     // When required_keys is set and the member_index already covers every
     // requested key, skip the expensive resolve_prepared_ref which would
     // resolve the full declaration body (including unrelated external refs).
-    let all_required_covered = required_keys
-        .map(|keys| keys.iter().all(|k| merged.contains_key(k)))
-        .unwrap_or(false);
+    let all_required_covered = all_required_covered_by_member_index
+        && required_keys
+            .map(|keys| keys.iter().all(|k| merged.contains_key(k)))
+            .unwrap_or(false);
 
     if !all_required_covered {
         let resolved_args: Vec<NodeId> = type_arguments

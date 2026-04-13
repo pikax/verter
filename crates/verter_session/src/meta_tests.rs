@@ -6770,6 +6770,30 @@ defineProps<Props>()
         )
         .unwrap();
 
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./button-types".to_string(),
+            resolved_canonical_id: Some("/src/button-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/button-types.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
     let resolved = project
         .host()
         .resolve_component_meta(
@@ -7133,6 +7157,30 @@ defineProps<Props>()
 <template><div /></template>"#,
         )
         .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./button-types".to_string(),
+            resolved_canonical_id: Some("/src/button-types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/button-types.ts",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
 
     let resolved = project
         .host()
@@ -8243,9 +8291,13 @@ defineSlots<ButtonSlots>()
         .iter()
         .find_map(|member| match member {
             ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
+                TypeExpr::Function(function) => Some(function.as_ref()),
+                _ => None,
+            },
             _ => None,
         })
-        .expect("ButtonSlots should keep the default slot as a method signature");
+        .expect("ButtonSlots should keep the default slot callable signature");
     let props_param = default_method
         .parameters
         .first()
@@ -8361,9 +8413,13 @@ defineSlots<ButtonSlots>()
         .iter()
         .find_map(|member| match member {
             ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
+                TypeExpr::Function(function) => Some(function.as_ref()),
+                _ => None,
+            },
             _ => None,
         })
-        .expect("ButtonSlots should keep the default slot as a method signature");
+        .expect("ButtonSlots should keep the default slot callable signature");
     let props_param = default_method
         .parameters
         .first()
@@ -8638,6 +8694,72 @@ defineProps<ButtonProps>()
             .iter()
             .any(|entry| entry.name == "Avatar"),
         "transitive Avatar alias should not be separately published in the registry"
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Button.vue")
+        .expect("should return component meta");
+    let avatar = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "avatar")
+        .expect("avatar prop should still be exposed");
+    assert_eq!(
+        avatar.raw_type.as_deref(),
+        Some("AvatarProps"),
+        "public prop contract should keep the imported alias text"
+    );
+    let TypeExpr::Object(avatar_shape) = &avatar.type_expr else {
+        panic!(
+            "avatar prop should materialize to an object in the public payload, got {:?}",
+            avatar.type_expr
+        );
+    };
+    let size_prop = avatar_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "size" => Some(property),
+            _ => None,
+        })
+        .expect("avatar prop should include a size member");
+    let TypeExpr::Union(size_variants) = &size_prop.ty else {
+        panic!(
+            "avatar.size should materialize to a string-literal union, got {:?}",
+            size_prop.ty
+        );
+    };
+    assert!(
+        size_variants.iter().any(|variant| {
+            matches!(
+                variant,
+                TypeExpr::Literal(LiteralValue::String(value)) if value == "sm"
+            )
+        }),
+        "avatar.size should include the concrete theme variants, got {:?}",
+        size_prop.ty
+    );
+    let ui_prop = avatar_shape
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == "ui" => Some(property),
+            _ => None,
+        })
+        .expect("avatar prop should include a ui member");
+    let TypeExpr::Object(ui_shape) = &ui_prop.ty else {
+        panic!(
+            "avatar.ui should materialize to a concrete slots object, got {:?}",
+            ui_prop.ty
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "avatar.ui should expose the concrete slots members, got {:?}",
+        ui_prop.ty
     );
 }
 
@@ -9613,6 +9735,1115 @@ defineProps<MyProps>()
 }
 
 #[test]
+fn package_pick_heritage_survives_local_indexed_access_helpers_in_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+export type ComponentConfig<TTheme> = {
+  variants: {
+    color: 'primary' | 'secondary'
+    size: 'sm' | 'md'
+  }
+  slots: {
+    root?: string
+    list?: string
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    size: { sm: '', md: '' }
+  },
+  slots: {
+    root: '',
+    list: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface Props extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  color?: Tabs['variants']['color']
+  ui?: Tabs['slots']
+}
+
+export interface Emits extends TabsRootEmits<string | number> {}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+defineEmits<Emits>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"activationMode")
+            && prop_names.contains(&"defaultValue")
+            && prop_names.contains(&"modelValue")
+            && prop_names.contains(&"unmountOnHide"),
+        "package-backed Pick heritage should survive alongside local indexed-access helpers, got {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"color") && prop_names.contains(&"ui"),
+        "local indexed-access helper props should still be present, got {prop_names:?}"
+    );
+
+    let color = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "color")
+        .expect("color prop should exist");
+    assert!(
+        !matches!(
+            color.type_expr,
+            TypeExpr::Unknown { .. } | TypeExpr::IndexedAccess { .. }
+        ),
+        "component-config indexed access should not stay symbolic in component meta, got {:?}",
+        color.type_expr
+    );
+    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+
+    let ui = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should exist");
+    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
+        panic!(
+            "component-config slots helper should materialize as an object, got {:?}",
+            ui.type_expr
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+        ),
+        "ui helper should keep root, got {:?}",
+        ui.type_expr
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "list")
+        ),
+        "ui helper should keep list, got {:?}",
+        ui.type_expr
+    );
+
+    let event = meta
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("update:modelValue event should exist");
+    let TypeExpr::Tuple { elements, .. } = &event.payload else {
+        panic!(
+            "package-backed emits should materialize as a tuple payload, got {:?}",
+            event.payload
+        );
+    };
+    assert_eq!(
+        elements.len(),
+        1,
+        "model update should have a single payload"
+    );
+    match &elements[0].ty {
+        TypeExpr::Union(members) => {
+            assert!(
+                members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
+                "event payload should include string, got {:?}",
+                event.payload
+            );
+            assert!(
+                members.contains(&TypeExpr::Primitive(PrimitiveName::Number)),
+                "event payload should include number, got {:?}",
+                event.payload
+            );
+        }
+        other => panic!(
+            "package-backed emits should instantiate the generic payload, got {:?}",
+            other
+        ),
+    }
+    assert_eq!(
+        event.raw_signature.as_deref(),
+        Some("[payload: string | number]"),
+        "event display should not fall back to the uninstantiated type parameter"
+    );
+}
+
+#[test]
+fn generic_package_pick_heritage_and_indexed_access_helpers_survive_in_component_meta() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+export type GetItemKeys<T> = keyof T & string
+
+export type ComponentConfig<TTheme> = {
+  variants: {
+    color: 'primary' | 'secondary'
+    variant: 'pill' | 'link'
+    size: 'sm' | 'md'
+    orientation: 'horizontal' | 'vertical'
+  }
+  slots: {
+    root?: string
+    list?: string
+    content?: string
+  }
+  ui: {
+    root: string
+    list: string
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { pill: '', link: '' },
+    size: { sm: '', md: '' },
+    orientation: { horizontal: '', vertical: '' }
+  },
+  slots: {
+    root: '',
+    list: '',
+    content: ''
+  },
+  ui: {
+    root: '',
+    list: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { VNode } from 'vue'
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig, GetItemKeys } from './types'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  label?: string
+  value?: string | number
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  items?: T[]
+  color?: Tabs['variants']['color']
+  variant?: Tabs['variants']['variant']
+  size?: Tabs['variants']['size']
+  orientation?: Tabs['variants']['orientation']
+  valueKey?: GetItemKeys<T>
+  labelKey?: GetItemKeys<T>
+  ui?: Tabs['slots']
+}
+
+export interface TabsEmits extends TabsRootEmits<string | number> {}
+
+type SlotProps<T extends TabsItem> = (props: { item: T, index: number, ui: Tabs['ui'] }) => VNode[]
+
+export type TabsSlots<T extends TabsItem = TabsItem> = {
+  'default'?(props: { item: T, index: number }): VNode[]
+  'content'?: SlotProps<T>
+}
+</script>
+<script setup lang=\"ts\" generic=\"T extends TabsItem\">
+withDefaults(defineProps<TabsProps<T>>(), {
+  defaultValue: '0',
+  orientation: 'horizontal',
+  unmountOnHide: true,
+  valueKey: 'value',
+  labelKey: 'label'
+})
+defineEmits<TabsEmits>()
+defineSlots<TabsSlots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+    let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+    assert!(
+        prop_names.contains(&"activationMode")
+            && prop_names.contains(&"defaultValue")
+            && prop_names.contains(&"modelValue")
+            && prop_names.contains(&"unmountOnHide"),
+        "generic package-backed Pick heritage should survive, got {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"color")
+            && prop_names.contains(&"variant")
+            && prop_names.contains(&"size")
+            && prop_names.contains(&"orientation")
+            && prop_names.contains(&"ui"),
+        "generic indexed-access helper props should survive, got {prop_names:?}"
+    );
+
+    let color = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "color")
+        .expect("color prop should exist");
+    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+
+    let ui = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should exist");
+    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
+        panic!(
+            "ui helper should materialize as an object, got {:?}",
+            ui.type_expr
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+        ),
+        "ui helper should keep root, got {:?}",
+        ui.type_expr
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "list")
+        ),
+        "ui helper should keep list, got {:?}",
+        ui.type_expr
+    );
+
+    let value_key = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "valueKey")
+        .expect("valueKey prop should exist");
+    assert!(
+        !matches!(
+            value_key.type_expr,
+            TypeExpr::Primitive(PrimitiveName::Never)
+        ),
+        "generic key helpers should not collapse to never, got {:?}",
+        value_key.type_expr
+    );
+
+    let content_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should exist");
+    let binding_names: Vec<_> = content_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item", "index", "ui"],
+        "generic slot aliases should keep their scoped bindings, got {:?}",
+        binding_names
+    );
+
+    let event = meta
+        .events
+        .iter()
+        .find(|event| event.name == "update:modelValue")
+        .expect("update:modelValue event should exist");
+    let TypeExpr::Tuple { elements, .. } = &event.payload else {
+        panic!(
+            "generic package-backed emits should materialize as a tuple payload, got {:?}",
+            event.payload
+        );
+    };
+    assert_eq!(
+        elements.len(),
+        1,
+        "model update should have a single payload"
+    );
+    match &elements[0].ty {
+        TypeExpr::Union(members) => {
+            assert!(
+                members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
+                "event payload should include string, got {:?}",
+                event.payload
+            );
+            assert!(
+                members.contains(&TypeExpr::Primitive(PrimitiveName::Number)),
+                "event payload should include number, got {:?}",
+                event.payload
+            );
+        }
+        other => panic!(
+            "generic package-backed emits should instantiate the generic payload, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn resolved_component_meta_materializes_imported_generic_tabs_helper_fields() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
+  keyof Extract<T, object> & string
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { pill: '', link: '' },
+    size: { sm: '', md: '' },
+    orientation: { horizontal: '', vertical: '' }
+  },
+  slots: {
+    root: '',
+    list: '',
+    content: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import type { GetItemKeys } from './utils'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  label?: string
+  value?: string | number
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  items?: T[]
+  color?: Tabs['variants']['color']
+  variant?: Tabs['variants']['variant']
+  size?: Tabs['variants']['size']
+  orientation?: Tabs['variants']['orientation']
+  valueKey?: GetItemKeys<T>
+  labelKey?: GetItemKeys<T>
+  ui?: Tabs['slots']
+}
+
+export interface TabsEmits extends TabsRootEmits<string | number> {}
+
+type SlotProps<T extends TabsItem> = (props: { item: T, index: number, ui: Tabs['ui'] }) => any
+
+export type TabsSlots<T extends TabsItem = TabsItem> = {
+  content?: SlotProps<T>
+}
+</script>
+<script setup lang="ts" generic="T extends TabsItem">
+withDefaults(defineProps<TabsProps<T>>(), {
+  defaultValue: '0',
+  orientation: 'horizontal',
+  unmountOnHide: true,
+  valueKey: 'value',
+  labelKey: 'label'
+})
+defineEmits<TabsEmits>()
+defineSlots<TabsSlots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+
+    let color = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "color")
+        .expect("color prop should exist");
+    assert_union_string_literals(&color.type_expr, &["primary", "secondary"]);
+
+    let ui = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should exist");
+    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
+        panic!(
+            "ui helper should materialize as an object, got {:?}",
+            ui.type_expr
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+        ),
+        "ui helper should keep root, got {:?}",
+        ui.type_expr
+    );
+
+    let value_key = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "valueKey")
+        .expect("valueKey prop should exist");
+    assert!(
+        !matches!(
+            value_key.type_expr,
+            TypeExpr::Primitive(PrimitiveName::Never)
+        ),
+        "generic key helpers should not collapse to never, got {:?}",
+        value_key.type_expr
+    );
+
+    let content_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should exist");
+    let binding_names: Vec<_> = content_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item", "index", "ui"],
+        "generic slot aliases should keep their scoped bindings, got {:?}",
+        binding_names
+    );
+}
+
+#[test]
+fn component_meta_keeps_explicit_slot_bindings_through_dynamic_slots_intersection() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+export type DynamicSlotsKeys<Name extends string | undefined, Suffix extends string | undefined = undefined> = (
+  Name extends string
+    ? Suffix extends string
+      ? Name | `${Name}-${Suffix}`
+      : Name
+    : never
+)
+
+export type DynamicSlots<
+  T extends { slot?: string },
+  Suffix extends string | undefined = undefined,
+  ExtraProps extends object = {}
+> = {
+  [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+  ) => any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  slots: {
+    root: '',
+    list: '',
+    trigger: '',
+    label: '',
+    content: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import type { DynamicSlots } from './utils'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  label?: string
+  value?: string | number
+  slot?: string
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  items?: T[]
+}
+
+export interface TabsEmits extends TabsRootEmits<string | number> {}
+
+type SlotProps<T extends TabsItem> = (props: { item: T, index: number, ui: Tabs['ui'] }) => any
+
+export type TabsSlots<T extends TabsItem = TabsItem> = {
+  leading?: SlotProps<T>
+  content?: SlotProps<T>
+} & DynamicSlots<T, undefined, { index: number, ui: Tabs['ui'] }>
+</script>
+<script setup lang="ts" generic="T extends TabsItem">
+defineProps<TabsProps<T>>()
+defineEmits<TabsEmits>()
+defineSlots<TabsSlots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+    let content_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should exist");
+    let binding_names: Vec<_> = content_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item", "index", "ui"],
+        "explicit slots in DynamicSlots intersections should keep their bindings, got {:?}",
+        binding_names
+    );
+
+    let leading_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "leading")
+        .expect("leading slot should exist");
+    let leading_binding_names: Vec<_> = leading_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        leading_binding_names,
+        vec!["item", "index", "ui"],
+        "sibling explicit slots should keep the same intersection bindings, got {:?}",
+        leading_binding_names
+    );
+}
+
+#[test]
+fn component_meta_keeps_realistic_tabs_slot_bindings_with_dynamic_helper_intersection() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+
+export interface TabsRootEmits<T> {
+  (e: 'update:modelValue', payload: T): void
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+export type DynamicSlotsKeys<Name extends string | undefined, Suffix extends string | undefined = undefined> = (
+  Name extends string
+    ? Suffix extends string
+      ? Name | `${Name}-${Suffix}`
+      : Name
+    : never
+)
+
+export type DynamicSlots<
+  T extends { slot?: string },
+  Suffix extends string | undefined = undefined,
+  ExtraProps extends object = {}
+> = {
+  [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+  ) => any
+}
+
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+
+type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
+  ? true
+  : false
+
+type IsPlainObject<T> = IsPrimitive<T> extends true
+  ? false
+  : T extends readonly any[] | ((...args: any[]) => any)
+    ? false
+    : T extends object ? true
+      : false
+
+type DotPathKeys<T> = IsPlainObject<T> extends true
+  ? {
+      [K in keyof T & string]:
+      IsPlainObject<NonNullable<T[K]>> extends true
+        ? K | `${K}.${DotPathKeys<NonNullable<T[K]>>}`
+        : K
+    }[keyof T & string]
+  : never
+
+export type GetItemKeys<
+  I,
+  T extends NestedItem<I> = NestedItem<I>
+> = (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { pill: '', link: '' },
+    size: { sm: '', md: '' },
+    orientation: { horizontal: '', vertical: '' }
+  },
+  slots: {
+    root: '',
+    list: '',
+    trigger: '',
+    label: '',
+    content: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { TabsRootProps, TabsRootEmits } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import type { DynamicSlots, GetItemKeys } from './utils'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  label?: string
+  value?: string | number
+  slot?: string
+  nested?: {
+    path?: string
+  }
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  items?: T[]
+  color?: Tabs['variants']['color']
+  variant?: Tabs['variants']['variant']
+  size?: Tabs['variants']['size']
+  orientation?: Tabs['variants']['orientation']
+  valueKey?: GetItemKeys<T>
+  labelKey?: GetItemKeys<T>
+  ui?: Tabs['slots']
+}
+
+export interface TabsEmits extends TabsRootEmits<string | number> {}
+
+type SlotProps<T extends TabsItem> = (props: { item: T, index: number, ui: Tabs['ui'] }) => any
+
+export type TabsSlots<T extends TabsItem = TabsItem> = {
+  leading?: SlotProps<T>
+  default?(props: { item: T, index: number }): any
+  trailing?: SlotProps<T>
+  content?: SlotProps<T>
+} & DynamicSlots<T, undefined, { index: number, ui: Tabs['ui'] }>
+</script>
+<script setup lang="ts" generic="T extends TabsItem">
+withDefaults(defineProps<TabsProps<T>>(), {
+  defaultValue: '0',
+  orientation: 'horizontal',
+  unmountOnHide: true,
+  valueKey: 'value',
+  labelKey: 'label'
+})
+defineEmits<TabsEmits>()
+defineSlots<TabsSlots<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "reka-ui".to_string(),
+                resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./utils".to_string(),
+                resolved_canonical_id: Some("/src/utils.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+    let content_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should exist");
+    let binding_names: Vec<_> = content_slot
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item", "index", "ui"],
+        "realistic Tabs slot helpers should keep explicit content bindings, got {:?}",
+        binding_names
+    );
+}
+
+#[test]
 fn union_object_variants_synthesize_component_meta_props() {
     let project = make_project();
     project
@@ -10209,9 +11440,13 @@ defineSlots<ButtonSlots>()
         .iter()
         .find_map(|member| match member {
             ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
+                TypeExpr::Function(function) => Some(function.as_ref()),
+                _ => None,
+            },
             _ => None,
         })
-        .expect("ButtonSlots should keep the default slot as a method signature");
+        .expect("ButtonSlots should keep the default slot callable signature");
     let Some(props_param) = default_method.parameters.first() else {
         panic!("default slot method should keep its props parameter");
     };
@@ -10320,9 +11555,13 @@ defineSlots<ButtonSlots>()
         .iter()
         .find_map(|member| match member {
             ObjectMember::Method(method) if method.name == "default" => Some(&method.function),
+            ObjectMember::Property(property) if property.name == "default" => match &property.ty {
+                TypeExpr::Function(function) => Some(function.as_ref()),
+                _ => None,
+            },
             _ => None,
         })
-        .expect("ButtonSlots should keep the default slot as a method signature");
+        .expect("ButtonSlots should keep the default slot callable signature");
     let Some(props_param) = default_method.parameters.first() else {
         panic!("default slot method should keep its props parameter");
     };
@@ -10364,6 +11603,26 @@ defineSlots<ButtonSlots>()
         ui_binding.raw_type.as_deref() == Some("Button['ui']"),
         "slot binding contract should still point at the requested helper route, got {:?}",
         ui_binding.raw_type
+    );
+    let TypeExpr::Object(ui_shape) = &ui_binding.type_expr else {
+        panic!(
+            "public slot binding should materialize to the imported helper object, got {:?}",
+            ui_binding.type_expr
+        );
+    };
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "slot binding should expose the concrete ui members, got {:?}",
+        ui_binding.type_expr
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "slot binding should keep all imported ui members, got {:?}",
+        ui_binding.type_expr
     );
 }
 

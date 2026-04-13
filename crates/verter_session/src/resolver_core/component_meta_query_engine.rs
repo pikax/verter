@@ -1917,6 +1917,62 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
     }
 
+    pub fn solve_expr_type_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+        let solver_host = self.solver_host_for_scope(scope_canonical_id);
+        let (result, _) = self
+            .owner_engine
+            .solve_scoped(&solver_host, scope_canonical_id, expr);
+        (result.value != *expr).then_some(result.value)
+    }
+
+    pub fn expand_local_generic_ref_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = expr
+        else {
+            return None;
+        };
+        if type_arguments.is_empty() {
+            return None;
+        }
+
+        let declaration = self.resolve_type_declaration(scope_canonical_id, name.as_ref());
+        let target_canonical_id = if declaration.canonical_source.is_empty() {
+            scope_canonical_id.to_string()
+        } else {
+            declaration.canonical_source.clone()
+        };
+        if is_package_source(Some(target_canonical_id.as_str())) {
+            return None;
+        }
+        let target_symbol_name = if declaration.resolved_name.is_empty() {
+            name.as_ref()
+        } else {
+            declaration.resolved_name.as_str()
+        };
+        let prepared = self.prepared_type_decl(&target_canonical_id, target_symbol_name)?;
+        let substitutions = prepared_type_param_substitutions(prepared.as_ref(), type_arguments)?;
+        Some(substitute_type_expr_if_needed(
+            &prepared.body,
+            &substitutions,
+        ))
+    }
+
     pub fn project_expr_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -1972,30 +2028,39 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         if let super::RouteDemand::MemberPath(path) = route {
-            if let [member_name] = path.as_slice() {
-                if let Some(projected_member) = self.project_prepared_member_route_projection(
-                    scope_canonical_id,
-                    root_symbol,
-                    member_name,
-                ) {
-                    let projected_expr = projected_member.ty.clone();
-                    if let Some(store_view) = self.store_view {
-                        self.cache_routed_expr_surface_expr(
-                            scope_canonical_id,
-                            root_symbol,
-                            route,
-                            &projected_expr,
-                            store_view,
-                        );
-                        self.cache_projected_member(
-                            scope_canonical_id,
-                            root_symbol,
-                            &projected_member,
-                            store_view,
-                        );
+            if let Some(projected_expr) = self.project_prepared_member_path_route_surface_expr(
+                scope_canonical_id,
+                root_symbol,
+                path,
+            ) {
+                if let Some(store_view) = self.store_view {
+                    self.cache_routed_expr_surface_expr(
+                        scope_canonical_id,
+                        root_symbol,
+                        route,
+                        &projected_expr,
+                        store_view,
+                    );
+                    if let [member_name] = path.as_slice() {
+                        if let Some(projected_member) = self
+                            .project_prepared_member_route_projection(
+                                scope_canonical_id,
+                                root_symbol,
+                                member_name,
+                            )
+                        {
+                            self.cache_projected_member(
+                                scope_canonical_id,
+                                root_symbol,
+                                &projected_member,
+                                store_view,
+                            );
+                        }
                     }
-                    return Some(projected_expr);
                 }
+                return Some(projected_expr);
+            }
+            if let [member_name] = path.as_slice() {
                 let projected_member =
                     self.project_type_member(scope_canonical_id, root_symbol, member_name)?;
                 let projected_expr = projected_member.ty.clone();
@@ -2452,6 +2517,470 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             readonly: member.readonly,
             is_method: member.is_method,
         })
+    }
+
+    fn project_prepared_member_path_route_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        path: &[String],
+    ) -> Option<TypeExpr> {
+        let mut visited = FxHashSet::default();
+        self.project_prepared_member_path_route_projection_from_symbol(
+            scope_canonical_id,
+            scope_canonical_id,
+            symbol_name,
+            path,
+            &FxHashMap::default(),
+            &mut visited,
+        )
+    }
+
+    fn expr_references_prepared_scope_symbol(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                (!is_builtin_name(name.as_ref())
+                    && self
+                        .prepared_type_decl(scope_canonical_id, name.as_ref())
+                        .is_some())
+                    || type_arguments.iter().any(|arg| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, arg)
+                    })
+            }
+            TypeExpr::Parenthesized(inner)
+            | TypeExpr::Array { element: inner, .. }
+            | TypeExpr::KeyOf(inner)
+            | TypeExpr::Rest(inner) => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, inner)
+            }
+            TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, &element.ty)
+            }),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| self.expr_references_prepared_scope_symbol(scope_canonical_id, ty)),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                ObjectMember::Property(property) => {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, &property.ty)
+                }
+                ObjectMember::Method(method) => {
+                    method.function.parameters.iter().any(|param| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                    }) || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(|return_type| {
+                            self.expr_references_prepared_scope_symbol(
+                                scope_canonical_id,
+                                return_type,
+                            )
+                        })
+                }
+                ObjectMember::IndexSignature(signature) => {
+                    self.expr_references_prepared_scope_symbol(
+                        scope_canonical_id,
+                        &signature.key_type,
+                    ) || self.expr_references_prepared_scope_symbol(
+                        scope_canonical_id,
+                        &signature.value_type,
+                    )
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function.parameters.iter().any(|param| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, return_type)
+                    })
+                }
+            }),
+            TypeExpr::Function(function) => {
+                function.parameters.iter().any(|param| {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, &param.ty)
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    self.expr_references_prepared_scope_symbol(scope_canonical_id, return_type)
+                })
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, object)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, index)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, check)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, extends)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, true_type)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, false_type)
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                self.expr_references_prepared_scope_symbol(scope_canonical_id, source)
+                    || self.expr_references_prepared_scope_symbol(scope_canonical_id, value)
+                    || name_type.as_deref().is_some_and(|name_type| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, name_type)
+                    })
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => expressions
+                .iter()
+                .any(|expr| self.expr_references_prepared_scope_symbol(scope_canonical_id, expr)),
+            TypeExpr::TypeParameter(type_parameter) => {
+                type_parameter
+                    .constraint
+                    .as_deref()
+                    .is_some_and(|constraint| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, constraint)
+                    })
+                    || type_parameter.default.as_deref().is_some_and(|default| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, default)
+                    })
+            }
+            TypeExpr::RecursiveRef {
+                type_arguments,
+                conditional_context,
+                ..
+            } => {
+                type_arguments
+                    .iter()
+                    .any(|arg| self.expr_references_prepared_scope_symbol(scope_canonical_id, arg))
+                    || conditional_context.iter().any(|frame| {
+                        self.expr_references_prepared_scope_symbol(scope_canonical_id, &frame.check)
+                            || self.expr_references_prepared_scope_symbol(
+                                scope_canonical_id,
+                                &frame.extends,
+                            )
+                    })
+            }
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::Unknown { .. } => false,
+        }
+    }
+
+    fn solve_or_project_prepared_member_leaf_expr(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let active_result =
+            self.solve_or_project_leaf_expr_until_stable(active_scope_canonical_id, expr);
+        if resolution_scope_canonical_id == active_scope_canonical_id
+            || !self.expr_references_prepared_scope_symbol(resolution_scope_canonical_id, expr)
+        {
+            return active_result;
+        }
+
+        self.solve_or_project_leaf_expr_until_stable(resolution_scope_canonical_id, expr)
+            .or(active_result)
+    }
+
+    fn solve_or_project_leaf_expr_until_stable(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let mut current = expr.clone();
+        let mut last = None;
+        for _ in 0..3 {
+            let next = self
+                .solve_expr_type_expr(scope_canonical_id, &current)
+                .or_else(|| self.project_expr_surface_expr(scope_canonical_id, &current));
+            let Some(next) = next else {
+                return last;
+            };
+            if next == current {
+                return Some(next);
+            }
+            last = Some(next.clone());
+            current = next;
+        }
+        last
+    }
+
+    fn project_prepared_member_path_route_projection_from_symbol(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        symbol_name: &str,
+        path: &[String],
+        substitutions: &FxHashMap<String, TypeExpr>,
+        visited: &mut FxHashSet<(String, String)>,
+    ) -> Option<TypeExpr> {
+        let visit_key = (
+            resolution_scope_canonical_id.to_string(),
+            symbol_name.to_string(),
+        );
+        if !visited.insert(visit_key.clone()) {
+            return None;
+        }
+
+        let result = self
+            .prepared_type_decl(resolution_scope_canonical_id, symbol_name)
+            .and_then(|prepared| {
+                if let Some(member_name) = path.first() {
+                    if let Some(member) = prepared.member(member_name) {
+                        let member_ty = substitute_type_expr_if_needed(&member.ty, substitutions);
+                        if path.len() == 1 {
+                            return self
+                                .solve_or_project_prepared_member_leaf_expr(
+                                    resolution_scope_canonical_id,
+                                    active_scope_canonical_id,
+                                    &member_ty,
+                                )
+                                .or(Some(member_ty));
+                        }
+                        return self.project_prepared_member_path_route_projection_from_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            prepared.as_ref(),
+                            &member_ty,
+                            &path[1..],
+                            &FxHashMap::default(),
+                            visited,
+                        );
+                    }
+                }
+
+                self.project_prepared_member_path_route_projection_from_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    prepared.as_ref(),
+                    &prepared.body,
+                    path,
+                    substitutions,
+                    visited,
+                )
+            });
+
+        visited.remove(&visit_key);
+        result
+    }
+
+    fn project_prepared_member_path_route_projection_from_expr(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+        expr: &TypeExpr,
+        path: &[String],
+        substitutions: &FxHashMap<String, TypeExpr>,
+        visited: &mut FxHashSet<(String, String)>,
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        let Some((member_name, tail)) = path.split_first() else {
+            let projected_expr = substitute_type_expr_if_needed(expr, substitutions);
+            return self
+                .solve_or_project_prepared_member_leaf_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    &projected_expr,
+                )
+                .or(Some(projected_expr));
+        };
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => self
+                .project_prepared_member_path_route_projection_from_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    prepared,
+                    inner,
+                    path,
+                    substitutions,
+                    visited,
+                ),
+            TypeExpr::Intersection(parts) => parts.iter().rev().find_map(|part| {
+                self.project_prepared_member_path_route_projection_from_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    prepared,
+                    part,
+                    path,
+                    substitutions,
+                    visited,
+                )
+            }),
+            TypeExpr::Object(object) => {
+                let member_ty = object.properties.iter().find_map(|member| match member {
+                    ObjectMember::Property(property) if property.name == *member_name => {
+                        Some(substitute_type_expr_if_needed(&property.ty, substitutions))
+                    }
+                    ObjectMember::Method(method) if method.name == *member_name => {
+                        Some(TypeExpr::Function(std::sync::Arc::new(
+                            substitute_function_expr_if_needed(&method.function, substitutions),
+                        )))
+                    }
+                    _ => None,
+                })?;
+                if tail.is_empty() {
+                    return self
+                        .solve_or_project_prepared_member_leaf_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            &member_ty,
+                        )
+                        .or(Some(member_ty));
+                }
+                self.project_prepared_member_path_route_projection_from_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    prepared,
+                    &member_ty,
+                    tail,
+                    &FxHashMap::default(),
+                    visited,
+                )
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                if let Some(substituted) =
+                    substituted_ref_expr_if_needed(expr, name.as_ref(), substitutions)
+                {
+                    return self.project_prepared_member_path_route_projection_from_expr(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        prepared,
+                        &substituted,
+                        path,
+                        &FxHashMap::default(),
+                        visited,
+                    );
+                }
+
+                match (name.as_ref(), type_arguments.as_ref()) {
+                    ("Partial", [inner])
+                    | ("Required", [inner])
+                    | ("Readonly", [inner])
+                    | ("NonNullable", [inner]) => self
+                        .project_prepared_member_path_route_projection_from_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            prepared,
+                            inner,
+                            path,
+                            substitutions,
+                            visited,
+                        ),
+                    ("Pick", [target, keys]) => {
+                        let requested = self.prepared_string_literal_keys(
+                            resolution_scope_canonical_id,
+                            prepared,
+                            keys,
+                            visited,
+                        )?;
+                        if !requested.iter().any(|candidate| candidate == member_name) {
+                            return None;
+                        }
+                        self.project_prepared_member_path_route_projection_from_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            prepared,
+                            target,
+                            path,
+                            substitutions,
+                            visited,
+                        )
+                    }
+                    ("Omit", [target, keys]) => {
+                        let omitted = self.prepared_string_literal_keys(
+                            resolution_scope_canonical_id,
+                            prepared,
+                            keys,
+                            visited,
+                        )?;
+                        if omitted.iter().any(|candidate| candidate == member_name) {
+                            return None;
+                        }
+                        self.project_prepared_member_path_route_projection_from_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            prepared,
+                            target,
+                            path,
+                            substitutions,
+                            visited,
+                        )
+                    }
+                    _ if matches!(name.as_ref(), "Array" | "ReadonlyArray" | "Promise") => None,
+                    _ if is_builtin_name(name.as_ref()) => None,
+                    _ => {
+                        let (target_canonical_id, target_symbol_name) = self
+                            .resolve_prepared_surface_target(
+                                resolution_scope_canonical_id,
+                                prepared,
+                                name.as_ref(),
+                            )?;
+                        let target_prepared =
+                            self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
+                        let target_substitutions = prepared_type_param_substitutions(
+                            target_prepared.as_ref(),
+                            type_arguments.as_ref(),
+                        )?;
+                        self.project_prepared_member_path_route_projection_from_symbol(
+                            &target_canonical_id,
+                            active_scope_canonical_id,
+                            &target_symbol_name,
+                            path,
+                            &target_substitutions,
+                            visited,
+                        )
+                    }
+                }
+            }
+            TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Union(_)
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Array { .. }
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Infer { .. } => {
+                let nested_expr = path.iter().fold(
+                    substitute_type_expr_if_needed(expr, substitutions),
+                    |object, member| TypeExpr::IndexedAccess {
+                        object: std::sync::Arc::new(object),
+                        index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
+                    },
+                );
+                self.solve_or_project_prepared_member_leaf_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    &nested_expr,
+                )
+            }
+            TypeExpr::Function(_)
+            | TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Unknown { .. } => None,
+        }
     }
 
     fn project_inherited_member_route_projection(
@@ -4673,6 +5202,130 @@ export interface Props<T extends { id?: string } = { id?: string }> {
                 .project_prepared_pick_route_surface_expr("/src/types.ts", "Props", &requested)
                 .is_none(),
             "generic pick route members that still mention type parameters should fall back to the existing projection path",
+        );
+    }
+
+    #[test]
+    fn project_expr_surface_expr_materializes_nested_indexed_access_through_generic_package_pick_heritage(
+    ) {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/node_modules/reka-ui/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface TabsRootProps<T> {
+  defaultValue?: T
+  modelValue?: T
+  activationMode?: 'automatic' | 'manual'
+  unmountOnHide?: boolean
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/tv.ts".to_string(),
+            Arc::from(
+                r#"
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/theme.ts".to_string(),
+            Arc::from(
+                r#"
+export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { pill: '', link: '' }
+  }
+} as const
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { TabsRootProps } from 'reka-ui'
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Tabs = ComponentConfig<typeof theme>
+
+export interface TabsItem {
+  value?: string | number
+}
+
+export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootProps<string | number>, 'defaultValue' | 'modelValue' | 'activationMode' | 'unmountOnHide'> {
+  color?: Tabs['variants']['color']
+  variant?: Tabs['variants']['variant']
+}
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "reka-ui".to_string(),
+                    resolved_canonical_id: Some("/src/node_modules/reka-ui/index.d.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./tv".to_string(),
+                    resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./theme".to_string(),
+                    resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("Tabs")),
+                index: Arc::new(TypeExpr::string_literal("variants")),
+            }),
+            index: Arc::new(TypeExpr::string_literal("color")),
+        };
+
+        let projected = query_engine
+            .project_expr_surface_expr("/src/App.vue", &expr)
+            .expect("nested indexed-access helper should project");
+
+        let TypeExpr::Union(members) = projected else {
+            panic!("nested indexed-access helper should materialize as a literal union, got {projected:?}");
+        };
+        assert!(
+            members.contains(&TypeExpr::string_literal("primary"))
+                && members.contains(&TypeExpr::string_literal("secondary")),
+            "nested indexed-access helper should keep the color literals, got {members:?}",
         );
     }
 
@@ -6935,5 +7588,137 @@ export type Concrete = Wrapper<string>
             !super::type_expr_references_substitutions(&expr, &substitutions),
             "substitution checks should only consider names that are actually bound in the active substitution map",
         );
+    }
+
+    #[test]
+    fn project_prepared_member_route_uses_resolution_scope_for_imported_alias_helpers() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+export type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  ui: ComponentUI<T>
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/theme.ts".to_string(),
+            Arc::from(
+                r#"
+export const theme = {
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/button-types.ts".to_string(),
+            Arc::from(
+                r#"
+import type { ComponentConfig } from './types'
+import { theme } from './theme'
+
+export type Button = ComponentConfig<typeof theme>
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/ImportedSlotButton.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { Button } from './button-types'
+
+type ImportedSlot = {
+  default?(props: {
+    ui: Button['ui']
+  }): any
+}
+
+defineSlots<ImportedSlot>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        host.set_import_dependencies(
+            "/src/button-types.ts",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "./types".to_string(),
+                    resolved_canonical_id: Some("/src/types.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./theme".to_string(),
+                    resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+        host.set_import_dependencies(
+            "/src/ImportedSlotButton.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./button-types".to_string(),
+                resolved_canonical_id: Some("/src/button-types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        assert!(host.ensure_loaded("/src/button-types.ts"));
+        assert!(host.ensure_loaded("/src/ImportedSlotButton.vue"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let projected = engine
+            .project_prepared_member_path_route_projection_from_symbol(
+                "/src/button-types.ts",
+                "/src/ImportedSlotButton.vue",
+                "Button",
+                &["ui".to_string()],
+                &FxHashMap::default(),
+                &mut rustc_hash::FxHashSet::default(),
+            )
+            .expect("imported alias helper route should project");
+
+        match &projected {
+            TypeExpr::Object(object) => {
+                let member_names: std::collections::BTreeSet<_> = object
+                    .properties
+                    .iter()
+                    .filter_map(|member| match member {
+                        ObjectMember::Property(property) => Some(property.name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    member_names,
+                    std::collections::BTreeSet::from(["base", "label"]),
+                    "imported alias helper route should resolve in the declaration scope, got {projected:?}",
+                );
+            }
+            TypeExpr::Mapped { .. } => {}
+            other => panic!(
+                "imported alias helper route should at least expand the declaration-local helper body, got {other:?}"
+            ),
+        }
     }
 }

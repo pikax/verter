@@ -1313,7 +1313,7 @@ fn define_model_type_string() {
         Some("string"),
         "type_annotation should be 'string'"
     );
-    assert!(!fields[0].is_optional);
+    assert!(fields[0].is_optional);
 }
 
 #[test]
@@ -1351,6 +1351,19 @@ fn define_model_no_type_param() {
     assert!(
         macros[0].prop_fields.is_empty(),
         "defineModel without type param should have no prop_fields"
+    );
+}
+
+#[test]
+fn define_model_required_option_marks_prop_required() {
+    let code = "defineModel<string>({ required: true })";
+    let macros = parse_macros(code);
+    let fields = &macros[0].prop_fields;
+
+    assert_eq!(fields.len(), 1);
+    assert!(
+        !fields[0].is_optional,
+        "defineModel({{ required: true }}) should keep the generated prop required"
     );
 }
 
@@ -1536,6 +1549,41 @@ fn pick_omit_return_none_unresolvable() {
     // The inline literal extracts "display" field but cannot resolve Pick<Full,...>
     assert_eq!(dp.prop_fields.len(), 1);
     assert_eq!(dp.prop_fields[0].name, "display");
+}
+
+#[test]
+fn interface_with_unresolved_heritage_keeps_own_prop_fields_without_partial_expansion() {
+    let source = r#"
+        interface Full { id: number; name: string }
+        interface Props extends Pick<Full, 'id'> { label: string }
+        defineProps<Props>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let dp = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .unwrap();
+
+    let field_names: Vec<_> = dp
+        .prop_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(
+        field_names,
+        vec!["label"],
+        "unresolved heritage should still keep the interface's own members, got {:?}",
+        field_names
+    );
+    assert!(
+        dp.resolved_local_types.is_empty(),
+        "resolved_local_types should not publish a partial expansion for unresolved heritage, got {:?}",
+        dp.resolved_local_types
+            .iter()
+            .map(|ty| ty.name.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

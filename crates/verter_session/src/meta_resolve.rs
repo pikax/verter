@@ -301,6 +301,27 @@ fn collect_expanded_slot_binding_param_types<'a>(
                 out.push(&first.ty);
             }
         }
+        verter_semantic::analysis::type_expr::TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                        function,
+                    ) => {
+                        if let Some(first) = function.parameters.first() {
+                            out.push(&first.ty);
+                        }
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                        if let Some(first) = method.function.parameters.first() {
+                            out.push(&first.ty);
+                        }
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(_)
+                    | verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(_) => {}
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -418,6 +439,188 @@ fn enrich_missing_slot_bindings(
     }
 }
 
+fn materialize_component_meta_type_expr_until_stable_in_scope(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let mut current = expr.clone();
+    for _ in 0..4 {
+        let materialized = materialize_component_meta_member_surface_expr(
+            &current,
+            scope_canonical_id,
+            query_engine,
+            true,
+        );
+        let next = query_engine
+            .solve_expr_type_expr(scope_canonical_id, &materialized)
+            .map(|solved| {
+                materialize_component_meta_member_surface_expr(
+                    &solved,
+                    scope_canonical_id,
+                    query_engine,
+                    true,
+                )
+            })
+            .unwrap_or(materialized);
+        if next == current {
+            return next;
+        }
+        current = next;
+    }
+    current
+}
+
+fn imported_component_meta_materialization_scope(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    owner_canonical: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<String> {
+    let route_root_name = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        .map(|(root_name, _)| root_name);
+    let root_name = match expr {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => name.as_ref(),
+        _ => route_root_name.as_deref()?,
+    };
+
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, root_name);
+    (!declaration.canonical_source.is_empty() && declaration.canonical_source != owner_canonical)
+        .then_some(declaration.canonical_source)
+}
+
+pub(crate) fn materialize_component_meta_type_expr_until_stable(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
+        expr,
+        scope_canonical_id,
+        query_engine,
+    );
+    if !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &owner_materialized) {
+        return owner_materialized;
+    }
+
+    let Some(imported_scope_canonical_id) =
+        imported_component_meta_materialization_scope(expr, scope_canonical_id, query_engine)
+    else {
+        return owner_materialized;
+    };
+
+    let imported_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
+        expr,
+        imported_scope_canonical_id.as_str(),
+        query_engine,
+    );
+    if imported_materialized != owner_materialized
+        && (!type_expr_needs_projection_rescue(
+            query_engine,
+            imported_scope_canonical_id.as_str(),
+            &imported_materialized,
+        ) || type_expr_needs_projection_rescue(
+            query_engine,
+            scope_canonical_id,
+            &owner_materialized,
+        ))
+    {
+        return imported_materialized;
+    }
+
+    owner_materialized
+}
+
+fn materialize_component_meta_field_types(
+    scope_canonical_id: &str,
+    resolved_macros: &[ResolvedMacroMeta],
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    fn rescue_field(
+        scope_canonical_id: &str,
+        field: &mut verter_semantic::analysis::type_expand::ExpandedField,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) {
+        if !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &field.r#type) {
+            return;
+        }
+
+        let rescued = materialize_component_meta_type_expr_until_stable(
+            &field.r#type,
+            scope_canonical_id,
+            query_engine,
+        );
+        if rescued != field.r#type {
+            field.r#type = rescued;
+        }
+    }
+
+    let mut slot_binding_scope_hints = rustc_hash::FxHashMap::<String, Vec<String>>::default();
+    for resolved in resolved_macros.iter().filter(|resolved| {
+        resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+    }) {
+        let declaration_scope = resolved.declaration.canonical_source.as_str();
+        if declaration_scope.is_empty() {
+            continue;
+        }
+        for slot in &resolved.slots {
+            for binding in &slot.bindings {
+                let entry = slot_binding_scope_hints
+                    .entry(format!("{}.{}", slot.name, binding.name))
+                    .or_default();
+                if !entry.iter().any(|scope| scope == declaration_scope) {
+                    entry.push(declaration_scope.to_string());
+                }
+            }
+        }
+    }
+
+    for field in &mut evaluated_types.props {
+        rescue_field(scope_canonical_id, field, query_engine);
+    }
+    for field in &mut evaluated_types.emits {
+        rescue_field(scope_canonical_id, field, query_engine);
+    }
+    for field in &mut evaluated_types.slot_bindings {
+        rescue_field(scope_canonical_id, field, query_engine);
+        let Some(scope_hints) = slot_binding_scope_hints.get(&field.name) else {
+            continue;
+        };
+        for scope_hint in scope_hints {
+            let parsed_raw = field
+                .raw_type
+                .as_deref()
+                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
+            for candidate in [
+                Some(field.r#type.clone()),
+                parsed_raw.clone(),
+                parsed_raw
+                    .as_ref()
+                    .and_then(|raw| query_engine.project_expr_surface_expr(scope_hint, raw)),
+                query_engine.project_expr_surface_expr(scope_hint, &field.r#type),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let rescued = materialize_component_meta_type_expr_until_stable(
+                    &candidate,
+                    scope_hint,
+                    query_engine,
+                );
+                if component_meta_type_expr_symbolic_score(&rescued)
+                    < component_meta_type_expr_symbolic_score(&field.r#type)
+                {
+                    field.r#type = rescued;
+                }
+            }
+        }
+    }
+    for field in &mut evaluated_types.bindings {
+        rescue_field(scope_canonical_id, field, query_engine);
+    }
+}
+
 /// Sole-authority producer for type-based macro object shapes.
 ///
 /// This is the ONE place that produces `define_props`, `define_emits`, and
@@ -493,6 +696,11 @@ fn produce_macro_object_shapes_for_purpose(
 
         match mac.kind {
             verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                let define_props_lowered = params.define_props.get(define_props_index);
+                let define_props_needs_projection_rescue =
+                    define_props_lowered.is_some_and(|lowered| {
+                        type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                    });
                 if let Some((shape, source)) =
                     synthesize_define_props_shape_from_known_surface_with_authority(
                         macro_index,
@@ -588,35 +796,65 @@ fn produce_macro_object_shapes_for_purpose(
                             );
                         }
                     }
-                } else if let Some((shape, source)) =
-                    synthesize_define_props_shape_from_registry_root(
+                } else if !define_props_needs_projection_rescue {
+                    if let Some((shape, source)) = synthesize_define_props_shape_from_registry_root(
                         owner_canonical,
                         macro_index,
                         snapshot,
                         resolved_type_registry,
                         resolved_type_registry_meta,
-                    )
-                {
-                    registry_hits += 1;
-                    let count = shape.value.properties.len();
-                    component_meta_trace_event!(
-                        "macro_object_shape",
-                        format!(
-                            "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                    ) {
+                        registry_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_event!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                                std::time::Duration::ZERO,
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some(lowered) = define_props_lowered {
+                        let item_started = std::time::Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
                             owner_canonical,
-                            macro_index,
-                            source.label(),
-                            count,
-                            std::time::Duration::ZERO,
-                        ),
-                    );
-                    evaluated_types.define_props.push(
-                        verter_semantic::analysis::type_expand::ExpandedMacroProps {
-                            macro_index,
-                            result: shape,
-                        },
-                    );
-                } else if let Some(lowered) = params.define_props.get(define_props_index) {
+                            lowered,
+                            has_prop_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_event!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                } else if let Some(lowered) = define_props_lowered {
                     let item_started = std::time::Instant::now();
                     let (shape, source) = produce_one_macro_object_shape(
                         query_engine,
@@ -719,59 +957,98 @@ fn produce_macro_object_shapes_for_purpose(
                 define_emits_index += 1;
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                if let Some((shape, source)) =
-                    synthesize_define_slots_shape_from_known_surface(macro_index, resolved_macros)
-                {
-                    projection_hits += 1;
-                    let count = shape.value.properties.len();
-                    component_meta_trace_event!(
-                        "macro_object_shape",
-                        format!(
-                            "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
-                            owner_canonical,
-                            macro_index,
-                            source.label(),
-                            count,
-                            std::time::Duration::ZERO,
-                        ),
-                    );
-                    evaluated_types.define_slots.push(
-                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
-                            macro_index,
-                            result: shape,
-                        },
-                    );
-                } else if let Some(lowered) = params.define_slots.get(define_slots_index) {
-                    if mac.slot_fields.is_empty() {
-                        let item_started = std::time::Instant::now();
-                        let (shape, source) = produce_one_macro_object_shape_for_slots(
-                            query_engine,
-                            owner_canonical,
-                            lowered,
+                let define_slots_lowered = params.define_slots.get(define_slots_index);
+                let define_slots_needs_projection_rescue =
+                    define_slots_lowered.is_some_and(|lowered| {
+                        type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                    });
+                if !define_slots_needs_projection_rescue {
+                    if let Some((shape, source)) = synthesize_define_slots_shape_from_known_surface(
+                        macro_index,
+                        resolved_macros,
+                    ) {
+                        projection_hits += 1;
+                        let count = shape.value.properties.len();
+                        component_meta_trace_event!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                                std::time::Duration::ZERO,
+                            ),
                         );
-                        if source.is_projection() {
-                            projection_hits += 1;
-                        } else if source.is_solver() {
-                            solver_fallbacks += 1;
-                        }
-                        if let Some(shape) = shape {
-                            if !shape.value.properties.is_empty() {
-                                let count = shape.value.properties.len();
-                                component_meta_trace_event!(
-                                    "macro_object_shape",
-                                    format!(
-                                        "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
-                                        owner_canonical, macro_index, source.label(), count,
-                                        item_started.elapsed(),
-                                    ),
-                                );
-                                evaluated_types.define_slots.push(
-                                    verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
-                                        macro_index,
-                                        result: shape,
-                                    },
-                                );
+                        evaluated_types.define_slots.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    } else if let Some(lowered) = define_slots_lowered {
+                        if mac.slot_fields.is_empty() {
+                            let item_started = std::time::Instant::now();
+                            let (shape, source) = produce_one_macro_object_shape_for_slots(
+                                query_engine,
+                                owner_canonical,
+                                lowered,
+                            );
+                            if source.is_projection() {
+                                projection_hits += 1;
+                            } else if source.is_solver() {
+                                solver_fallbacks += 1;
                             }
+                            if let Some(shape) = shape {
+                                if !shape.value.properties.is_empty() {
+                                    let count = shape.value.properties.len();
+                                    component_meta_trace_event!(
+                                        "macro_object_shape",
+                                        format!(
+                                            "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                                            owner_canonical, macro_index, source.label(), count,
+                                            item_started.elapsed(),
+                                        ),
+                                    );
+                                    evaluated_types.define_slots.push(
+                                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                            macro_index,
+                                            result: shape,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(lowered) = define_slots_lowered {
+                    let item_started = std::time::Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape_for_slots(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                    );
+                    if source.is_projection() {
+                        projection_hits += 1;
+                    } else if source.is_solver() {
+                        solver_fallbacks += 1;
+                    }
+                    if let Some(shape) = shape {
+                        if !shape.value.properties.is_empty() {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_event!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_slots.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
                         }
                     }
                 }
@@ -1388,6 +1665,57 @@ fn registry_entry_to_expanded_shape(
     })
 }
 
+fn expanded_shape_to_type_expr(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{
+        FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    let mut properties = Vec::new();
+
+    for property in &shape.properties {
+        properties.push(ObjectMember::Property(ObjectProperty {
+            name: property.name.clone(),
+            ty: property.ty.clone(),
+            optional: property.optional,
+            readonly: property.readonly,
+        }));
+    }
+
+    for signature in &shape.call_signatures {
+        properties.push(ObjectMember::CallSignature(FunctionExpr {
+            parameters: signature
+                .parameters
+                .iter()
+                .map(|parameter| FunctionParam {
+                    name: (!parameter.name.is_empty()).then(|| parameter.name.clone()),
+                    ty: parameter.ty.clone(),
+                    optional: parameter.optional,
+                    rest: parameter.rest,
+                })
+                .collect(),
+            return_type: Some(std::sync::Arc::new(signature.return_type.clone())),
+            type_parameters: signature.type_parameters.clone(),
+        }));
+    }
+
+    for signature in &shape.index_signatures {
+        properties.push(
+            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(
+                verter_semantic::analysis::type_expr::IndexSignature {
+                    key_name: "key".to_string(),
+                    key_type: signature.key_type.clone(),
+                    value_type: signature.value_type.clone(),
+                    readonly: signature.readonly,
+                },
+            ),
+        );
+    }
+
+    TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+}
+
 type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
     verter_semantic::analysis::type_expand::ExpandedObjectShape,
 >;
@@ -1400,7 +1728,13 @@ fn type_expr_needs_projection_rescue(
     use verter_semantic::analysis::type_expr::TypeExpr;
 
     match expr {
-        TypeExpr::Ref { name, .. } => {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if !type_arguments.is_empty() {
+                return true;
+            }
             let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
             let scope_canonical = if declaration.canonical_source.is_empty() {
                 owner_canonical
@@ -1579,7 +1913,7 @@ fn produce_one_macro_object_shape(
 
     match projected {
         Some(proj) if solver_count == 0 => (Some(proj), MacroShapeSource::Projection),
-        Some(proj) if shape_surface_count(&proj) > solver_count => {
+        Some(proj) if projection_result_beats_solver_shape(&proj, &solver_result) => {
             (Some(proj), MacroShapeSource::Projection)
         }
         _ if solver_count > 0 => (Some(solver_result), MacroShapeSource::Solver),
@@ -1768,14 +2102,24 @@ fn produce_one_macro_object_shape_for_slots(
     let projected = query_engine
         .project_expr_surface_shape(owner_canonical, lowered)
         .and_then(|shape| {
-            has_shape_surface(&shape).then(|| {
-                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
+            let projected_expr = expanded_shape_to_type_expr(&shape);
+            let resolved_expr =
+                verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
+                    &projected_expr,
+                    query_engine.owner_engine_mut(),
+                );
+            registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+                has_shape_surface(&resolved_shape).then(|| {
+                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                        resolved_shape,
+                    )
+                })
             })
         });
 
     match projected {
         Some(proj) if solver_count == 0 => (Some(proj), MacroShapeSource::Projection),
-        Some(proj) if shape_surface_count(&proj) > solver_count => {
+        Some(proj) if projection_result_beats_solver_shape(&proj, &solver_result) => {
             (Some(proj), MacroShapeSource::Projection)
         }
         _ if solver_count > 0 => (Some(solver_result), MacroShapeSource::Solver),
@@ -1790,6 +2134,157 @@ fn has_shape_surface(shape: &verter_semantic::analysis::type_expand::ExpandedObj
     !shape.properties.is_empty()
         || !shape.index_signatures.is_empty()
         || !shape.call_signatures.is_empty()
+}
+
+fn type_expr_symbolic_penalty(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> usize {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => 0,
+        TypeExpr::Unknown { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::Infer { .. } => 2,
+        TypeExpr::Ref { type_arguments, .. } => {
+            1 + type_arguments
+                .iter()
+                .map(type_expr_symbolic_penalty)
+                .sum::<usize>()
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::Parenthesized(element)
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element) => type_expr_symbolic_penalty(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .map(|element| type_expr_symbolic_penalty(&element.ty))
+            .sum(),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().map(type_expr_symbolic_penalty).sum()
+        }
+        TypeExpr::Object(object) => object
+            .properties
+            .iter()
+            .map(|member| match member {
+                ObjectMember::Property(property) => type_expr_symbolic_penalty(&property.ty),
+                ObjectMember::IndexSignature(signature) => {
+                    type_expr_symbolic_penalty(&signature.key_type)
+                        + type_expr_symbolic_penalty(&signature.value_type)
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                        .sum::<usize>()
+                        + function
+                            .return_type
+                            .as_deref()
+                            .map(type_expr_symbolic_penalty)
+                            .unwrap_or_default()
+                }
+                ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                        .sum::<usize>()
+                        + method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map(type_expr_symbolic_penalty)
+                            .unwrap_or_default()
+                }
+            })
+            .sum(),
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                .sum::<usize>()
+                + function
+                    .return_type
+                    .as_deref()
+                    .map(type_expr_symbolic_penalty)
+                    .unwrap_or_default()
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            2 + type_expr_symbolic_penalty(object) + type_expr_symbolic_penalty(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            2 + type_expr_symbolic_penalty(check)
+                + type_expr_symbolic_penalty(extends)
+                + type_expr_symbolic_penalty(true_type)
+                + type_expr_symbolic_penalty(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            2 + type_expr_symbolic_penalty(source)
+                + type_expr_symbolic_penalty(value)
+                + name_type
+                    .as_deref()
+                    .map(type_expr_symbolic_penalty)
+                    .unwrap_or_default()
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            1 + expressions
+                .iter()
+                .map(type_expr_symbolic_penalty)
+                .sum::<usize>()
+        }
+        TypeExpr::TypeOf(_) => 2,
+    }
+}
+
+fn shape_symbolic_penalty(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> usize {
+    shape
+        .properties
+        .iter()
+        .map(|property| type_expr_symbolic_penalty(&property.ty))
+        .sum::<usize>()
+        + shape
+            .index_signatures
+            .iter()
+            .map(|signature| {
+                type_expr_symbolic_penalty(&signature.key_type)
+                    + type_expr_symbolic_penalty(&signature.value_type)
+            })
+            .sum::<usize>()
+        + shape
+            .call_signatures
+            .iter()
+            .map(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| type_expr_symbolic_penalty(&parameter.ty))
+                    .sum::<usize>()
+                    + type_expr_symbolic_penalty(&signature.return_type)
+            })
+            .sum::<usize>()
+}
+
+fn projection_result_beats_solver_shape(projected: &ShapeResult, solver: &ShapeResult) -> bool {
+    let projected_count = shape_surface_count(projected);
+    let solver_count = shape_surface_count(solver);
+    projected_count > solver_count
+        || (projected_count == solver_count
+            && shape_symbolic_penalty(&projected.value) < shape_symbolic_penalty(&solver.value))
 }
 
 fn has_prop_shape_surface(
@@ -2188,8 +2683,21 @@ impl VerterHost {
                         &mut query_engine,
                         purpose,
                     );
+                    materialize_component_meta_macro_shape_member_types(
+                        canonical,
+                        &snapshot,
+                        &eval_source,
+                        &mut evaluated_types,
+                        &mut query_engine,
+                    );
                     if !evaluated_types.is_empty() {
                         enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
+                        materialize_component_meta_field_types(
+                            canonical,
+                            &parts.resolved_macros,
+                            &mut evaluated_types,
+                            &mut query_engine,
+                        );
                         parts.evaluated_types = Some(evaluated_types);
                     }
                 }
@@ -3549,6 +4057,364 @@ fn materialize_component_meta_member_surface_expr(
     )
 }
 
+fn materialize_component_meta_macro_shape_member_types(
+    scope_canonical_id: &str,
+    snapshot: &FileAnalysisSnapshot,
+    eval_source: &str,
+    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) {
+    fn shape_needs_member_rescue(
+        scope_canonical_id: &str,
+        shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        shape.properties.iter().any(|property| {
+            type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &property.ty)
+        })
+    }
+
+    let params =
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
+    let mut define_props_index = 0usize;
+    let mut define_emits_index = 0usize;
+    let mut define_slots_index = 0usize;
+
+    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+        if !mac.is_type_based {
+            continue;
+        }
+
+        match mac.kind {
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                if let Some(lowered) = params.define_props.get(define_props_index) {
+                    if let Some(define_props) = evaluated_types
+                        .define_props
+                        .iter_mut()
+                        .find(|entry| entry.macro_index == macro_index)
+                    {
+                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                            query_engine,
+                            scope_canonical_id,
+                            lowered,
+                        ) || shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_props.result.value,
+                            query_engine,
+                        );
+                        if needs_projection_rescue {
+                            if let Some(projected_shape) = query_engine
+                                .project_expr_surface_shape(scope_canonical_id, lowered)
+                                .filter(has_prop_shape_surface)
+                            {
+                                let projected_result =
+                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                        projected_shape,
+                                    );
+                                if projection_result_beats_solver_shape(
+                                    &projected_result,
+                                    &define_props.result,
+                                ) {
+                                    define_props.result = projected_result;
+                                }
+                            }
+                            for property in &mut define_props.result.value.properties {
+                                if !type_expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    &property.ty,
+                                ) {
+                                    continue;
+                                }
+                                property.ty =
+                                    materialize_component_meta_macro_shape_member_type_expr(
+                                        lowered,
+                                        property.name.as_str(),
+                                        &property.ty,
+                                        scope_canonical_id,
+                                        query_engine,
+                                    );
+                            }
+                        }
+                    }
+                }
+                define_props_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                if let Some(lowered) = params.define_emits.get(define_emits_index) {
+                    if let Some(define_emits) = evaluated_types
+                        .define_emits
+                        .iter_mut()
+                        .find(|entry| entry.macro_index == macro_index)
+                    {
+                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                            query_engine,
+                            scope_canonical_id,
+                            lowered,
+                        ) || shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_emits.result.value,
+                            query_engine,
+                        );
+                        if needs_projection_rescue {
+                            if let Some(projected_shape) = query_engine
+                                .project_expr_surface_shape(scope_canonical_id, lowered)
+                                .filter(
+                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                )
+                            {
+                                let projected_result =
+                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                        projected_shape,
+                                    );
+                                if projection_result_beats_solver_shape(
+                                    &projected_result,
+                                    &define_emits.result,
+                                ) {
+                                    define_emits.result = projected_result;
+                                }
+                            }
+                            for property in &mut define_emits.result.value.properties {
+                                if !type_expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    &property.ty,
+                                ) {
+                                    continue;
+                                }
+                                property.ty =
+                                    materialize_component_meta_macro_shape_member_type_expr(
+                                        lowered,
+                                        property.name.as_str(),
+                                        &property.ty,
+                                        scope_canonical_id,
+                                        query_engine,
+                                    );
+                            }
+                        }
+                    }
+                }
+                define_emits_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                if let Some(lowered) = params.define_slots.get(define_slots_index) {
+                    if let Some(define_slots) = evaluated_types
+                        .define_slots
+                        .iter_mut()
+                        .find(|entry| entry.macro_index == macro_index)
+                    {
+                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                            query_engine,
+                            scope_canonical_id,
+                            lowered,
+                        ) || shape_needs_member_rescue(
+                            scope_canonical_id,
+                            &define_slots.result.value,
+                            query_engine,
+                        );
+                        if needs_projection_rescue {
+                            if let Some(projected_shape) = query_engine
+                                .project_expr_surface_shape(scope_canonical_id, lowered)
+                                .filter(
+                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                )
+                            {
+                                let projected_result =
+                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                        projected_shape,
+                                    );
+                                if projection_result_beats_solver_shape(
+                                    &projected_result,
+                                    &define_slots.result,
+                                ) {
+                                    define_slots.result = projected_result;
+                                }
+                            }
+                            for property in &mut define_slots.result.value.properties {
+                                if !type_expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    &property.ty,
+                                ) {
+                                    continue;
+                                }
+                                property.ty =
+                                    materialize_component_meta_macro_shape_member_type_expr(
+                                        lowered,
+                                        property.name.as_str(),
+                                        &property.ty,
+                                        scope_canonical_id,
+                                        query_engine,
+                                    );
+                            }
+                        }
+                    }
+                }
+                define_slots_index += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn materialize_component_meta_macro_shape_member_type_expr(
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    member_name: &str,
+    current: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let route_expr = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
+        object: std::sync::Arc::new(lowered.clone()),
+        index: std::sync::Arc::new(
+            verter_semantic::analysis::type_expr::TypeExpr::string_literal(member_name.to_string()),
+        ),
+    };
+    let materialize_scope_canonical_id =
+        imported_component_meta_materialization_scope(lowered, scope_canonical_id, query_engine)
+            .unwrap_or_else(|| scope_canonical_id.to_string());
+    let current_materialized = materialize_component_meta_type_expr_until_stable(
+        current,
+        materialize_scope_canonical_id.as_str(),
+        query_engine,
+    );
+
+    if let Some(solved) = query_engine.solve_expr_type_expr(scope_canonical_id, &route_expr) {
+        let solved_materialized = materialize_component_meta_type_expr_until_stable(
+            &solved,
+            materialize_scope_canonical_id.as_str(),
+            query_engine,
+        );
+        if component_meta_type_expr_symbolic_score(&current_materialized)
+            < component_meta_type_expr_symbolic_score(&solved_materialized)
+        {
+            return current_materialized;
+        }
+        return solved_materialized;
+    }
+
+    current_materialized
+}
+
+pub(crate) fn component_meta_type_expr_symbolic_score(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> usize {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => 0,
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => component_meta_type_expr_symbolic_score(inner),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .map(|element| component_meta_type_expr_symbolic_score(&element.ty))
+            .sum(),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .map(component_meta_type_expr_symbolic_score)
+            .sum(),
+        TypeExpr::Object(object) => object
+            .properties
+            .iter()
+            .map(|member| match member {
+                ObjectMember::Property(property) => {
+                    component_meta_type_expr_symbolic_score(&property.ty)
+                }
+                ObjectMember::Method(method) => {
+                    method
+                        .function
+                        .parameters
+                        .iter()
+                        .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
+                        .sum::<usize>()
+                        + method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map(component_meta_type_expr_symbolic_score)
+                            .unwrap_or_default()
+                }
+                ObjectMember::IndexSignature(signature) => {
+                    component_meta_type_expr_symbolic_score(&signature.key_type)
+                        + component_meta_type_expr_symbolic_score(&signature.value_type)
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function
+                        .parameters
+                        .iter()
+                        .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
+                        .sum::<usize>()
+                        + function
+                            .return_type
+                            .as_deref()
+                            .map(component_meta_type_expr_symbolic_score)
+                            .unwrap_or_default()
+                }
+            })
+            .sum(),
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
+                .sum::<usize>()
+                + function
+                    .return_type
+                    .as_deref()
+                    .map(component_meta_type_expr_symbolic_score)
+                    .unwrap_or_default()
+        }
+        TypeExpr::Ref { type_arguments, .. } => {
+            1 + type_arguments
+                .iter()
+                .map(component_meta_type_expr_symbolic_score)
+                .sum::<usize>()
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            1 + component_meta_type_expr_symbolic_score(object)
+                + component_meta_type_expr_symbolic_score(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            1 + component_meta_type_expr_symbolic_score(check)
+                + component_meta_type_expr_symbolic_score(extends)
+                + component_meta_type_expr_symbolic_score(true_type)
+                + component_meta_type_expr_symbolic_score(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            1 + component_meta_type_expr_symbolic_score(source)
+                + component_meta_type_expr_symbolic_score(value)
+                + name_type
+                    .as_deref()
+                    .map(component_meta_type_expr_symbolic_score)
+                    .unwrap_or_default()
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => {
+            1 + expressions
+                .iter()
+                .map(component_meta_type_expr_symbolic_score)
+                .sum::<usize>()
+        }
+        TypeExpr::TypeOf(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => 1,
+    }
+}
+
 fn component_meta_registry_prefers_structural_materialization(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
@@ -4049,7 +4915,33 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         if let Some(projected) = projected {
             if projected != *expr {
                 let result = match expr {
-                    TypeExpr::Ref { .. } | TypeExpr::IndexedAccess { .. } => projected,
+                    TypeExpr::Ref { name, .. } => {
+                        let projected_scope_canonical_id =
+                            imported_component_meta_materialization_scope(
+                                expr,
+                                scope_canonical_id,
+                                engine,
+                            )
+                            .or_else(|| {
+                                let declaration = engine
+                                    .resolve_type_declaration(scope_canonical_id, name.as_ref());
+                                (!declaration.canonical_source.is_empty()
+                                    && declaration.canonical_source != scope_canonical_id)
+                                    .then_some(declaration.canonical_source)
+                            })
+                            .unwrap_or_else(|| scope_canonical_id.to_string());
+                        if projected_scope_canonical_id != scope_canonical_id {
+                            materialize_component_meta_member_surface_expr_with_active_stack(
+                                &projected,
+                                projected_scope_canonical_id.as_str(),
+                                engine,
+                                true,
+                                active,
+                            )
+                        } else {
+                            projected
+                        }
+                    }
                     _ => materialize_component_meta_member_surface_expr_with_active_stack(
                         &projected,
                         scope_canonical_id,
@@ -4068,6 +4960,46 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 return result;
             }
         }
+    }
+
+    if let Some(expanded_ref) = engine.expand_local_generic_ref_expr(scope_canonical_id, expr) {
+        if expanded_ref != *expr {
+            let result = materialize_component_meta_member_surface_expr_with_active_stack(
+                &expanded_ref,
+                scope_canonical_id,
+                engine,
+                nested_surface,
+                active,
+            );
+            engine.store_materialized_member_surface(
+                scope_canonical_id,
+                expr,
+                nested_surface,
+                result.clone(),
+            );
+            active.remove(expr);
+            return result;
+        }
+    }
+
+    let structural =
+        materialize_component_meta_registry_structural_expr(expr, scope_canonical_id, engine);
+    if structural != *expr {
+        let result = materialize_component_meta_member_surface_expr_with_active_stack(
+            &structural,
+            scope_canonical_id,
+            engine,
+            nested_surface,
+            active,
+        );
+        engine.store_materialized_member_surface(
+            scope_canonical_id,
+            expr,
+            nested_surface,
+            result.clone(),
+        );
+        active.remove(expr);
+        return result;
     }
 
     let result = match expr {
