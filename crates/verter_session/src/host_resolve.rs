@@ -1612,6 +1612,47 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
+
+        let cache_kind = verter_workspace::ResolveRequestKind::TypeImport;
+        let cache_entry = if effective_dep_canonical.ends_with(".vue") {
+            self.lookup_resolved_external_type_cache_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                cache_kind,
+                store_view,
+            )
+        } else {
+            self.lookup_resolved_external_type_cache_by_whole_hash_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                cache_kind,
+                store_view,
+            )
+        };
+
+        if let Some(entry) = cache_entry {
+            self.provenance
+                .resolved_external_type_cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for dep in &entry.tracked_deps {
+                tracked_deps.insert(dep.clone());
+                resolution_deps.insert(dep.clone());
+            }
+            let resolved = entry.resolved.clone();
+            cache.insert(cache_key, resolved.clone());
+            cache.insert(final_target_key, resolved.clone());
+            let elements = resolved?;
+            return Some((
+                dep_canonical,
+                effective_dep_canonical,
+                effective_type_name,
+                elements,
+            ));
+        }
+
+        self.provenance
+            .resolved_external_type_cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key, cached.clone());
             let elements = cached?;
@@ -1642,6 +1683,26 @@ impl VerterHost {
                     store_view,
                 )
             });
+
+        if effective_dep_canonical.ends_with(".vue") {
+            self.store_resolved_external_type_cache_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                cache_kind,
+                resolved.clone(),
+                resolution_deps.iter().cloned().collect(),
+                store_view,
+            );
+        } else {
+            self.store_resolved_external_type_cache_by_whole_hash_in_view(
+                effective_dep_canonical.as_str(),
+                effective_type_name.as_str(),
+                cache_kind,
+                resolved.clone(),
+                resolution_deps.iter().cloned().collect(),
+                store_view,
+            );
+        }
 
         cache.insert(cache_key, resolved.clone());
         cache.insert(final_target_key, resolved.clone());
@@ -1791,6 +1852,23 @@ impl VerterHost {
         self.resolved_type_cache.lock().get(&key).cloned()
     }
 
+    fn lookup_resolved_external_type_cache_by_whole_hash_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
+        let dep_source_hash = self.current_or_read_whole_hash_in_view(dep_canonical, store_view)?;
+        let key = crate::types::ResolvedTypeCacheKey {
+            dep_canonical_id: dep_canonical.to_string(),
+            dep_source_hash,
+            type_name: type_name.to_string(),
+            resolve_kind: kind,
+        };
+        self.resolved_type_cache.lock().get(&key).cloned()
+    }
+
     fn store_resolved_external_type_cache_in_view(
         &self,
         dep_canonical: &str,
@@ -1802,6 +1880,40 @@ impl VerterHost {
     ) {
         let Some(dep_source_hash) =
             self.current_type_resolution_hash_in_view(dep_canonical, store_view)
+        else {
+            return;
+        };
+
+        let key = crate::types::ResolvedTypeCacheKey {
+            dep_canonical_id: dep_canonical.to_string(),
+            dep_source_hash,
+            type_name: type_name.to_string(),
+            resolve_kind: kind,
+        };
+        let mut host_cache = self.resolved_type_cache.lock();
+        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
+            host_cache.clear();
+        }
+        host_cache.insert(
+            key,
+            crate::types::ResolvedTypeCacheEntry {
+                resolved,
+                tracked_deps,
+            },
+        );
+    }
+
+    fn store_resolved_external_type_cache_by_whole_hash_in_view(
+        &self,
+        dep_canonical: &str,
+        type_name: &str,
+        kind: verter_workspace::ResolveRequestKind,
+        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        tracked_deps: Vec<String>,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) {
+        let Some(dep_source_hash) =
+            self.current_or_read_whole_hash_in_view(dep_canonical, store_view)
         else {
             return;
         };

@@ -8361,6 +8361,145 @@ export interface ButtonProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn resolve_component_meta_macro_elements_reuses_host_cache_across_requests_for_package_targets() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { PackageEmits } from './types'
+
+const emit = defineEmits<PackageEmits>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts",
+        "export type { PackageEmits } from 'pkg'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        "export type { PackageEmits } from './index3.d.ts'\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/pkg/dist/index3.d.ts",
+        "export interface PackageEmits {\n  (e: 'open', value?: string): void\n}\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(
+        host.ensure_loaded("/workspace/src/Consumer.vue"),
+        "consumer should load from the workspace",
+    );
+
+    host.set_import_dependencies(
+        "/workspace/src/Consumer.vue",
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+    host.set_import_dependencies(
+        "/workspace/src/types.ts",
+        vec![exact_dependency(
+            "pkg",
+            "/workspace/node_modules/pkg/dist/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(
+        "/workspace/node_modules/pkg/dist/index.d.ts",
+        vec![exact_dependency(
+            "./index3.d.ts",
+            "/workspace/node_modules/pkg/dist/index3.d.ts",
+        )],
+    );
+
+    let view = host.resolver_store_view();
+    host.provenance().reset();
+
+    let mut tracked_deps_first = std::collections::BTreeSet::new();
+    let mut resolution_deps_first = std::collections::BTreeSet::new();
+    let mut cache_first = crate::resolver_core::ExternalTypeBodyCache::default();
+    let resolved_first = host.resolve_component_meta_macro_elements_in_view(
+        "/workspace/src/Consumer.vue",
+        "./types",
+        "PackageEmits",
+        &mut tracked_deps_first,
+        &mut resolution_deps_first,
+        &mut cache_first,
+        Some(&view),
+    );
+    assert!(
+        resolved_first.is_some(),
+        "the first imported macro lookup should resolve the package emits surface",
+    );
+    let after_first = host.provenance().snapshot();
+    assert!(
+        after_first.resolved_external_type_cache_misses >= 1,
+        "the first package-backed lookup should populate the shared resolved-type cache, got {:?}",
+        after_first,
+    );
+    assert!(
+        tracked_deps_first.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
+        "the first lookup should track the routed package target canonical",
+    );
+    assert!(
+        resolution_deps_first.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
+        "the first lookup should record the routed package target canonical in resolution deps",
+    );
+
+    let mut tracked_deps_second = std::collections::BTreeSet::new();
+    let mut resolution_deps_second = std::collections::BTreeSet::new();
+    let mut cache_second = crate::resolver_core::ExternalTypeBodyCache::default();
+    let resolved_second = host.resolve_component_meta_macro_elements_in_view(
+        "/workspace/src/Consumer.vue",
+        "./types",
+        "PackageEmits",
+        &mut tracked_deps_second,
+        &mut resolution_deps_second,
+        &mut cache_second,
+        Some(&view),
+    );
+    assert!(
+        resolved_second.is_some(),
+        "the second imported macro lookup should still resolve the package emits surface",
+    );
+    let after_second = host.provenance().snapshot();
+    assert!(
+        after_second.resolved_external_type_cache_hits >= 1,
+        "the second package-backed lookup should reuse the shared resolved-type cache even with a fresh request-local cache, got {:?}",
+        after_second,
+    );
+    assert!(
+        tracked_deps_second.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
+        "the warm lookup must keep tracking the routed package target canonical",
+    );
+    assert!(
+        resolution_deps_second.contains("/workspace/node_modules/pkg/dist/index3.d.ts"),
+        "the warm lookup must keep the routed package target in resolution deps for downstream fact tracking",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
+            .is_none(),
+        "package provider barrels should stay off ModuleFactsDb while the shared resolved-type cache is used",
+    );
+    assert!(
+        host.resolver
+            .runtime
+            .module_facts
+            .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
+            .is_none(),
+        "package targets should stay off ModuleFactsDb while the shared resolved-type cache is used",
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn resolve_component_meta_macro_elements_skip_imported_declaration_builds() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(

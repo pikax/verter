@@ -4036,7 +4036,7 @@ impl VerterHost {
         Some((next_canonical, original_name.clone()))
     }
 
-    fn current_or_read_whole_hash_in_view(
+    pub(crate) fn current_or_read_whole_hash_in_view(
         &self,
         canonical_id: &str,
         store_view: Option<&crate::resolver_store::HostStoreView>,
