@@ -376,6 +376,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .or_insert_with(|| {
                 host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
                     .or_else(|| {
+                        // Lazy first-time loading for dependency files discovered
+                        // during resolution. This is NOT re-walking cached state —
+                        // it triggers the normal load/parse/cache pipeline for files
+                        // not yet in the host's cache.
                         host.ensure_loaded(scope_canonical_id)
                             .then(|| {
                                 host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
@@ -801,6 +805,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .host
             .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
             .or_else(|| {
+                // Lazy first-time loading (see scope_payload_for_scope comment).
                 self.host
                     .ensure_loaded(canonical_id)
                     .then(|| {
@@ -1076,22 +1081,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
-        if substitutions.is_empty() {
-            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
-                if let Some(default_substitutions) =
-                    prepared_type_param_substitutions(prepared.as_ref(), &[])
-                {
-                    if !default_substitutions.is_empty() {
-                        return self.project_prepared_surface_from_symbol(
-                            scope_canonical_id,
-                            symbol_name,
-                            &default_substitutions,
-                            active,
-                        );
-                    }
-                }
-            }
-        }
         let cache_key = PreparedSurfaceCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -1099,6 +1088,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         if let Some(cached) = self.prepared_surface_cache.get(&cache_key) {
             return cached.clone();
+        }
+        if substitutions.is_empty() {
+            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
+                if let Some(default_substitutions) =
+                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                {
+                    if !default_substitutions.is_empty() {
+                        let result = self.project_prepared_surface_from_symbol(
+                            scope_canonical_id,
+                            symbol_name,
+                            &default_substitutions,
+                            active,
+                        );
+                        self.prepared_surface_cache
+                            .insert(cache_key, result.clone());
+                        return result;
+                    }
+                }
+            }
         }
 
         if let Some(cached) =
@@ -1397,23 +1405,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
-        if substitutions.is_empty() {
-            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
-                if let Some(default_substitutions) =
-                    prepared_type_param_substitutions(prepared.as_ref(), &[])
-                {
-                    if !default_substitutions.is_empty() {
-                        return self.project_prepared_requested_member_from_symbol(
-                            scope_canonical_id,
-                            symbol_name,
-                            member_name,
-                            &default_substitutions,
-                            active,
-                        );
-                    }
-                }
-            }
-        }
         let cache_key = PreparedMemberCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -1423,6 +1414,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         if let Some(cached) = self.prepared_member_cache.get(&cache_key) {
             return cached.clone();
+        }
+        if substitutions.is_empty() {
+            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
+                if let Some(default_substitutions) =
+                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                {
+                    if !default_substitutions.is_empty() {
+                        let result = self.project_prepared_requested_member_from_symbol(
+                            scope_canonical_id,
+                            symbol_name,
+                            member_name,
+                            &default_substitutions,
+                            active,
+                        );
+                        self.prepared_member_cache.insert(cache_key, result.clone());
+                        return result;
+                    }
+                }
+            }
         }
 
         if let Some(cached) = self.cached_prepared_requested_member(
@@ -3144,6 +3154,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         visited: &mut FxHashSet<(String, String)>,
     ) -> Option<TypeExpr> {
+        let visit_key = (
+            resolution_scope_canonical_id.to_string(),
+            symbol_name.to_string(),
+        );
+        if !visited.insert(visit_key.clone()) {
+            return None;
+        }
         if substitutions.is_empty() {
             if let Some(prepared) =
                 self.prepared_type_decl(resolution_scope_canonical_id, symbol_name)
@@ -3152,7 +3169,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared_type_param_substitutions(prepared.as_ref(), &[])
                 {
                     if !default_substitutions.is_empty() {
-                        return self.project_prepared_member_path_route_projection_from_symbol(
+                        let result = self.project_prepared_member_path_route_projection_from_symbol(
                             resolution_scope_canonical_id,
                             active_scope_canonical_id,
                             symbol_name,
@@ -3160,16 +3177,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             &default_substitutions,
                             visited,
                         );
+                        visited.remove(&visit_key);
+                        return result;
                     }
                 }
             }
-        }
-        let visit_key = (
-            resolution_scope_canonical_id.to_string(),
-            symbol_name.to_string(),
-        );
-        if !visited.insert(visit_key.clone()) {
-            return None;
         }
 
         let result = self

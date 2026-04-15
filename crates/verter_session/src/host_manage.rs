@@ -9176,6 +9176,9 @@ fn rematerialize_public_component_meta_types(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     store_view: Option<&HostStoreView>,
 ) {
+    // Seed improvement: look up already-resolved registry entries to provide
+    // a better starting point for the query engine.  This reads pre-computed
+    // data from the earlier resolution step — NOT a second resolver.
     fn resolved_registry_route_surface<'a>(
         current: &verter_semantic::analysis::type_expr::TypeExpr,
         raw_type: Option<&str>,
@@ -9212,21 +9215,6 @@ fn rematerialize_public_component_meta_types(
             }
             _ => None,
         }
-    }
-
-    fn registry_surface_improves(
-        candidate: &verter_semantic::analysis::type_expr::TypeExpr,
-        current: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> bool {
-        crate::meta_resolve::component_meta_type_expr_improves(candidate, current)
-            || matches!(
-                (current, candidate),
-                (
-                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
-                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
-                )
-            )
     }
 
     let _trace = component_meta_trace_scope!(
@@ -9340,7 +9328,9 @@ fn rematerialize_public_component_meta_types(
             prop.raw_type.as_deref(),
             &resolved_registry_by_name,
         )
-        .filter(|candidate| registry_surface_improves(candidate, &prop.type_expr))
+        .filter(|candidate| {
+            crate::meta_resolve::component_meta_type_expr_improves(candidate, &prop.type_expr)
+        })
         .unwrap_or_else(|| prop.type_expr.clone());
         let next = choose_less_symbolic_component_meta_type_expr(
             &current,
@@ -9392,7 +9382,12 @@ fn rematerialize_public_component_meta_types(
                 binding.raw_type.as_deref(),
                 &resolved_registry_by_name,
             )
-            .filter(|candidate| registry_surface_improves(candidate, &binding.type_expr))
+            .filter(|candidate| {
+                crate::meta_resolve::component_meta_type_expr_improves(
+                    candidate,
+                    &binding.type_expr,
+                )
+            })
             .unwrap_or_else(|| binding.type_expr.clone());
             let next = choose_less_symbolic_component_meta_type_expr(
                 &current,

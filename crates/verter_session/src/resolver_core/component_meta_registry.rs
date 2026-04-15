@@ -982,19 +982,6 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
         ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
-    fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
-        match expr {
-            TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
-            TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == member_name => {
-                    Some(&property.ty)
-                }
-                _ => None,
-            }),
-            _ => None,
-        }
-    }
-
     if path.is_empty() {
         return Some(expr.clone());
     }
@@ -2146,25 +2133,28 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
     }
 }
 
+/// Navigate into a [`TypeExpr::Object`] by a single property name, unwrapping
+/// parenthesized wrappers.  Shared by [`raw_member_path_leaf`] and
+/// [`component_meta_registry_raw_member_path_surface`].
+fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
+    match expr {
+        TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
+        TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
+            ObjectMember::Property(property) if property.name == member_name => {
+                Some(&property.ty)
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// Walk a member path (sequence of property names) into a [`TypeExpr::Object`]
 /// and return the leaf type.  Returns `None` if any segment is missing.
 pub(crate) fn raw_member_path_leaf(
     expr: &TypeExpr,
     path: &[String],
 ) -> Option<TypeExpr> {
-    fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
-        match expr {
-            TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
-            TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-                ObjectMember::Property(property) if property.name == member_name => {
-                    Some(&property.ty)
-                }
-                _ => None,
-            }),
-            _ => None,
-        }
-    }
-
     let mut leaf = expr;
     for member_name in path {
         leaf = explicit_object_member(leaf, member_name)?;

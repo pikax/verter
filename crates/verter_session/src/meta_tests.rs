@@ -14568,6 +14568,7 @@ defineSlots<ButtonSlots>()
         .expect("component meta should exist");
 
     assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
+    assert!(meta.events.is_empty(), "should have no events, got {:?}", meta.events.iter().map(|e| &e.name).collect::<Vec<_>>());
 
     for prop_name in ["color", "activeColor"] {
         let prop = meta
@@ -14576,6 +14577,7 @@ defineSlots<ButtonSlots>()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
         assert_union_string_literals(&prop.type_expr, &["primary", "secondary"]);
+        assert!(!matches!(&prop.type_expr, TypeExpr::Unknown { .. }), "variant prop should not degrade to Unknown");
     }
 
     let ui = meta
@@ -14779,6 +14781,7 @@ defineSlots<ButtonSlots>()
         .expect("component meta should exist");
 
     assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
+    assert!(meta.events.is_empty(), "should have no events, got {:?}", meta.events.iter().map(|e| &e.name).collect::<Vec<_>>());
 
     for prop_name in ["color", "activeColor"] {
         let prop = meta
@@ -14787,6 +14790,7 @@ defineSlots<ButtonSlots>()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
         assert_union_string_literals(&prop.type_expr, &["primary", "secondary", "neutral"]);
+        assert!(!matches!(&prop.type_expr, TypeExpr::Unknown { .. }), "variant prop should not degrade to Unknown");
     }
 
     let ui = meta

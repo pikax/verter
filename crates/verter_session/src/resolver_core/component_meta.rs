@@ -496,6 +496,11 @@ where
             };
             let mut projected =
                 project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
+            // TODO(follow-up): this source-text reparsing fallback violates the
+            // cache-owned recovery rule.  The resolver should be extended to handle
+            // mapped types, inherited emits, and other cases that currently produce
+            // empty surfaces from `resolve_macro_elements`.  Once the resolver covers
+            // all cases, remove this fallback entirely.
             if projected.props.is_empty()
                 && projected.emits.is_empty()
                 && projected.slots.is_empty()
@@ -567,6 +572,9 @@ where
                 });
             }
         } else {
+            // TODO(follow-up): same as the fallback above — this source-text
+            // reparsing should be replaced by extending the resolver to handle
+            // all imported macro types through the cache-owned path.
             let declaration_source = if skip_declaration_metadata {
                 None
             } else {
@@ -589,79 +597,61 @@ where
                 && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
                 && dep.macro_kind == AnalyzedMacroKind::DefineProps
                 && declaration.canonical_source.ends_with(".vue");
-            if let Some(projected) = projected_from_source.filter(|projected| {
-                !projected.props.is_empty()
-                    || !projected.emits.is_empty()
-                    || !projected.slots.is_empty()
-                    || !projected.native_props.is_empty()
-            }) {
-                let package_backed_dep = dep_canonical.contains("/node_modules/")
-                    || declaration.canonical_source.contains("/node_modules/");
-                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                    && !package_backed_dep
-                    && should_seed_direct_macro_registry_entry(&declaration)
-                    && seen_registry_names.insert(dep.type_name.clone())
-                {
-                    resolved_type_registry.push(ResolvedTypeAnalysis {
-                        name: dep.type_name.clone(),
-                        type_expr: projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected),
-                        type_expansion: None,
-                    });
-                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                        name: dep.type_name.clone(),
-                        declaration: declaration.clone(),
-                    });
-                }
-                if !projectable_owner_local || keep_direct_imported_vue_macro {
-                    resolved_macros.push(ResolvedMacroMeta {
-                        macro_index,
-                        macro_kind: dep.macro_kind,
-                        type_name: dep.type_name.clone(),
-                        import_source: dep.import_source.clone(),
-                        surface_is_authoritative: imported_declaration_surface_is_authoritative(
-                            &declaration,
-                        ),
-                        declaration,
-                        native_props: projected.native_props,
-                        props: projected.props,
-                        emits: projected.emits,
-                        slots: projected.slots,
-                        jsdoc,
-                    });
-                }
-            } else {
-                let package_backed_dep = dep_canonical.contains("/node_modules/")
-                    || declaration.canonical_source.contains("/node_modules/");
-                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                    && !package_backed_dep
-                    && should_seed_direct_macro_registry_entry(&declaration)
-                    && seen_registry_names.insert(dep.type_name.clone())
-                {
-                    resolved_type_registry.push(ResolvedTypeAnalysis {
-                        name: dep.type_name.clone(),
-                        type_expr: TypeExpr::named(dep.type_name.clone()),
-                        type_expansion: None,
-                    });
-                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                        name: dep.type_name.clone(),
-                        declaration: declaration.clone(),
-                    });
-                }
-                if !projectable_owner_local || keep_direct_imported_vue_macro {
+            let package_backed_dep = dep_canonical.contains("/node_modules/")
+                || declaration.canonical_source.contains("/node_modules/");
+            let (surface_props, surface_emits, surface_slots, surface_native_props, surface_authoritative) =
+                if let Some(projected) = projected_from_source.filter(|p| {
+                    !p.props.is_empty() || !p.emits.is_empty() || !p.slots.is_empty() || !p.native_props.is_empty()
+                }) {
+                    if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                        && !package_backed_dep
+                        && should_seed_direct_macro_registry_entry(&declaration)
+                        && seen_registry_names.insert(dep.type_name.clone())
+                    {
+                        resolved_type_registry.push(ResolvedTypeAnalysis {
+                            name: dep.type_name.clone(),
+                            type_expr: projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected),
+                            type_expansion: None,
+                        });
+                        resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                            name: dep.type_name.clone(),
+                            declaration: declaration.clone(),
+                        });
+                    }
+                    (projected.props, projected.emits, projected.slots, projected.native_props,
+                     imported_declaration_surface_is_authoritative(&declaration))
+                } else {
+                    if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                        && !package_backed_dep
+                        && should_seed_direct_macro_registry_entry(&declaration)
+                        && seen_registry_names.insert(dep.type_name.clone())
+                    {
+                        resolved_type_registry.push(ResolvedTypeAnalysis {
+                            name: dep.type_name.clone(),
+                            type_expr: TypeExpr::named(dep.type_name.clone()),
+                            type_expansion: None,
+                        });
+                        resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                            name: dep.type_name.clone(),
+                            declaration: declaration.clone(),
+                        });
+                    }
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false)
+                };
+            if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
                     macro_kind: dep.macro_kind,
                     type_name: dep.type_name.clone(),
                     import_source: dep.import_source.clone(),
-                    surface_is_authoritative: false,
+                    surface_is_authoritative: surface_authoritative,
                     declaration,
-                    native_props: Vec::new(),
-                    props: Vec::new(),
-                    emits: Vec::new(),
-                    slots: Vec::new(),
+                    native_props: surface_native_props,
+                    props: surface_props,
+                    emits: surface_emits,
+                    slots: surface_slots,
                     jsdoc,
                 });
-            }
             }
         }
     }
