@@ -1460,6 +1460,23 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 )
             })
             || owner_component_meta_registry_import_root(host, snapshot, name, store_view)
+                .and_then(|(canonical_id, exported_name)| {
+                    (!canonical_id.is_empty() && !canonical_id.contains("/node_modules/")).then(
+                        || {
+                            host.prepared_type_decl_in_view(
+                                canonical_id.as_str(),
+                                exported_name.as_str(),
+                                store_view,
+                            )
+                        },
+                    )
+                })
+                .flatten()
+                .is_some_and(|prepared| {
+                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
+                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
+                })
+            || owner_component_meta_registry_import_root(host, snapshot, name, store_view)
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
             || crate::meta_resolve::resolve_type_declaration_in_view(
                 host,

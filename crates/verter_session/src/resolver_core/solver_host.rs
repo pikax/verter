@@ -244,6 +244,23 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         &self,
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedTypeDecl>> {
+        fn imported_non_object_alias_should_stay_symbolic(
+            owner_scope_canonical_id: Option<&str>,
+            root_identity: &ResolvedRootIdentity,
+            prepared: &PreparedTypeDecl,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            owner_scope_canonical_id.is_some_and(|owner| owner != root_identity.canonical_id)
+                && matches!(
+                    prepared.body,
+                    TypeExpr::Mapped { .. }
+                        | TypeExpr::Conditional { .. }
+                        | TypeExpr::IndexedAccess { .. }
+                        | TypeExpr::TypeOf(_)
+                )
+        }
+
         if let (Some(scope_canonical_id), Some(scope_payload)) = (
             self.scope_canonical_id.as_deref(),
             self.scope_payload.as_ref(),
@@ -273,6 +290,22 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             &root_identity.symbol_name,
             self.store_view,
         ) {
+            if imported_non_object_alias_should_stay_symbolic(
+                self.scope_canonical_id.as_deref(),
+                root_identity,
+                &prepared,
+            ) {
+                component_meta_trace_event!(
+                    "solver_resolve_prepared_type_decl_result",
+                    format!(
+                        "root={}::{} source=direct_prepared_symbolic_alias hit=false store_view={}",
+                        root_identity.canonical_id,
+                        root_identity.symbol_name,
+                        self.store_view.is_some()
+                    ),
+                );
+                return None;
+            }
             component_meta_trace_event!(
                 "solver_resolve_prepared_type_decl_result",
                 format!(
@@ -328,6 +361,26 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             &final_symbol_name,
             self.store_view,
         );
+        if let Some(prepared) = resolved.as_ref() {
+            if imported_non_object_alias_should_stay_symbolic(
+                self.scope_canonical_id.as_deref(),
+                &ResolvedRootIdentity::new(&final_canonical_id, &final_symbol_name),
+                prepared,
+            ) {
+                component_meta_trace_event!(
+                    "solver_resolve_prepared_type_decl_result",
+                    format!(
+                        "root={}::{} source=root_resolve_symbolic_alias target={}::{} hit=false store_view={}",
+                        root_identity.canonical_id,
+                        root_identity.symbol_name,
+                        final_canonical_id,
+                        final_symbol_name,
+                        self.store_view.is_some()
+                    ),
+                );
+                return None;
+            }
+        }
         component_meta_trace_event!(
             "solver_resolve_prepared_type_decl_result",
             format!(

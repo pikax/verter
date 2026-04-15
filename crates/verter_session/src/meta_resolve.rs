@@ -511,7 +511,7 @@ fn imported_component_meta_materialization_scope(
 /// scope with full local visibility to every sibling helper, which can exhaust
 /// the structural-expansion budgets during a single projection call even
 /// though the owner-scope result is already a good surface.
-fn expr_has_transitively_recursive_generic_root(
+pub(crate) fn expr_has_transitively_recursive_generic_root(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -3644,7 +3644,7 @@ fn type_expr_needs_projection_rescue(
     }
 }
 
-fn type_expr_has_non_object_top_level_surface(
+pub(crate) fn type_expr_has_non_object_top_level_surface(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -4872,6 +4872,22 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
+        fn imported_registry_alias_should_stay_symbolic(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => {
+                    imported_registry_alias_should_stay_symbolic(inner)
+                }
+                TypeExpr::Mapped { .. }
+                | TypeExpr::Conditional { .. }
+                | TypeExpr::IndexedAccess { .. }
+                | TypeExpr::TypeOf(_) => true,
+                _ => false,
+            }
+        }
         fn materialize_component_meta_registry_candidate(
             query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
             scope_canonical_id: &str,
@@ -5262,6 +5278,11 @@ impl VerterHost {
                 );
             }
             meta.declaration.canonical_source = resolved.canonical_id.clone();
+            if imported_registry_alias_should_stay_symbolic(&resolved.body) {
+                entry.type_expr =
+                    verter_semantic::analysis::type_expr::TypeExpr::named(entry.name.clone());
+                continue;
+            }
             let materialized = materialize_component_meta_registry_candidate(
                 query_engine,
                 resolved.canonical_id.as_str(),
@@ -5511,6 +5532,30 @@ impl VerterHost {
                         .unwrap_or_default();
                     if declaration.canonical_source.is_empty() {
                         declaration.canonical_source = resolved.canonical_id.clone();
+                    }
+                    let pending_route_is_whole = match &pending_route {
+                        crate::resolver_core::RouteDemand::Whole => true,
+                        crate::resolver_core::RouteDemand::MemberPath(path) => path.is_empty(),
+                        _ => false,
+                    };
+                    if pending_route_is_whole
+                        && imported_registry_alias_should_stay_symbolic(&resolved.body)
+                    {
+                        upsert_component_meta_registry_entry(
+                            owner_canonical,
+                            resolved_type_registry,
+                            resolved_type_registry_meta,
+                            &mut published_names,
+                            &mut queued_names,
+                            &mut referenced_names,
+                            type_name.clone(),
+                            verter_semantic::analysis::type_expr::TypeExpr::named(
+                                type_name.clone(),
+                            ),
+                            declaration,
+                            None,
+                        );
+                        continue;
                     }
                     track_component_meta_dependency(
                         tracked_dependencies,
@@ -6368,6 +6413,120 @@ fn materialize_component_meta_macro_shape_member_types(
         })
     }
 
+    fn slot_binding_param_can_stay_symbolic(
+        ty: &verter_semantic::analysis::type_expr::TypeExpr,
+        scope_canonical_id: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match ty {
+            TypeExpr::Parenthesized(inner) => {
+                slot_binding_param_can_stay_symbolic(inner, scope_canonical_id, query_engine)
+            }
+            TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::TemplateLiteral { .. } => true,
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().all(|ty| {
+                slot_binding_param_can_stay_symbolic(ty, scope_canonical_id, query_engine)
+            }),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if !type_arguments.is_empty()
+                && !component_meta_ref_resolves_to_package(
+                    scope_canonical_id,
+                    name.as_ref(),
+                    query_engine,
+                ) =>
+            {
+                let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
+                let declaration_scope = if declaration.canonical_source.is_empty() {
+                    scope_canonical_id
+                } else {
+                    declaration.canonical_source.as_str()
+                };
+                let declaration_name = if declaration.resolved_name.is_empty() {
+                    name.as_ref()
+                } else {
+                    declaration.resolved_name.as_str()
+                };
+                query_engine
+                    .named_decl_body(declaration_scope, declaration_name)
+                    .is_some_and(|body| {
+                        type_expr_has_non_object_top_level_surface(
+                            query_engine,
+                            declaration_scope,
+                            &body,
+                        )
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn slot_member_binding_rescue_can_stay_symbolic(
+        ty: &verter_semantic::analysis::type_expr::TypeExpr,
+        scope_canonical_id: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        match ty {
+            TypeExpr::Parenthesized(inner) => slot_member_binding_rescue_can_stay_symbolic(
+                inner,
+                scope_canonical_id,
+                query_engine,
+            ),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().all(|ty| {
+                slot_member_binding_rescue_can_stay_symbolic(ty, scope_canonical_id, query_engine)
+            }),
+            TypeExpr::Function(function) => {
+                !function.parameters.is_empty()
+                    && function.parameters.iter().all(|parameter| {
+                        slot_binding_param_can_stay_symbolic(
+                            &parameter.ty,
+                            scope_canonical_id,
+                            query_engine,
+                        )
+                    })
+            }
+            TypeExpr::Object(object) => {
+                let mut saw_callable = false;
+                object.properties.iter().all(|member| match member {
+                    ObjectMember::CallSignature(function)
+                    | ObjectMember::ConstructSignature(function) => {
+                        saw_callable = true;
+                        !function.parameters.is_empty()
+                            && function.parameters.iter().all(|parameter| {
+                                slot_binding_param_can_stay_symbolic(
+                                    &parameter.ty,
+                                    scope_canonical_id,
+                                    query_engine,
+                                )
+                            })
+                    }
+                    ObjectMember::Method(method) => {
+                        saw_callable = true;
+                        !method.function.parameters.is_empty()
+                            && method.function.parameters.iter().all(|parameter| {
+                                slot_binding_param_can_stay_symbolic(
+                                    &parameter.ty,
+                                    scope_canonical_id,
+                                    query_engine,
+                                )
+                            })
+                    }
+                    ObjectMember::Property(_) | ObjectMember::IndexSignature(_) => true,
+                }) && saw_callable
+            }
+            _ => false,
+        }
+    }
+
     let params =
         verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
     let mut define_props_index = 0usize;
@@ -6603,8 +6762,15 @@ fn materialize_component_meta_macro_shape_member_types(
                                         scope_canonical_id,
                                         &property.ty,
                                     );
+                                let binding_rescue_can_stay_symbolic =
+                                    slot_member_binding_rescue_can_stay_symbolic(
+                                        &property.ty,
+                                        scope_canonical_id,
+                                        query_engine,
+                                    );
                                 if !property_needs_projection_rescue
-                                    && !slot_member_needs_binding_rescue(&property.ty)
+                                    && (binding_rescue_can_stay_symbolic
+                                        || !slot_member_needs_binding_rescue(&property.ty))
                                 {
                                     continue;
                                 }
@@ -6656,6 +6822,36 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         (property.name == member_name).then(|| property.ty.clone())
     }
 
+    fn top_level_needs_owner_route_fallback(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => top_level_needs_owner_route_fallback(inner),
+            TypeExpr::Ref { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. } => true,
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Object(_)
+            | TypeExpr::Function(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::RecursiveRef { .. } => false,
+        }
+    }
+
     let current_is_route_expr = matches!(
         current,
         verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. }
@@ -6668,33 +6864,143 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             verter_semantic::analysis::type_expr::TypeExpr::string_literal(member_name.to_string()),
         ),
     };
-    let materialize_scope_canonical_id =
+    let materialize_scope_canonical_id = if current_is_route_expr {
+        imported_component_meta_materialization_scope(current, scope_canonical_id, query_engine)
+            .or_else(|| {
+                imported_component_meta_materialization_scope(
+                    lowered,
+                    scope_canonical_id,
+                    query_engine,
+                )
+            })
+    } else {
         imported_component_meta_materialization_scope(lowered, scope_canonical_id, query_engine)
-            .unwrap_or_else(|| scope_canonical_id.to_string());
-    let current_materialized = materialize_component_meta_type_expr_until_stable(
-        current,
-        materialize_scope_canonical_id.as_str(),
-        query_engine,
+    }
+    .unwrap_or_else(|| scope_canonical_id.to_string());
+    let inline_route_candidate = current_is_route_expr
+        .then(|| {
+            let _trace = component_meta_trace_scope!(
+                "materialize_member_route_inline_candidate",
+                format!(
+                    "owner={} member={} current={:?}",
+                    scope_canonical_id, member_name, current,
+                ),
+            );
+            if type_expr_has_package_backed_root(current, scope_canonical_id, query_engine)
+                || expr_has_transitively_recursive_generic_root(
+                    query_engine,
+                    scope_canonical_id,
+                    current,
+                )
+            {
+                None
+            } else {
+                materialize_inline_registry_member_route_from_decl_body(
+                    current,
+                    scope_canonical_id,
+                    query_engine,
+                )
+                .or_else(|| {
+                    materialize_inline_registry_member_route_if_materializable(
+                        current,
+                        scope_canonical_id,
+                        query_engine,
+                    )
+                })
+            }
+        })
+        .flatten();
+    if let Some(candidate) = &inline_route_candidate {
+        component_meta_trace_event!(
+            "materialize_member_route_inline_candidate_result",
+            format!(
+                "owner={} member={} candidate={:?}",
+                scope_canonical_id, member_name, candidate,
+            ),
+        );
+    }
+    let current_materialized = inline_route_candidate.clone().unwrap_or_else(|| {
+        let _trace = component_meta_trace_scope!(
+            "materialize_member_route_current",
+            format!(
+                "owner={} member={} current={:?}",
+                scope_canonical_id, member_name, current,
+            ),
+        );
+        materialize_component_meta_type_expr_until_stable(
+            current,
+            materialize_scope_canonical_id.as_str(),
+            query_engine,
+        )
+    });
+    component_meta_trace_event!(
+        "materialize_member_route_current_result",
+        format!(
+            "owner={} member={} current_materialized={:?}",
+            scope_canonical_id, member_name, current_materialized,
+        ),
     );
     let mut best = if current_is_route_expr {
         wrapped_member_leaf(&current_materialized, member_name).unwrap_or(current_materialized)
     } else {
         current_materialized
     };
+    if let Some(candidate) = inline_route_candidate {
+        if component_meta_type_expr_improves(&candidate, &best) {
+            best = candidate;
+        }
+    }
+    if !type_expr_contains_public_member_route(&best)
+        && !top_level_needs_owner_route_fallback(&best)
+    {
+        return best;
+    }
     if current_is_route_expr {
-        if let Some(candidate) = materialize_member_route_from_alias_body_in_owner_scope(
-            current,
-            scope_canonical_id,
-            query_engine,
-        ) {
+        let alias_route_candidate = {
+            let _trace = component_meta_trace_scope!(
+                "materialize_member_route_alias_candidate",
+                format!(
+                    "owner={} member={} current={:?}",
+                    scope_canonical_id, member_name, current,
+                ),
+            );
+            materialize_member_route_from_alias_body_in_owner_scope(
+                current,
+                scope_canonical_id,
+                query_engine,
+            )
+        };
+        if let Some(candidate) = alias_route_candidate {
             if component_meta_type_expr_improves(&candidate, &best) {
                 best = candidate;
             }
         }
     }
-    let projected_candidate =
-        query_engine.project_expr_surface_expr(scope_canonical_id, &route_expr);
-    let solved_candidate = query_engine.solve_expr_type_expr(scope_canonical_id, &route_expr);
+    let (projected_candidate, solved_candidate) = if current_is_route_expr {
+        (None, None)
+    } else {
+        let projected_candidate = {
+            let _trace = component_meta_trace_scope!(
+                "materialize_member_route_projected_candidate",
+                format!(
+                    "owner={} member={} route={:?}",
+                    scope_canonical_id, member_name, route_expr,
+                ),
+            );
+            query_engine.project_expr_surface_expr(scope_canonical_id, &route_expr)
+        };
+        let solved_candidate = {
+            let _trace = component_meta_trace_scope!(
+                "materialize_member_route_solved_candidate",
+                format!(
+                    "owner={} member={} route={:?}",
+                    scope_canonical_id, member_name, route_expr,
+                ),
+            );
+            query_engine.solve_expr_type_expr(scope_canonical_id, &route_expr)
+        };
+        (projected_candidate, solved_candidate)
+    };
 
     for candidate in [projected_candidate, solved_candidate]
         .into_iter()
@@ -6708,11 +7014,20 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         {
             continue;
         }
-        let candidate_materialized = materialize_component_meta_type_expr_until_stable(
-            &candidate,
-            materialize_scope_canonical_id.as_str(),
-            query_engine,
-        );
+        let candidate_materialized = {
+            let _trace = component_meta_trace_scope!(
+                "materialize_member_route_candidate_materialized",
+                format!(
+                    "owner={} member={} candidate={:?}",
+                    scope_canonical_id, member_name, candidate,
+                ),
+            );
+            materialize_component_meta_type_expr_until_stable(
+                &candidate,
+                materialize_scope_canonical_id.as_str(),
+                query_engine,
+            )
+        };
         if component_meta_type_expr_improves(&candidate_materialized, &best) {
             best = candidate_materialized;
         }
@@ -7965,6 +8280,16 @@ fn materialize_inline_registry_member_route_from_decl_body(
         }
         _ => None,
     }
+}
+
+pub(crate) fn materialize_inline_registry_member_route_if_materializable(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    registry_member_route_inline_materializable(expr, scope_canonical_id, engine).then(|| {
+        materialize_inline_registry_member_route_from_decl_body(expr, scope_canonical_id, engine)
+    })?
 }
 
 fn materialize_component_meta_member_surface_expr_with_active_stack(

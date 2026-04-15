@@ -8705,6 +8705,145 @@ fn choose_less_symbolic_component_meta_type_expr(
         return current.clone();
     }
 
+    fn should_preserve_imported_object_like_public_ref(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        owner_canonical: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        let Some(raw_type) = raw_type else {
+            return false;
+        };
+
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = &parsed
+        else {
+            return false;
+        };
+
+        if !expr_contains_public_ref(current, name.as_ref(), type_arguments.len()) {
+            return false;
+        }
+
+        let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
+        let declaration_scope = if declaration.canonical_source.is_empty() {
+            owner_canonical
+        } else {
+            declaration.canonical_source.as_str()
+        };
+        if declaration_scope == owner_canonical {
+            return false;
+        }
+
+        let resolved_name = if declaration.resolved_name.is_empty() {
+            name.as_ref()
+        } else {
+            declaration.resolved_name.as_str()
+        };
+
+        query_engine
+            .named_decl_body(declaration_scope, resolved_name)
+            .is_some_and(|body| {
+                !crate::meta_resolve::type_expr_has_non_object_top_level_surface(
+                    query_engine,
+                    declaration_scope,
+                    &body,
+                )
+            })
+    }
+
+    if should_preserve_imported_object_like_public_ref(
+        current,
+        raw_type,
+        owner_canonical,
+        query_engine,
+    ) {
+        return current.clone();
+    }
+
+    fn should_preserve_recursive_generic_public_helper(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        owner_canonical: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        let Some(raw_type) = raw_type else {
+            return false;
+        };
+
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = &parsed
+        else {
+            return false;
+        };
+
+        !type_arguments.is_empty()
+            && crate::meta_resolve::expr_has_transitively_recursive_generic_root(
+                query_engine,
+                owner_canonical,
+                &parsed,
+            )
+            && expr_contains_public_ref(current, name.as_ref(), type_arguments.len())
+    }
+
+    if should_preserve_recursive_generic_public_helper(
+        current,
+        raw_type,
+        owner_canonical,
+        query_engine,
+    ) {
+        return current.clone();
+    }
+
+    fn should_preserve_existing_component_ui_object_surface(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+    ) -> bool {
+        fn raw_type_uses_only_component_ui_routes(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => raw_type_uses_only_component_ui_routes(inner),
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    !types.is_empty() && types.iter().all(raw_type_uses_only_component_ui_routes)
+                }
+                TypeExpr::Object(_) => true,
+                TypeExpr::Primitive(PrimitiveName::Undefined) => true,
+                other => matches!(
+                    crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(other),
+                    Some((
+                        _,
+                        crate::resolver_core::RouteDemand::MemberPath(path)
+                    )) if path.len() == 1 && matches!(path[0].as_str(), "slots" | "ui")
+                ),
+            }
+        }
+
+        let Some(raw_type) = raw_type else {
+            return false;
+        };
+        if !crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(
+            current,
+        ) {
+            return false;
+        }
+
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        raw_type_uses_only_component_ui_routes(&parsed)
+    }
+
+    if should_preserve_existing_component_ui_object_surface(current, raw_type) {
+        return current.clone();
+    }
+
     let mut best = current.clone();
     let mut scopes = Vec::new();
     let mut seed_exprs = vec![current.clone()];
@@ -8731,6 +8870,18 @@ fn choose_less_symbolic_component_meta_type_expr(
 
     for expr in &seed_exprs {
         for scope in &scopes {
+            if let Some(candidate) =
+                crate::meta_resolve::materialize_inline_registry_member_route_if_materializable(
+                    expr,
+                    scope.as_str(),
+                    query_engine,
+                )
+            {
+                if candidate_beats_current(&best, &candidate) {
+                    best = candidate;
+                }
+                continue;
+            }
             let safe_route_candidate =
                 crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(expr)
                     .or_else(|| {
@@ -9347,6 +9498,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     include_fallthrough: bool,
     store_view: Option<&HostStoreView>,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
@@ -9363,7 +9515,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     );
     rematerialize_public_component_meta_types(
         host,
-        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        canonical.as_str(),
         &mut meta,
         resolved,
         store_view,
@@ -9371,7 +9523,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
     if fill_missing_component_meta_prop_descriptions_from_imported_roots(
         host,
-        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        canonical.as_str(),
         &mut meta,
         resolved,
         store_view,
@@ -9379,7 +9531,6 @@ pub(crate) fn extract_component_meta_from_resolved(
         populate_public_instance_sidecar(&mut meta);
     }
     if include_fallthrough {
-        let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
         let mut visiting = rustc_hash::FxHashSet::default();
         if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
             &canonical,
@@ -9409,6 +9560,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     Option<Vec<crate::resolver_core::FactVersionRef>>,
 ) {
+    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
         &resolved.resolved_macros,
@@ -9425,13 +9577,12 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     );
     rematerialize_public_component_meta_types(
         host,
-        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        canonical.as_str(),
         &mut meta,
         resolved,
         store_view,
     );
     merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
-    let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let mut visiting = rustc_hash::FxHashSet::default();
     let fallthrough_facts = if let Some(resolution) = host
         .compute_fallthrough_surface_from_resolved_state(

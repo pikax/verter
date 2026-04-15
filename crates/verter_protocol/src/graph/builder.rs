@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use verter_semantic::analysis::type_expr::{
     FunctionExpr, FunctionParam, IndexSignature, LiteralValue, MappedModifier, MethodSignature,
@@ -141,12 +142,210 @@ pub struct GraphFunctionParam {
     pub rest: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ExprMemoKey {
+    Primitive(verter_semantic::analysis::type_expr::PrimitiveName),
+    Literal(verter_semantic::analysis::type_expr::LiteralValue),
+    Union {
+        ptr: usize,
+        len: usize,
+    },
+    Intersection {
+        ptr: usize,
+        len: usize,
+    },
+    Array {
+        element_ptr: usize,
+        readonly: bool,
+    },
+    Tuple {
+        ptr: usize,
+        len: usize,
+        readonly: bool,
+    },
+    Object {
+        ptr: usize,
+    },
+    Function {
+        ptr: usize,
+    },
+    Ref {
+        name: Arc<str>,
+        type_arguments_ptr: usize,
+        type_arguments_len: usize,
+    },
+    TypeParameter(verter_semantic::analysis::type_expr::TypeParam),
+    KeyOf {
+        operand_ptr: usize,
+    },
+    TypeOf(verter_semantic::analysis::type_expr::ValueRef),
+    IndexedAccess {
+        object_ptr: usize,
+        index_ptr: usize,
+    },
+    Conditional {
+        check_ptr: usize,
+        extends_ptr: usize,
+        true_ptr: usize,
+        false_ptr: usize,
+    },
+    Mapped {
+        parameter: String,
+        source_ptr: usize,
+        value_ptr: usize,
+        optional: MappedModifier,
+        readonly: MappedModifier,
+        name_type_ptr: usize,
+    },
+    TemplateLiteral {
+        quasis: Vec<String>,
+        expressions_ptr: usize,
+        expressions_len: usize,
+    },
+    Infer {
+        name: String,
+    },
+    Rest {
+        inner_ptr: usize,
+    },
+    Parenthesized {
+        inner_ptr: usize,
+    },
+    RecursiveRef {
+        name: Arc<str>,
+        type_arguments_ptr: usize,
+        type_arguments_len: usize,
+        conditional_context_ptr: usize,
+        conditional_context_len: usize,
+    },
+    Unknown {
+        raw: String,
+    },
+}
+
+impl ExprMemoKey {
+    fn from_expr(expr: &TypeExpr) -> Self {
+        match expr {
+            TypeExpr::Primitive(name) => Self::Primitive(*name),
+            TypeExpr::Literal(value) => Self::Literal(value.clone()),
+            TypeExpr::Union(types) => Self::Union {
+                ptr: slice_ptr_id(types),
+                len: types.len(),
+            },
+            TypeExpr::Intersection(types) => Self::Intersection {
+                ptr: slice_ptr_id(types),
+                len: types.len(),
+            },
+            TypeExpr::Array { element, readonly } => Self::Array {
+                element_ptr: arc_ptr_id(element),
+                readonly: *readonly,
+            },
+            TypeExpr::Tuple { elements, readonly } => Self::Tuple {
+                ptr: slice_ptr_id(elements),
+                len: elements.len(),
+                readonly: *readonly,
+            },
+            TypeExpr::Object(object) => Self::Object {
+                ptr: arc_ptr_id(object),
+            },
+            TypeExpr::Function(function) => Self::Function {
+                ptr: arc_ptr_id(function),
+            },
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => Self::Ref {
+                name: Arc::clone(name),
+                type_arguments_ptr: slice_ptr_id(type_arguments),
+                type_arguments_len: type_arguments.len(),
+            },
+            TypeExpr::TypeParameter(param) => Self::TypeParameter(param.clone()),
+            TypeExpr::KeyOf(operand) => Self::KeyOf {
+                operand_ptr: arc_ptr_id(operand),
+            },
+            TypeExpr::TypeOf(value) => Self::TypeOf(value.clone()),
+            TypeExpr::IndexedAccess { object, index } => Self::IndexedAccess {
+                object_ptr: arc_ptr_id(object),
+                index_ptr: arc_ptr_id(index),
+            },
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => Self::Conditional {
+                check_ptr: arc_ptr_id(check),
+                extends_ptr: arc_ptr_id(extends),
+                true_ptr: arc_ptr_id(true_type),
+                false_ptr: arc_ptr_id(false_type),
+            },
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                value,
+                optional,
+                readonly,
+                name_type,
+            } => Self::Mapped {
+                parameter: parameter.clone(),
+                source_ptr: arc_ptr_id(source),
+                value_ptr: arc_ptr_id(value),
+                optional: *optional,
+                readonly: *readonly,
+                name_type_ptr: option_arc_ptr_id(name_type.as_ref()),
+            },
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Self::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions_ptr: slice_ptr_id(expressions),
+                expressions_len: expressions.len(),
+            },
+            TypeExpr::Infer { name } => Self::Infer { name: name.clone() },
+            TypeExpr::Rest(inner) => Self::Rest {
+                inner_ptr: arc_ptr_id(inner),
+            },
+            TypeExpr::Parenthesized(inner) => Self::Parenthesized {
+                inner_ptr: arc_ptr_id(inner),
+            },
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => Self::RecursiveRef {
+                name: Arc::clone(name),
+                type_arguments_ptr: slice_ptr_id(type_arguments),
+                type_arguments_len: type_arguments.len(),
+                conditional_context_ptr: conditional_context.as_ptr() as usize,
+                conditional_context_len: conditional_context.len(),
+            },
+            TypeExpr::Unknown { raw } => Self::Unknown { raw: raw.clone() },
+        }
+    }
+}
+
+fn arc_ptr_id<T>(value: &Arc<T>) -> usize {
+    Arc::as_ptr(value) as usize
+}
+
+fn slice_ptr_id<T>(value: &Arc<[T]>) -> usize {
+    value.as_ptr() as usize
+}
+
+fn option_arc_ptr_id<T>(value: Option<&Arc<T>>) -> usize {
+    value.map(arc_ptr_id).unwrap_or(0)
+}
+
 #[derive(Debug, Default)]
 pub struct GraphBuilder {
     strings: Vec<String>,
     string_ids: HashMap<String, u32>,
     nodes: Vec<GraphNode>,
     node_ids: HashMap<GraphNode, u32>,
+    expr_ids: HashMap<ExprMemoKey, u32>,
+    #[cfg(test)]
+    graph_node_build_count: usize,
 }
 
 impl GraphBuilder {
@@ -176,8 +375,14 @@ impl GraphBuilder {
     }
 
     pub fn node_id(&mut self, expr: &TypeExpr) -> u32 {
+        let memo_key = ExprMemoKey::from_expr(expr);
+        if let Some(id) = self.expr_ids.get(&memo_key) {
+            return *id;
+        }
+
         let node = self.graph_node(expr);
         if let Some(id) = self.node_ids.get(&node) {
+            self.expr_ids.insert(memo_key, *id);
             return *id;
         }
 
@@ -189,6 +394,7 @@ impl GraphBuilder {
             .expect("node table overflow");
         self.nodes.push(node.clone());
         self.node_ids.insert(node, id);
+        self.expr_ids.insert(memo_key, id);
         id
     }
 
@@ -200,7 +406,16 @@ impl GraphBuilder {
         &self.nodes
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_graph_node_build_count(&self) -> usize {
+        self.graph_node_build_count
+    }
+
     fn graph_node(&mut self, expr: &TypeExpr) -> GraphNode {
+        #[cfg(test)]
+        {
+            self.graph_node_build_count += 1;
+        }
         match expr {
             TypeExpr::Primitive(name) => GraphNode::Primitive {
                 primitive: schema::primitive_to_tag(*name),
@@ -474,8 +689,10 @@ fn mapped_modifier_tag(modifier: MappedModifier) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use verter_semantic::analysis::type_expr::{
-        PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, TypeExpr,
+        LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame,
+        TypeExpr,
     };
 
     #[test]
@@ -518,5 +735,33 @@ mod tests {
             assert_eq!(conditional_context[0].branch, 1, "branch=true should be 1");
             assert!(conditional_context[0].decided);
         }
+    }
+
+    #[test]
+    fn graph_builder_reuses_same_expr_reference_without_rewalking_subgraph() {
+        let shared = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("Accordion")),
+            index: Arc::new(TypeExpr::Literal(LiteralValue::String("slots".to_string()))),
+        };
+        let expr = TypeExpr::Array {
+            element: Arc::new(TypeExpr::Union(Arc::from(vec![shared.clone(), shared]))),
+            readonly: false,
+        };
+
+        let mut builder = GraphBuilder::new();
+        let first_id = builder.node_id(&expr);
+        let builds_after_first = builder.debug_graph_node_build_count();
+
+        let second_id = builder.node_id(&expr);
+        let builds_after_second = builder.debug_graph_node_build_count();
+
+        assert_eq!(
+            first_id, second_id,
+            "same expression should reuse one node id"
+        );
+        assert_eq!(
+            builds_after_second, builds_after_first,
+            "repeat node_id() on the same expression should hit the front cache instead of rebuilding the graph node"
+        );
     }
 }

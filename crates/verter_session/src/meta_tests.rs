@@ -10962,6 +10962,185 @@ defineProps<{
 }
 
 #[test]
+fn declared_component_meta_extract_keeps_recursive_get_item_keys_symbolic_without_hanging() {
+    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
+  ? true
+  : false
+
+type IsPlainObject<T> = IsPrimitive<T> extends true
+  ? false
+  : T extends readonly any[] | ((...args: any[]) => any)
+    ? false
+    : T extends object ? true
+      : false
+
+type DotPathKeys<T> = IsPlainObject<T> extends true
+  ? {
+      [K in keyof T & string]:
+      IsPlainObject<NonNullable<T[K]>> extends true
+        ? K | `${K}.${DotPathKeys<NonNullable<T[K]>>}`
+        : K
+    }[keyof T & string]
+  : never
+
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+
+export type GetItemKeys<
+  I,
+  T extends NestedItem<I> = NestedItem<I>
+> = (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="T extends { label?: string; nested?: { path?: string } }">
+import type { GetItemKeys } from './utils'
+
+defineProps<{
+  labelKey?: GetItemKeys<T>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./utils".to_string(),
+            resolved_canonical_id: Some("/src/utils.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let started = std::time::Instant::now();
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        false,
+        None,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed.as_secs_f64() < 10.0,
+        "declared component meta extraction should not hang on recursive GetItemKeys helper \
+         (elapsed {:.2}s)",
+        elapsed.as_secs_f64()
+    );
+
+    let label_key = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "labelKey")
+        .expect("labelKey prop should be present");
+    assert_eq!(
+        label_key.raw_type.as_deref(),
+        Some("GetItemKeys<T>"),
+        "labelKey should preserve the source helper name"
+    );
+    assert!(
+        matches!(
+            &label_key.type_expr,
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "GetItemKeys" && type_arguments.len() == 1
+        ),
+        "labelKey should stay symbolic at the prop surface, got {:?}",
+        label_key.type_expr
+    );
+}
+
+#[test]
+fn component_meta_keeps_conditional_slot_helper_symbolic_without_hanging() {
+    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+type Mode = 'click' | 'hover'
+
+type SlotProps<M extends Mode = Mode> = [M] extends ['hover']
+  ? { close: undefined }
+  : { close: () => void }
+
+interface Slots<M extends Mode = Mode> {
+  default?(props: { open: boolean }): any
+  content?(props: SlotProps<M>): any
+  anchor?(props: SlotProps<M>): any
+}
+</script>
+<script setup lang="ts" generic="M extends Mode">
+defineSlots<Slots<M>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        false,
+        None,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed.as_secs_f64() < 10.0,
+        "conditional slot helper should not hang component-meta resolution \
+         (elapsed {:.2}s)",
+        elapsed.as_secs_f64()
+    );
+
+    let content_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "content")
+        .expect("content slot should exist");
+    let anchor_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "anchor")
+        .expect("anchor slot should exist");
+    assert!(
+        content_slot.bindings.is_empty(),
+        "conditional content slot helper should stay symbolic, got bindings {:?}",
+        content_slot
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        anchor_slot.bindings.is_empty(),
+        "conditional anchor slot helper should stay symbolic, got bindings {:?}",
+        anchor_slot
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn union_object_variants_synthesize_component_meta_props() {
     let project = make_project();
     project
@@ -13214,6 +13393,76 @@ defineProps<{
         assert_eq!(
             tooltip.raw_type.as_deref(),
             Some("TooltipProviderProps"),
+            "{label} component meta should preserve the raw imported type text"
+        );
+    }
+}
+
+#[test]
+fn public_component_meta_keeps_imported_object_refs_symbolic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/editor-lib/index.d.ts",
+            r#"
+export interface Editor {
+  chain(): { run(): void }
+  isEditable?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { Editor } from 'editor-lib'
+
+defineProps<{
+  editor: Editor
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "editor-lib".to_string(),
+            resolved_canonical_id: Some("/node_modules/editor-lib/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let declared = session
+        .get_declared_component_meta("/src/App.vue")
+        .expect("declared component meta query should succeed")
+        .expect("declared component meta should exist");
+    let full = session
+        .get_component_meta("/src/App.vue")
+        .expect("full component meta query should succeed")
+        .expect("full component meta should exist");
+
+    for (label, meta) in [("declared", declared), ("full", full)] {
+        let editor = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "editor")
+            .expect("editor prop should exist");
+        assert!(
+            matches!(
+                &editor.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "Editor" && type_arguments.is_empty()
+            ),
+            "{label} component meta should keep imported object refs symbolic instead of rematerializing them, got {:?}",
+            editor.type_expr
+        );
+        assert_eq!(
+            editor.raw_type.as_deref(),
+            Some("Editor"),
             "{label} component meta should preserve the raw imported type text"
         );
     }

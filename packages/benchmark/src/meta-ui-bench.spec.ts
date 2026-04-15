@@ -2,7 +2,7 @@
  * @ai-generated - Verifies meta-ui benchmark project preparation and component discovery.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -17,6 +17,7 @@ import {
   prepareMetaUiProject,
   tryLoadExpectedArtifacts,
 } from "./meta-ui-bench.js";
+import { compareNormalizedArtifacts } from "./meta-ui-core.js";
 import { loadVerterCompatModule } from "./verter-compat.js";
 import { resolveVerterCompatSourceEntry } from "./verter-compat.js";
 
@@ -272,6 +273,190 @@ describe("verter repeated benchmark queries", () => {
         expect(secondLatencyMs).toBeLessThan(firstLatencyMs * 2);
       } finally {
         checker.close();
+      }
+    },
+    20_000,
+  );
+});
+
+describe("verter benchmark worker parity", () => {
+  const defaultUiRoot = parseMetaUiBenchArgs([]).uiRoot;
+  const editorPath = resolve(defaultUiRoot, "src", "runtime", "components", "Editor.vue");
+  const expectedEditorPath = resolve(
+    parseMetaUiBenchArgs([]).expectedDir,
+    "src/runtime/components/Editor.vue.json",
+  );
+  const editorDragHandlePath = resolve(
+    defaultUiRoot,
+    "src",
+    "runtime",
+    "components",
+    "EditorDragHandle.vue",
+  );
+  const expectedEditorDragHandlePath = resolve(
+    parseMetaUiBenchArgs([]).expectedDir,
+    "src/runtime/components/EditorDragHandle.vue.json",
+  );
+  const popoverPath = resolve(defaultUiRoot, "src", "runtime", "components", "Popover.vue");
+  const expectedPopoverPath = resolve(
+    parseMetaUiBenchArgs([]).expectedDir,
+    "src/runtime/components/Popover.vue.json",
+  );
+
+  it.runIf(existsSync(popoverPath) && existsSync(expectedPopoverPath))(
+    "returns the pinned Popover.vue artifact within the 5s query budget",
+    async () => {
+      const prepared = prepareMetaUiProject(
+        parseMetaUiBenchArgs([
+          "--components=Popover.vue",
+          "--expected=none",
+          "--query-timeout-ms=5000",
+        ]),
+      );
+      const popover = prepared.componentSnapshots.find(
+        (component) => component.relativePath === "src/runtime/components/Popover.vue",
+      );
+      expect(popover).toBeDefined();
+
+      const instance = await createWorkerBackendInstance(
+        {
+          backend: "verter",
+          uiRoot: prepared.uiRoot,
+          checkerConfig: {
+            extends: `${prepared.uiRoot}/tsconfig.json`,
+            skipLibCheck: true,
+            include: [popover!.absolutePath],
+            exclude: [],
+            compilerOptions: {
+              ...(prepared.compilerOptions.baseUrl
+                ? { baseUrl: prepared.compilerOptions.baseUrl }
+                : {}),
+              ...(prepared.compilerOptions.paths ? { paths: prepared.compilerOptions.paths } : {}),
+            },
+          },
+          components: [popover!],
+        },
+        {
+          queryTimeoutMs: 5_000,
+          setupTimeoutMs: 30_000,
+        },
+      );
+
+      try {
+        const result = await instance.query(popover!);
+        const expectedArtifact = JSON.parse(readFileSync(expectedPopoverPath, "utf8"));
+        const comparison = compareNormalizedArtifacts(result.artifact, expectedArtifact);
+
+        expect(result.outcome).toBe("success");
+        expect(comparison.exact).toBe(true);
+      } finally {
+        await instance.dispose();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(existsSync(editorPath) && existsSync(expectedEditorPath))(
+    "returns the pinned Editor.vue artifact within the 5s query budget",
+    async () => {
+      const prepared = prepareMetaUiProject(
+        parseMetaUiBenchArgs([
+          "--components=Editor.vue",
+          "--expected=none",
+          "--query-timeout-ms=5000",
+        ]),
+      );
+      const editor = prepared.componentSnapshots.find(
+        (component) => component.relativePath === "src/runtime/components/Editor.vue",
+      );
+      expect(editor).toBeDefined();
+
+      const instance = await createWorkerBackendInstance(
+        {
+          backend: "verter",
+          uiRoot: prepared.uiRoot,
+          checkerConfig: {
+            extends: `${prepared.uiRoot}/tsconfig.json`,
+            skipLibCheck: true,
+            include: [editor!.absolutePath],
+            exclude: [],
+            compilerOptions: {
+              ...(prepared.compilerOptions.baseUrl
+                ? { baseUrl: prepared.compilerOptions.baseUrl }
+                : {}),
+              ...(prepared.compilerOptions.paths ? { paths: prepared.compilerOptions.paths } : {}),
+            },
+          },
+          components: [editor!],
+        },
+        {
+          queryTimeoutMs: 5_000,
+          setupTimeoutMs: 30_000,
+        },
+      );
+
+      try {
+        const result = await instance.query(editor!);
+        const expectedArtifact = JSON.parse(readFileSync(expectedEditorPath, "utf8"));
+        const comparison = compareNormalizedArtifacts(result.artifact, expectedArtifact);
+
+        expect(result.outcome).toBe("success");
+        expect(comparison.exact).toBe(true);
+      } finally {
+        await instance.dispose();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(existsSync(editorDragHandlePath) && existsSync(expectedEditorDragHandlePath))(
+    "returns the pinned EditorDragHandle.vue artifact within the 5s query budget",
+    async () => {
+      const prepared = prepareMetaUiProject(
+        parseMetaUiBenchArgs([
+          "--components=EditorDragHandle.vue",
+          "--expected=none",
+          "--query-timeout-ms=5000",
+        ]),
+      );
+      const editorDragHandle = prepared.componentSnapshots.find(
+        (component) => component.relativePath === "src/runtime/components/EditorDragHandle.vue",
+      );
+      expect(editorDragHandle).toBeDefined();
+
+      const instance = await createWorkerBackendInstance(
+        {
+          backend: "verter",
+          uiRoot: prepared.uiRoot,
+          checkerConfig: {
+            extends: `${prepared.uiRoot}/tsconfig.json`,
+            skipLibCheck: true,
+            include: [editorDragHandle!.absolutePath],
+            exclude: [],
+            compilerOptions: {
+              ...(prepared.compilerOptions.baseUrl
+                ? { baseUrl: prepared.compilerOptions.baseUrl }
+                : {}),
+              ...(prepared.compilerOptions.paths ? { paths: prepared.compilerOptions.paths } : {}),
+            },
+          },
+          components: [editorDragHandle!],
+        },
+        {
+          queryTimeoutMs: 5_000,
+          setupTimeoutMs: 30_000,
+        },
+      );
+
+      try {
+        const result = await instance.query(editorDragHandle!);
+        const expectedArtifact = JSON.parse(readFileSync(expectedEditorDragHandlePath, "utf8"));
+        const comparison = compareNormalizedArtifacts(result.artifact, expectedArtifact);
+
+        expect(result.outcome).toBe("success");
+        expect(comparison.exact).toBe(true);
+      } finally {
+        await instance.dispose();
       }
     },
     20_000,
