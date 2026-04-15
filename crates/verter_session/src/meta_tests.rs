@@ -13469,6 +13469,296 @@ defineProps<{
 }
 
 #[test]
+fn public_component_meta_keeps_utility_wrapped_imported_refs_symbolic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/button.ts",
+            r#"
+export interface ButtonProps {
+  href?: string
+  disabled?: boolean
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/avatar.ts",
+            r#"
+export interface AvatarProps {
+  src?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/progress.ts",
+            r#"
+export interface ProgressProps {
+  color?: string
+  ui?: {
+    root?: string
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/src/keys.ts", "export type LinkPropsKeys = 'href'")
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { AvatarProps } from './avatar'
+import type { ButtonProps } from './button'
+import type { LinkPropsKeys } from './keys'
+import type { ProgressProps } from './progress'
+
+defineProps<{
+  avatar?: AvatarProps
+  actions?: ButtonProps[]
+  close?: boolean | Omit<ButtonProps, LinkPropsKeys>
+  progress?: boolean | Pick<ProgressProps, 'color' | 'ui'>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./avatar".to_string(),
+                resolved_canonical_id: Some("/src/avatar.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./button".to_string(),
+                resolved_canonical_id: Some("/src/button.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./keys".to_string(),
+                resolved_canonical_id: Some("/src/keys.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./progress".to_string(),
+                resolved_canonical_id: Some("/src/progress.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let declared = session
+        .get_declared_component_meta("/src/App.vue")
+        .expect("declared component meta query should succeed")
+        .expect("declared component meta should exist");
+    let full = session
+        .get_component_meta("/src/App.vue")
+        .expect("full component meta query should succeed")
+        .expect("full component meta should exist");
+
+    fn union_contains_utility_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        utility_name: &str,
+        inner_name: &str,
+    ) -> bool {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+                members.iter().any(|member| match member {
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } if name.as_ref() == utility_name && type_arguments.len() == 2 => {
+                        matches!(
+                            &type_arguments[0],
+                            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                                name,
+                                type_arguments
+                            } if name.as_ref() == inner_name && type_arguments.is_empty()
+                        )
+                    }
+                    _ => false,
+                })
+            }
+            _ => false,
+        }
+    }
+
+    for (label, meta) in [("declared", declared), ("full", full)] {
+        let avatar = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "avatar")
+            .expect("avatar prop should exist");
+        assert!(
+            matches!(
+                &avatar.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
+            ),
+            "{label} component meta should keep imported object refs symbolic, got {:?}",
+            avatar.type_expr
+        );
+
+        let actions = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "actions")
+            .expect("actions prop should exist");
+        assert!(
+            matches!(
+                &actions.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Array { element, .. }
+                    if matches!(
+                        element.as_ref(),
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                            if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
+                    )
+            ),
+            "{label} component meta should keep imported array element refs symbolic, got {:?}",
+            actions.type_expr
+        );
+
+        let close = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "close")
+            .expect("close prop should exist");
+        assert!(
+            union_contains_utility_ref(&close.type_expr, "Omit", "ButtonProps"),
+            "{label} component meta should keep imported Omit wrappers symbolic, got {:?}",
+            close.type_expr
+        );
+
+        let progress = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "progress")
+            .expect("progress prop should exist");
+        assert!(
+            union_contains_utility_ref(&progress.type_expr, "Pick", "ProgressProps"),
+            "{label} component meta should keep imported Pick wrappers symbolic, got {:?}",
+            progress.type_expr
+        );
+    }
+}
+
+#[test]
+fn public_component_meta_keeps_simple_imported_alias_union_surface() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+export interface VNode {
+  __brand?: 'vnode'
+}
+
+export type StringOrVNode = string | VNode | (() => VNode)
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { StringOrVNode } from './utils'
+
+defineProps<{
+  description?: StringOrVNode
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./utils".to_string(),
+            resolved_canonical_id: Some("/src/utils.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let declared = session
+        .get_declared_component_meta("/src/App.vue")
+        .expect("declared component meta query should succeed")
+        .expect("declared component meta should exist");
+
+    let description = declared
+        .props
+        .iter()
+        .find(|prop| prop.name == "description")
+        .expect("description prop should exist");
+
+    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &description.type_expr else {
+        panic!(
+            "declared component meta should keep imported alias unions structural, got {:?}",
+            description.type_expr
+        );
+    };
+
+    assert!(
+        members.iter().any(|member| {
+            matches!(
+                member,
+                verter_semantic::analysis::type_expr::TypeExpr::Primitive(
+                    verter_semantic::analysis::type_expr::PrimitiveName::String
+                )
+            )
+        }),
+        "declared component meta should keep the string branch, got {:?}",
+        description.type_expr
+    );
+    assert!(
+        members.iter().any(|member| {
+            matches!(
+                member,
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "VNode" && type_arguments.is_empty()
+            )
+        }),
+        "declared component meta should keep the VNode branch, got {:?}",
+        description.type_expr
+    );
+    assert!(
+        members.iter().any(|member| {
+            match member {
+                verter_semantic::analysis::type_expr::TypeExpr::Function(function) => matches!(
+                    function.return_type.as_deref(),
+                    Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments })
+                        if name.as_ref() == "VNode" && type_arguments.is_empty()
+                ),
+                verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                    matches!(
+                        inner.as_ref(),
+                        verter_semantic::analysis::type_expr::TypeExpr::Function(function)
+                            if matches!(
+                                function.return_type.as_deref(),
+                                Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments })
+                                    if name.as_ref() == "VNode" && type_arguments.is_empty()
+                            )
+                    )
+                }
+                _ => false,
+            }
+        }),
+        "declared component meta should keep the function branch, got {:?}",
+        description.type_expr
+    );
+}
+
+#[test]
 fn imported_utility_wrapped_field_stays_symbolic_in_evaluated_types() {
     let project = make_project();
     project

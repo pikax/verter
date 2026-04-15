@@ -8454,6 +8454,13 @@ fn choose_less_symbolic_component_meta_type_expr(
     preferred_scope_canonical_ids: &[String],
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let parsed_raw_type = raw_type
+        .filter(|raw| !raw.trim().is_empty())
+        .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
+    if parsed_raw_type.as_ref().is_some_and(|parsed| parsed == current) {
+        return current.clone();
+    }
+
     fn component_meta_type_expr_root_name(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> Option<String> {
@@ -8546,38 +8553,50 @@ fn choose_less_symbolic_component_meta_type_expr(
         }
     }
 
+    fn has_structural_top_level(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => has_structural_top_level(inner),
+            TypeExpr::Ref { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::Infer { .. } => false,
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Object(_)
+            | TypeExpr::Function(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::RecursiveRef { .. } => true,
+        }
+    }
+
+    fn is_plain_named_alias_ref(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                is_plain_named_alias_ref(inner)
+            }
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. } => {
+                type_arguments.is_empty()
+            }
+            _ => false,
+        }
+    }
+
     fn candidate_beats_current(
         current: &verter_semantic::analysis::type_expr::TypeExpr,
         candidate: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> bool {
-        fn has_structural_top_level(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
-            use verter_semantic::analysis::type_expr::TypeExpr;
-
-            match expr {
-                TypeExpr::Parenthesized(inner) => has_structural_top_level(inner),
-                TypeExpr::Ref { .. }
-                | TypeExpr::IndexedAccess { .. }
-                | TypeExpr::Conditional { .. }
-                | TypeExpr::Mapped { .. }
-                | TypeExpr::TypeOf(_)
-                | TypeExpr::TypeParameter(_)
-                | TypeExpr::Unknown { .. }
-                | TypeExpr::Infer { .. } => false,
-                TypeExpr::Primitive(_)
-                | TypeExpr::Literal(_)
-                | TypeExpr::Object(_)
-                | TypeExpr::Function(_)
-                | TypeExpr::Array { .. }
-                | TypeExpr::Tuple { .. }
-                | TypeExpr::Union(_)
-                | TypeExpr::Intersection(_)
-                | TypeExpr::KeyOf(_)
-                | TypeExpr::Rest(_)
-                | TypeExpr::TemplateLiteral { .. }
-                | TypeExpr::RecursiveRef { .. } => true,
-            }
-        }
-
         match (current, candidate) {
             (
                 verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
@@ -8617,6 +8636,15 @@ fn choose_less_symbolic_component_meta_type_expr(
                 refs.insert((name.to_string(), type_arguments.len()));
                 true
             }
+            TypeExpr::Ref { type_arguments, .. } => {
+                let mut found = false;
+                for type_argument in type_arguments.iter() {
+                    if collect_props_like_public_refs(type_argument, refs) {
+                        found = true;
+                    }
+                }
+                found
+            }
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
                 let mut found = false;
                 for ty in types.iter() {
@@ -8637,6 +8665,21 @@ fn choose_less_symbolic_component_meta_type_expr(
                 }
                 found
             }
+            TypeExpr::Array { element, .. } => collect_props_like_public_refs(element, refs),
+            TypeExpr::Tuple { elements, .. } => {
+                let mut found = false;
+                for element in elements.iter() {
+                    if collect_props_like_public_refs(&element.ty, refs) {
+                        found = true;
+                    }
+                }
+                found
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                let object_found = collect_props_like_public_refs(object, refs);
+                let index_found = collect_props_like_public_refs(index, refs);
+                object_found || index_found
+            }
             _ => false,
         }
     }
@@ -8655,7 +8698,12 @@ fn choose_less_symbolic_component_meta_type_expr(
             TypeExpr::Ref {
                 name: current_name,
                 type_arguments,
-            } => current_name.as_ref() == name && type_arguments.len() == type_argument_arity,
+            } => {
+                (current_name.as_ref() == name && type_arguments.len() == type_argument_arity)
+                    || type_arguments
+                        .iter()
+                        .any(|arg| expr_contains_public_ref(arg, name, type_argument_arity))
+            }
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
                 .iter()
                 .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
@@ -8665,44 +8713,53 @@ fn choose_less_symbolic_component_meta_type_expr(
             TypeExpr::Tuple { elements, .. } => elements
                 .iter()
                 .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
+            TypeExpr::IndexedAccess { object, index } => {
+                expr_contains_public_ref(object, name, type_argument_arity)
+                    || expr_contains_public_ref(index, name, type_argument_arity)
+            }
             _ => false,
         }
     }
 
-    fn should_preserve_imported_props_like_public_refs(
-        current: &verter_semantic::analysis::type_expr::TypeExpr,
+    fn imported_props_like_public_raw_type(
         raw_type: Option<&str>,
         owner_canonical: &str,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    ) -> bool {
+    ) -> Option<(
+        verter_semantic::analysis::type_expr::TypeExpr,
+        rustc_hash::FxHashSet<(String, usize)>,
+    )> {
         let Some(raw_type) = raw_type else {
-            return false;
+            return None;
         };
 
         let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
         let mut refs = rustc_hash::FxHashSet::default();
         if !collect_props_like_public_refs(&parsed, &mut refs) || refs.is_empty() {
-            return false;
+            return None;
         }
 
-        refs.into_iter().all(|(name, type_argument_arity)| {
-            if !expr_contains_public_ref(current, &name, type_argument_arity) {
-                return false;
-            }
-
+        let all_imported = refs.iter().all(|(name, _)| {
             let declaration = query_engine.resolve_type_declaration(owner_canonical, &name);
             !declaration.canonical_source.is_empty()
                 && declaration.canonical_source != owner_canonical
-        })
+        });
+        all_imported.then_some((parsed, refs))
     }
 
-    if should_preserve_imported_props_like_public_refs(
-        current,
+    if let Some((parsed, refs)) = imported_props_like_public_raw_type(
         raw_type,
         owner_canonical,
         query_engine,
     ) {
-        return current.clone();
+        let keeps_all_refs = refs
+            .iter()
+            .all(|(name, type_argument_arity)| expr_contains_public_ref(current, name, *type_argument_arity));
+        return if keeps_all_refs {
+            current.clone()
+        } else {
+            parsed
+        };
     }
 
     fn restore_missing_imported_public_ref_from_raw_type(
@@ -8835,6 +8892,127 @@ fn choose_less_symbolic_component_meta_type_expr(
         return current.clone();
     }
 
+    fn should_preserve_named_alias_public_surface(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+    ) -> bool {
+        let Some(raw_type) = raw_type else {
+            return false;
+        };
+        if !has_structural_top_level(current) {
+            return false;
+        }
+
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        is_plain_named_alias_ref(&parsed)
+            && crate::meta_resolve::component_meta_type_expr_improves(current, &parsed)
+    }
+
+    if should_preserve_named_alias_public_surface(current, raw_type) {
+        return current.clone();
+    }
+
+    fn transport_stable_named_alias_body_candidate(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        owner_canonical: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        fn is_transport_stable_named_alias_body(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => is_transport_stable_named_alias_body(inner),
+                TypeExpr::Primitive(_)
+                | TypeExpr::Literal(_)
+                | TypeExpr::Ref { .. }
+                | TypeExpr::Unknown { .. }
+                | TypeExpr::TypeParameter(_)
+                | TypeExpr::RecursiveRef { .. } => true,
+                TypeExpr::Array { element, .. } => is_transport_stable_named_alias_body(element),
+                TypeExpr::Tuple { elements, .. } => elements
+                    .iter()
+                    .all(|element| is_transport_stable_named_alias_body(&element.ty)),
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    !types.is_empty() && types.iter().all(is_transport_stable_named_alias_body)
+                }
+                TypeExpr::Function(function) => {
+                    function
+                        .parameters
+                        .iter()
+                        .all(|param| is_transport_stable_named_alias_body(&param.ty))
+                        && function
+                            .return_type
+                            .as_deref()
+                            .is_none_or(is_transport_stable_named_alias_body)
+                }
+                TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
+                    ObjectMember::Property(property) => {
+                        is_transport_stable_named_alias_body(&property.ty)
+                    }
+                    ObjectMember::IndexSignature(signature) => {
+                        is_transport_stable_named_alias_body(&signature.key_type)
+                            && is_transport_stable_named_alias_body(&signature.value_type)
+                    }
+                    ObjectMember::CallSignature(function)
+                    | ObjectMember::ConstructSignature(function) => {
+                        function
+                            .parameters
+                            .iter()
+                            .all(|param| is_transport_stable_named_alias_body(&param.ty))
+                            && function
+                                .return_type
+                                .as_deref()
+                                .is_none_or(is_transport_stable_named_alias_body)
+                    }
+                    ObjectMember::Method(method) => {
+                        method
+                            .function
+                            .parameters
+                            .iter()
+                            .all(|param| is_transport_stable_named_alias_body(&param.ty))
+                            && method
+                                .function
+                                .return_type
+                                .as_deref()
+                                .is_none_or(is_transport_stable_named_alias_body)
+                    }
+                }),
+                TypeExpr::IndexedAccess { .. }
+                | TypeExpr::Conditional { .. }
+                | TypeExpr::Mapped { .. }
+                | TypeExpr::KeyOf(_)
+                | TypeExpr::Rest(_)
+                | TypeExpr::TemplateLiteral { .. }
+                | TypeExpr::TypeOf(_)
+                | TypeExpr::Infer { .. } => false,
+            }
+        }
+
+        let Some(raw_type) = raw_type else {
+            return None;
+        };
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        if !is_plain_named_alias_ref(&parsed) {
+            return None;
+        }
+        let candidate = alias_body_transport_candidate(&parsed, owner_canonical, query_engine)?;
+        (is_transport_stable_named_alias_body(&candidate)
+            && candidate_beats_current(current, &candidate))
+        .then_some(candidate)
+    }
+
+    if let Some(candidate) = transport_stable_named_alias_body_candidate(
+        current,
+        raw_type,
+        owner_canonical,
+        query_engine,
+    ) {
+        return candidate;
+    }
+
     fn should_preserve_existing_component_ui_object_surface(
         current: &verter_semantic::analysis::type_expr::TypeExpr,
         raw_type: Option<&str>,
@@ -8965,6 +9143,17 @@ fn rematerialize_public_component_meta_types(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     store_view: Option<&HostStoreView>,
 ) {
+    let _trace = component_meta_trace_scope!(
+        "rematerialize_public_component_meta_types",
+        format!(
+            "owner={} props={} slots={} resolved_macros={} registry_meta={}",
+            owner_canonical,
+            meta.props.len(),
+            meta.slots.len(),
+            resolved.resolved_macros.len(),
+            resolved.resolved_type_registry_meta.len(),
+        ),
+    );
     let has_candidates = meta.props.iter().any(|prop| prop.raw_type.is_some())
         || meta
             .slots
@@ -9033,6 +9222,18 @@ fn rematerialize_public_component_meta_types(
     let mut changed = false;
 
     for prop in &mut meta.props {
+        if prop.raw_type.as_deref().is_none_or(|raw| raw.trim().is_empty()) {
+            continue;
+        }
+        let _trace = component_meta_trace_scope!(
+            "rematerialize_public_prop_type",
+            format!(
+                "owner={} prop={} raw_type={}",
+                owner_canonical,
+                prop.name,
+                prop.raw_type.as_deref().unwrap_or(""),
+            ),
+        );
         let mut candidate_scopes = define_props_scopes.clone();
         for scope in &registry_scopes {
             if !candidate_scopes.iter().any(|existing| existing == scope) {
@@ -9059,6 +9260,23 @@ fn rematerialize_public_component_meta_types(
 
     for slot in &mut meta.slots {
         for binding in &mut slot.bindings {
+            if binding
+                .raw_type
+                .as_deref()
+                .is_none_or(|raw| raw.trim().is_empty())
+            {
+                continue;
+            }
+            let _trace = component_meta_trace_scope!(
+                "rematerialize_public_slot_binding_type",
+                format!(
+                    "owner={} slot={} binding={} raw_type={}",
+                    owner_canonical,
+                    slot.name,
+                    binding.name,
+                    binding.raw_type.as_deref().unwrap_or(""),
+                ),
+            );
             let mut candidate_scopes = define_slots_scopes.clone();
             for scope in &registry_scopes {
                 if !candidate_scopes.iter().any(|existing| existing == scope) {
@@ -9092,12 +9310,115 @@ fn rematerialize_public_component_meta_types(
 }
 
 fn merge_evaluated_prop_types_into_meta(
+    host: &VerterHost,
+    owner_canonical: &str,
     meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    store_view: Option<&HostStoreView>,
 ) {
     let Some(evaluated_types) = evaluated_types else {
         return;
     };
+    fn collect_imported_props_like_raw_refs(
+        host: &VerterHost,
+        owner_canonical: &str,
+        raw_type: Option<&str>,
+        store_view: Option<&HostStoreView>,
+    ) -> rustc_hash::FxHashSet<(String, usize)> {
+        fn collect(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            refs: &mut rustc_hash::FxHashSet<(String, usize)>,
+        ) {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => collect(inner, refs),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    if name.ends_with("Props") {
+                        refs.insert((name.to_string(), type_arguments.len()));
+                    }
+                    for arg in type_arguments.iter() {
+                        collect(arg, refs);
+                    }
+                }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    for ty in types.iter() {
+                        collect(ty, refs);
+                    }
+                }
+                TypeExpr::Array { element, .. } => collect(element, refs),
+                TypeExpr::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        collect(&element.ty, refs);
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    collect(object, refs);
+                    collect(index, refs);
+                }
+                _ => {}
+            }
+        }
+
+        let Some(raw_type) = raw_type else {
+            return rustc_hash::FxHashSet::default();
+        };
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let mut refs = rustc_hash::FxHashSet::default();
+        collect(&parsed, &mut refs);
+        refs.retain(|(name, _)| {
+            host.resolve_local_import_symbol_target_in_view(owner_canonical, name, store_view)
+                .is_some()
+                || {
+                    let declaration = crate::meta_resolve::resolve_type_declaration_in_view(
+                        host,
+                        owner_canonical,
+                        name,
+                        store_view,
+                    );
+                    !declaration.canonical_source.is_empty()
+                        && declaration.canonical_source != owner_canonical
+                }
+        });
+        refs
+    }
+
+    fn expr_contains_public_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        name: &str,
+        type_argument_arity: usize,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => expr_contains_public_ref(inner, name, type_argument_arity),
+            TypeExpr::Ref {
+                name: current_name,
+                type_arguments,
+            } => {
+                (current_name.as_ref() == name && type_arguments.len() == type_argument_arity)
+                    || type_arguments
+                        .iter()
+                        .any(|arg| expr_contains_public_ref(arg, name, type_argument_arity))
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
+            TypeExpr::Array { element, .. } => expr_contains_public_ref(element, name, type_argument_arity),
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
+            TypeExpr::IndexedAccess { object, index } => {
+                expr_contains_public_ref(object, name, type_argument_arity)
+                    || expr_contains_public_ref(index, name, type_argument_arity)
+            }
+            _ => false,
+        }
+    }
+
     let evaluated_by_name = evaluated_types
         .props
         .iter()
@@ -9108,6 +9429,19 @@ fn merge_evaluated_prop_types_into_meta(
         let Some(evaluated) = evaluated_by_name.get(prop.name.as_str()) else {
             continue;
         };
+        let imported_props_like_refs = collect_imported_props_like_raw_refs(
+            host,
+            owner_canonical,
+            prop.raw_type.as_deref(),
+            store_view,
+        );
+        if !imported_props_like_refs.is_empty()
+            && !imported_props_like_refs.iter().all(|(name, type_argument_arity)| {
+                expr_contains_public_ref(evaluated, name, *type_argument_arity)
+            })
+        {
+            continue;
+        }
         if crate::meta_resolve::component_meta_type_expr_improves(evaluated, &prop.type_expr)
             || matches!(
                 (&prop.type_expr, *evaluated),
@@ -9554,7 +9888,13 @@ pub(crate) fn extract_component_meta_from_resolved(
         resolved,
         store_view,
     );
-    merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
+    merge_evaluated_prop_types_into_meta(
+        host,
+        canonical.as_str(),
+        &mut meta,
+        resolved.evaluated_types.as_ref(),
+        store_view,
+    );
     if fill_missing_component_meta_prop_descriptions_from_imported_roots(
         host,
         canonical.as_str(),
@@ -9616,7 +9956,13 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         resolved,
         store_view,
     );
-    merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
+    merge_evaluated_prop_types_into_meta(
+        host,
+        canonical.as_str(),
+        &mut meta,
+        resolved.evaluated_types.as_ref(),
+        store_view,
+    );
     let mut visiting = rustc_hash::FxHashSet::default();
     let fallthrough_facts = if let Some(resolution) = host
         .compute_fallthrough_surface_from_resolved_state(
