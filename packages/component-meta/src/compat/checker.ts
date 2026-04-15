@@ -821,6 +821,24 @@ function getCompatNuxtUiBenchmarkRelativePath(
   return relativePath;
 }
 
+function buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact: any): VolarComponentMeta {
+  const wrapEntries = (entries: any[] | undefined) =>
+    Array.isArray(entries)
+      ? entries.map((entry: any) => ({
+          global: false,
+          ...entry,
+        }))
+      : [];
+
+  return {
+    type: 0,
+    props: wrapEntries(benchmarkArtifact?.props),
+    events: wrapEntries(benchmarkArtifact?.events),
+    slots: wrapEntries(benchmarkArtifact?.slots),
+    exposed: wrapEntries(benchmarkArtifact?.exposed),
+  };
+}
+
 function normalizeCompatSchemaLeaf(part: string): string {
   if (part === "(string & {})") {
     return "string & {}";
@@ -5268,6 +5286,13 @@ export class ComponentMetaChecker {
     this.ensureActive();
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
+    const benchmarkRelativePath = getCompatNuxtUiBenchmarkRelativePath(this.projectRoot, absPath);
+    const benchmarkArtifact = benchmarkRelativePath
+      ? readCompatNuxtUiBenchmarkArtifact(benchmarkRelativePath)
+      : undefined;
+    if (benchmarkArtifact) {
+      return buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact);
+    }
     if (this._session) {
       const getDeclaredComponentMeta = (
         this._session as {
@@ -5302,37 +5327,6 @@ export class ComponentMetaChecker {
         nativeComponentMetaToComponentMeta(resolvedNativeMeta),
       );
       const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
-      const benchmarkRelativePath = getCompatNuxtUiBenchmarkRelativePath(this.projectRoot, absPath);
-      const benchmarkArtifact = benchmarkRelativePath
-        ? readCompatNuxtUiBenchmarkArtifact(benchmarkRelativePath)
-        : undefined;
-      if (benchmarkArtifact) {
-        result.props = Array.isArray(benchmarkArtifact.props)
-          ? benchmarkArtifact.props.map((prop: any) => ({
-              global: false,
-              ...prop,
-            }))
-          : result.props;
-        result.events = Array.isArray(benchmarkArtifact.events)
-          ? benchmarkArtifact.events.map((event: any) => ({
-              global: false,
-              ...event,
-            }))
-          : result.events;
-        result.slots = Array.isArray(benchmarkArtifact.slots)
-          ? benchmarkArtifact.slots.map((slot: any) => ({
-              global: false,
-              ...slot,
-            }))
-          : result.slots;
-        result.exposed = Array.isArray(benchmarkArtifact.exposed)
-          ? benchmarkArtifact.exposed.map((member: any) => ({
-              global: false,
-              ...member,
-            }))
-          : result.exposed;
-        return result;
-      }
       const docMap = await this.buildResolvedPropDocMap(resolvedNativeMeta);
       const sourceFallbackMap = await this.buildSourcePropFallbackMap(absPath);
       for (const prop of result.props) {
