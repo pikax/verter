@@ -302,6 +302,11 @@ describe("verter benchmark worker parity", () => {
     parseMetaUiBenchArgs([]).expectedDir,
     "src/runtime/components/Popover.vue.json",
   );
+  const themePath = resolve(defaultUiRoot, "src", "runtime", "components", "Theme.vue");
+  const expectedThemePath = resolve(
+    parseMetaUiBenchArgs([]).expectedDir,
+    "src/runtime/components/Theme.vue.json",
+  );
 
   it.runIf(existsSync(popoverPath) && existsSync(expectedPopoverPath))(
     "returns the pinned Popover.vue artifact within the 5s query budget",
@@ -451,6 +456,59 @@ describe("verter benchmark worker parity", () => {
       try {
         const result = await instance.query(editorDragHandle!);
         const expectedArtifact = JSON.parse(readFileSync(expectedEditorDragHandlePath, "utf8"));
+        const comparison = compareNormalizedArtifacts(result.artifact, expectedArtifact);
+
+        expect(result.outcome).toBe("success");
+        expect(comparison.exact).toBe(true);
+      } finally {
+        await instance.dispose();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(existsSync(themePath) && existsSync(expectedThemePath))(
+    "returns the pinned Theme.vue artifact within the 5s query budget",
+    async () => {
+      const prepared = prepareMetaUiProject(
+        parseMetaUiBenchArgs([
+          "--components=Theme.vue",
+          "--expected=none",
+          "--query-timeout-ms=5000",
+        ]),
+      );
+      const theme = prepared.componentSnapshots.find(
+        (component) => component.relativePath === "src/runtime/components/Theme.vue",
+      );
+      expect(theme).toBeDefined();
+
+      const instance = await createWorkerBackendInstance(
+        {
+          backend: "verter",
+          uiRoot: prepared.uiRoot,
+          checkerConfig: {
+            extends: `${prepared.uiRoot}/tsconfig.json`,
+            skipLibCheck: true,
+            include: [theme!.absolutePath],
+            exclude: [],
+            compilerOptions: {
+              ...(prepared.compilerOptions.baseUrl
+                ? { baseUrl: prepared.compilerOptions.baseUrl }
+                : {}),
+              ...(prepared.compilerOptions.paths ? { paths: prepared.compilerOptions.paths } : {}),
+            },
+          },
+          components: [theme!],
+        },
+        {
+          queryTimeoutMs: 5_000,
+          setupTimeoutMs: 30_000,
+        },
+      );
+
+      try {
+        const result = await instance.query(theme!);
+        const expectedArtifact = JSON.parse(readFileSync(expectedThemePath, "utf8"));
         const comparison = compareNormalizedArtifacts(result.artifact, expectedArtifact);
 
         expect(result.outcome).toBe("success");

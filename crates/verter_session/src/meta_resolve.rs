@@ -6858,6 +6858,15 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     ) || component_meta_registry_public_utility_route(current)
         .or_else(|| component_meta_registry_public_indexed_access_route(current))
         .is_some();
+    if !current_is_route_expr
+        && matches!(
+            current,
+            verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
+                if type_arguments.is_empty()
+        )
+    {
+        return current.clone();
+    }
     let route_expr = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
         object: std::sync::Arc::new(lowered.clone()),
         index: std::sync::Arc::new(
@@ -6919,7 +6928,9 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             ),
         );
     }
-    let current_materialized = inline_route_candidate.clone().unwrap_or_else(|| {
+    let current_materialized = if inline_route_candidate.is_some() {
+        inline_route_candidate.clone().unwrap()
+    } else {
         let _trace = component_meta_trace_scope!(
             "materialize_member_route_current",
             format!(
@@ -6932,7 +6943,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             materialize_scope_canonical_id.as_str(),
             query_engine,
         )
-    });
+    };
     component_meta_trace_event!(
         "materialize_member_route_current_result",
         format!(

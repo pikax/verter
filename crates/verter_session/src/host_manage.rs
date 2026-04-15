@@ -8705,6 +8705,40 @@ fn choose_less_symbolic_component_meta_type_expr(
         return current.clone();
     }
 
+    fn restore_missing_imported_public_ref_from_raw_type(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        owner_canonical: &str,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        let verter_semantic::analysis::type_expr::TypeExpr::Unknown { raw: missing } = current
+        else {
+            return None;
+        };
+        let missing_target = missing.strip_prefix("missing: ")?;
+
+        let raw_type = raw_type?;
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = &parsed
+        else {
+            return None;
+        };
+        if !type_arguments.is_empty() {
+            return None;
+        }
+
+        let (missing_canonical, missing_name) = missing_target.rsplit_once("::")?;
+        (missing_name == name.as_ref() && missing_canonical != owner_canonical).then_some(parsed)
+    }
+
+    if let Some(restored) =
+        restore_missing_imported_public_ref_from_raw_type(current, raw_type, owner_canonical)
+    {
+        return restored;
+    }
+
     fn should_preserve_imported_object_like_public_ref(
         current: &verter_semantic::analysis::type_expr::TypeExpr,
         raw_type: Option<&str>,
