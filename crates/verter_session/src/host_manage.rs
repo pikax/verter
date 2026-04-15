@@ -8457,7 +8457,40 @@ fn choose_less_symbolic_component_meta_type_expr(
     let parsed_raw_type = raw_type
         .filter(|raw| !raw.trim().is_empty())
         .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
-    if parsed_raw_type.as_ref().is_some_and(|parsed| parsed == current) {
+    fn current_can_skip_equal_raw_type(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => current_can_skip_equal_raw_type(inner),
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Object(_)
+            | TypeExpr::Function(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Union(_)
+            | TypeExpr::Intersection(_)
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Unknown { .. } => true,
+            TypeExpr::Ref { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. } => false,
+        }
+    }
+
+    if parsed_raw_type
+        .as_ref()
+        .is_some_and(|parsed| parsed == current && current_can_skip_equal_raw_type(current))
+    {
         return current.clone();
     }
 
@@ -9143,6 +9176,59 @@ fn rematerialize_public_component_meta_types(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     store_view: Option<&HostStoreView>,
 ) {
+    fn resolved_registry_route_surface<'a>(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        resolved_registry_by_name: &'a rustc_hash::FxHashMap<
+            &str,
+            &'a verter_semantic::analysis::type_expr::TypeExpr,
+        >,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        let route = raw_type
+            .filter(|raw| !raw.trim().is_empty())
+            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+            .and_then(|parsed| {
+                crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(&parsed)
+                    .or_else(|| {
+                        crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(&parsed)
+                    })
+            })
+            .or_else(|| {
+                crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(current)
+                    .or_else(|| {
+                        crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(current)
+                    })
+            })?;
+        let (root_name, route) = route;
+        let root_surface = *resolved_registry_by_name.get(root_name.as_str())?;
+
+        match route {
+            crate::resolver_core::RouteDemand::Whole => Some(root_surface.clone()),
+            crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
+                Some(root_surface.clone())
+            }
+            crate::resolver_core::RouteDemand::MemberPath(path) => {
+                crate::resolver_core::component_meta_registry::raw_member_path_leaf(root_surface, &path)
+            }
+            _ => None,
+        }
+    }
+
+    fn registry_surface_improves(
+        candidate: &verter_semantic::analysis::type_expr::TypeExpr,
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        crate::meta_resolve::component_meta_type_expr_improves(candidate, current)
+            || matches!(
+                (current, candidate),
+                (
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+                )
+            )
+    }
+
     let _trace = component_meta_trace_scope!(
         "rematerialize_public_component_meta_types",
         format!(
@@ -9172,6 +9258,10 @@ fn rematerialize_public_component_meta_types(
     let mut define_props_scopes = Vec::new();
     let mut define_slots_scopes = Vec::new();
     let mut registry_scopes = Vec::new();
+    let mut resolved_registry_by_name: rustc_hash::FxHashMap<&str, &verter_semantic::analysis::type_expr::TypeExpr> = rustc_hash::FxHashMap::default();
+    for entry in &resolved.resolved_type_registry {
+        resolved_registry_by_name.insert(entry.name.as_str(), &entry.type_expr);
+    }
     for meta_entry in &resolved.resolved_type_registry_meta {
         let declaration_scope = meta_entry.declaration.canonical_source.as_str();
         if !declaration_scope.is_empty()
@@ -9245,8 +9335,15 @@ fn rematerialize_public_component_meta_types(
                 candidate_scopes.insert(0, scope_hint.clone());
             }
         }
-        let next = choose_less_symbolic_component_meta_type_expr(
+        let current = resolved_registry_route_surface(
             &prop.type_expr,
+            prop.raw_type.as_deref(),
+            &resolved_registry_by_name,
+        )
+        .filter(|candidate| registry_surface_improves(candidate, &prop.type_expr))
+        .unwrap_or_else(|| prop.type_expr.clone());
+        let next = choose_less_symbolic_component_meta_type_expr(
+            &current,
             prop.raw_type.as_deref(),
             owner_canonical,
             &candidate_scopes,
@@ -9290,8 +9387,15 @@ fn rematerialize_public_component_meta_types(
                     candidate_scopes.insert(0, scope_hint.clone());
                 }
             }
-            let next = choose_less_symbolic_component_meta_type_expr(
+            let current = resolved_registry_route_surface(
                 &binding.type_expr,
+                binding.raw_type.as_deref(),
+                &resolved_registry_by_name,
+            )
+            .filter(|candidate| registry_surface_improves(candidate, &binding.type_expr))
+            .unwrap_or_else(|| binding.type_expr.clone());
+            let next = choose_less_symbolic_component_meta_type_expr(
+                &current,
                 binding.raw_type.as_deref(),
                 owner_canonical,
                 &candidate_scopes,

@@ -494,8 +494,27 @@ where
             } else {
                 host.read_source(declaration.canonical_source.as_str())
             };
-            let projected =
+            let mut projected =
                 project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
+            if projected.props.is_empty()
+                && projected.emits.is_empty()
+                && projected.slots.is_empty()
+                && projected.native_props.is_empty()
+            {
+                if let Some(source_projected) = declaration_source
+                    .as_deref()
+                    .and_then(|source| {
+                        let projection_source = source_for_local_type_projection(source);
+                        project_macro_surfaces_from_source_type_name(
+                            projection_source.as_ref(),
+                            dep.macro_kind,
+                            dep_exported_name.as_ref(),
+                        )
+                    })
+                {
+                    projected = source_projected;
+                }
+            }
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
             if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
@@ -503,9 +522,17 @@ where
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
             {
+                let has_seed_surface = !projected.props.is_empty()
+                    || !projected.emits.is_empty()
+                    || !projected.slots.is_empty()
+                    || !projected.native_props.is_empty();
                 resolved_type_registry.push(ResolvedTypeAnalysis {
                     name: dep.type_name.clone(),
-                    type_expr: resolved_elements_to_type_expr_via_type_text(&elements),
+                    type_expr: if has_seed_surface {
+                        projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected)
+                    } else {
+                        TypeExpr::named(dep.type_name.clone())
+                    },
                     type_expansion: None,
                 });
                 resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
@@ -540,6 +567,19 @@ where
                 });
             }
         } else {
+            let declaration_source = if skip_declaration_metadata {
+                None
+            } else {
+                host.read_source(declaration.canonical_source.as_str())
+            };
+            let projected_from_source = declaration_source.as_deref().and_then(|source| {
+                let projection_source = source_for_local_type_projection(source);
+                project_macro_surfaces_from_source_type_name(
+                    projection_source.as_ref(),
+                    dep.macro_kind,
+                    dep_exported_name.as_ref(),
+                )
+            });
             let projectable_owner_local = projectable_owner_local_surfaces
                 .get(dep.macro_index)
                 .copied()
@@ -549,7 +589,65 @@ where
                 && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
                 && dep.macro_kind == AnalyzedMacroKind::DefineProps
                 && declaration.canonical_source.ends_with(".vue");
-            if !projectable_owner_local || keep_direct_imported_vue_macro {
+            if let Some(projected) = projected_from_source.filter(|projected| {
+                !projected.props.is_empty()
+                    || !projected.emits.is_empty()
+                    || !projected.slots.is_empty()
+                    || !projected.native_props.is_empty()
+            }) {
+                let package_backed_dep = dep_canonical.contains("/node_modules/")
+                    || declaration.canonical_source.contains("/node_modules/");
+                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                    && !package_backed_dep
+                    && should_seed_direct_macro_registry_entry(&declaration)
+                    && seen_registry_names.insert(dep.type_name.clone())
+                {
+                    resolved_type_registry.push(ResolvedTypeAnalysis {
+                        name: dep.type_name.clone(),
+                        type_expr: projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected),
+                        type_expansion: None,
+                    });
+                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                        name: dep.type_name.clone(),
+                        declaration: declaration.clone(),
+                    });
+                }
+                if !projectable_owner_local || keep_direct_imported_vue_macro {
+                    resolved_macros.push(ResolvedMacroMeta {
+                        macro_index,
+                        macro_kind: dep.macro_kind,
+                        type_name: dep.type_name.clone(),
+                        import_source: dep.import_source.clone(),
+                        surface_is_authoritative: imported_declaration_surface_is_authoritative(
+                            &declaration,
+                        ),
+                        declaration,
+                        native_props: projected.native_props,
+                        props: projected.props,
+                        emits: projected.emits,
+                        slots: projected.slots,
+                        jsdoc,
+                    });
+                }
+            } else {
+                let package_backed_dep = dep_canonical.contains("/node_modules/")
+                    || declaration.canonical_source.contains("/node_modules/");
+                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                    && !package_backed_dep
+                    && should_seed_direct_macro_registry_entry(&declaration)
+                    && seen_registry_names.insert(dep.type_name.clone())
+                {
+                    resolved_type_registry.push(ResolvedTypeAnalysis {
+                        name: dep.type_name.clone(),
+                        type_expr: TypeExpr::named(dep.type_name.clone()),
+                        type_expansion: None,
+                    });
+                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                        name: dep.type_name.clone(),
+                        declaration: declaration.clone(),
+                    });
+                }
+                if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
                     macro_kind: dep.macro_kind,
@@ -563,6 +661,7 @@ where
                     slots: Vec::new(),
                     jsdoc,
                 });
+            }
             }
         }
     }
@@ -2623,28 +2722,87 @@ interface Helper {
 pub fn resolved_elements_to_type_expr_via_type_text(
     resolved: &ResolvedElements,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let properties = resolved
+    projected_macro_surfaces_to_type_expr(
+        AnalyzedMacroKind::DefineProps,
+        &project_macro_surfaces(None, AnalyzedMacroKind::DefineProps, resolved),
+    )
+}
+
+pub fn projected_macro_surfaces_to_type_expr(
+    macro_kind: AnalyzedMacroKind,
+    projected: &ProjectedMacroSurfaces,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    let prop_properties = projected
         .props
         .iter()
         .map(|prop| {
             let ty = prop
-                .type_text
+                .type_annotation
                 .as_deref()
                 .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
                 .unwrap_or(TypeExpr::Unknown {
                     raw: "unknown".to_string(),
                 });
             ObjectMember::Property(ObjectProperty {
-                name: prop
-                    .key_name
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
+                name: prop.name.clone(),
                 ty,
-                optional: prop.optional,
+                optional: prop.is_optional,
                 readonly: false,
             })
+        });
+
+    let emit_properties = projected.emits.iter().map(|emit| {
+        let ty = emit
+            .payload_type
+            .as_deref()
+            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "unknown".to_string(),
+            });
+        ObjectMember::Property(ObjectProperty {
+            name: emit.name.clone(),
+            ty,
+            optional: false,
+            readonly: false,
         })
-        .collect();
+    });
+
+    let slot_properties = projected.slots.iter().map(|slot| {
+        let return_type = slot.return_type.as_deref().unwrap_or("any");
+        let signature = if slot.bindings.is_empty() {
+            format!("() => {return_type}")
+        } else {
+            let bindings = slot
+                .bindings
+                .iter()
+                .map(|binding| {
+                    format!(
+                        "{}: {}",
+                        binding.name,
+                        binding.type_annotation.as_deref().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("(props: {{ {bindings} }}) => {return_type}")
+        };
+
+        ObjectMember::Property(ObjectProperty {
+            name: slot.name.clone(),
+            ty: verter_semantic::analysis::type_expr_lower::parse_type_annotation(&signature),
+            optional: !slot.is_required,
+            readonly: false,
+        })
+    });
+
+    let properties = match macro_kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => prop_properties.collect(),
+        AnalyzedMacroKind::DefineEmits => emit_properties.collect(),
+        AnalyzedMacroKind::DefineSlots => slot_properties.collect(),
+        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => Vec::new(),
+    };
 
     TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
 }

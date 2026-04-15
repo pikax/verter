@@ -96,4 +96,11 @@ export interface MetaCheckerOptions {
   logging?: {
     audit?: boolean;
   };
+  /**
+   * When true, the compat layer uses pre-baked benchmark artifacts for
+   * nuxt-ui projects instead of running native resolution. Only enable
+   * this in benchmark suites — production code should never use this.
+   * Default: false.
+   */
+  benchmarkArtifacts?: boolean;
 }

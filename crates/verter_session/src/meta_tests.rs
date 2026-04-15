@@ -14474,6 +14474,385 @@ defineProps<{ msg: string }>()
 }
 
 #[test]
+fn public_component_meta_materializes_local_component_config_variant_and_slot_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', soft: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Button = ComponentConfig<typeof theme>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  activeColor?: Button['variants']['color']
+  ui?: Button['slots']
+}
+
+type ButtonSlots = {
+  default?: (props: { ui: Button['ui'] }) => any
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let meta = session
+        .get_component_meta("/src/Button.vue")
+        .expect("component meta query should succeed")
+        .expect("component meta should exist");
+
+    assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
+
+    for prop_name in ["color", "activeColor"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == prop_name)
+            .expect("variant prop should exist");
+        assert_union_string_literals(&prop.type_expr, &["primary", "secondary"]);
+    }
+
+    let ui = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should exist");
+    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
+        panic!(
+            "component-config slots helper should materialize as an object, got {:?}",
+            ui.type_expr
+        );
+    };
+    assert_eq!(ui_shape.properties.len(), 2, "ui prop should have exactly 2 properties (base, label)");
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "ui helper should expose base, got {:?}",
+        ui.type_expr
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "ui helper should expose label, got {:?}",
+        ui.type_expr
+    );
+
+    assert_eq!(meta.slots.len(), 1, "should have exactly 1 slot (default)");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should exist");
+    assert_eq!(default_slot.bindings.len(), 1, "default slot should have exactly 1 binding (ui)");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose ui");
+    let TypeExpr::Object(binding_shape) = &ui_binding.type_expr else {
+        panic!(
+            "slot ui binding should materialize as an object, got {:?}",
+            ui_binding.type_expr
+        );
+    };
+    assert_eq!(binding_shape.properties.len(), 2, "slot ui binding should have exactly 2 properties (base, label)");
+    assert!(
+        binding_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "slot ui binding should expose base, got {:?}",
+        ui_binding.type_expr
+    );
+    assert!(
+        binding_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "slot ui binding should expose label, got {:?}",
+        ui_binding.type_expr
+    );
+}
+
+#[test]
+fn public_component_meta_materializes_component_config_app_config_variant_and_slot_helpers() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/@nuxt/schema/index.d.ts",
+            r#"
+export interface AppConfig {
+  ui: {
+    button: {
+      variants: {
+        color: {
+          neutral: string
+        }
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type Id<T> = {} & { [P in keyof T]: T[P] }
+
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof T['slots']]?: string
+}>
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
+}>
+
+type GetComponentAppConfig<A, U extends string, K extends string>
+  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
+
+type ComponentAppConfig<
+  T,
+  A extends Record<string, any>,
+  K extends string,
+  U extends string = 'ui' | 'ui.prose'
+> = A & (
+  U extends 'ui.prose'
+    ? { ui?: { prose?: { [k in K]?: Partial<T> } } }
+    : { [key in Exclude<U, 'ui.prose'>]?: { [k in K]?: Partial<T> } }
+)
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+  U extends 'ui' | 'ui.prose' = 'ui'
+> = {
+  AppConfig: ComponentAppConfig<T, A, K, U>
+  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
+  slots: ComponentSlots<T>
+  ui: ComponentUI<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', soft: '' }
+  },
+  slots: {
+    base: '',
+    label: ''
+  }
+} as const
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { AppConfig } from '@nuxt/schema'
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+
+export interface ButtonProps {
+  color?: Button['variants']['color']
+  activeColor?: Button['variants']['color']
+  ui?: Button['slots']
+}
+
+type ButtonSlots = {
+  default?: (props: { ui: Button['ui'] }) => any
+}
+</script>
+<script setup lang="ts">
+defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/Button.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "@nuxt/schema".to_string(),
+                resolved_canonical_id: Some("/node_modules/@nuxt/schema/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let meta = session
+        .get_component_meta("/src/Button.vue")
+        .expect("component meta query should succeed")
+        .expect("component meta should exist");
+
+    assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
+
+    for prop_name in ["color", "activeColor"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == prop_name)
+            .expect("variant prop should exist");
+        assert_union_string_literals(&prop.type_expr, &["primary", "secondary", "neutral"]);
+    }
+
+    let ui = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "ui")
+        .expect("ui prop should exist");
+    let TypeExpr::Object(ui_shape) = &ui.type_expr else {
+        panic!(
+            "component-config slots helper should materialize as an object, got {:?}",
+            ui.type_expr
+        );
+    };
+    assert_eq!(ui_shape.properties.len(), 2, "ui prop should have exactly 2 properties (base, label)");
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "ui helper should expose base, got {:?}",
+        ui.type_expr
+    );
+    assert!(
+        ui_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "ui helper should expose label, got {:?}",
+        ui.type_expr
+    );
+
+    assert_eq!(meta.slots.len(), 1, "should have exactly 1 slot (default)");
+    let default_slot = meta
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should exist");
+    assert_eq!(default_slot.bindings.len(), 1, "default slot should have exactly 1 binding (ui)");
+    let ui_binding = default_slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("default slot should expose ui");
+    let TypeExpr::Object(binding_shape) = &ui_binding.type_expr else {
+        panic!(
+            "slot ui binding should materialize as an object, got {:?}",
+            ui_binding.type_expr
+        );
+    };
+    assert_eq!(binding_shape.properties.len(), 2, "slot ui binding should have exactly 2 properties (base, label)");
+    assert!(
+        binding_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+        ),
+        "slot ui binding should expose base, got {:?}",
+        ui_binding.type_expr
+    );
+    assert!(
+        binding_shape.properties.iter().any(
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+        ),
+        "slot ui binding should expose label, got {:?}",
+        ui_binding.type_expr
+    );
+}
+
+
+#[test]
 fn explicit_root_bindings_are_subtracted() {
     let project = make_project();
     project

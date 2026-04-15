@@ -2958,11 +2958,33 @@ fn add_top_level_undefined_to_model_event_payload(payload: TypeExpr) -> TypeExpr
 
 fn optionalize_model_source_type_text(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.contains("undefined") {
+    if trimmed.is_empty() || type_text_contains_undefined(trimmed) {
         trimmed.to_string()
     } else {
         format!("{trimmed} | undefined")
     }
+}
+
+/// Word-boundary-aware check for the `undefined` keyword in type text.
+/// Avoids false positives on type names like `UndefinedHandler`.
+fn type_text_contains_undefined(text: &str) -> bool {
+    let needle = "undefined";
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(needle) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0
+            || !text.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                && text.as_bytes()[abs_pos - 1] != b'_';
+        let after_pos = abs_pos + needle.len();
+        let after_ok = after_pos >= text.len()
+            || !text.as_bytes()[after_pos].is_ascii_alphanumeric()
+                && text.as_bytes()[after_pos] != b'_';
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
 }
 
 fn extract_exposed_from_macro(

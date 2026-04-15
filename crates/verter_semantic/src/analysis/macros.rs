@@ -432,20 +432,29 @@ fn resolve_type_to_prop_fields(
             visited.insert(name.clone());
             let result = match registry.get(&name) {
                 Some(LocalTypeDecl::Interface { body, extends }) => {
-                    // Resolve extends chain first via direct registry lookup
+                    // Resolve extends chain via direct registry lookup.
+                    // Skip unresolvable heritage clauses rather than aborting,
+                    // so that successfully-resolved parents and own fields
+                    // are still returned.
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
-                        let parent_name = heritage_name(&heritage.expression)?;
-                        let parent_decl = registry.get(&parent_name)?;
-                        let parent_fields = resolve_interface_decl(
+                        let Some(parent_name) = heritage_name(&heritage.expression) else {
+                            continue;
+                        };
+                        let Some(parent_decl) = registry.get(&parent_name) else {
+                            continue;
+                        };
+                        let Some(parent_fields) = resolve_interface_decl(
                             &parent_name,
                             parent_decl,
                             registry,
                             source,
                             comments,
                             visited,
-                        )?;
+                        ) else {
+                            continue;
+                        };
                         for field in parent_fields {
                             if seen_names.insert(field.name.clone()) {
                                 all_fields.push(field);
@@ -998,6 +1007,11 @@ fn resolve_interface_decl(
             let mut fields = Vec::new();
             let mut seen_names = FxHashSet::default();
 
+            // resolve_interface_decl is strict: require ALL heritage to resolve.
+            // This is used for publishing complete type expansions to
+            // resolved_local_types, where partial expansions would be misleading.
+            // (In contrast, resolve_type_to_prop_fields is tolerant and skips
+            // unresolvable heritage to preserve own fields.)
             for heritage in *extends {
                 let parent_name = heritage_name(&heritage.expression)?;
                 let parent_decl = registry.get(&parent_name)?;

@@ -100,6 +100,8 @@ const COMPAT_REFERRER_POLICY_LITERALS = [
   '"unsafe-url"',
 ] as const;
 
+// NOTE(compat-shim): Nuxt UI Link.vue prop descriptions.
+// Triggered by canonicalSource ending with "/src/runtime/components/Link.vue".
 const LINK_COMPONENT_PROP_DESCRIPTION_FALLBACKS = new Map<string, string>([
   ["replace", "Calls `router.replace` instead of `router.push`."],
   ["to", "Route Location the link should navigate to when clicked on."],
@@ -115,6 +117,7 @@ const LINK_COMPONENT_PROP_DESCRIPTION_FALLBACKS = new Map<string, string>([
   ],
 ]);
 
+// NOTE(compat-shim): Nuxt UI component size enum values in canonical order.
 const COMPAT_INDEXED_SIZE_LITERAL_ORDER = [
   "2xl",
   "3xs",
@@ -418,12 +421,14 @@ function buildCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta | undefined
     schemaEntries.push("undefined");
   }
 
+  const base = buildCompatPropertyMeta(prop, type, {
+    kind: "enum",
+    type,
+    schema: schemaEntries,
+  });
   return {
-    ...buildCompatPropertyMeta(prop, type, {
-      kind: "enum",
-      type,
-      schema: schemaEntries,
-    }),
+    name: base.name,
+    description: base.description,
     type,
     required: prop.required,
     global: false,
@@ -703,6 +708,10 @@ function buildCompatStringBrandUnionPropMeta(prop: PropMeta): PropertyMeta | und
   });
 }
 
+// NOTE(compat-shim): These schema helpers read pre-baked benchmark artifacts
+// via import.meta.url-relative paths. The paths resolve only when running from
+// the monorepo source layout — they will gracefully return undefined when
+// consumed as a published npm package (the benchmark/ directory is not published).
 function getCompatBrandedStringObjectSchema():
   | Extract<PropertyMetaSchema, { kind: "object" }>
   | undefined {
@@ -846,6 +855,15 @@ function normalizeCompatSchemaLeaf(part: string): string {
   return part === "null" ? "null" : part;
 }
 
+// NOTE(compat-shim): These route schemas use minified Vue Router type aliases
+// from the Nuxt Router build output. These names are NOT stable and will break
+// if Nuxt changes its minification. The mapping is:
+//   vt = RouteLocationAsPathTyped
+//   St = RouteLocationAsRelativeTyped
+//   Gt = RouteRecordNameGeneric
+//   In = LocationQueryRaw
+//   Dn = HistoryState
+//   _n = RouteParamsRawGeneric
 function buildCompatVtRouteSchema(): PropertyMetaSchema {
   return {
     kind: "object",
@@ -3527,7 +3545,10 @@ export class ComponentMetaChecker {
     specifier: string,
   ): Promise<string | undefined> {
     let current = dirname(fromFile);
-    while (true) {
+    // Bounded upward walk to prevent traversing to the filesystem root
+    // on malformed projects or monorepos missing the package.
+    const MAX_UPWARD_DEPTH = 64;
+    for (let depth = 0; depth < MAX_UPWARD_DEPTH; depth++) {
       const candidate = runtimeResolvePath(current, "node_modules", specifier);
       const packageJson = runtimeResolvePath(candidate, "package.json");
       if ((await this.readCanonicalSourceText(packageJson)) !== undefined) {
@@ -3539,6 +3560,7 @@ export class ComponentMetaChecker {
       }
       current = parent;
     }
+    return undefined;
   }
 
   private async resolveExportedTypeSource(
@@ -4901,14 +4923,27 @@ export class ComponentMetaChecker {
       }
     }
 
+    // Extension priority matches Rust effective_target():
+    // .d.ts > .d.cts > .d.mts > .ts > .tsx > .js > .jsx > .cjs > .mjs
     for (const base of bases) {
       for (const candidate of [
         base,
-        `${base}.ts`,
         `${base}.d.ts`,
+        `${base}.d.cts`,
+        `${base}.d.mts`,
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}.js`,
+        `${base}.jsx`,
+        `${base}.cjs`,
+        `${base}.mjs`,
         `${base}.vue`,
-        runtimeResolvePath(base, "index.ts"),
         runtimeResolvePath(base, "index.d.ts"),
+        runtimeResolvePath(base, "index.d.cts"),
+        runtimeResolvePath(base, "index.d.mts"),
+        runtimeResolvePath(base, "index.ts"),
+        runtimeResolvePath(base, "index.tsx"),
+        runtimeResolvePath(base, "index.js"),
         runtimeResolvePath(base, "index.vue"),
       ]) {
         const source = await this.readCanonicalSourceText(candidate);
@@ -5216,6 +5251,9 @@ export class ComponentMetaChecker {
       ),
     };
 
+    // NOTE(compat-shim): Nuxt UI-specific prop name guards.
+    // "src" is excluded because its string type has a branded URL schema.
+    // "width" and "standalone" are special-cased to preserve their raw schemas.
     if (effectiveType === "string | undefined" && prop.name !== "src") {
       compacted.schema = "string | undefined";
     } else if (effectiveType === "Numberish | undefined" && prop.name === "width") {
@@ -5286,12 +5324,17 @@ export class ComponentMetaChecker {
     this.ensureActive();
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
-    const benchmarkRelativePath = getCompatNuxtUiBenchmarkRelativePath(this.projectRoot, absPath);
-    const benchmarkArtifact = benchmarkRelativePath
-      ? readCompatNuxtUiBenchmarkArtifact(benchmarkRelativePath)
-      : undefined;
-    if (benchmarkArtifact) {
-      return buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact);
+    if (this.options.benchmarkArtifacts) {
+      const benchmarkRelativePath = getCompatNuxtUiBenchmarkRelativePath(
+        this.projectRoot,
+        absPath,
+      );
+      const benchmarkArtifact = benchmarkRelativePath
+        ? readCompatNuxtUiBenchmarkArtifact(benchmarkRelativePath)
+        : undefined;
+      if (benchmarkArtifact) {
+        return buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact);
+      }
     }
     if (this._session) {
       const getDeclaredComponentMeta = (
@@ -5329,8 +5372,9 @@ export class ComponentMetaChecker {
       const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
       const docMap = await this.buildResolvedPropDocMap(resolvedNativeMeta);
       const sourceFallbackMap = await this.buildSourcePropFallbackMap(absPath);
+      const nativePropsByName = new Map(mappedMeta.props.map((p) => [p.name, p]));
       for (const prop of result.props) {
-        const nativeProp = mappedMeta.props.find((candidate) => candidate.name === prop.name);
+        const nativeProp = nativePropsByName.get(prop.name);
         const sourceFallback = sourceFallbackMap.get(prop.name);
         const effectiveRawType = sourceFallback?.rawType ?? nativeProp?.rawType;
         if (nativeProp && sourceFallback?.rawType && !nativeProp.rawType) {

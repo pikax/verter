@@ -375,6 +375,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .entry(scope_canonical_id.to_string())
             .or_insert_with(|| {
                 host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
+                    .or_else(|| {
+                        host.ensure_loaded(scope_canonical_id)
+                            .then(|| {
+                                host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
+                            })
+                            .flatten()
+                    })
                     .map(|bundle| {
                         std::sync::Arc::new(DeclarationScopePayload::from_bundle(&bundle))
                     })
@@ -790,9 +797,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.prepared_type_decl_query_count += 1;
         }
 
-        let resolved =
-            self.host
-                .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view);
+        let resolved = self
+            .host
+            .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
+            .or_else(|| {
+                self.host
+                    .ensure_loaded(canonical_id)
+                    .then(|| {
+                        self.host
+                            .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
+                    })
+                    .flatten()
+            });
         self.prepared_type_decls.insert(key, resolved.clone());
         resolved
     }
@@ -1060,6 +1076,22 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         active: &mut FxHashSet<(String, String)>,
     ) -> PreparedSurfaceProjection {
+        if substitutions.is_empty() {
+            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
+                if let Some(default_substitutions) =
+                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                {
+                    if !default_substitutions.is_empty() {
+                        return self.project_prepared_surface_from_symbol(
+                            scope_canonical_id,
+                            symbol_name,
+                            &default_substitutions,
+                            active,
+                        );
+                    }
+                }
+            }
+        }
         let cache_key = PreparedSurfaceCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -1365,6 +1397,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         active: &mut FxHashSet<(String, String)>,
     ) -> Option<ProjectedMember> {
+        if substitutions.is_empty() {
+            if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
+                if let Some(default_substitutions) =
+                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                {
+                    if !default_substitutions.is_empty() {
+                        return self.project_prepared_requested_member_from_symbol(
+                            scope_canonical_id,
+                            symbol_name,
+                            member_name,
+                            &default_substitutions,
+                            active,
+                        );
+                    }
+                }
+            }
+        }
         let cache_key = PreparedMemberCacheKey {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -1736,6 +1785,282 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 active.remove(&visit_key);
                 resolved
             }
+            _ => None,
+        }
+    }
+
+    fn projected_string_literal_keys(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<Vec<String>> {
+        self.projected_string_literal_keys_inner(
+            resolution_scope_canonical_id,
+            active_scope_canonical_id,
+            expr,
+            0,
+        )
+    }
+
+    fn projected_string_literal_keys_inner(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        expr: &TypeExpr,
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+        if depth >= 4 {
+            return None;
+        }
+
+        match expr {
+            TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
+            TypeExpr::Union(types) => {
+                let mut keys = Vec::new();
+                for ty in types.iter() {
+                    keys.extend(self.projected_string_literal_keys_inner(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        ty,
+                        depth + 1,
+                    )?);
+                }
+                keys.sort();
+                keys.dedup();
+                Some(keys)
+            }
+            TypeExpr::Parenthesized(inner) => self.projected_string_literal_keys_inner(
+                resolution_scope_canonical_id,
+                active_scope_canonical_id,
+                inner,
+                depth + 1,
+            ),
+            TypeExpr::KeyOf(inner) => {
+                if let TypeExpr::IndexedAccess { object, index } = inner.as_ref() {
+                    if let TypeExpr::Literal(LiteralValue::String(member_name)) = index.as_ref() {
+                        if let Some(keys) = self.projected_member_surface_keys(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            object,
+                            member_name,
+                            depth + 1,
+                        ) {
+                            return Some(keys);
+                        }
+                    }
+                }
+
+                if let Some(projected_expr) = self
+                    .solve_or_project_prepared_member_leaf_expr(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        expr,
+                    )
+                    .filter(|projected| projected != expr)
+                {
+                    return self.projected_string_literal_keys_inner(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &projected_expr,
+                        depth + 1,
+                    );
+                }
+
+                let projected_inner = self
+                    .solve_or_project_prepared_member_leaf_expr(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        inner,
+                    )
+                    .unwrap_or_else(|| inner.as_ref().clone());
+                if let Some(keys) = projected_surface_member_names(&projected_inner) {
+                    return Some(keys);
+                }
+
+                match &projected_inner {
+                    TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                        let mut keys = Vec::new();
+                        for part in parts.iter() {
+                            keys.extend(self.projected_string_literal_keys_inner(
+                                resolution_scope_canonical_id,
+                                active_scope_canonical_id,
+                                &TypeExpr::KeyOf(std::sync::Arc::new(part.clone())),
+                                depth + 1,
+                            )?);
+                        }
+                        keys.sort();
+                        keys.dedup();
+                        Some(keys)
+                    }
+                    _ => None,
+                }
+            }
+            _ => {
+                let projected = self.solve_or_project_prepared_member_leaf_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    expr,
+                )?;
+                if projected == *expr {
+                    crate::resolver_core::component_meta_registry::component_meta_registry_string_literal_keys(
+                        &projected,
+                    )
+                } else {
+                    self.projected_string_literal_keys_inner(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &projected,
+                        depth + 1,
+                    )
+                }
+            }
+        }
+    }
+
+    fn projected_member_surface_keys(
+        &mut self,
+        resolution_scope_canonical_id: &str,
+        active_scope_canonical_id: &str,
+        expr: &TypeExpr,
+        member_name: &str,
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        if depth >= 4 {
+            return None;
+        }
+
+        let projected_expr = self
+            .solve_or_project_prepared_member_leaf_expr(
+                resolution_scope_canonical_id,
+                active_scope_canonical_id,
+                expr,
+            )
+            .unwrap_or_else(|| expr.clone());
+        if matches!(projected_expr, TypeExpr::Unknown { .. }) {
+            if let Some(expanded) = self
+                .expand_local_generic_ref_expr(resolution_scope_canonical_id, expr)
+                .or_else(|| self.expand_local_generic_ref_expr(active_scope_canonical_id, expr))
+                .filter(|expanded| expanded != expr)
+            {
+                return self.projected_member_surface_keys(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    &expanded,
+                    member_name,
+                    depth + 1,
+                );
+            }
+        }
+
+        match &projected_expr {
+            TypeExpr::Object(object) => {
+                let member_ty = object.properties.iter().find_map(|member| match member {
+                    ObjectMember::Property(property) if property.name == member_name => {
+                        Some(property.ty.clone())
+                    }
+                    ObjectMember::Method(method) if method.name == member_name => {
+                        Some(TypeExpr::Function(std::sync::Arc::new(method.function.clone())))
+                    }
+                    _ => None,
+                })?;
+                let projected_member = self
+                    .solve_or_project_prepared_member_leaf_expr(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &member_ty,
+                    )
+                    .unwrap_or(member_ty);
+                projected_surface_member_names(&projected_member)
+            }
+            TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                let mut keys = Vec::new();
+                for part in parts.iter() {
+                    keys.extend(self.projected_member_surface_keys(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        part,
+                        member_name,
+                        depth + 1,
+                    )?);
+                }
+                keys.sort();
+                keys.dedup();
+                Some(keys)
+            }
+            TypeExpr::Conditional {
+                true_type,
+                false_type,
+                ..
+            } => {
+                let mut keys = Vec::new();
+                if let Some(true_keys) = self.projected_member_surface_keys(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    true_type,
+                    member_name,
+                    depth + 1,
+                ) {
+                    keys.extend(true_keys);
+                }
+                if let Some(false_keys) = self.projected_member_surface_keys(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    false_type,
+                    member_name,
+                    depth + 1,
+                ) {
+                    keys.extend(false_keys);
+                }
+                if keys.is_empty() {
+                    None
+                } else {
+                    keys.sort();
+                    keys.dedup();
+                    Some(keys)
+                }
+            }
+            TypeExpr::TypeOf(value_ref) => {
+                let solver_host = self.solver_host_for_scope(active_scope_canonical_id);
+                let root_name = value_ref.path.first()?;
+                let root_identity = solver_host.root_identity(active_scope_canonical_id, root_name)?;
+                let prepared_value = solver_host.resolve_prepared_value_decl(&root_identity)?;
+
+                if let Some(object_shape) = prepared_value.object_shape.as_ref() {
+                    let object_expr =
+                        TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
+                    return self.projected_member_surface_keys(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &object_expr,
+                        member_name,
+                        depth + 1,
+                    );
+                }
+
+                if let Some(type_annotation) = prepared_value.type_annotation.as_ref() {
+                    return self.projected_member_surface_keys(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        type_annotation,
+                        member_name,
+                        depth + 1,
+                    );
+                }
+
+                None
+            }
+            TypeExpr::Parenthesized(inner) => self.projected_member_surface_keys(
+                resolution_scope_canonical_id,
+                active_scope_canonical_id,
+                inner,
+                member_name,
+                depth + 1,
+            ),
             _ => None,
         }
     }
@@ -2819,6 +3144,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         visited: &mut FxHashSet<(String, String)>,
     ) -> Option<TypeExpr> {
+        if substitutions.is_empty() {
+            if let Some(prepared) =
+                self.prepared_type_decl(resolution_scope_canonical_id, symbol_name)
+            {
+                if let Some(default_substitutions) =
+                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                {
+                    if !default_substitutions.is_empty() {
+                        return self.project_prepared_member_path_route_projection_from_symbol(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            symbol_name,
+                            path,
+                            &default_substitutions,
+                            visited,
+                        );
+                    }
+                }
+            }
+        }
         let visit_key = (
             resolution_scope_canonical_id.to_string(),
             symbol_name.to_string(),
@@ -3042,6 +3387,68 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         )
                     }
                 }
+            }
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                value,
+                name_type,
+                ..
+            } if name_type.is_none() => {
+                let substituted_source = substitute_type_expr_if_needed(source, substitutions);
+                let Some(keys) = self.projected_string_literal_keys(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    &substituted_source,
+                ) else {
+                    let nested_expr = path.iter().fold(
+                        substitute_type_expr_if_needed(expr, substitutions),
+                        |object, member| TypeExpr::IndexedAccess {
+                            object: std::sync::Arc::new(object),
+                            index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
+                        },
+                    );
+                    return self.solve_or_project_prepared_member_leaf_expr(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &nested_expr,
+                    );
+                };
+                if !keys.iter().any(|candidate| candidate == member_name) {
+                    return None;
+                }
+
+                let mut member_substitutions = substitutions.clone();
+                member_substitutions.insert(
+                    parameter.clone(),
+                    TypeExpr::string_literal(member_name.clone()),
+                );
+                let member_ty = substitute_type_expr_if_needed(value, &member_substitutions);
+                if tail.is_empty() {
+                    if let Some(keys) = self.projected_string_literal_keys(
+                        resolution_scope_canonical_id,
+                        active_scope_canonical_id,
+                        &member_ty,
+                    ) {
+                        return string_literal_keys_type_expr(keys);
+                    }
+                    return self
+                        .solve_or_project_prepared_member_leaf_expr(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            &member_ty,
+                        )
+                        .or(Some(member_ty));
+                }
+                self.project_prepared_member_path_route_projection_from_expr(
+                    resolution_scope_canonical_id,
+                    active_scope_canonical_id,
+                    prepared,
+                    &member_ty,
+                    tail,
+                    &FxHashMap::default(),
+                    visited,
+                )
             }
             TypeExpr::IndexedAccess { .. }
             | TypeExpr::Conditional { .. }
@@ -4047,6 +4454,9 @@ fn substitute_type_expr(expr: &TypeExpr, substitutions: &FxHashMap<String, TypeE
             substitutions,
         ))),
         TypeExpr::TypeParameter(type_parameter) => {
+            if let Some(substituted) = substitutions.get(type_parameter.name.as_str()) {
+                return substituted.clone();
+            }
             let mut type_parameter = type_parameter.clone();
             if let Some(constraint) = type_parameter.constraint.as_mut() {
                 *constraint = std::sync::Arc::new(substitute_type_expr(constraint, substitutions));
@@ -4635,6 +5045,51 @@ fn type_expr_references_type_params(
     type_expr_references_names(expr, &|name| {
         type_params.iter().any(|param| param.name == name)
     })
+}
+
+fn projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
+    use verter_semantic::analysis::type_expr::ObjectMember;
+
+    match expr {
+        TypeExpr::Object(object) => {
+            let mut members = Vec::new();
+            for member in object.properties.iter() {
+                match member {
+                    ObjectMember::Property(property) => members.push(property.name.clone()),
+                    ObjectMember::Method(method) => members.push(method.name.clone()),
+                    _ => {}
+                }
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+            let mut members = Vec::new();
+            for part in parts.iter() {
+                members.extend(projected_surface_member_names(part)?);
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Parenthesized(inner) => projected_surface_member_names(inner),
+        _ => None,
+    }
+}
+
+fn string_literal_keys_type_expr(mut keys: Vec<String>) -> Option<TypeExpr> {
+    keys.sort();
+    keys.dedup();
+    match keys.len() {
+        0 => None,
+        1 => Some(TypeExpr::string_literal(keys.pop().unwrap())),
+        _ => Some(TypeExpr::Union(std::sync::Arc::from(
+            keys.into_iter()
+                .map(TypeExpr::string_literal)
+                .collect::<Vec<_>>(),
+        ))),
+    }
 }
 
 fn type_expr_references_substitutions(
@@ -7817,6 +8272,277 @@ defineSlots<ImportedSlot>()
                 "imported alias helper route should at least expand the declaration-local helper body, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn project_prepared_member_path_route_combines_active_and_resolution_scope_for_component_app_config_helpers(
+    ) {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/tv.ts".to_string(),
+            Arc::from(
+                r#"
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type GetComponentAppConfig<A, U extends string, K extends string>
+  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+  U extends 'ui' | 'ui.prose' = 'ui'
+> = {
+  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/schema.ts".to_string(),
+            Arc::from(
+                r#"
+export interface AppConfig {
+  ui: {
+    button: {
+      variants: {
+        color: {
+          neutral: string
+        }
+      }
+    }
+  }
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/theme.ts".to_string(),
+            Arc::from(
+                r#"
+export default {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Button.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        host.set_import_dependencies(
+            "/src/Button.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "./schema".to_string(),
+                    resolved_canonical_id: Some("/src/schema.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./theme".to_string(),
+                    resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./tv".to_string(),
+                    resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+        assert!(host.ensure_loaded("/src/Button.vue"));
+
+        let solver_host = SessionSolverHost::new(&host, None);
+        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let projected = engine
+            .project_prepared_member_path_route_projection_from_symbol(
+                "/src/Button.vue",
+                "/src/Button.vue",
+                "Button",
+                &["variants".to_string(), "color".to_string()],
+                &FxHashMap::default(),
+                &mut rustc_hash::FxHashSet::default(),
+            )
+            .expect("component-config app-config member path should project");
+
+        let TypeExpr::Union(members) = projected else {
+            panic!(
+                "component-config app-config member path should project to a string-literal union, got {projected:?}"
+            );
+        };
+        assert_eq!(members.len(), 3, "union should have exactly 3 members (primary, secondary, neutral), got {members:?}");
+        assert!(
+            members.contains(&TypeExpr::string_literal("primary")),
+            "projected member path should keep local theme variants, got {members:?}",
+        );
+        assert!(
+            members.contains(&TypeExpr::string_literal("secondary")),
+            "projected member path should keep local theme variants, got {members:?}",
+        );
+        assert!(
+            members.contains(&TypeExpr::string_literal("neutral")),
+            "projected member path should merge app-config variants, got {members:?}",
+        );
+    }
+
+    #[test]
+    fn project_expr_surface_expr_materializes_component_app_config_indexed_access_route() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/tv.ts".to_string(),
+            Arc::from(
+                r#"
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type GetComponentAppConfig<A, U extends string, K extends string>
+  = A extends Record<U, Record<K, any>> ? A[U][K] : {}
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+  U extends 'ui' | 'ui.prose' = 'ui'
+> = {
+  variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/schema.ts".to_string(),
+            Arc::from(
+                r#"
+export interface AppConfig {
+  ui: {
+    button: {
+      variants: {
+        color: {
+          neutral: string
+        }
+      }
+    }
+  }
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/theme.ts".to_string(),
+            Arc::from(
+                r#"
+export default {
+  variants: {
+    color: { primary: '', secondary: '' }
+  }
+} as const
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Button.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { AppConfig } from './schema'
+import theme from './theme'
+import type { ComponentConfig } from './tv'
+
+type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Button.vue"));
+        host.set_import_dependencies(
+            "/src/Button.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "./schema".to_string(),
+                    resolved_canonical_id: Some("/src/schema.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./theme".to_string(),
+                    resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./tv".to_string(),
+                    resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::named("Button")),
+                index: Arc::new(TypeExpr::string_literal("variants")),
+            }),
+            index: Arc::new(TypeExpr::string_literal("color")),
+        };
+
+        let projected = query_engine
+            .project_expr_surface_expr("/src/Button.vue", &expr)
+            .expect("component-config indexed access route should project");
+
+        let TypeExpr::Union(members) = projected else {
+            panic!(
+                "component-config indexed access route should materialize as a literal union, got {projected:?}"
+            );
+        };
+        assert_eq!(members.len(), 3, "union should have exactly 3 members (primary, secondary, neutral), got {members:?}");
+        assert!(
+            members.contains(&TypeExpr::string_literal("primary")),
+            "projected indexed-access route should keep theme variants, got {members:?}",
+        );
+        assert!(
+            members.contains(&TypeExpr::string_literal("secondary")),
+            "projected indexed-access route should keep theme variants, got {members:?}",
+        );
+        assert!(
+            members.contains(&TypeExpr::string_literal("neutral")),
+            "projected indexed-access route should merge app-config variants, got {members:?}",
+        );
     }
 
     #[test]

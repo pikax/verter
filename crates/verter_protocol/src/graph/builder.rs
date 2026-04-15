@@ -337,6 +337,171 @@ fn option_arc_ptr_id<T>(value: Option<&Arc<T>>) -> usize {
     value.map(arc_ptr_id).unwrap_or(0)
 }
 
+/// Compact pointer-based identity key for `TypeExpr` variants whose identity is
+/// fully determined by Arc pointers (no owned/cloned data). Used as a fast-path
+/// cache to avoid building the full `ExprMemoKey` and cloning value fields on
+/// cache hits.
+///
+/// Variants that carry owned data (`Literal`, `TypeParameter`, `TypeOf`, `Mapped`,
+/// `TemplateLiteral`, `Infer`, `Unknown`) are not eligible and fall through to
+/// the full `ExprMemoKey` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExprPtrKey {
+    /// Discriminant of the `TypeExpr` variant.
+    tag: u8,
+    /// Primary pointer (Arc::as_ptr or slice as_ptr). 0 when unused.
+    p0: usize,
+    /// Secondary pointer or small value. 0 when unused.
+    p1: usize,
+    /// Tertiary pointer. 0 when unused.
+    p2: usize,
+    /// Quaternary pointer. 0 when unused.
+    p3: usize,
+    /// Extra bits: readonly flag, len, etc. 0 when unused.
+    extra: usize,
+}
+
+impl ExprPtrKey {
+    /// Try to extract a pointer-based identity key from a `TypeExpr`.
+    /// Returns `None` for variants whose identity depends on owned/cloned data.
+    fn try_from_expr(expr: &TypeExpr) -> Option<Self> {
+        Some(match expr {
+            TypeExpr::Primitive(name) => Self {
+                tag: 0,
+                p0: *name as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Union(types) => Self {
+                tag: 1,
+                p0: types.as_ptr() as usize,
+                p1: types.len(),
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Intersection(types) => Self {
+                tag: 2,
+                p0: types.as_ptr() as usize,
+                p1: types.len(),
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Array { element, readonly } => Self {
+                tag: 3,
+                p0: Arc::as_ptr(element) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: *readonly as usize,
+            },
+            TypeExpr::Tuple { elements, readonly } => Self {
+                tag: 4,
+                p0: elements.as_ptr() as usize,
+                p1: elements.len(),
+                p2: 0,
+                p3: 0,
+                extra: *readonly as usize,
+            },
+            TypeExpr::Object(object) => Self {
+                tag: 5,
+                p0: Arc::as_ptr(object) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Function(function) => Self {
+                tag: 6,
+                p0: Arc::as_ptr(function) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => Self {
+                tag: 7,
+                p0: Arc::as_ptr(name) as *const u8 as usize,
+                p1: type_arguments.as_ptr() as usize,
+                p2: type_arguments.len(),
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::KeyOf(operand) => Self {
+                tag: 8,
+                p0: Arc::as_ptr(operand) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::IndexedAccess { object, index } => Self {
+                tag: 9,
+                p0: Arc::as_ptr(object) as usize,
+                p1: Arc::as_ptr(index) as usize,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => Self {
+                tag: 10,
+                p0: Arc::as_ptr(check) as usize,
+                p1: Arc::as_ptr(extends) as usize,
+                p2: Arc::as_ptr(true_type) as usize,
+                p3: Arc::as_ptr(false_type) as usize,
+                extra: 0,
+            },
+            TypeExpr::Rest(inner) => Self {
+                tag: 11,
+                p0: Arc::as_ptr(inner) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::Parenthesized(inner) => Self {
+                tag: 12,
+                p0: Arc::as_ptr(inner) as usize,
+                p1: 0,
+                p2: 0,
+                p3: 0,
+                extra: 0,
+            },
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => Self {
+                tag: 13,
+                p0: Arc::as_ptr(name) as *const u8 as usize,
+                p1: type_arguments.as_ptr() as usize,
+                p2: type_arguments.len(),
+                p3: conditional_context.as_ptr() as usize,
+                extra: conditional_context.len(),
+            },
+            // Value-based variants that require cloning — fall through to full ExprMemoKey.
+            TypeExpr::Literal(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::Infer { .. }
+            | TypeExpr::Unknown { .. } => return None,
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct GraphBuilder {
     strings: Vec<String>,
@@ -344,8 +509,14 @@ pub struct GraphBuilder {
     nodes: Vec<GraphNode>,
     node_ids: HashMap<GraphNode, u32>,
     expr_ids: HashMap<ExprMemoKey, u32>,
+    /// Fast-path cache for pointer-based `TypeExpr` variants. Checked before
+    /// building the full `ExprMemoKey`, avoiding clones on cache hits for the
+    /// majority of expression types.
+    expr_ptr_ids: HashMap<ExprPtrKey, u32>,
     #[cfg(test)]
     graph_node_build_count: usize,
+    #[cfg(test)]
+    expr_ptr_cache_hits: usize,
 }
 
 impl GraphBuilder {
@@ -375,14 +546,36 @@ impl GraphBuilder {
     }
 
     pub fn node_id(&mut self, expr: &TypeExpr) -> u32 {
+        // Fast path: for pointer-based variants, check the compact ptr cache
+        // before building the full ExprMemoKey (avoids cloning on cache hits).
+        let ptr_key = ExprPtrKey::try_from_expr(expr);
+        if let Some(pk) = &ptr_key {
+            if let Some(id) = self.expr_ptr_ids.get(pk) {
+                #[cfg(test)]
+                {
+                    self.expr_ptr_cache_hits += 1;
+                }
+                return *id;
+            }
+        }
+
+        // Slow path: build the full memo key (may clone value fields).
         let memo_key = ExprMemoKey::from_expr(expr);
         if let Some(id) = self.expr_ids.get(&memo_key) {
+            // Populate the ptr cache so future hits for the same Arc take
+            // the fast path.
+            if let Some(pk) = ptr_key {
+                self.expr_ptr_ids.insert(pk, *id);
+            }
             return *id;
         }
 
         let node = self.graph_node(expr);
         if let Some(id) = self.node_ids.get(&node) {
             self.expr_ids.insert(memo_key, *id);
+            if let Some(pk) = ptr_key {
+                self.expr_ptr_ids.insert(pk, *id);
+            }
             return *id;
         }
 
@@ -395,6 +588,9 @@ impl GraphBuilder {
         self.nodes.push(node.clone());
         self.node_ids.insert(node, id);
         self.expr_ids.insert(memo_key, id);
+        if let Some(pk) = ptr_key {
+            self.expr_ptr_ids.insert(pk, id);
+        }
         id
     }
 
@@ -409,6 +605,11 @@ impl GraphBuilder {
     #[cfg(test)]
     pub(crate) fn debug_graph_node_build_count(&self) -> usize {
         self.graph_node_build_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_expr_ptr_cache_hits(&self) -> usize {
+        self.expr_ptr_cache_hits
     }
 
     fn graph_node(&mut self, expr: &TypeExpr) -> GraphNode {
@@ -735,6 +936,61 @@ mod tests {
             assert_eq!(conditional_context[0].branch, 1, "branch=true should be 1");
             assert!(conditional_context[0].decided);
         }
+    }
+
+    #[test]
+    fn ptr_cache_fast_path_avoids_memo_key_on_pointer_based_variants() {
+        // Build an expression tree with pointer-based variants (Union, Object,
+        // Function, IndexedAccess, Array) and verify that repeat lookups hit
+        // the ptr cache without building ExprMemoKey or GraphNode.
+        let inner_obj = TypeExpr::Object(Arc::new(
+            verter_semantic::analysis::type_expr::ObjectExpr {
+                properties: vec![],
+            },
+        ));
+        let union = TypeExpr::Union(Arc::from(vec![
+            inner_obj.clone(),
+            TypeExpr::Primitive(PrimitiveName::String),
+        ]));
+        let array = TypeExpr::Array {
+            element: Arc::new(union.clone()),
+            readonly: false,
+        };
+
+        let mut builder = GraphBuilder::new();
+
+        // First pass: builds everything.
+        let id1 = builder.node_id(&array);
+        let builds_after_first = builder.debug_graph_node_build_count();
+        assert!(builds_after_first > 0, "first pass should build graph nodes");
+        assert_eq!(
+            builder.debug_expr_ptr_cache_hits(),
+            0,
+            "first pass should have zero ptr cache hits"
+        );
+
+        // Second pass: should hit the ptr cache for the top-level Array.
+        let id2 = builder.node_id(&array);
+        assert_eq!(id1, id2, "same expression must return same node id");
+        assert_eq!(
+            builder.debug_expr_ptr_cache_hits(),
+            1,
+            "second lookup on a pointer-based variant should hit the ptr cache"
+        );
+        assert_eq!(
+            builder.debug_graph_node_build_count(),
+            builds_after_first,
+            "ptr cache hit should not build any new graph nodes"
+        );
+
+        // Also verify that value-based variants (Literal) still work correctly.
+        let lit = TypeExpr::Literal(LiteralValue::String("hello".to_string()));
+        let lit_id1 = builder.node_id(&lit);
+        let lit_id2 = builder.node_id(&lit);
+        assert_eq!(
+            lit_id1, lit_id2,
+            "value-based variant should still deduplicate via ExprMemoKey"
+        );
     }
 
     #[test]
