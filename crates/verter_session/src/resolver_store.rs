@@ -15,6 +15,7 @@ pub struct HostStoreView {
     mutation_epoch: u64,
     whole_hashes: FxHashMap<String, Hash16>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
+    import_routes: FxHashMap<(String, String), crate::types::DependencyResolution>,
 }
 
 impl Default for HostStoreView {
@@ -24,6 +25,7 @@ impl Default for HostStoreView {
             mutation_epoch: 0,
             whole_hashes: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
+            import_routes: FxHashMap::default(),
         }
     }
 }
@@ -67,6 +69,15 @@ impl HostStoreView {
                             .insert(canonical_id.clone(), state.whole_hash);
                     }
                 }
+
+                if let Some(entry) = host.compile_cache.get(&canonical_id) {
+                    for (specifier, resolution) in entry.import_routes.iter() {
+                        view.import_routes.insert(
+                            (canonical_id.clone(), specifier.clone()),
+                            resolution.clone(),
+                        );
+                    }
+                }
             }
         }
 
@@ -76,6 +87,12 @@ impl HostStoreView {
             for (canonical_id, entry) in files.iter() {
                 view.whole_hashes
                     .insert(canonical_id.clone(), entry.whole_hash);
+                for (specifier, resolution) in entry.import_routes.iter() {
+                    view.import_routes.insert(
+                        (canonical_id.clone(), specifier.clone()),
+                        resolution.clone(),
+                    );
+                }
             }
             drop(files);
         }
@@ -106,6 +123,24 @@ impl HostStoreView {
             }
         }
 
+        for snapshot in host.snapshot_route_owned_shallow_cache_entries() {
+            let tracked_whole_hash = *view
+                .whole_hashes
+                .entry(snapshot.canonical_id.clone())
+                .or_insert(snapshot.whole_hash);
+            if tracked_whole_hash == snapshot.whole_hash {
+                if let Some(route_hash) = snapshot.route_hash {
+                    view.derived_hashes.insert(
+                        (
+                            snapshot.canonical_id.clone(),
+                            crate::resolver_core::DerivedFactKind::Route,
+                        ),
+                        route_hash,
+                    );
+                }
+            }
+        }
+
         view.snapshot_tracked_import_route_hashes(host);
         view.compat_token = view.compute_compat_token();
         view
@@ -113,6 +148,8 @@ impl HostStoreView {
 
     fn snapshot_tracked_import_route_hashes(&mut self, host: &VerterHost) {
         let canonical_ids: Vec<String> = self.whole_hashes.keys().cloned().collect();
+        let empty_import_routes = FxHashMap::default();
+        let empty_import_route_hash = hash_import_route_targets(&empty_import_routes);
 
         for canonical_id in canonical_ids {
             if self.derived_hashes.contains_key(&(
@@ -141,15 +178,13 @@ impl HostStoreView {
                 }
             };
 
-            if let Some(import_route_hash) = import_route_hash {
-                self.derived_hashes.insert(
-                    (
-                        canonical_id.clone(),
-                        crate::resolver_core::DerivedFactKind::ImportRoute,
-                    ),
-                    import_route_hash,
-                );
-            }
+            self.derived_hashes.insert(
+                (
+                    canonical_id.clone(),
+                    crate::resolver_core::DerivedFactKind::ImportRoute,
+                ),
+                import_route_hash.unwrap_or(empty_import_route_hash),
+            );
         }
     }
 
@@ -180,6 +215,16 @@ impl HostStoreView {
         self.derived_hashes
             .get(&(canonical_id.to_string(), kind))
             .copied()
+    }
+
+    pub(crate) fn import_route(
+        &self,
+        canonical_id: &str,
+        import_source: &str,
+    ) -> Option<crate::types::DependencyResolution> {
+        self.import_routes
+            .get(&(canonical_id.to_string(), import_source.to_string()))
+            .cloned()
     }
 
     /// Returns true if ALL fact versions are still valid in this view.

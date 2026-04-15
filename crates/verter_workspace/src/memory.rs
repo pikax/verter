@@ -30,6 +30,12 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     })
 }
 
+fn mark_parent_dir_dirty(engine: &Engine, canonical_id: &str) {
+    if let Some((parent, _)) = canonical_id.rsplit_once('/') {
+        engine.dir_index.write().mark_dirty(parent);
+    }
+}
+
 /// In-memory file content cache used by MemoryWorkspace and as the
 /// snapshot layer in FilesystemWorkspace.
 ///
@@ -408,10 +414,13 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn write_file(&self, path: &str, content: &str) -> Result<(), crate::error::VfsError> {
         self.engine.invalidate_package_manifest(path);
+        mark_parent_dir_dirty(&self.engine, path);
+        self.engine.edges.write().remove_file(path);
         self.engine
             .snapshot
             .write()
             .inject(path.to_string(), Arc::from(content));
+        self.engine.bump_content_generation();
         Ok(())
     }
 
@@ -422,8 +431,10 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn delete_file(&self, path: &str) -> Result<(), crate::error::VfsError> {
         self.engine.invalidate_package_manifest(path);
+        mark_parent_dir_dirty(&self.engine, path);
         self.engine.snapshot.write().remove(path);
         self.engine.edges.write().remove_file(path);
+        self.engine.bump_content_generation();
         Ok(())
     }
 
@@ -440,6 +451,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .map(|id| id.to_string())
             .collect();
         for id in &ids_to_remove {
+            self.engine.invalidate_package_manifest(id);
             snapshot.remove(id);
         }
         drop(snapshot);
@@ -447,6 +459,9 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         for id in &ids_to_remove {
             edges.remove_file(id);
         }
+        self.engine.dir_index.write().mark_dirty_under(path);
+        mark_parent_dir_dirty(&self.engine, path);
+        self.engine.bump_content_generation();
         Ok(())
     }
 
@@ -457,10 +472,14 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             .read()
             .read(src)
             .ok_or_else(|| crate::error::VfsError::NotFound(src.to_string()))?;
+        self.engine.invalidate_package_manifest(dst);
+        mark_parent_dir_dirty(&self.engine, dst);
+        self.engine.edges.write().remove_file(dst);
         self.engine
             .snapshot
             .write()
             .inject(dst.to_string(), content);
+        self.engine.bump_content_generation();
         Ok(())
     }
 

@@ -67,8 +67,10 @@ function convertType(
       return {
         kind: "enum",
         type,
-        schema: flat.map((t) =>
-          convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+        schema: flat.flatMap((t) =>
+          flattenSchemaEnumEntries(
+            convertType(t, options, typeRegistry, visited, registryResolutionDepth),
+          ),
         ),
       };
     }
@@ -213,6 +215,21 @@ function convertType(
     case "unknown":
       return td.rawType || "unknown";
   }
+}
+
+export function flattenSchemaEnumEntries(schema: PropertyMetaSchema): PropertyMetaSchema[] {
+  if (
+    typeof schema === "object" &&
+    !Array.isArray(schema) &&
+    schema !== null &&
+    schema.kind === "enum" &&
+    Array.isArray(schema.schema) &&
+    schema.schema.every((entry) => typeof entry === "string")
+  ) {
+    return [...schema.schema];
+  }
+
+  return [schema];
 }
 
 function schemaDescriptorToString(

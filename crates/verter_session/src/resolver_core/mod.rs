@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-mod component_meta;
+pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
 pub mod component_meta_registry;
 mod component_meta_request;
@@ -21,7 +21,7 @@ pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
 pub mod solver_host;
-mod surface_projector;
+pub(crate) mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
 pub mod type_expansion_host;

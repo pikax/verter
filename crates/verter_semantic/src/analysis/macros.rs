@@ -436,22 +436,16 @@ fn resolve_type_to_prop_fields(
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
                     for heritage in *extends {
-                        let Some(parent_name) = heritage_name(&heritage.expression) else {
-                            return None;
-                        };
-                        let Some(parent_decl) = registry.get(&parent_name) else {
-                            return None;
-                        };
-                        let Some(parent_fields) = resolve_interface_decl(
+                        let parent_name = heritage_name(&heritage.expression)?;
+                        let parent_decl = registry.get(&parent_name)?;
+                        let parent_fields = resolve_interface_decl(
                             &parent_name,
                             parent_decl,
                             registry,
                             source,
                             comments,
                             visited,
-                        ) else {
-                            return None;
-                        };
+                        )?;
                         for field in parent_fields {
                             if seen_names.insert(field.name.clone()) {
                                 all_fields.push(field);
@@ -651,10 +645,11 @@ fn resolve_local_define_props(
 
     let mac_start = mac.span.start;
     if let Some(type_param) = type_params.iter().find(|tp| tp.0 == mac_start) {
+        let direct_local_root_names = collect_direct_local_macro_root_names(type_param.1);
         if let Some(fields) =
             resolve_type_to_prop_fields(type_param.1, registry, source, comments, &mut visited)
         {
-            for type_ref in &mac.type_references {
+            for type_ref in &direct_local_root_names {
                 if let Some(decl) = registry.get(type_ref.as_str()) {
                     visited.clear();
                     if let Some(ref_fields) = resolve_interface_decl(
@@ -732,6 +727,49 @@ fn resolve_local_define_props(
     }
 
     mac.resolved_local_types = resolved_types;
+}
+
+fn collect_direct_local_macro_root_names(ts_type: &TSType<'_>) -> Vec<String> {
+    fn collect(ts_type: &TSType<'_>, direct_roots: &mut Vec<String>) -> bool {
+        match ts_type {
+            TSType::TSParenthesizedType(parenthesized) => {
+                collect(&parenthesized.type_annotation, direct_roots)
+            }
+            TSType::TSTypeReference(type_ref) => {
+                let name = type_name_to_string(&type_ref.type_name);
+                if name.is_empty() {
+                    return false;
+                }
+                direct_roots.push(name);
+                true
+            }
+            TSType::TSIntersectionType(intersection) => {
+                let start_len = direct_roots.len();
+                if intersection
+                    .types
+                    .iter()
+                    .all(|inner| collect(inner, direct_roots))
+                {
+                    true
+                } else {
+                    direct_roots.truncate(start_len);
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    let mut direct_roots = Vec::new();
+    if !collect(ts_type, &mut direct_roots) {
+        return Vec::new();
+    }
+
+    let mut seen = FxHashSet::default();
+    direct_roots
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
 }
 
 fn resolve_local_decl_own_prop_fields(
@@ -961,22 +999,16 @@ fn resolve_interface_decl(
             let mut seen_names = FxHashSet::default();
 
             for heritage in *extends {
-                let Some(parent_name) = heritage_name(&heritage.expression) else {
-                    return None;
-                };
-                let Some(parent_decl) = registry.get(&parent_name) else {
-                    return None;
-                };
-                let Some(parent_fields) = resolve_interface_decl(
+                let parent_name = heritage_name(&heritage.expression)?;
+                let parent_decl = registry.get(&parent_name)?;
+                let parent_fields = resolve_interface_decl(
                     &parent_name,
                     parent_decl,
                     registry,
                     source,
                     comments,
                     visited,
-                ) else {
-                    return None;
-                };
+                )?;
                 for field in parent_fields {
                     if seen_names.insert(field.name.clone()) {
                         fields.push(field);
@@ -1060,12 +1092,18 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                 Some(LocalTypeDecl::Interface { body, extends }) => {
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
+                    let own_fields = extract_from_members(&body.body, source, comments);
+                    for field in own_fields {
+                        if seen_names.insert(field.field_name().to_string()) {
+                            all_fields.push(field);
+                        }
+                    }
                     for heritage in *extends {
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
-                            return None;
+                            continue;
                         };
                         let Some(parent_decl) = registry.get(&parent_name) else {
-                            return None;
+                            continue;
                         };
                         let Some(parent_fields) = resolve_interface_decl_generic(
                             &parent_name,
@@ -1076,18 +1114,12 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                             visited,
                             extract_from_members,
                         ) else {
-                            return None;
+                            continue;
                         };
                         for field in parent_fields {
                             if seen_names.insert(field.field_name().to_string()) {
                                 all_fields.push(field);
                             }
-                        }
-                    }
-                    let own_fields = extract_from_members(&body.body, source, comments);
-                    for field in own_fields {
-                        if seen_names.insert(field.field_name().to_string()) {
-                            all_fields.push(field);
                         }
                     }
                     Some(all_fields)
@@ -1149,12 +1181,18 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
         LocalTypeDecl::Interface { body, extends } => {
             let mut fields = Vec::new();
             let mut seen_names = FxHashSet::default();
+            let own_fields = extract_from_members(&body.body, source, comments);
+            for field in own_fields {
+                if seen_names.insert(field.field_name().to_string()) {
+                    fields.push(field);
+                }
+            }
             for heritage in *extends {
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
-                    return None;
+                    continue;
                 };
                 let Some(parent_decl) = registry.get(&parent_name) else {
-                    return None;
+                    continue;
                 };
                 let Some(parent_fields) = resolve_interface_decl_generic(
                     &parent_name,
@@ -1165,18 +1203,12 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
                     visited,
                     extract_from_members,
                 ) else {
-                    return None;
+                    continue;
                 };
                 for field in parent_fields {
                     if seen_names.insert(field.field_name().to_string()) {
                         fields.push(field);
                     }
-                }
-            }
-            let own_fields = extract_from_members(&body.body, source, comments);
-            for field in own_fields {
-                if seen_names.insert(field.field_name().to_string()) {
-                    fields.push(field);
                 }
             }
             Some(fields)

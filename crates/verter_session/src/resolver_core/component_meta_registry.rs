@@ -1218,10 +1218,10 @@ pub(crate) fn collect_component_meta_registry_refs(
         }
         // Registry publication stays shallow: object/function member types remain
         // inline on the owning helper instead of spawning separate registry
-        // entries for every nested support type. We still need to notice
-        // direct member-surface helper refs such as `Button['variants']['color']`
-        // or `LocalConfig<string>['slot']`, because compat display/schema output
-        // depends on those helpers being present in the registry.
+        // entries for every nested support type. Routed helper refs still need
+        // to preserve their member path here; imported deep member-path roots
+        // are filtered later in `meta_resolve` once the consuming field surface
+        // has already been projected concretely.
         TypeExpr::Object(obj) => {
             use verter_semantic::analysis::type_expr::ObjectMember;
 
@@ -1438,7 +1438,17 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 .as_deref()
                 .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
         })
-        .flatten();
+        .flatten()
+        .filter(|raw| {
+            let deep_indexed_path = component_meta_registry_public_indexed_access_route(raw)
+                .is_some_and(|(_, route)| {
+                    matches!(
+                        route,
+                        RouteDemand::MemberPath(ref path) if path.len() > 1
+                    )
+                });
+            !deep_indexed_path || component_meta_registry_has_explicit_object_surface(&field.r#type)
+        });
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {

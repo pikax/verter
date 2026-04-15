@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -7,6 +9,11 @@ use verter_semantic::analysis::type_solver::{
 };
 
 use super::{ExportTarget, ShallowFileState};
+
+type PreparedTypeDeclSlot = Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>;
+type PreparedTypeDeclSlots = Arc<FxHashMap<String, PreparedTypeDeclSlot>>;
+type PreparedValueDeclSlot = Arc<OnceLock<Option<Arc<PreparedValueDecl>>>>;
+type PreparedValueDeclSlots = Arc<FxHashMap<String, PreparedValueDeclSlot>>;
 
 /// Import binding: maps a local import name to its resolved target.
 /// Used by the declaration-scope solver host to resolve cross-file references.
@@ -65,7 +72,9 @@ pub fn prepare_local_type_decl(
     }
 
     #[cfg(test)]
-    PREPARED_TYPE_DECL_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| {
+        count.set(count.get().saturating_add(1));
+    });
 
     let mut prepared = PreparedTypeDecl::new(
         ResolvedRootIdentity::new(canonical_id, symbol_name),
@@ -226,12 +235,16 @@ pub struct PreparedTypeDeclCache {
     canonical_id: Arc<str>,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
-    slots: Arc<FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>>>,
+    slots: PreparedTypeDeclSlots,
 }
 
 impl PreparedTypeDeclCache {
     pub fn len(&self) -> usize {
         self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 
     pub fn contains_key(&self, symbol_name: &str) -> bool {
@@ -258,12 +271,16 @@ pub struct PreparedValueDeclCache {
     canonical_id: Arc<str>,
     state: Arc<ShallowFileState>,
     dep_edges: Arc<FxHashMap<String, String>>,
-    slots: Arc<FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedValueDecl>>>>>>,
+    slots: PreparedValueDeclSlots,
 }
 
 impl PreparedValueDeclCache {
     pub fn len(&self) -> usize {
         self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 
     pub fn contains_key(&self, symbol_name: &str) -> bool {
@@ -411,17 +428,18 @@ pub fn build_prepared_value_decl_cache(
 }
 
 #[cfg(test)]
-static PREPARED_TYPE_DECL_BUILD_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static PREPARED_TYPE_DECL_BUILD_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_prepared_type_decl_build_count_for_tests() {
-    PREPARED_TYPE_DECL_BUILD_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn prepared_type_decl_build_count_for_tests() -> usize {
-    PREPARED_TYPE_DECL_BUILD_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| count.get())
 }
 
 #[cfg(test)]
@@ -632,5 +650,28 @@ export const defaults: Props = { label: 'ok' }
 
         assert!(type_cache.contains_key("Props"));
         assert!(value_cache.contains_key("defaults"));
+    }
+
+    #[test]
+    fn prepared_type_decl_build_counter_is_thread_local() {
+        reset_prepared_type_decl_build_count_for_tests();
+
+        let source = "export interface Props { label: string }";
+        let analysis = make_analysis(source);
+        let env = parse_and_build_env(source);
+        let state = ShallowFileState::from_analysis(Hash16::default(), analysis, Some(&env));
+
+        let prepared = prepare_exported_type_decl("/src/types.ts", &state, "Props", None)
+            .expect("Props should prepare");
+        assert_eq!(prepared.root_identity.symbol_name, "Props");
+        assert_eq!(prepared_type_decl_build_count_for_tests(), 1);
+
+        let other_thread_count = std::thread::spawn(prepared_type_decl_build_count_for_tests)
+            .join()
+            .expect("thread-local counter probe should join cleanly");
+        assert_eq!(
+            other_thread_count, 0,
+            "prepared decl build counters should not leak across test threads",
+        );
     }
 }

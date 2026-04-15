@@ -239,6 +239,172 @@ describe("mapPropMeta", () => {
     expect(result.type).toBe("string | undefined");
   });
 
+  it("keeps NuxtLink route-location compat output exact when native resolution degrades to one object arm", () => {
+    const prop: PropMeta = {
+      name: "href",
+      type: object([
+        { name: "path", type: primitive("string"), optional: false },
+        { name: "replace", type: primitive("boolean"), optional: true },
+      ]),
+      required: false,
+      hasDefault: false,
+      rawType: "NuxtLinkProps['to']",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("string | St | vt | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "string | St | vt | undefined",
+      schema: [
+        "string",
+        "undefined",
+        {
+          kind: "object",
+          type: "vt",
+          schema: expect.objectContaining({
+            path: expect.objectContaining({
+              type: "string",
+              required: true,
+            }),
+          }),
+        },
+        {
+          kind: "object",
+          type: "St",
+          schema: expect.objectContaining({
+            name: expect.objectContaining({
+              type: "Gt",
+            }),
+          }),
+        },
+      ],
+    });
+  });
+
+  it("preserves raw literal-plus-Partial union text for prefetchOn compat output", () => {
+    const prop: PropMeta = {
+      name: "prefetchOn",
+      type: object([
+        { name: "visibility", type: primitive("boolean"), optional: true },
+        { name: "interaction", type: primitive("boolean"), optional: true },
+      ]),
+      required: false,
+      hasDefault: false,
+      rawType:
+        "'visibility' | 'interaction' | Partial<{\n    visibility: boolean\n    interaction: boolean\n  }>",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe(
+      '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined',
+    );
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined',
+      schema: [
+        '"interaction"',
+        '"visibility"',
+        "Partial<{ visibility: boolean; interaction: boolean; }>",
+        "undefined",
+      ],
+    });
+  });
+
+  it("expands HTMLAttributeReferrerPolicy to its literal compat enum", () => {
+    const prop: PropMeta = {
+      name: "referrerpolicy",
+      type: union([ref("HTMLAttributeReferrerPolicy"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("HTMLAttributeReferrerPolicy | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "HTMLAttributeReferrerPolicy | undefined",
+      schema: [
+        '""',
+        '"no-referrer-when-downgrade"',
+        '"no-referrer"',
+        '"origin-when-cross-origin"',
+        '"origin"',
+        '"same-origin"',
+        '"strict-origin-when-cross-origin"',
+        '"strict-origin"',
+        '"unsafe-url"',
+        "undefined",
+      ],
+    });
+  });
+
+  it("preserves function-or-array event unions in compat output", () => {
+    const fn = func(
+      [{ name: "event", type: ref("MouseEvent"), optional: false }],
+      union([primitive("void"), ref("Promise", [primitive("void")])]),
+    );
+    const prop: PropMeta = {
+      name: "onClick",
+      type: fn,
+      required: false,
+      hasDefault: false,
+      rawType:
+        "((event: MouseEvent) => void | Promise<void>) | Array<((event: MouseEvent) => void | Promise<void>)>",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe(
+      "((event: MouseEvent) => void | Promise<void>) | ((event: MouseEvent) => void | Promise<void>)[] | undefined",
+    );
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "((event: MouseEvent) => void | Promise<void>) | ((event: MouseEvent) => void | Promise<void>)[] | undefined",
+      schema: [
+        "undefined",
+        {
+          kind: "array",
+          type: "((event: MouseEvent) => void | Promise<void>)[]",
+          schema: [
+            {
+              kind: "event",
+              type: "(event: MouseEvent): void | Promise<void>",
+              schema: [],
+            },
+          ],
+        },
+        {
+          kind: "event",
+          type: "(event: MouseEvent): void | Promise<void>",
+          schema: [],
+        },
+      ],
+    });
+  });
+
+  it("keeps bare raw ref text when the native descriptor already expanded it to literals", () => {
+    const prop: PropMeta = {
+      name: "dir",
+      type: union([literal("ltr"), literal("rtl"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "Direction",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("Direction | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "Direction | undefined",
+      schema: ['"ltr"', '"rtl"', "undefined"],
+    });
+  });
+
   it("keeps symbolic indexed-access raw prop types when the descriptor degrades to any", () => {
     const prop: PropMeta = {
       name: "icon",
@@ -448,6 +614,117 @@ describe("mapPropMeta", () => {
       ],
     });
   });
+
+  it("flattens literal boolean schema members inside larger raw unions", () => {
+    const prop: PropMeta = {
+      name: "portal",
+      type: union([primitive("boolean"), primitive("string"), ref("HTMLElement")]),
+      required: false,
+      hasDefault: false,
+      rawType: "boolean | string | HTMLElement",
+    };
+
+    const result = mapPropMeta(prop, {
+      schema: { literalBooleanSchema: true },
+    });
+
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "boolean | string | HTMLElement | undefined",
+      schema: [
+        "false",
+        "true",
+        "string",
+        {
+          kind: "object",
+          type: "HTMLElement",
+          schema: {},
+        },
+        "undefined",
+      ],
+    });
+  });
+
+  it("collapses any-containing unions to compat any", () => {
+    const prop: PropMeta = {
+      name: "as",
+      type: union([
+        primitive("any"),
+        object([
+          { name: "root", type: primitive("any"), optional: true },
+          { name: "img", type: primitive("any"), optional: true },
+        ]),
+        primitive("undefined"),
+      ]),
+      required: false,
+      hasDefault: false,
+      rawType: "any | { root?: any, img?: any }",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("any");
+    expect(result.schema).toBe("any");
+  });
+
+  it("renders Booleanish compat enums as string values", () => {
+    const prop: PropMeta = {
+      name: "autofocus",
+      type: union([ref("Booleanish"), primitive("undefined")]),
+      required: false,
+      hasDefault: false,
+      rawType: "Booleanish | undefined",
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe("Booleanish | undefined");
+    expect(result.schema).toEqual({
+      kind: "enum",
+      type: "Booleanish | undefined",
+      schema: ['"false"', '"true"', "false", "true", "undefined"],
+    });
+  });
+
+  it("preserves compat ordering for branded string unions", () => {
+    const prop: PropMeta = {
+      name: "target",
+      type: union([
+        literal("_blank"),
+        literal("_parent"),
+        literal("_self"),
+        literal("_top"),
+        unknown("string & {}"),
+        primitive("null"),
+        primitive("undefined"),
+      ]),
+      required: false,
+      hasDefault: false,
+      rawType: '"_blank" | "_parent" | "_self" | "_top" | (string & {}) | null',
+    };
+
+    const result = mapPropMeta(prop);
+
+    expect(result.type).toBe(
+      '(string & {}) | "_blank" | "_parent" | "_self" | "_top" | null | undefined',
+    );
+    expect(result.schema).toMatchObject({
+      kind: "enum",
+      type: '(string & {}) | "_blank" | "_parent" | "_self" | "_top" | null | undefined',
+      schema: [
+        '"_blank"',
+        '"_parent"',
+        '"_self"',
+        '"_top"',
+        "null",
+        "undefined",
+        {
+          kind: "object",
+          type: "string & {}",
+        },
+      ],
+    });
+  });
 });
 
 describe("mapEventMeta", () => {
@@ -519,6 +796,22 @@ describe("mapEventMeta", () => {
     const result = mapEventMeta(event);
 
     expect(result.type).toBe("[transform: (value: string, count: number) => void, exact: boolean]");
+  });
+
+  it("flattens boolean event payload schemas in literal parity mode", () => {
+    const event: EventMeta = {
+      name: "update:open",
+      payload: primitive("boolean"),
+      hasValidator: false,
+      isDeclared: true,
+      rawSignature: "[value: boolean]",
+    };
+
+    const result = mapEventMeta(event, {
+      schema: { literalBooleanSchema: true },
+    });
+
+    expect(result.schema).toEqual(["false", "true"]);
   });
 });
 
@@ -659,12 +952,12 @@ describe("mapSlotMeta", () => {
       kind: "enum",
       type: "{} | undefined",
       schema: [
+        "undefined",
         {
           kind: "object",
           type: "{}",
           schema: {},
         },
-        "undefined",
       ],
     });
   });
@@ -871,7 +1164,8 @@ describe("mapComponentMeta", () => {
 // ── Checker integration tests ───────────────────────────────────────
 
 describe("ComponentMetaChecker", () => {
-  it("uses the resolved native component-meta query instead of rebuilding from analysis snapshots", async () => {
+  it("uses the declared native component-meta query instead of rebuilding from analysis snapshots", async () => {
+    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getResolvedComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const session = {
@@ -879,6 +1173,7 @@ describe("ComponentMetaChecker", () => {
       engine: { state: "active" as const },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta,
       getResolvedComponentMeta,
       getComponentMeta,
       getProvenance() {
@@ -911,8 +1206,9 @@ describe("ComponentMetaChecker", () => {
     const meta = await checker.getComponentMeta("Single.vue");
 
     expect(meta.props.some((prop) => prop.name === "label")).toBe(true);
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith(resolvePath("/tmp", "Single.vue"));
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/tmp", "Single.vue"));
+    expect(getResolvedComponentMeta).not.toHaveBeenCalled();
     expect(getComponentMeta).not.toHaveBeenCalled();
   });
 
@@ -1032,12 +1328,17 @@ describe("ComponentMetaChecker", () => {
 }
 
 type ComponentSlots<T extends { slots?: Record<string, any> }> = {
-  [K in keyof T['slots']]?: string
+  [K in keyof T['slots']]?: ClassNameValue
+}
+
+type ComponentUI<T extends { slots?: Record<string, any> }> = {
+  [K in keyof Required<T['slots']>]: (props?: Record<string, any>) => string
 }
 
 export type ComponentConfig<T extends Record<string, any>, A> = {
   variants: ComponentVariants<T>
   slots: ComponentSlots<T>
+  ui: ComponentUI<T>
   appConfig?: A
 }`,
     );
@@ -1058,6 +1359,7 @@ export type ComponentConfig<T extends Record<string, any>, A> = {
       `<script lang="ts">
 import type { ComponentConfig } from './types'
 import theme from './theme'
+import type { VNode } from 'vue'
 
 type Button = ComponentConfig<typeof theme, MissingAppConfig>
 
@@ -1065,9 +1367,14 @@ export interface ButtonProps {
   color?: Button['variants']['color']
   ui?: Button['slots']
 }
+
+export interface ButtonSlots {
+  leading?(props: { ui: Button['ui'] }): VNode[]
+}
 </script>
 <script setup lang="ts">
 defineProps<ButtonProps>()
+defineSlots<ButtonSlots>()
 </script>
 <template><div /></template>`,
     );
@@ -1076,11 +1383,24 @@ defineProps<ButtonProps>()
 
     const meta = await checker.getComponentMeta("Button.vue");
     const color = meta.props.find((prop) => prop.name === "color");
+    const ui = meta.props.find((prop) => prop.name === "ui");
+    const leading = meta.slots.find((slot) => slot.name === "leading");
 
     expect(color).toBeDefined();
     expect(color!.type).toContain("primary");
     expect(color!.type).toContain("secondary");
     expect(color!.type).not.toContain('Button["variants"]["color"]');
+    expect(ui).toBeDefined();
+    expect(ui!.type).toBe("{ base?: ClassNameValue; label?: ClassNameValue; } | undefined");
+    expect(ui!.schema).toEqual({
+      kind: "enum",
+      type: "{ base?: ClassNameValue; label?: ClassNameValue; } | undefined",
+      schema: ["{ base?: ClassNameValue; label?: ClassNameValue; }", "undefined"],
+    });
+    expect(leading).toBeDefined();
+    expect(leading!.type).toContain("ui: {");
+    expect(leading!.type).toContain("base: (props?: Record<string, any> | undefined) => string");
+    expect(leading!.type).toContain("label: (props?: Record<string, any> | undefined) => string");
 
     checker.close();
   });
@@ -1227,6 +1547,7 @@ defineProps<ButtonProps>()
   it("promotes lazy workspace files into the shared native project", async () => {
     const canonicalId = resolvePath("/tmp", "Lazy.vue");
     const ensureBaseFile = vi.fn(() => true);
+    const getDeclaredComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getResolvedComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const getComponentMeta = vi.fn((canonicalId: string) => nativeMetaPayload(canonicalId));
     const workspace = {
@@ -1251,6 +1572,7 @@ defineProps<ButtonProps>()
         upsert: vi.fn(),
         delete: vi.fn(),
         ensureBaseFile,
+        getDeclaredComponentMeta,
         getResolvedComponentMeta,
         getComponentMeta,
         getProvenance() {
@@ -1277,8 +1599,9 @@ defineProps<ButtonProps>()
 
     expect(ensureBaseFile).toHaveBeenCalledWith(canonicalId);
     expect(workspace.readFile).not.toHaveBeenCalled();
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith(canonicalId);
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(canonicalId);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).not.toHaveBeenCalled();
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
@@ -1341,8 +1664,9 @@ defineEmits<{
     expect(meta._verter!.componentName).toBeDefined();
   });
 
-  it("uses the resolved native query by default when a compat query exists", async () => {
+  it("uses the declared native query by default when a compat query exists", async () => {
     const canonicalId = "Fast.vue";
+    const getDeclaredComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const getResolvedComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/project/Fast.vue"));
     const checker = new ComponentMetaChecker(
@@ -1353,6 +1677,7 @@ defineEmits<{
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
+        getDeclaredComponentMeta,
         getResolvedComponentMeta,
         getComponentMeta,
         getProvenance() {
@@ -1383,7 +1708,8 @@ defineEmits<{
 
     const meta = await checker.getComponentMeta(canonicalId);
 
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith(resolvePath("/project", canonicalId));
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith(resolvePath("/project", canonicalId));
+    expect(getResolvedComponentMeta).not.toHaveBeenCalled();
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
   });
@@ -2323,6 +2649,235 @@ export default defineComponent({
     const noDocProp = meta.props.find((p) => p.name === "noDoc");
     expect(noDocProp).toBeDefined();
     expect(noDocProp!.description).toBe("");
+  });
+
+  it("keeps imported component-prop helpers and Numberish aliases exact", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-imported-component-props-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "types.ts",
+      `export * from './Chip.vue'
+export * from './Avatar.vue'
+
+export type Numberish = number | string`,
+    );
+
+    checker.updateFile(
+      "Chip.vue",
+      `<script lang="ts">
+export interface ChipProps {
+  /**
+   * The element or component this component should render as.
+   * @defaultValue 'div'
+   */
+  as?: any
+  text?: string | number
+}
+</script>
+<script setup lang="ts">
+defineProps<ChipProps>()
+</script>
+<template><div /></template>`,
+    );
+
+    checker.updateFile(
+      "Avatar.vue",
+      `<script lang="ts">
+import type { ChipProps, Numberish } from './types'
+
+export interface AvatarProps {
+  /**
+   * The element or component this component should render as.
+   * @defaultValue 'span'
+   */
+  as?: any | { root?: any, img?: any }
+  chip?: boolean | ChipProps
+  height?: Numberish
+  width?: Numberish
+}
+</script>
+<script setup lang="ts">
+defineProps<AvatarProps>()
+</script>
+<template><div /></template>`,
+    );
+
+    const avatarMeta = await checker.getComponentMeta("Avatar.vue");
+    const asProp = avatarMeta.props.find((prop) => prop.name === "as");
+    const chipProp = avatarMeta.props.find((prop) => prop.name === "chip");
+    const heightProp = avatarMeta.props.find((prop) => prop.name === "height");
+
+    expect(asProp).toBeDefined();
+    expect(asProp!.type).toBe("any");
+    expect(asProp!.schema).toBe("any");
+
+    expect(chipProp).toBeDefined();
+    expect(typeof chipProp!.schema).not.toBe("string");
+    if (typeof chipProp!.schema !== "string") {
+      expect(chipProp!.schema).toEqual({
+        kind: "enum",
+        type: "boolean | ChipProps | undefined",
+        schema: [
+          "false",
+          "true",
+          "undefined",
+          {
+            kind: "object",
+            type: "ChipProps",
+            schema: {
+              as: expect.objectContaining({
+                type: "any",
+                schema: "any",
+              }),
+              text: expect.objectContaining({
+                type: "string | number | undefined",
+              }),
+            },
+          },
+        ],
+      });
+    }
+
+    expect(heightProp).toBeDefined();
+    expect(heightProp!.type).toBe("Numberish | undefined");
+    expect(heightProp!.schema).toEqual({
+      kind: "enum",
+      type: "Numberish | undefined",
+      schema: ["number", "string", "undefined"],
+    });
+
+    checker.close();
+  });
+
+  it("keeps nested referenced component props compact and rewrites defaulted enum schema types", async () => {
+    const projectRoot = resolve(
+      process.env.TEMP ?? "/tmp",
+      `verter-test-nested-component-props-${nextProjectRootId++}`,
+    );
+    const checker = await createCheckerByJson(projectRoot, {});
+
+    checker.updateFile(
+      "types.ts",
+      `export * from './Chip.vue'
+export * from './Avatar.vue'`,
+    );
+
+    checker.updateFile(
+      "Chip.vue",
+      `<script lang="ts">
+type Chip = {
+  variants: {
+    size: 'sm' | 'md'
+  }
+}
+
+export interface ChipProps {
+  /**
+   * @defaultValue 'div'
+   */
+  as?: any
+  text?: string | number
+  /**
+   * @defaultValue 'md'
+   */
+  size?: Chip['variants']['size']
+}
+</script>
+<script setup lang="ts">
+defineProps<ChipProps>()
+defineModel<boolean>('show', { default: true })
+</script>
+<template><div /></template>`,
+    );
+
+    checker.updateFile(
+      "Avatar.vue",
+      `<script lang="ts">
+import type { ChipProps } from './types'
+
+export interface AvatarProps {
+  chip?: boolean | ChipProps
+}
+</script>
+<script setup lang="ts">
+defineProps<AvatarProps>()
+</script>
+<template><div /></template>`,
+    );
+
+    checker.updateFile(
+      "Alert.vue",
+      `<script lang="ts">
+import type { AvatarProps } from './Avatar.vue'
+
+export interface AlertProps {
+  /**
+   * @defaultValue 'vertical'
+   */
+  orientation?: 'horizontal' | 'vertical'
+  avatar?: AvatarProps
+}
+</script>
+<script setup lang="ts">
+defineProps<AlertProps>()
+</script>
+<template><div /></template>`,
+    );
+
+    const meta = await checker.getComponentMeta("Alert.vue");
+    const orientationProp = meta.props.find((prop) => prop.name === "orientation");
+    expect(orientationProp).toBeDefined();
+    expect(orientationProp!.type).toBe('"vertical" | "horizontal" | undefined');
+    expect(orientationProp!.schema).toEqual({
+      kind: "enum",
+      type: '"vertical" | "horizontal" | undefined',
+      schema: ['"horizontal"', '"vertical"', "undefined"],
+    });
+
+    const avatarProp = meta.props.find((prop) => prop.name === "avatar");
+    expect(avatarProp).toBeDefined();
+    expect(typeof avatarProp!.schema).not.toBe("string");
+    if (
+      typeof avatarProp!.schema !== "string" &&
+      !Array.isArray(avatarProp!.schema) &&
+      avatarProp!.schema.kind === "enum"
+    ) {
+      const avatarObject = avatarProp!.schema.schema.find(
+        (entry): entry is Extract<typeof entry, { kind: "object" }> =>
+          typeof entry !== "string" &&
+          !Array.isArray(entry) &&
+          entry.kind === "object" &&
+          entry.type === "AvatarProps",
+      );
+      expect(avatarObject).toBeDefined();
+      const chipProp = avatarObject!.schema.chip;
+      expect(chipProp).toBeDefined();
+      expect(typeof chipProp.schema).not.toBe("string");
+      if (
+        typeof chipProp.schema !== "string" &&
+        !Array.isArray(chipProp.schema) &&
+        chipProp.schema.kind === "enum"
+      ) {
+        expect(chipProp.schema.schema).toEqual([
+          "false",
+          "true",
+          "undefined",
+          expect.objectContaining({
+            kind: "object",
+            type: "ChipProps",
+            schema: expect.not.objectContaining({
+              show: expect.anything(),
+            }),
+          }),
+        ]);
+      }
+    }
+
+    checker.close();
   });
 });
 

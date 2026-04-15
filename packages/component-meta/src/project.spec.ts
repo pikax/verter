@@ -315,13 +315,15 @@ describe("ComponentMetaSession public API", () => {
     project.close();
   });
 
-  it("uses the resolved native component-meta query for public compat metadata", async () => {
+  it("uses the declared native component-meta query for public compat metadata", async () => {
+    const getDeclaredComponentMeta = vi.fn((id: string) => nativeMetaPayload(id));
     const getResolvedComponentMeta = vi.fn((id: string) => nativeMetaPayload(id));
     const session = {
       closed: false,
       engine: { state: "active" as const, clearCaches() {} },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta,
       getResolvedComponentMeta,
       getComponentMeta(id: string) {
         return nativeMetaPayload(id);
@@ -342,7 +344,8 @@ describe("ComponentMetaSession public API", () => {
     const meta = await project.getComponentMeta("Button.vue");
 
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith("/test/Button.vue");
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("/test/Button.vue");
+    expect(getResolvedComponentMeta).not.toHaveBeenCalled();
   });
 
   it("projects optional generic raw prop text through the public session API", async () => {
@@ -647,7 +650,8 @@ describe("ComponentMetaSession public API", () => {
     expect(nativeMeta?.typeRegistry?.[0]?.declaration?.canonicalSource).toBe("/test/types.ts");
   });
 
-  it("routes public and native project queries through the resolved native session method", async () => {
+  it("routes public project queries through declared metadata and native project queries through resolved metadata", async () => {
+    const getDeclaredComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
     const getComponentMeta = vi.fn(() => nativeMetaPayload("/test/Button.vue"));
     const getResolvedComponentMeta = vi.fn(() => ({
       ...nativeMetaPayload("/test/Button.vue"),
@@ -661,6 +665,7 @@ describe("ComponentMetaSession public API", () => {
       engine: { state: "active" as const, clearCaches() {} },
       upsert() {},
       delete() {},
+      getDeclaredComponentMeta,
       getComponentMeta,
       getResolvedComponentMeta,
       getEffectiveSource() {
@@ -680,7 +685,8 @@ describe("ComponentMetaSession public API", () => {
     const nativeMeta = await project.getNativeComponentMeta("Button.vue");
 
     expect(getComponentMeta).not.toHaveBeenCalled();
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(2);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
     expect(compatMeta.props.map((prop) => prop.name)).toEqual(["label"]);
     expect(nativeMeta?.resolution?.mode).toBe("expanded");
   });

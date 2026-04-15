@@ -22,8 +22,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/runtime session/i);
   });
 
-  it("normalizes session-backed canonical ids before querying resolved native metadata", async () => {
-    const getResolvedComponentMeta = vi.fn(() => ({
+  it("normalizes session-backed canonical ids before querying declared native metadata", async () => {
+    const getDeclaredComponentMeta = vi.fn(() => ({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [],
@@ -66,7 +66,7 @@ describe("ComponentMetaChecker session requirement", () => {
         engine: { state: "active" as const },
         upsert() {},
         delete() {},
-        getResolvedComponentMeta,
+        getDeclaredComponentMeta,
         getComponentMeta() {
           throw new Error("legacy full native query should not be used for default Verter compat");
         },
@@ -92,7 +92,7 @@ describe("ComponentMetaChecker session requirement", () => {
     );
     await checker.getComponentMeta("src\\App.vue");
 
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
   it("propagates native component-meta budget errors to callers", async () => {
@@ -141,8 +141,8 @@ describe("ComponentMetaChecker session requirement", () => {
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
   });
 
-  it("uses one resolved native query for explicit Verter compat output and _verter", async () => {
-    const resolvedMeta: any = {
+  it("uses one declared native query for public Verter compat output and _verter", async () => {
+    const declaredMeta: any = {
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -175,25 +175,15 @@ describe("ComponentMetaChecker session requirement", () => {
         hasInheritAttrsFalse: false,
         hasStoreUsage: false,
       },
-      acceptedProps: [
-        {
-          name: "id",
-          type: { kind: "primitive", name: "string" },
-          rawType: "string",
-          required: false,
-          provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
-          availability: { kind: "always" },
-          kind: "attr",
-        },
-      ],
+      acceptedProps: [],
       acceptedEvents: [],
       acceptedSurfaceCompleteness: "exact",
-      rootReachability: { kind: "branches", branches: [] },
-      fallthroughSurface: { kind: "branches", branches: [] },
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
     };
-    const getResolvedComponentMeta = vi.fn(() => resolvedMeta);
+    const getDeclaredComponentMeta = vi.fn(() => declaredMeta);
     const getComponentMeta = vi.fn(() => {
-      throw new Error("legacy full native query should not be used for explicit Verter compat");
+      throw new Error("legacy full native query should not be used for public Verter compat");
     });
 
     const checker = new ComponentMetaChecker(
@@ -208,7 +198,7 @@ describe("ComponentMetaChecker session requirement", () => {
         upsert() {},
         delete() {},
         getComponentMeta,
-        getResolvedComponentMeta,
+        getDeclaredComponentMeta,
         getProvenance() {
           return "{}";
         },
@@ -232,11 +222,11 @@ describe("ComponentMetaChecker session requirement", () => {
 
     const meta = await checker.getComponentMeta("src\\App.vue");
 
-    expect(getResolvedComponentMeta).toHaveBeenCalledTimes(1);
-    expect(getResolvedComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
+    expect(getDeclaredComponentMeta).toHaveBeenCalledTimes(1);
+    expect(getDeclaredComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
     expect(getComponentMeta).not.toHaveBeenCalled();
     expect(meta.props.map((prop) => prop.name)).toEqual(["label"]);
-    expect(meta._verter?.acceptedProps.map((prop) => prop.name)).toEqual(["id"]);
+    expect(meta._verter?.acceptedProps).toEqual([]);
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
   });
 });

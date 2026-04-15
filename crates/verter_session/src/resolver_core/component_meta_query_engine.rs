@@ -32,7 +32,7 @@ use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedRegistrySymbol {
@@ -162,13 +162,11 @@ pub struct ComponentMetaQueryEngine<'a> {
 }
 
 #[cfg(test)]
-static FORBID_STRUCTURAL_SLOW_LANE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static FORBID_STRUCTURAL_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
+    static FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
+    static FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) struct StructuralSlowLaneGuard;
@@ -176,13 +174,17 @@ pub(crate) struct StructuralSlowLaneGuard;
 #[cfg(test)]
 impl Drop for StructuralSlowLaneGuard {
     fn drop(&mut self) {
-        FORBID_STRUCTURAL_SLOW_LANE.store(false, Ordering::SeqCst);
+        FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
 #[cfg(test)]
 pub(crate) fn forbid_structural_slow_lane_for_tests() -> StructuralSlowLaneGuard {
-    FORBID_STRUCTURAL_SLOW_LANE.store(true, Ordering::SeqCst);
+    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
     StructuralSlowLaneGuard
 }
 
@@ -192,14 +194,18 @@ pub(crate) struct DirectPickRoutedExprSlowLaneGuard;
 #[cfg(test)]
 impl Drop for DirectPickRoutedExprSlowLaneGuard {
     fn drop(&mut self) {
-        FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.store(false, Ordering::SeqCst);
+        FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
 #[cfg(test)]
 pub(crate) fn forbid_direct_pick_routed_expr_slow_lane_for_tests(
 ) -> DirectPickRoutedExprSlowLaneGuard {
-    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.store(true, Ordering::SeqCst);
+    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
     DirectPickRoutedExprSlowLaneGuard
 }
 
@@ -209,21 +215,25 @@ pub(crate) struct PreparedStructuralSubstitutionSlowLaneGuard;
 #[cfg(test)]
 impl Drop for PreparedStructuralSubstitutionSlowLaneGuard {
     fn drop(&mut self) {
-        FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.store(false, Ordering::SeqCst);
+        FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
 #[cfg(test)]
 pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
 ) -> PreparedStructuralSubstitutionSlowLaneGuard {
-    FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.store(true, Ordering::SeqCst);
+    FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
     PreparedStructuralSubstitutionSlowLaneGuard
 }
 
 #[cfg(test)]
 fn assert_structural_slow_lane_allowed() {
     assert!(
-        !FORBID_STRUCTURAL_SLOW_LANE.load(Ordering::SeqCst),
+        !structural_slow_lane_forbidden_for_current_thread(),
         "component-meta structural slow lane should not be used on the DB-backed production path",
     );
 }
@@ -231,7 +241,7 @@ fn assert_structural_slow_lane_allowed() {
 #[cfg(test)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {
     assert!(
-        !FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.load(Ordering::SeqCst),
+        !direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
         "direct routed-expr pick slow lane should not be used when member projection can satisfy the route",
     );
 }
@@ -254,10 +264,25 @@ fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
     );
     if is_structural {
         assert!(
-            !FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.load(Ordering::SeqCst),
+            !prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
             "prepared generic projection should not whole-substitute structural bodies when shallow member-local substitution can satisfy the route",
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn structural_slow_lane_forbidden_for_current_thread() -> bool {
+    FORBID_STRUCTURAL_SLOW_LANE.with(|depth| depth.get() > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn direct_pick_routed_expr_slow_lane_forbidden_for_current_thread() -> bool {
+    FORBID_DIRECT_PICK_ROUTED_EXPR_SLOW_LANE.with(|depth| depth.get() > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_thread() -> bool {
+    FORBID_PREPARED_STRUCTURAL_SUBSTITUTION_SLOW_LANE.with(|depth| depth.get() > 0)
 }
 
 #[cfg(not(test))]
@@ -412,12 +437,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
-        if self
-            .prepared_type_decl(canonical_source, resolved_name)
-            .is_none()
-        {
-            return None;
-        }
+        self.prepared_type_decl(canonical_source, resolved_name)?;
         let metadata = local_type_symbol_metadata_for_known_source(
             self.host,
             canonical_source,
@@ -441,12 +461,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<ResolvedTypeDeclaration> {
-        if self
-            .prepared_type_decl(canonical_source, resolved_name)
-            .is_none()
-        {
-            return None;
-        }
+        self.prepared_type_decl(canonical_source, resolved_name)?;
         let metadata = local_type_symbol_metadata_for_known_source(
             self.host,
             canonical_source,
@@ -490,6 +505,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         self.declarations.insert(key, declaration.clone());
         declaration
+    }
+
+    pub fn resolve_final_prepared_type_target(
+        &mut self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> (String, String) {
+        if self
+            .prepared_type_decl(canonical_source, resolved_name)
+            .is_some()
+        {
+            return (canonical_source.to_string(), resolved_name.to_string());
+        }
+
+        self.host
+            .resolve_named_type_export_target_shallow_in_view(
+                canonical_source,
+                resolved_name,
+                self.store_view,
+            )
+            .filter(|(target_canonical, target_name)| {
+                self.prepared_type_decl(target_canonical.as_str(), target_name.as_str())
+                    .is_some()
+            })
+            .unwrap_or_else(|| (canonical_source.to_string(), resolved_name.to_string()))
     }
 
     /// Check if a registry ref can resolve, cached per query.
@@ -540,6 +580,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn named_decl_body(&mut self, canonical_id: &str, name: &str) -> Option<TypeExpr> {
         self.prepared_type_decl(canonical_id, name)
             .map(|prepared| prepared.body.clone())
+    }
+
+    pub fn prepared_member_raw_type(
+        &mut self,
+        canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+    ) -> Option<TypeExpr> {
+        self.prepared_type_decl(canonical_id, symbol_name)
+            .and_then(|prepared| prepared.member(member_name).map(|member| member.ty.clone()))
     }
 
     pub fn solve_scoped(
@@ -2021,6 +2071,43 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
+        fn single_member_route_cache_entry(
+            query_engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            root_symbol: &str,
+            member_name: &str,
+            projected_expr: &TypeExpr,
+        ) -> Option<ProjectedMember> {
+            query_engine
+                .project_type_member(scope_canonical_id, root_symbol, member_name)
+                .or_else(|| {
+                    query_engine.project_prepared_member_route_projection(
+                        scope_canonical_id,
+                        root_symbol,
+                        member_name,
+                    )
+                })
+                .or_else(|| {
+                    query_engine.project_inherited_member_route_projection(
+                        scope_canonical_id,
+                        root_symbol,
+                        member_name,
+                    )
+                })
+                .or_else(|| {
+                    let prepared =
+                        query_engine.prepared_type_decl(scope_canonical_id, root_symbol)?;
+                    let member = prepared.member(member_name)?;
+                    Some(ProjectedMember {
+                        name: member_name.to_string(),
+                        ty: projected_expr.clone(),
+                        optional: member.optional,
+                        readonly: member.readonly,
+                        is_method: member.is_method,
+                    })
+                })
+        }
+
         if let Some(cached_expr) =
             self.cached_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
         {
@@ -2042,13 +2129,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         store_view,
                     );
                     if let [member_name] = path.as_slice() {
-                        if let Some(projected_member) = self
-                            .project_prepared_member_route_projection(
-                                scope_canonical_id,
-                                root_symbol,
-                                member_name,
-                            )
-                        {
+                        if let Some(projected_member) = single_member_route_cache_entry(
+                            self,
+                            scope_canonical_id,
+                            root_symbol,
+                            member_name,
+                            &projected_expr,
+                        ) {
                             self.cache_projected_member(
                                 scope_canonical_id,
                                 root_symbol,
@@ -2070,6 +2157,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         root_symbol,
                         route,
                         &projected_expr,
+                        store_view,
+                    );
+                    self.cache_projected_member(
+                        scope_canonical_id,
+                        root_symbol,
+                        &projected_member,
                         store_view,
                     );
                 }
@@ -3049,7 +3142,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     fn project_inherited_member_route_projection_from_expr(
         &mut self,
-        scope_canonical_id: &str,
+        _scope_canonical_id: &str,
         prepared: &std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
         expr: &TypeExpr,
         member_name: &str,
@@ -3058,7 +3151,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         match expr {
             TypeExpr::Parenthesized(inner) => self
                 .project_inherited_member_route_projection_from_expr(
-                    scope_canonical_id,
+                    _scope_canonical_id,
                     prepared,
                     inner,
                     member_name,
@@ -3066,7 +3159,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ),
             TypeExpr::Intersection(parts) => parts.iter().rev().find_map(|part| {
                 self.project_inherited_member_route_projection_from_expr(
-                    scope_canonical_id,
+                    _scope_canonical_id,
                     prepared,
                     part,
                     member_name,
@@ -4679,10 +4772,14 @@ fn type_expr_references_names(expr: &TypeExpr, contains_name: &impl Fn(&str) -> 
 #[cfg(test)]
 mod tests {
     use super::forbid_direct_pick_routed_expr_slow_lane_for_tests;
+    use super::forbid_structural_slow_lane_for_tests;
     use super::ComponentMetaQueryEngine;
     use super::{
+        direct_pick_routed_expr_slow_lane_forbidden_for_current_thread,
         forbid_prepared_structural_substitution_slow_lane_for_tests,
-        prepared_substitution_instantiation_hash, type_expr_references_type_params,
+        prepared_structural_substitution_slow_lane_forbidden_for_current_thread,
+        prepared_substitution_instantiation_hash,
+        structural_slow_lane_forbidden_for_current_thread, type_expr_references_type_params,
     };
     use crate::resolver_core::solver_host::SessionSolverHost;
     use crate::types::{AnalysisLevel, HostConfig};
@@ -7720,5 +7817,39 @@ defineSlots<ImportedSlot>()
                 "imported alias helper route should at least expand the declaration-local helper body, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn slow_lane_forbid_guards_are_thread_local() {
+        let _structural_guard = forbid_structural_slow_lane_for_tests();
+        let _direct_pick_guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();
+        let _prepared_guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
+
+        assert!(structural_slow_lane_forbidden_for_current_thread());
+        assert!(direct_pick_routed_expr_slow_lane_forbidden_for_current_thread());
+        assert!(prepared_structural_substitution_slow_lane_forbidden_for_current_thread());
+
+        let (structural, direct_pick, prepared) = std::thread::spawn(|| {
+            (
+                structural_slow_lane_forbidden_for_current_thread(),
+                direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
+                prepared_structural_substitution_slow_lane_forbidden_for_current_thread(),
+            )
+        })
+        .join()
+        .expect("thread-local guard probe should join cleanly");
+
+        assert!(
+            !structural,
+            "structural slow-lane guard should not leak across test threads",
+        );
+        assert!(
+            !direct_pick,
+            "direct-pick slow-lane guard should not leak across test threads",
+        );
+        assert!(
+            !prepared,
+            "prepared structural substitution slow-lane guard should not leak across test threads",
+        );
     }
 }

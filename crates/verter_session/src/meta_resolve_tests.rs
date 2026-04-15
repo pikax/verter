@@ -74,6 +74,15 @@ fn clear_legacy_cached_resolved_state(project: &MetaProject, canonical: &str, mo
 
 #[test]
 fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
+    let declaration = crate::resolver_core::ResolvedTypeDeclaration {
+        requested_name: "Props".to_string(),
+        declaration_id: None,
+        resolved_name: "Props".to_string(),
+        canonical_source: "/src/types.ts".to_string(),
+        span: verter_span::Span::default(),
+        kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+        text: Some("export interface Props { label?: string }".to_string()),
+    };
     let object = verter_semantic::analysis::type_expr::TypeExpr::Object(Arc::new(
         verter_semantic::analysis::type_expr::ObjectExpr {
             properties: vec![
@@ -92,13 +101,22 @@ fn imported_registry_seed_refresh_skips_explicit_object_surfaces() {
     ));
 
     assert!(
-        should_skip_imported_registry_seed_refresh("/src/App.vue", "/src/types.ts", &object),
+        should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &object),
         "imported direct-macro seeds that already hold an explicit object surface should stay on that seeded surface instead of re-entering imported registry materialization",
     );
 }
 
 #[test]
 fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable() {
+    let declaration = crate::resolver_core::ResolvedTypeDeclaration {
+        requested_name: "Button".to_string(),
+        declaration_id: None,
+        resolved_name: "Button".to_string(),
+        canonical_source: "/src/types.ts".to_string(),
+        span: verter_span::Span::default(),
+        kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+        text: Some("export type Button = VariantProps<typeof config>".to_string()),
+    };
     let symbolic = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
         object: Arc::new(verter_semantic::analysis::type_expr::TypeExpr::named(
             "Button",
@@ -107,7 +125,7 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
     };
 
     assert!(
-        !should_skip_imported_registry_seed_refresh("/src/App.vue", "/src/types.ts", &symbolic),
+        !should_skip_imported_registry_seed_refresh("/src/App.vue", &declaration, &symbolic),
         "symbolic imported seeds still need the imported-registry refresh path to materialize their requested route",
     );
 }
@@ -5061,11 +5079,16 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
         ],
         ..Default::default()
     };
+    let lowered = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name: "Props".into(),
+        type_arguments: Vec::new().into(),
+    };
     let (shape, source) = synthesize_define_props_shape_from_known_surface_with_authority(
         0,
         &snapshot,
         &[],
         &evaluated,
+        Some(&lowered),
         true,
     )
     .expect("single defineProps macros should synthesize the object shape from expanded fields");
@@ -5107,6 +5130,130 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
         diagnostics,
         vec!["title diagnostic", "icon diagnostic"],
         "helper should carry field diagnostics onto the synthesized defineProps shape"
+    );
+}
+
+#[test]
+fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_incomplete() {
+    let snapshot = crate::types::FileAnalysisSnapshot {
+        macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
+            kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: vec!["Props".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            span: verter_span::Span::new(0, 0),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let resolved_macros = vec![ResolvedMacroMeta {
+        macro_index: 0,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        type_name: "Props".to_string(),
+        import_source: String::new(),
+        surface_is_authoritative: true,
+        declaration: crate::resolver_core::ResolvedTypeDeclaration {
+            requested_name: "Props".to_string(),
+            declaration_id: None,
+            resolved_name: "Props".to_string(),
+            canonical_source: "/src/App.vue".to_string(),
+            span: verter_span::Span::new(0, 0),
+            kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+            text: Some(
+                "interface Props extends Pick<BaseProps, 'id' | 'label'> { own?: boolean }"
+                    .to_string(),
+            ),
+        },
+        native_props: Vec::new(),
+        props: vec![
+            verter_semantic::analysis::AnalyzedPropField {
+                name: "id".to_string(),
+                type_annotation: Some("string".to_string()),
+                is_optional: false,
+                span: verter_span::Span::new(0, 0),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+            },
+            verter_semantic::analysis::AnalyzedPropField {
+                name: "label".to_string(),
+                type_annotation: Some("string".to_string()),
+                is_optional: true,
+                span: verter_span::Span::new(0, 0),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+            },
+            verter_semantic::analysis::AnalyzedPropField {
+                name: "own".to_string(),
+                type_annotation: Some("boolean".to_string()),
+                is_optional: true,
+                span: verter_span::Span::new(0, 0),
+                description: None,
+                tags: Vec::new(),
+                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+            },
+        ],
+        emits: Vec::new(),
+        slots: Vec::new(),
+        jsdoc: None,
+    }];
+    let evaluated = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![verter_semantic::analysis::type_expand::ExpandedField {
+            name: "own".to_string(),
+            r#type: verter_semantic::analysis::type_expr::TypeExpr::primitive(
+                verter_semantic::analysis::type_expr::PrimitiveName::Boolean,
+            ),
+            raw_type: Some("boolean".to_string()),
+            optional: true,
+            exactness: verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status:
+                verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    let lowered = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name: "Props".into(),
+        type_arguments: Vec::new().into(),
+    };
+
+    let (shape, source) = synthesize_define_props_shape_from_known_surface_with_authority(
+        0,
+        &snapshot,
+        &resolved_macros,
+        &evaluated,
+        Some(&lowered),
+        true,
+    )
+    .expect("defineProps should merge the wider resolved macro surface when expanded fields are incomplete");
+    let prop_names: Vec<&str> = shape
+        .value
+        .properties
+        .iter()
+        .map(|property| property.name.as_str())
+        .collect();
+
+    assert_eq!(
+        prop_names,
+        vec!["id", "label", "own"],
+        "resolved macro fallback should keep inherited imported props instead of truncating to the local evaluated field set"
+    );
+    assert!(
+        matches!(source, MacroShapeSource::ResolvedMacro),
+        "incomplete expanded fields should not win over a wider authoritative resolved macro surface"
     );
 }
 
@@ -8442,7 +8589,22 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
+    let shared_surface_key =
+        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: component.clone(),
+            symbol_name: "ColorModeSelectProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        });
+    let shared_surface_warmed_before = matches!(
+        host.resolver_runtime()
+            .type_surfaces
+            .get(&shared_surface_key, &store_view)
+            .as_deref(),
+        Some(crate::resolver_core::TypeSurfaceOpResult::Surface(_))
+    );
     let prepared_projection_before = query_engine.debug_prepared_root_surface_projection_count();
+    let solves_before = query_engine.solve_count();
 
     produce_macro_object_shapes(
         &component,
@@ -8457,13 +8619,18 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
 
     assert_eq!(
         query_engine.debug_prepared_root_surface_projection_count() - prepared_projection_before,
-        1,
-        "empty-shell registry roots must fall back to prepared projection instead of producing an empty defineProps surface",
+        if shared_surface_warmed_before { 0 } else { 1 },
+        "empty-shell registry roots must use the prepared projection path; warm shared root-surface cache reuse should avoid recomputing that projection",
     );
     assert_eq!(
         evaluated_types.define_props.len(),
         1,
         "projection fallback should still synthesize the real defineProps shape",
+    );
+    assert_eq!(
+        query_engine.solve_count().saturating_sub(solves_before),
+        0,
+        "empty-shell registry roots should stay on the prepared projection path instead of falling back to the semantic solver",
     );
 }
 
@@ -8867,6 +9034,521 @@ export type Button = ComponentConfig<typeof theme>
         ),
         "single-member routed projections should also warm the shared member projection cache",
     );
+}
+
+#[test]
+fn define_props_member_rescue_skips_symbolic_imported_union_field_routes() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/theme.ts",
+            r#"export default {
+  variants: {
+    color: { neutral: '' }
+  },
+  slots: {
+    base: ''
+  }
+} as const"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/tv.ts",
+            r#"
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+type ComponentSlots<T extends { slots?: Record<string, any> }> = {
+  [K in keyof T['slots']]?: string
+}
+
+export type ComponentConfig<T extends Record<string, any>> = {
+  variants: ComponentVariants<T>
+  slots: ComponentSlots<T>
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Kbd.vue",
+            r#"<script lang="ts">
+import type { ComponentConfig } from './tv'
+import theme from './theme'
+
+type Kbd = ComponentConfig<typeof theme>
+
+export interface KbdProps {
+  value?: string
+  color?: Kbd['variants']['color']
+  ui?: Kbd['slots']
+}
+</script>
+<template><kbd /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { KbdProps } from './Kbd.vue'
+
+export interface TooltipProps {
+  kbds?: KbdProps['value'][] | KbdProps[]
+}
+</script>
+<script setup lang="ts">
+defineProps<TooltipProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./Kbd.vue".to_string(),
+            resolved_canonical_id: Some("/src/Kbd.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/src/Kbd.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./tv".to_string(),
+                resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./theme".to_string(),
+                resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("App snapshot should exist");
+    let facts = host
+        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .expect("App facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let kbds_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+        "KbdProps['value'][] | KbdProps[]",
+    );
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![verter_semantic::analysis::type_expand::ExpandedField {
+            name: "kbds".to_string(),
+            r#type: kbds_ty.clone(),
+            raw_type: Some("KbdProps['value'][] | KbdProps[]".to_string()),
+            optional: true,
+            exactness:
+                verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+            execution_status:
+                verter_semantic::analysis::type_solver::result::ExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+        }],
+        define_props: vec![verter_semantic::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![verter_semantic::analysis::type_expand::ExpandedProperty {
+                        name: "kbds".to_string(),
+                        ty: kbds_ty.clone(),
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    materialize_component_meta_macro_shape_member_types(
+        "/src/App.vue",
+        &snapshot,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
+        subject: crate::resolver_core::TypeSurfaceKey {
+            canonical_owner: "/src/App.vue".to_string(),
+            symbol_name: "TooltipProps".to_string(),
+            instantiation_hash: 0,
+            context_hash: 0,
+        },
+        route: crate::resolver_core::RouteDemand::MemberPath(vec!["kbds".to_string()]),
+    };
+    assert!(
+        host.resolver_runtime()
+            .type_surfaces
+            .get(&routed_key, &store_view)
+            .is_none(),
+        "symbolic imported union fields should skip defineProps member-route rescue instead of warming a routed surface for kbds",
+    );
+    let define_props = evaluated_types
+        .define_props
+        .iter()
+        .find(|shape| shape.macro_index == 0)
+        .expect("defineProps shape should still exist");
+    let property = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .find(|property| property.name == "kbds")
+        .expect("kbds property should exist");
+    assert_eq!(
+        property.ty, kbds_ty,
+        "symbolic imported union fields should stay on the raw defineProps member surface",
+    );
+}
+
+#[test]
+fn define_props_member_rescue_skips_symbolic_imported_non_object_leaf_fields() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export type Direction = 'ltr' | 'rtl'
+export type ScrollBodyOption = 'omit' | 'always'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { Direction, ScrollBodyOption } from 'reka-ui'
+
+export interface Props {
+  dir?: Direction
+  scrollBody?: boolean | ScrollBodyOption
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("App snapshot should exist");
+    let facts = host
+        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .expect("App facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
+    let scroll_body_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+        "boolean | ScrollBodyOption",
+    );
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "dir".to_string(),
+                r#type: dir_ty.clone(),
+                raw_type: Some("Direction".to_string()),
+                optional: true,
+                exactness:
+                    verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_solver::result::ExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "scrollBody".to_string(),
+                r#type: scroll_body_ty.clone(),
+                raw_type: Some("boolean | ScrollBodyOption".to_string()),
+                optional: true,
+                exactness:
+                    verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_solver::result::ExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        define_props: vec![verter_semantic::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "dir".to_string(),
+                            ty: dir_ty.clone(),
+                            optional: true,
+                            readonly: false,
+                        },
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "scrollBody".to_string(),
+                            ty: scroll_body_ty.clone(),
+                            optional: true,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    materialize_component_meta_macro_shape_member_types(
+        "/src/App.vue",
+        &snapshot,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    for member_name in ["dir", "scrollBody"] {
+        let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
+            subject: crate::resolver_core::TypeSurfaceKey {
+                canonical_owner: "/src/App.vue".to_string(),
+                symbol_name: "Props".to_string(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
+            route: crate::resolver_core::RouteDemand::MemberPath(vec![member_name.to_string()]),
+        };
+        assert!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&routed_key, &store_view)
+                .is_none(),
+            "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name}",
+        );
+    }
+    let define_props = evaluated_types
+        .define_props
+        .iter()
+        .find(|shape| shape.macro_index == 0)
+        .expect("defineProps shape should still exist");
+    let dir = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .find(|property| property.name == "dir")
+        .expect("dir property should exist");
+    assert_eq!(
+        dir.ty, dir_ty,
+        "symbolic imported ref fields should stay on the raw defineProps member surface",
+    );
+    let scroll_body = define_props
+        .result
+        .value
+        .properties
+        .iter()
+        .find(|property| property.name == "scrollBody")
+        .expect("scrollBody property should exist");
+    assert_eq!(
+        scroll_body.ty, scroll_body_ty,
+        "symbolic imported non-object unions should stay on the raw defineProps member surface",
+    );
+}
+
+#[test]
+fn define_props_member_rescue_skips_symbolic_imported_non_object_leaf_fields_without_raw_type() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export type Direction = 'ltr' | 'rtl'
+export type ScrollBodyOption = 'omit' | 'always'
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { Direction, ScrollBodyOption } from 'reka-ui'
+
+export interface Props {
+  dir?: Direction
+  scrollBody?: boolean | ScrollBodyOption
+}
+</script>
+<script setup lang="ts">
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let host = project.host();
+    let store_view = host.resolver_store_view();
+    let snapshot = host
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .expect("App snapshot should exist");
+    let facts = host
+        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .expect("App facts should exist");
+    let eval_source =
+        VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+    let owner_solver_host =
+        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+            host,
+            Some(&store_view),
+            "/src/App.vue",
+        );
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+        host,
+        Some(&store_view),
+        &owner_solver_host,
+    );
+    let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
+    let scroll_body_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+        "boolean | ScrollBodyOption",
+    );
+    let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+        props: vec![
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "dir".to_string(),
+                r#type: dir_ty.clone(),
+                raw_type: None,
+                optional: true,
+                exactness:
+                    verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_solver::result::ExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+            verter_semantic::analysis::type_expand::ExpandedField {
+                name: "scrollBody".to_string(),
+                r#type: scroll_body_ty.clone(),
+                raw_type: None,
+                optional: true,
+                exactness:
+                    verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+                execution_status:
+                    verter_semantic::analysis::type_solver::result::ExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+            },
+        ],
+        define_props: vec![verter_semantic::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "dir".to_string(),
+                            ty: dir_ty.clone(),
+                            optional: true,
+                            readonly: false,
+                        },
+                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                            name: "scrollBody".to_string(),
+                            ty: scroll_body_ty.clone(),
+                            optional: true,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: Vec::new(),
+        slot_bindings: Vec::new(),
+        bindings: Vec::new(),
+    };
+
+    materialize_component_meta_macro_shape_member_types(
+        "/src/App.vue",
+        &snapshot,
+        &eval_source,
+        &mut evaluated_types,
+        &mut query_engine,
+    );
+
+    for member_name in ["dir", "scrollBody"] {
+        let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
+            subject: crate::resolver_core::TypeSurfaceKey {
+                canonical_owner: "/src/App.vue".to_string(),
+                symbol_name: "Props".to_string(),
+                instantiation_hash: 0,
+                context_hash: 0,
+            },
+            route: crate::resolver_core::RouteDemand::MemberPath(vec![member_name.to_string()]),
+        };
+        assert!(
+            host.resolver_runtime()
+                .type_surfaces
+                .get(&routed_key, &store_view)
+                .is_none(),
+            "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name} even when field raw_type is missing",
+        );
+    }
 }
 
 #[test]

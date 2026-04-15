@@ -362,6 +362,16 @@ export function typeExprToDescriptor(
 
     case "ref":
       if (expr.typeArguments.length > 0) {
+        const resolved = resolveRegistryRefDescriptor(
+          expr.name,
+          expr.typeArguments,
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        if (resolved) {
+          return resolved;
+        }
         return typeRef(
           expr.name,
           expr.typeArguments.map((typeArgument) =>
@@ -2049,6 +2059,18 @@ function graphNodeToDescriptor(
     }
     case NODE_REF: {
       const name = expr.graph.getString(node.nameId);
+      if (node.typeArgumentNodeIds.length > 0) {
+        const resolved = resolveRegistryRefDescriptor(
+          name,
+          node.typeArgumentNodeIds.map((id) => createGraphTypeExprRef(expr.graph, id)),
+          nativeRegistry,
+          visiting,
+          graphVisiting,
+        );
+        if (resolved) {
+          return resolved;
+        }
+      }
       const typeArguments = node.typeArgumentNodeIds.map((id) =>
         typeExprToDescriptor(
           createGraphTypeExprRef(expr.graph, id),

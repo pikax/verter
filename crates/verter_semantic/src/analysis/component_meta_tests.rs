@@ -1040,6 +1040,138 @@ fn small_partial_helper_slot_binding_expansions_fall_back_to_symbolic_indexed_ac
 }
 
 #[test]
+fn define_slots_prefer_concrete_evaluated_slot_bindings_over_symbolic_direct_bindings() {
+    let macros = vec![AnalyzedMacro {
+        kind: AnalyzedMacroKind::DefineSlots,
+        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+            name: "default".to_string(),
+            is_required: false,
+            span: verter_span::Span::default(),
+            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
+                name: "ui".to_string(),
+                type_annotation: Some("Button['ui']".to_string()),
+                span: verter_span::Span::default(),
+            }],
+            return_type: Some("any".to_string()),
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        props: Vec::new(),
+        define_props: Vec::new(),
+        define_emits: Vec::new(),
+        emits: Vec::new(),
+        define_slots: vec![crate::analysis::type_expand::ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
+                        name: "default".to_string(),
+                        ty: TypeExpr::Function(Arc::new(
+                            crate::analysis::type_expr::FunctionExpr {
+                                parameters: vec![crate::analysis::type_expr::FunctionParam {
+                                    name: Some("props".to_string()),
+                                    ty: TypeExpr::Object(Arc::new(
+                                        crate::analysis::type_expr::ObjectExpr {
+                                            properties: vec![
+                                                crate::analysis::type_expr::ObjectMember::Property(
+                                                    crate::analysis::type_expr::ObjectProperty {
+                                                        name: "ui".to_string(),
+                                                        ty: TypeExpr::Ref {
+                                                            name: Arc::from("ComponentUI"),
+                                                            type_arguments: Arc::from(vec![
+                                                                TypeExpr::TypeOf(
+                                                                    crate::analysis::type_expr::ValueRef {
+                                                                        path: vec![
+                                                                            "theme".to_string(),
+                                                                        ],
+                                                                    },
+                                                                ),
+                                                            ]),
+                                                        },
+                                                        optional: false,
+                                                        readonly: false,
+                                                    },
+                                                ),
+                                            ],
+                                        },
+                                    )),
+                                    optional: false,
+                                    rest: false,
+                                }],
+                                return_type: Some(Arc::new(TypeExpr::Primitive(
+                                    PrimitiveName::Any,
+                                ))),
+                                type_parameters: Vec::new(),
+                            },
+                        )),
+                        optional: true,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
+            name: "default.ui".to_string(),
+            r#type: TypeExpr::Object(Arc::new(crate::analysis::type_expr::ObjectExpr {
+                properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                    crate::analysis::type_expr::ObjectProperty {
+                        name: "base".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    },
+                )],
+            })),
+            raw_type: Some("Button['ui']".to_string()),
+            optional: false,
+            exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            diagnostics: Vec::new(),
+        }],
+        bindings: Vec::new(),
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    let slot = result
+        .slots
+        .iter()
+        .find(|slot| slot.name == "default")
+        .expect("default slot should be extracted");
+    let binding = slot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "ui")
+        .expect("ui binding should be extracted");
+
+    let TypeExpr::Object(object) = &binding.type_expr else {
+        panic!(
+            "rescued evaluated slot binding should materialize to an object, got {:?}",
+            binding.type_expr
+        );
+    };
+    assert!(
+        object.properties.iter().any(|member| {
+            matches!(
+                member,
+                crate::analysis::type_expr::ObjectMember::Property(property)
+                    if property.name == "base"
+            )
+        }),
+        "rescued evaluated slot binding should expose concrete members, got {:?}",
+        binding.type_expr
+    );
+    assert_eq!(binding.raw_type.as_deref(), Some("Button['ui']"));
+}
+
+#[test]
 fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
     let macros = vec![AnalyzedMacro {
         kind: AnalyzedMacroKind::DefineSlots,

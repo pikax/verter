@@ -322,13 +322,15 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 return false;
             };
 
-            matches!(
-                prepared.projection_class,
-                super::prepared::PreparedProjectionClass::DirectMembers
-            ) || matches!(
-                prepared.kind,
-                crate::analysis::type_eval::TypeDeclKind::Class
-            )
+            !prepared.member_index.is_empty()
+                || matches!(
+                    prepared.projection_class,
+                    super::prepared::PreparedProjectionClass::DirectMembers
+                )
+                || matches!(
+                    prepared.kind,
+                    crate::analysis::type_eval::TypeDeclKind::Class
+                )
         };
 
         self.shallow_imported_bare_ref_cache
@@ -578,6 +580,69 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             }
         }
 
+        fn fast_symbolic_imported_bare_ref_route<A: super::audit::AuditSink>(
+            engine: &TypeQueryEngine<'_, A>,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if type_arguments.is_empty()
+                    && engine.host.bare_ref_origin(name.as_ref()) == BareRefOrigin::Imported
+                    && name.as_ref().ends_with("Props") =>
+                {
+                    true
+                }
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    fast_symbolic_imported_bare_ref_route(engine, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements
+                    .iter()
+                    .any(|element| fast_symbolic_imported_bare_ref_route(engine, &element.ty)),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members
+                    .iter()
+                    .any(|member| fast_symbolic_imported_bare_ref_route(engine, member)),
+                _ => false,
+            }
+        }
+
+        fn collapse_same_file_imported_alias_chain<A: super::audit::AuditSink>(
+            engine: &TypeQueryEngine<'_, A>,
+            canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> TypeExpr {
+            let mut current = expr.clone();
+            let mut visited = rustc_hash::FxHashSet::<String>::default();
+
+            loop {
+                let TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } = strip_parens(&current)
+                else {
+                    return current;
+                };
+                if !type_arguments.is_empty() || !visited.insert(name.to_string()) {
+                    return current;
+                }
+                let Some(root_identity) = engine.host.root_identity(canonical_id, name.as_ref())
+                else {
+                    return current;
+                };
+                if root_identity.canonical_id != canonical_id {
+                    return current;
+                }
+                let Some(prepared) = engine.host.resolve_prepared_type_decl(&root_identity) else {
+                    return current;
+                };
+                current = prepared.body.clone();
+            }
+        }
+
         fn contains_direct_imported_utility_route<A: super::audit::AuditSink>(
             engine: &TypeQueryEngine<'_, A>,
             expr: &TypeExpr,
@@ -694,6 +759,10 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             return Some(SolverResult::exact_symbolic(expr.clone()));
         }
 
+        if fast_symbolic_imported_bare_ref_route(self, expr) {
+            return Some(SolverResult::exact_symbolic(expr.clone()));
+        }
+
         if let TypeExpr::Ref {
             name,
             type_arguments,
@@ -720,7 +789,12 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
                 if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
                     return None;
                 }
-                return Some(SolverResult::exact_concrete(member.ty.clone()));
+                let collapsed = collapse_same_file_imported_alias_chain(
+                    self,
+                    &root_identity.canonical_id,
+                    &member.ty,
+                );
+                return Some(SolverResult::exact_concrete(collapsed));
             }
         }
 
@@ -742,13 +816,11 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
             return false;
         }
 
-        let preserve = if engine.should_preserve_imported_bare_ref(expr) {
-            true
-        } else if engine.should_preserve_imported_member_path(expr) {
-            true
-        } else if engine.should_preserve_imported_utility_route(expr) {
-            true
-        } else if engine.should_preserve_package_member_path(expr) {
+        let preserve = if engine.should_preserve_imported_bare_ref(expr)
+            || engine.should_preserve_imported_member_path(expr)
+            || engine.should_preserve_imported_utility_route(expr)
+            || engine.should_preserve_package_member_path(expr)
+        {
             true
         } else {
             match expr {
@@ -2731,6 +2803,143 @@ mod tests {
         }
     }
 
+    struct OpaqueImportedObjectLikePreserveHost {
+        tooltip_root_identity_calls: Cell<u32>,
+        package_root_identity_calls: Cell<u32>,
+        tooltip_prepared_lookup_calls: Cell<u32>,
+        package_prepared_lookup_calls: Cell<u32>,
+        tooltip_prepared: Arc<PreparedTypeDecl>,
+        tooltip_root_prepared: Arc<PreparedTypeDecl>,
+    }
+
+    impl OpaqueImportedObjectLikePreserveHost {
+        fn new() -> Self {
+            let mut tooltip_prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/src/Tooltip.vue", "TooltipProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::Intersection(std::sync::Arc::from(vec![
+                    TypeExpr::named("TooltipRootProps"),
+                    TypeExpr::Object(std::sync::Arc::new(
+                        crate::analysis::type_expr::ObjectExpr {
+                            properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                                crate::analysis::type_expr::ObjectProperty {
+                                    name: "text".to_string(),
+                                    ty: TypeExpr::Primitive(PrimitiveName::String),
+                                    optional: true,
+                                    readonly: false,
+                                },
+                            )],
+                        },
+                    )),
+                ])),
+            );
+            tooltip_prepared.build_member_index();
+            tooltip_prepared.classify_wrapper_shape();
+            tooltip_prepared.classify_projection();
+
+            let mut tooltip_root_prepared = PreparedTypeDecl::new(
+                ResolvedRootIdentity::new("/node_modules/reka-ui/index.d.ts", "TooltipRootProps"),
+                TypeDeclKind::Interface,
+                TypeExpr::Object(std::sync::Arc::new(
+                    crate::analysis::type_expr::ObjectExpr {
+                        properties: vec![crate::analysis::type_expr::ObjectMember::Property(
+                            crate::analysis::type_expr::ObjectProperty {
+                                name: "delayDuration".to_string(),
+                                ty: TypeExpr::Primitive(PrimitiveName::Number),
+                                optional: true,
+                                readonly: false,
+                            },
+                        )],
+                    },
+                )),
+            );
+            tooltip_root_prepared.build_member_index();
+            tooltip_root_prepared.classify_wrapper_shape();
+            tooltip_root_prepared.classify_projection();
+
+            Self {
+                tooltip_root_identity_calls: Cell::new(0),
+                package_root_identity_calls: Cell::new(0),
+                tooltip_prepared_lookup_calls: Cell::new(0),
+                package_prepared_lookup_calls: Cell::new(0),
+                tooltip_prepared: Arc::new(tooltip_prepared),
+                tooltip_root_prepared: Arc::new(tooltip_root_prepared),
+            }
+        }
+    }
+
+    impl TypeSolverHost for OpaqueImportedObjectLikePreserveHost {
+        fn resolve_prepared_type_decl(
+            &self,
+            root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedTypeDecl>> {
+            match (
+                root_identity.canonical_id.as_str(),
+                root_identity.symbol_name.as_str(),
+            ) {
+                ("/src/Tooltip.vue", "TooltipProps") => {
+                    self.tooltip_prepared_lookup_calls
+                        .set(self.tooltip_prepared_lookup_calls.get() + 1);
+                    Some(Arc::clone(&self.tooltip_prepared))
+                }
+                ("/node_modules/reka-ui/index.d.ts", "TooltipRootProps") => {
+                    self.package_prepared_lookup_calls
+                        .set(self.package_prepared_lookup_calls.get() + 1);
+                    Some(Arc::clone(&self.tooltip_root_prepared))
+                }
+                _ => None,
+            }
+        }
+
+        fn resolve_prepared_value_decl(
+            &self,
+            _root_identity: &ResolvedRootIdentity,
+        ) -> Option<Arc<PreparedValueDecl>> {
+            None
+        }
+
+        fn utility_source(&self, _name: &str) -> UtilitySource {
+            UtilitySource::Unknown
+        }
+
+        fn bare_ref_origin(&self, name: &str) -> BareRefOrigin {
+            match name {
+                "TooltipProps" | "TooltipRootProps" => BareRefOrigin::Imported,
+                _ => BareRefOrigin::Unknown,
+            }
+        }
+
+        fn root_identity(
+            &self,
+            canonical_id: &str,
+            symbol_name: &str,
+        ) -> Option<ResolvedRootIdentity> {
+            assert!(
+                canonical_id.is_empty(),
+                "shallow preservation checks should resolve imported bare refs from the owner scope"
+            );
+            match symbol_name {
+                "TooltipProps" => {
+                    self.tooltip_root_identity_calls
+                        .set(self.tooltip_root_identity_calls.get() + 1);
+                    Some(ResolvedRootIdentity::new(
+                        "/src/Tooltip.vue",
+                        "TooltipProps",
+                    ))
+                }
+                "TooltipRootProps" => {
+                    self.package_root_identity_calls
+                        .set(self.package_root_identity_calls.get() + 1);
+                    Some(ResolvedRootIdentity::new(
+                        "/node_modules/reka-ui/index.d.ts",
+                        "TooltipRootProps",
+                    ))
+                }
+                _ => None,
+            }
+        }
+    }
+
     impl TypeSolverHost for LocalAliasImportedGenericFastHost {
         fn resolve_prepared_type_decl(
             &self,
@@ -3222,6 +3431,80 @@ mod tests {
             host.imported_resolve_prepared_type_decl_calls.get(),
             0,
             "local generic parameters should not materialize imported constraint declarations during shallow preservation"
+        );
+    }
+
+    #[test]
+    fn shallow_field_preservation_keeps_opaque_imported_object_like_refs_symbolic_without_chasing_package_bases(
+    ) {
+        let host = OpaqueImportedObjectLikePreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Union(std::sync::Arc::from(vec![
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            TypeExpr::named("TooltipProps"),
+        ]));
+
+        assert!(
+            engine.should_preserve_shallow_field_expr(&expr),
+            "imported object-like refs should stay symbolic even when their bodies extend package-backed bases"
+        );
+        assert_eq!(
+            host.tooltip_root_identity_calls.get(),
+            1,
+            "the imported object-like ref should still prove its own import root once"
+        );
+        assert_eq!(
+            host.tooltip_prepared_lookup_calls.get(),
+            1,
+            "the imported object-like ref should inspect its prepared declaration once"
+        );
+        assert_eq!(
+            host.package_root_identity_calls.get(),
+            0,
+            "shallow preservation should not chase inherited package bases once the imported ref is known to be object-like"
+        );
+        assert_eq!(
+            host.package_prepared_lookup_calls.get(),
+            0,
+            "shallow preservation should not materialize inherited package declarations for opaque imported object-like refs"
+        );
+    }
+
+    #[test]
+    fn fast_shallow_field_expansion_keeps_imported_vue_object_refs_symbolic_without_prepared_lookup(
+    ) {
+        let host = OpaqueImportedObjectLikePreserveHost::new();
+        let mut engine = TypeQueryEngine::new(&host);
+        let expr = TypeExpr::Union(std::sync::Arc::from(vec![
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            TypeExpr::named("TooltipProps"),
+        ]));
+
+        let result = engine.try_fast_shallow_field_expr(&expr).expect(
+            "imported vue object refs inside shallow unions should stay symbolic immediately",
+        );
+
+        assert_eq!(result.value, expr);
+        assert_eq!(result.exactness, SolverExactness::ExactSymbolic);
+        assert_eq!(
+            host.tooltip_root_identity_calls.get(),
+            0,
+            "the shallow fast path should not prove the imported vue ref route just to keep it symbolic"
+        );
+        assert_eq!(
+            host.tooltip_prepared_lookup_calls.get(),
+            0,
+            "the shallow fast path should not materialize the imported vue declaration just to keep it symbolic"
+        );
+        assert_eq!(
+            host.package_root_identity_calls.get(),
+            0,
+            "the shallow fast path should not chase inherited package bases"
+        );
+        assert_eq!(
+            host.package_prepared_lookup_calls.get(),
+            0,
+            "the shallow fast path should not materialize inherited package declarations"
         );
     }
 

@@ -297,7 +297,10 @@ function normalizeSchemaValue(input: unknown): NormalizedSchema {
     return input;
   }
   if (Array.isArray(input)) {
-    return input.map((item) => normalizeSchemaValue(item)).sort(compareSchemaValues);
+    const normalizedItems = input.map((item) => normalizeSchemaValue(item));
+    return shouldSortNormalizedSchemaArray(normalizedItems)
+      ? normalizedItems.sort(compareSchemaValues)
+      : normalizedItems;
   }
   if (typeof input === "object") {
     const output: Record<string, NormalizedSchema> = {};
@@ -317,6 +320,26 @@ function normalizeSchemaValue(input: unknown): NormalizedSchema {
 
 function compareSchemaValues(left: NormalizedSchema, right: NormalizedSchema): number {
   return stableStringify(left).localeCompare(stableStringify(right));
+}
+
+function shouldSortNormalizedSchemaArray(items: NormalizedSchema[]): boolean {
+  if (items.length < 2) {
+    return false;
+  }
+
+  const kinds = new Set(
+    items.map((item) => {
+      if (Array.isArray(item)) {
+        return "array";
+      }
+      if (item === null) {
+        return "null";
+      }
+      return typeof item;
+    }),
+  );
+
+  return kinds.size === 1;
 }
 
 function normalizeNullableString(value: unknown): string | null {

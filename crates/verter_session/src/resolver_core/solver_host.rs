@@ -201,7 +201,25 @@ impl<'a> SessionSolverHost<'a> {
             Some(crate::resolver_core::ExportTarget::Local { symbol_name }) => Some(
                 ResolvedRootIdentity::new(&binding.canonical_id, symbol_name),
             ),
-            _ => None,
+            _ => self
+                .host
+                .resolve_named_type_export_target_in_view(
+                    &binding.canonical_id,
+                    member,
+                    self.store_view,
+                )
+                .map(|(canonical_id, exported_name)| {
+                    ResolvedRootIdentity::new(&canonical_id, &exported_name)
+                })
+                .or_else(|| {
+                    self.host
+                        .resolve_value_export_target_in_view(
+                            &binding.canonical_id,
+                            member,
+                            self.store_view,
+                        )
+                        .map(|target| ResolvedRootIdentity::new(&target.canonical_id, &target.name))
+                }),
         }
     }
 

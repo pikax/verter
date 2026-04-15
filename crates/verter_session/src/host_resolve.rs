@@ -14,11 +14,10 @@
 //! - Barrel and `export *` hops must be cached once discovered because repeated
 //!   wildcard re-export scans are expensive.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::Arc;
-
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustc_hash::FxHashMap;
 
@@ -308,11 +307,18 @@ struct RouteOwnedShallowStateCacheKey {
 
 #[derive(Clone)]
 struct RouteOwnedShallowStateCacheEntry {
+    workspace_generation: u64,
     whole_hash: Hash16,
     raw_source: Arc<str>,
     cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     raw_snapshot: Arc<crate::types::FileAnalysisSnapshot>,
     shallow_state: Arc<crate::resolver_core::ShallowFileState>,
+}
+
+pub(crate) struct RouteOwnedShallowStateSnapshot {
+    pub canonical_id: String,
+    pub whole_hash: Hash16,
+    pub route_hash: Option<Hash16>,
 }
 
 thread_local! {
@@ -407,9 +413,10 @@ fn external_type_debug(message: impl AsRef<str>) {
 }
 
 #[cfg(test)]
-static FORBID_ROUTE_FRONTIER_FOR_TESTS: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static FORBID_ROUTE_FRONTIER_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
+    static FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) struct RouteFrontierGuard;
@@ -419,33 +426,41 @@ pub(crate) struct ImportRouteShadowGuard;
 #[cfg(test)]
 impl Drop for RouteFrontierGuard {
     fn drop(&mut self) {
-        FORBID_ROUTE_FRONTIER_FOR_TESTS.store(false, Ordering::SeqCst);
+        FORBID_ROUTE_FRONTIER_FOR_TESTS.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
 #[cfg(test)]
 impl Drop for ImportRouteShadowGuard {
     fn drop(&mut self) {
-        FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.store(false, Ordering::SeqCst);
+        FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
     }
 }
 
 #[cfg(test)]
 pub(crate) fn forbid_route_frontier_for_tests() -> RouteFrontierGuard {
-    FORBID_ROUTE_FRONTIER_FOR_TESTS.store(true, Ordering::SeqCst);
+    FORBID_ROUTE_FRONTIER_FOR_TESTS.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
     RouteFrontierGuard
 }
 
 #[cfg(test)]
 pub(crate) fn forbid_import_route_shadow_for_tests() -> ImportRouteShadowGuard {
-    FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.store(true, Ordering::SeqCst);
+    FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
     ImportRouteShadowGuard
 }
 
 #[cfg(test)]
 fn assert_route_frontier_allowed() {
     assert!(
-        !FORBID_ROUTE_FRONTIER_FOR_TESTS.load(Ordering::SeqCst),
+        !route_frontier_forbidden_for_current_thread(),
         "route/root production path should not fall back through the external-type frontier",
     );
 }
@@ -454,9 +469,19 @@ fn assert_route_frontier_allowed() {
 #[allow(dead_code)]
 pub(crate) fn assert_import_route_shadow_allowed() {
     assert!(
-        !FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.load(Ordering::SeqCst),
+        !import_route_shadow_forbidden_for_current_thread(),
         "route/root/component-meta production path should not read legacy import-route shadow maps",
     );
+}
+
+#[cfg(test)]
+pub(crate) fn route_frontier_forbidden_for_current_thread() -> bool {
+    FORBID_ROUTE_FRONTIER_FOR_TESTS.with(|depth| depth.get() > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn import_route_shadow_forbidden_for_current_thread() -> bool {
+    FORBID_IMPORT_ROUTE_SHADOW_FOR_TESTS.with(|depth| depth.get() > 0)
 }
 
 #[cfg(not(test))]
@@ -548,6 +573,35 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
 }
 
 impl VerterHost {
+    pub(crate) fn invalidate_route_owned_shallow_cache(&self, canonical_id: &str) {
+        let key = RouteOwnedShallowStateCacheKey {
+            host_instance_id: self.instance_id,
+            canonical_id: canonical_id.to_string(),
+        };
+        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
+            cache.borrow_mut().remove(&key);
+        });
+    }
+
+    pub(crate) fn snapshot_route_owned_shallow_cache_entries(
+        &self,
+    ) -> Vec<RouteOwnedShallowStateSnapshot> {
+        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .iter()
+                .filter(|&(key, _entry)| key.host_instance_id == self.instance_id)
+                .map(|(key, entry)| RouteOwnedShallowStateSnapshot {
+                    canonical_id: key.canonical_id.clone(),
+                    whole_hash: entry.whole_hash,
+                    route_hash: entry.shallow_state.has_resolvable_surface().then(|| {
+                        crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref())
+                    }),
+                })
+                .collect()
+        })
+    }
+
     /// Expand a relative import specifier into all candidate canonical IDs.
     ///
     /// Given an owner file and a relative specifier (e.g. `./types`), returns
@@ -616,7 +670,9 @@ impl VerterHost {
             .or_else(|| resolution.effective_target().map(str::to_string))
     }
 
-    fn import_route_is_known_miss(resolution: &crate::types::DependencyResolution) -> bool {
+    pub(crate) fn import_route_is_known_miss(
+        resolution: &crate::types::DependencyResolution,
+    ) -> bool {
         resolution.resolved_canonical_id.is_none()
             && resolution.effective_target().is_none()
             && resolution.possible_canonical_ids.is_empty()
@@ -673,7 +729,7 @@ impl VerterHost {
             })
     }
 
-    fn prefer_type_dependency_target_from_resolution_in_view(
+    pub(crate) fn prefer_type_dependency_target_from_resolution_in_view(
         &self,
         owner_canonical: &str,
         import_source: &str,
@@ -1028,8 +1084,33 @@ impl VerterHost {
                 return Some(resolved);
             }
             // Stale views must not discover new routes via the live workspace.
-            // Only current views may fall back to workspace resolution.
             if !view_is_current {
+                if import_source.starts_with('.') {
+                    let direct = crate::id::resolve_external(owner_canonical, import_source);
+                    if let Some(resolved) =
+                        crate::host_manage::resolve_eval_dependency_canonical_with(
+                            direct.as_str(),
+                            |candidate| view.whole_hash(candidate).is_some(),
+                        )
+                    {
+                        return Some(resolved);
+                    }
+                    if let Some(resolved) = self
+                        .expand_relative_candidates(owner_canonical, import_source)
+                        .into_iter()
+                        .filter(|candidate| view.whole_hash(candidate).is_some())
+                        .min_by_key(|candidate| crate::types::extension_priority(candidate))
+                    {
+                        return Some(resolved);
+                    }
+                    if let Some(resolved) = self.fallback_relative_type_companion_in_view(
+                        owner_canonical,
+                        import_source,
+                        Some(view),
+                    ) {
+                        return Some(resolved);
+                    }
+                }
                 return None;
             }
             if import_source.starts_with('.') {
@@ -1052,11 +1133,8 @@ impl VerterHost {
                         )
                     })
                     .filter(|resolved| {
-                        self.store_view_allows_current_whole_hash(
-                            resolved,
-                            self.get_whole_hash(resolved).unwrap_or_default(),
-                            Some(view),
-                        )
+                        self.current_or_read_whole_hash_in_view(resolved, Some(view))
+                            .is_some()
                     })
                 {
                     return Some(resolved);
@@ -1087,11 +1165,8 @@ impl VerterHost {
                         )
                     })
                     .filter(|resolved| {
-                        self.store_view_allows_current_whole_hash(
-                            resolved,
-                            self.get_whole_hash(resolved).unwrap_or_default(),
-                            Some(view),
-                        )
+                        self.current_or_read_whole_hash_in_view(resolved, Some(view))
+                            .is_some()
                     });
             }
             if let Some(resolved) = self
@@ -1612,47 +1687,6 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
-
-        let cache_kind = verter_workspace::ResolveRequestKind::TypeImport;
-        let cache_entry = if effective_dep_canonical.ends_with(".vue") {
-            self.lookup_resolved_external_type_cache_in_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                cache_kind,
-                store_view,
-            )
-        } else {
-            self.lookup_resolved_external_type_cache_by_whole_hash_in_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                cache_kind,
-                store_view,
-            )
-        };
-
-        if let Some(entry) = cache_entry {
-            self.provenance
-                .resolved_external_type_cache_hits
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            for dep in &entry.tracked_deps {
-                tracked_deps.insert(dep.clone());
-                resolution_deps.insert(dep.clone());
-            }
-            let resolved = entry.resolved.clone();
-            cache.insert(cache_key, resolved.clone());
-            cache.insert(final_target_key, resolved.clone());
-            let elements = resolved?;
-            return Some((
-                dep_canonical,
-                effective_dep_canonical,
-                effective_type_name,
-                elements,
-            ));
-        }
-
-        self.provenance
-            .resolved_external_type_cache_misses
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key, cached.clone());
             let elements = cached?;
@@ -1683,26 +1717,6 @@ impl VerterHost {
                     store_view,
                 )
             });
-
-        if effective_dep_canonical.ends_with(".vue") {
-            self.store_resolved_external_type_cache_in_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                cache_kind,
-                resolved.clone(),
-                resolution_deps.iter().cloned().collect(),
-                store_view,
-            );
-        } else {
-            self.store_resolved_external_type_cache_by_whole_hash_in_view(
-                effective_dep_canonical.as_str(),
-                effective_type_name.as_str(),
-                cache_kind,
-                resolved.clone(),
-                resolution_deps.iter().cloned().collect(),
-                store_view,
-            );
-        }
 
         cache.insert(cache_key, resolved.clone());
         cache.insert(final_target_key, resolved.clone());
@@ -1852,23 +1866,6 @@ impl VerterHost {
         self.resolved_type_cache.lock().get(&key).cloned()
     }
 
-    fn lookup_resolved_external_type_cache_by_whole_hash_in_view(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) -> Option<crate::types::ResolvedTypeCacheEntry> {
-        let dep_source_hash = self.current_or_read_whole_hash_in_view(dep_canonical, store_view)?;
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-        };
-        self.resolved_type_cache.lock().get(&key).cloned()
-    }
-
     fn store_resolved_external_type_cache_in_view(
         &self,
         dep_canonical: &str,
@@ -1880,40 +1877,6 @@ impl VerterHost {
     ) {
         let Some(dep_source_hash) =
             self.current_type_resolution_hash_in_view(dep_canonical, store_view)
-        else {
-            return;
-        };
-
-        let key = crate::types::ResolvedTypeCacheKey {
-            dep_canonical_id: dep_canonical.to_string(),
-            dep_source_hash,
-            type_name: type_name.to_string(),
-            resolve_kind: kind,
-        };
-        let mut host_cache = self.resolved_type_cache.lock();
-        if host_cache.len() >= crate::types::RESOLVED_TYPE_CACHE_CAP {
-            host_cache.clear();
-        }
-        host_cache.insert(
-            key,
-            crate::types::ResolvedTypeCacheEntry {
-                resolved,
-                tracked_deps,
-            },
-        );
-    }
-
-    fn store_resolved_external_type_cache_by_whole_hash_in_view(
-        &self,
-        dep_canonical: &str,
-        type_name: &str,
-        kind: verter_workspace::ResolveRequestKind,
-        resolved: Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        tracked_deps: Vec<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
-    ) {
-        let Some(dep_source_hash) =
-            self.current_or_read_whole_hash_in_view(dep_canonical, store_view)
         else {
             return;
         };
@@ -2196,7 +2159,7 @@ impl VerterHost {
         tracked_deps.insert(canonical_id.to_string());
         resolution_deps.insert(canonical_id.to_string());
 
-        let resolved = (|| {
+        let resolved = {
             let route = requested_routes
                 .get(&(canonical_id.to_string(), exported_name.to_string()))
                 .cloned()
@@ -2266,7 +2229,7 @@ impl VerterHost {
                 &companion_types,
                 store_view,
             )
-        })();
+        };
 
         active.remove(&cache_key);
         memo.insert(cache_key, resolved.clone());
@@ -2377,9 +2340,11 @@ impl VerterHost {
                     .unwrap_or_else(|| canonical.to_string());
                 route_shallow_cache
                     .and_then(|cache| cache.get(normalized_canonical.as_str()))
+                    .filter(|state| state.as_ref().has_resolvable_surface())
                     .map(|state| crate::resolver_store::hash_route_surface(state.as_ref()))
                     .or_else(|| {
                         self.shallow_file_state_in_view(canonical, store_view)
+                            .filter(|state| state.has_resolvable_surface())
                             .map(|state| crate::resolver_store::hash_route_surface(&state))
                     })
             });
@@ -2453,14 +2418,32 @@ impl VerterHost {
                     })
             })?;
 
-        if store_view.is_some()
-            && !self.store_view_allows_current_whole_hash(
-                resolved.as_str(),
-                self.get_whole_hash(&resolved).unwrap_or_default(),
-                store_view,
-            )
-        {
-            return None;
+        if let Some(view) = store_view {
+            if resolved.ends_with(".vue") {
+                let known_hash = view
+                    .whole_hash(resolved.as_str())
+                    .or_else(|| self.get_whole_hash(resolved.as_str()))
+                    .or_else(|| {
+                        self.cached_route_owned_shallow_whole_hash_in_view(
+                            resolved.as_str(),
+                            Some(view),
+                        )
+                    });
+                if let Some(hash) = known_hash {
+                    if !self.store_view_allows_current_whole_hash(
+                        resolved.as_str(),
+                        hash,
+                        Some(view),
+                    ) {
+                        return None;
+                    }
+                }
+            } else if self
+                .current_or_read_whole_hash_in_view(resolved.as_str(), Some(view))
+                .is_none()
+            {
+                return None;
+            }
         }
 
         Some(resolved)
@@ -2575,7 +2558,31 @@ impl VerterHost {
         let entry =
             HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| cache.borrow().get(&key).cloned())?;
 
+        if let Some(view_hash) = store_view.and_then(|view| view.whole_hash(canonical_id)) {
+            if view_hash != entry.whole_hash {
+                return None;
+            }
+            return Some(entry);
+        }
+
         if let Some(current_hash) = self.get_whole_hash(canonical_id) {
+            if current_hash != entry.whole_hash
+                || !self.store_view_allows_current_whole_hash(
+                    canonical_id,
+                    current_hash,
+                    store_view,
+                )
+            {
+                return None;
+            }
+        } else if (store_view.is_none() && entry.workspace_generation == workspace_generation)
+            || store_view.is_some_and(|view| !view.tracks_whole_hash(canonical_id))
+        {
+            if !self.ws().file_exists(canonical_id) {
+                return None;
+            }
+        } else if let Some(source) = self.read_analysis_source(canonical_id) {
+            let current_hash = crate::hash::hash_16(source.as_bytes());
             if current_hash != entry.whole_hash
                 || !self.store_view_allows_current_whole_hash(
                     canonical_id,
@@ -2690,6 +2697,7 @@ impl VerterHost {
             cache.borrow_mut().insert(
                 key,
                 RouteOwnedShallowStateCacheEntry {
+                    workspace_generation,
                     whole_hash,
                     raw_source,
                     cached_parse,

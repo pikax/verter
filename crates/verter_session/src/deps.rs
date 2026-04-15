@@ -403,14 +403,15 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
     dependency_id: &str,
     old_export_signatures: &[verter_semantic::analysis::ExportSignature],
     new_export_signatures: &[verter_semantic::analysis::ExportSignature],
-) {
+) -> BTreeSet<String> {
     if owners.is_empty() {
-        return;
+        return BTreeSet::new();
     }
 
     let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
     let mut files = write_lock(files);
     let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
+    let mut cleared = BTreeSet::new();
 
     for owner in owners {
         if let Some(file) = files.get_mut(&owner) {
@@ -426,9 +427,12 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
                 file.compile_slots.clear();
                 file.cached_resolved_meta.clear();
                 file.cached_meta_payloads.clear();
+                cleared.insert(owner);
             }
         }
     }
+
+    cleared
 }
 
 /// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots

@@ -2470,42 +2470,71 @@ fn expanded_slot_bindings(
     ty: &TypeExpr,
     type_expansion: Option<crate::analysis::type_expand::ExpansionMetadata>,
 ) -> Vec<SlotBindingAnalysis> {
-    let direct_bindings = slot_bindings_from_type_expr(ty, type_expansion.clone());
-    if !direct_bindings.is_empty() {
-        return direct_bindings;
+    fn evaluated_slot_bindings_for_slot(
+        evaluated: &crate::analysis::type_expand::ExpandedComponentTypes,
+        slot_name: &str,
+    ) -> Vec<SlotBindingAnalysis> {
+        evaluated
+            .slot_bindings
+            .iter()
+            .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
+            .map(|field| {
+                let type_expansion = field_expansion_metadata(field);
+                SlotBindingAnalysis {
+                    name: field
+                        .name
+                        .split_once('.')
+                        .map(|(_, binding)| binding.to_string())
+                        .unwrap_or_else(|| field.name.clone()),
+                    type_expr: prefer_symbolic_prop_type_expr(
+                        &field.r#type,
+                        field.raw_type.as_deref(),
+                        Some(&type_expansion),
+                    ),
+                    type_expansion: Some(type_expansion),
+                    raw_type: field.raw_type.clone(),
+                }
+            })
+            .collect()
     }
 
+    fn should_prefer_evaluated_slot_binding(
+        current: &SlotBindingAnalysis,
+        evaluated: &SlotBindingAnalysis,
+    ) -> bool {
+        type_expr_is_placeholder_for_symbolic_fallback(&current.type_expr)
+            && !type_expr_is_placeholder_for_symbolic_fallback(&evaluated.type_expr)
+    }
+
+    let mut direct_bindings = slot_bindings_from_type_expr(ty, type_expansion.clone());
     let Some(evaluated) = evaluated else {
-        return Vec::new();
+        return direct_bindings;
     };
 
-    let bindings: Vec<SlotBindingAnalysis> = evaluated
-        .slot_bindings
-        .iter()
-        .filter(|field| field.name.starts_with(&format!("{slot_name}.")))
-        .map(|field| {
-            let type_expansion = field_expansion_metadata(field);
-            SlotBindingAnalysis {
-                name: field
-                    .name
-                    .split_once('.')
-                    .map(|(_, binding)| binding.to_string())
-                    .unwrap_or_else(|| field.name.clone()),
-                type_expr: prefer_symbolic_prop_type_expr(
-                    &field.r#type,
-                    field.raw_type.as_deref(),
-                    Some(&type_expansion),
-                ),
-                type_expansion: Some(type_expansion),
-                raw_type: field.raw_type.clone(),
-            }
-        })
-        .collect();
-    if !bindings.is_empty() {
-        return bindings;
+    let evaluated_bindings = evaluated_slot_bindings_for_slot(evaluated, slot_name);
+    if direct_bindings.is_empty() {
+        return evaluated_bindings;
     }
 
-    Vec::new()
+    let mut evaluated_by_name: rustc_hash::FxHashMap<String, SlotBindingAnalysis> =
+        evaluated_bindings
+            .into_iter()
+            .map(|binding| (binding.name.clone(), binding))
+            .collect();
+    for binding in &mut direct_bindings {
+        let Some(evaluated) = evaluated_by_name.remove(&binding.name) else {
+            continue;
+        };
+        if should_prefer_evaluated_slot_binding(binding, &evaluated) {
+            binding.type_expr = evaluated.type_expr;
+            binding.type_expansion = evaluated.type_expansion;
+        }
+        if binding.raw_type.is_none() {
+            binding.raw_type = evaluated.raw_type;
+        }
+    }
+    direct_bindings.extend(evaluated_by_name.into_values());
+    direct_bindings
 }
 
 fn merge_slot_bindings_with_source(

@@ -8361,7 +8361,8 @@ export interface ButtonProps {
 
 #[cfg(feature = "scheduler")]
 #[test]
-fn resolve_component_meta_macro_elements_reuses_host_cache_across_requests_for_package_targets() {
+fn resolve_component_meta_macro_elements_avoids_legacy_host_cache_across_requests_for_package_targets(
+) {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -8436,9 +8437,14 @@ const emit = defineEmits<PackageEmits>()
         "the first imported macro lookup should resolve the package emits surface",
     );
     let after_first = host.provenance().snapshot();
-    assert!(
-        after_first.resolved_external_type_cache_misses >= 1,
-        "the first package-backed lookup should populate the shared resolved-type cache, got {:?}",
+    assert_eq!(
+        after_first.resolved_external_type_cache_misses, 0,
+        "component-meta package lookups should not populate the legacy resolved-type cache, got {:?}",
+        after_first,
+    );
+    assert_eq!(
+        after_first.resolved_external_type_cache_hits, 0,
+        "component-meta package lookups should not read the legacy resolved-type cache, got {:?}",
         after_first,
     );
     assert!(
@@ -8467,9 +8473,14 @@ const emit = defineEmits<PackageEmits>()
         "the second imported macro lookup should still resolve the package emits surface",
     );
     let after_second = host.provenance().snapshot();
-    assert!(
-        after_second.resolved_external_type_cache_hits >= 1,
-        "the second package-backed lookup should reuse the shared resolved-type cache even with a fresh request-local cache, got {:?}",
+    assert_eq!(
+        after_second.resolved_external_type_cache_hits, 0,
+        "component-meta package lookups should stay off the legacy resolved-type cache on repeat requests, got {:?}",
+        after_second,
+    );
+    assert_eq!(
+        after_second.resolved_external_type_cache_misses, 0,
+        "component-meta package lookups should stay off the legacy resolved-type cache on repeat requests, got {:?}",
         after_second,
     );
     assert!(
@@ -8486,7 +8497,7 @@ const emit = defineEmits<PackageEmits>()
             .module_facts
             .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
             .is_none(),
-        "package provider barrels should stay off ModuleFactsDb while the shared resolved-type cache is used",
+        "package provider barrels should stay off ModuleFactsDb on the current component-meta path",
     );
     assert!(
         host.resolver
@@ -8494,7 +8505,11 @@ const emit = defineEmits<PackageEmits>()
             .module_facts
             .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
             .is_none(),
-        "package targets should stay off ModuleFactsDb while the shared resolved-type cache is used",
+        "package targets should stay off ModuleFactsDb on the current component-meta path",
+    );
+    assert!(
+        host.resolved_type_cache.lock().is_empty(),
+        "component-meta package lookups should leave the legacy resolved-type cache empty",
     );
 }
 

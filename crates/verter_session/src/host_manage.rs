@@ -2081,98 +2081,40 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        let cached_facts = if let Some(sv) = store_view {
-            self.resolver.runtime.module_facts.get(canonical_id, sv)
+        let cached_facts = if let Some(view) = store_view {
+            self.resolver.runtime.module_facts.get(canonical_id, view)
         } else {
             self.resolver.runtime.module_facts.get_any(canonical_id)
         };
         if let Some(facts) = cached_facts {
-            if store_view.is_none()
-                || self.store_view_allows_current_whole_hash(
-                    canonical_id,
-                    facts.whole_hash,
-                    store_view,
-                )
-            {
-                return Some(ExternalTypeResolutionInputs {
-                    raw_source: Arc::clone(&facts.raw_source),
-                    cached_parse: facts.cached_parse.clone(),
-                    whole_hash: facts.whole_hash,
-                    eval_source: Arc::clone(&facts.eval_source),
-                    analysis: Arc::clone(&facts.external_type_analysis),
-                    analysis_cache_hit: true,
-                });
-            }
-        }
-
-        #[cfg(feature = "scheduler")]
-        let scheduler_state = self.effective_file_state(canonical_id, None);
-        #[cfg(not(feature = "scheduler"))]
-        let scheduler_state: Option<crate::types::EffectiveFileState> = None;
-
-        if let Some(view) = store_view {
-            if !view.tracks_whole_hash(canonical_id)
-                && scheduler_state.is_none()
-                && !self.has_cached_route_owned_shallow_state_in_view(canonical_id, Some(view))
-                && self
-                    .resolver
-                    .runtime
-                    .module_facts
-                    .get_any(canonical_id)
-                    .is_none()
-            {
-                return None;
-            }
-
-            if let Some((raw_source, cached_parse, whole_hash)) =
-                self.cached_route_owned_eval_state_in_view(canonical_id, Some(view))
-            {
-                let eval_source = Arc::<str>::from(Self::build_eval_script_source(
-                    raw_source.as_ref(),
-                    cached_parse.as_deref(),
-                ));
-                let (analysis, analysis_cache_hit) = self.cached_external_type_analysis_entry(
-                    canonical_id,
-                    whole_hash,
-                    raw_source.as_ref(),
-                    cached_parse.as_deref(),
-                    &eval_source,
-                );
-                return Some(ExternalTypeResolutionInputs {
-                    raw_source,
-                    cached_parse,
-                    whole_hash,
-                    eval_source,
-                    analysis,
-                    analysis_cache_hit,
-                });
-            }
-        }
-
-        let (raw_source, cached_parse, whole_hash) = if let Some(state) = scheduler_state {
-            if !self.store_view_allows_current_whole_hash(
-                canonical_id,
-                state.whole_hash,
-                store_view,
-            ) {
-                return None;
-            }
-            (state.source, state.cached_parse, state.whole_hash)
-        } else {
-            let raw_source = self.read_analysis_source(canonical_id)?;
-            let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-            if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-                return None;
-            }
-            let cached_parse = canonical_id.ends_with(".vue").then(|| {
-                Arc::new(verter_compiler::compile::parse_sfc(
-                    raw_source.as_ref(),
-                    None,
-                    None,
-                ))
+            return Some(ExternalTypeResolutionInputs {
+                raw_source: Arc::clone(&facts.raw_source),
+                cached_parse: facts.cached_parse.clone(),
+                whole_hash: facts.whole_hash,
+                eval_source: Arc::clone(&facts.eval_source),
+                analysis: Arc::clone(&facts.external_type_analysis),
+                analysis_cache_hit: true,
             });
-            (raw_source, cached_parse, whole_hash)
+        }
+
+        let (raw_source, cached_parse, whole_hash) =
+            self.current_eval_state_in_view(canonical_id, store_view)?;
+
+        let refreshed_facts = if let Some(view) = store_view {
+            self.resolver.runtime.module_facts.get(canonical_id, view)
+        } else {
+            self.resolver.runtime.module_facts.get_any(canonical_id)
         };
+        if let Some(facts) = refreshed_facts {
+            return Some(ExternalTypeResolutionInputs {
+                raw_source: Arc::clone(&facts.raw_source),
+                cached_parse: facts.cached_parse.clone(),
+                whole_hash: facts.whole_hash,
+                eval_source: Arc::clone(&facts.eval_source),
+                analysis: Arc::clone(&facts.external_type_analysis),
+                analysis_cache_hit: true,
+            });
+        }
 
         let eval_source = Arc::<str>::from(Self::build_eval_script_source(
             raw_source.as_ref(),
@@ -2959,17 +2901,18 @@ impl VerterHost {
                 target.source_specifier.as_str(),
                 store_view,
             );
-            let resolved = cached_resolution
-                .as_ref()
-                .and_then(|resolution| {
-                    resolution
-                        .resolved_canonical_id
-                        .clone()
-                        .or_else(|| resolution.effective_target().map(str::to_string))
-                })
+            let resolved: Option<String> = if let Some(resolution) = cached_resolution.as_ref() {
+                self.prefer_type_dependency_target_from_resolution_in_view(
+                    canonical_id,
+                    target.source_specifier.as_str(),
+                    resolution,
+                    store_view,
+                )
                 .or_else(|| {
-                    if !target.canonical_id.is_empty()
-                        && !(declaration_file && is_runtime_script_target(&target.canonical_id))
+                    if Self::import_route_is_known_miss(resolution) {
+                        None
+                    } else if !(target.canonical_id.is_empty()
+                        || declaration_file && is_runtime_script_target(&target.canonical_id))
                     {
                         Some(target.canonical_id.clone())
                     } else {
@@ -2979,7 +2922,18 @@ impl VerterHost {
                             store_view,
                         )
                     }
-                });
+                })
+            } else if !(target.canonical_id.is_empty()
+                || declaration_file && is_runtime_script_target(&target.canonical_id))
+            {
+                Some(target.canonical_id.clone())
+            } else {
+                self.resolve_route_type_edge_in_view(
+                    canonical_id,
+                    target.source_specifier.as_str(),
+                    store_view,
+                )
+            };
             let Some(resolved) = resolved else {
                 continue;
             };
@@ -3090,42 +3044,11 @@ impl VerterHost {
         {
             return None;
         }
-        let declaration_file = canonical_id.ends_with(".d.ts")
-            || canonical_id.ends_with(".d.mts")
-            || canonical_id.ends_with(".d.cts");
-        // 2. Build dep_edges from already-resolved import targets only.
-        // Demand-driven: don't eagerly resolve imports with empty canonical_ids
-        // through VFS — let the solver resolve them on demand via
-        // resolve_import_binding_from_facts when it actually needs them.
-        // For declaration files, prefer .d.ts companions over .js targets.
-        let mut dep_edges = rustc_hash::FxHashMap::default();
-        let mut seen_sources = rustc_hash::FxHashSet::default();
-        for target in state.import_targets.values() {
-            if !seen_sources.insert(target.source_specifier.clone()) {
-                continue;
-            }
-            // Only include imports that already have a resolved canonical_id
-            // from the host/scheduler. Skip empty canonical_ids — the solver
-            // will resolve them on demand if needed.
-            if target.canonical_id.is_empty() {
-                continue;
-            }
-            if declaration_file && is_runtime_script_target(&target.canonical_id) {
-                // For declaration files, prefer .d.ts companions — resolve
-                // through the type edge path to get the companion target.
-                if let Some(resolved) = self.resolve_route_type_edge_in_view(
-                    canonical_id,
-                    &target.source_specifier,
-                    store_view,
-                ) {
-                    dep_edges.insert(target.source_specifier.clone(), resolved);
-                }
-            } else {
-                dep_edges.insert(target.source_specifier.clone(), target.canonical_id.clone());
-            }
-        }
-
-        let import_route_hash = facts.import_route_hash;
+        let (dep_edges, import_route_hash) = self.prepared_decl_bundle_route_dep_edges_in_view(
+            canonical_id,
+            state.as_ref(),
+            store_view,
+        );
 
         // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
         // Non-Vue files get an empty map — zero cost.
@@ -3275,6 +3198,25 @@ impl VerterHost {
                                 crate::resolver_core::merge_route_demands(existing, &ext.route);
                         })
                         .or_insert_with(|| ext.route.clone());
+                }
+                if state.symbol(symbol_name).is_some_and(|symbol| {
+                    symbol.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                }) {
+                    if let Some(analysis) =
+                        self.external_type_analysis_in_view(canonical_id, store_view)
+                    {
+                        for required_name in analysis.required_import_names(exported_name) {
+                            result
+                                .entry(required_name)
+                                .and_modify(|existing| {
+                                    *existing = crate::resolver_core::merge_route_demands(
+                                        existing,
+                                        &RouteDemand::Whole,
+                                    );
+                                })
+                                .or_insert(RouteDemand::Whole);
+                        }
+                    }
                 }
                 return result;
             }
@@ -3534,7 +3476,7 @@ impl VerterHost {
             }
         }
 
-        None
+        self.route_owned_shallow_state_in_view(resolved_canonical_id.as_str(), store_view)
     }
 
     /// Ensure module facts are materialized for a canonical file.
@@ -4094,9 +4036,11 @@ impl VerterHost {
         {
             use crate::host_executor::HostSourceData;
 
-            let cc = self.compile_cache.get(canonical_id)?;
+            let Some(cc) = self.compile_cache.get(canonical_id) else {
+                return store_view.and_then(|view| view.import_route(canonical_id, import_source));
+            };
             if cc.evicted {
-                return None;
+                return store_view.and_then(|view| view.import_route(canonical_id, import_source));
             }
 
             let whole_hash = self
@@ -4113,23 +4057,25 @@ impl VerterHost {
                 &cc.import_routes,
                 store_view,
             ) {
-                return None;
+                return store_view.and_then(|view| view.import_route(canonical_id, import_source));
             }
 
-            return cc.import_routes.get(import_source).cloned();
+            cc.import_routes.get(import_source).cloned()
         }
 
         #[cfg(not(feature = "scheduler"))]
         {
             let files = read_lock(&self.files);
-            let entry = files.get(canonical_id)?;
+            let Some(entry) = files.get(canonical_id) else {
+                return store_view.and_then(|view| view.import_route(canonical_id, import_source));
+            };
             if !self.import_route_cache_matches_view(
                 canonical_id,
                 Some(entry.whole_hash),
                 &entry.import_routes,
                 store_view,
             ) {
-                return None;
+                return store_view.and_then(|view| view.import_route(canonical_id, import_source));
             }
 
             entry.import_routes.get(import_source).cloned()
@@ -4168,9 +4114,14 @@ impl VerterHost {
             .and_then(|view| {
                 view.derived_hash(canonical_id, crate::resolver_core::DerivedFactKind::Route)
             })
-            .or_else(|| known_shallow.map(crate::resolver_store::hash_route_surface))
+            .or_else(|| {
+                known_shallow
+                    .filter(|state| state.has_resolvable_surface())
+                    .map(crate::resolver_store::hash_route_surface)
+            })
             .or_else(|| {
                 self.route_owned_shallow_state_in_view(canonical_id, store_view)
+                    .filter(|state| state.has_resolvable_surface())
                     .map(|state| crate::resolver_store::hash_route_surface(&state))
             });
         if let Some(hash) = route_hash {
@@ -4227,6 +4178,18 @@ impl VerterHost {
         let normalized_target = self
             .resolve_eval_dependency_canonical_in_view(target_canonical.as_str(), store_view)
             .unwrap_or(target_canonical);
+        let (leaf_symbol, target_hash) = {
+            let target_state =
+                self.route_owned_shallow_state_in_view(normalized_target.as_str(), store_view)?;
+            match target_state.export_target(target_symbol.as_str())? {
+                crate::resolver_core::ExportTarget::Local { symbol_name }
+                    if target_state.import_target(symbol_name.as_str()).is_none() =>
+                {
+                    (symbol_name.clone(), target_state.whole_hash)
+                }
+                _ => return None,
+            }
+        };
 
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
@@ -4237,8 +4200,6 @@ impl VerterHost {
             &mut seen,
             store_view,
         );
-        let target_hash =
-            self.current_or_read_whole_hash_in_view(normalized_target.as_str(), store_view)?;
         let target_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: normalized_target.clone(),
             hash: target_hash,
@@ -4247,7 +4208,7 @@ impl VerterHost {
             facts.push(target_fact);
         }
 
-        Some(((normalized_target, target_symbol), facts))
+        Some(((normalized_target, leaf_symbol), facts))
     }
 
     pub(crate) fn resolve_local_import_symbol_target_in_view(
@@ -7757,6 +7718,7 @@ impl VerterHost {
         self.ws().set_exact_resolutions(&canonical, vfs_resolutions);
         // Soft-invalidate: file content didn't change, only import routes.
         // Module facts are archived for stale store views.
+        self.invalidate_route_owned_shallow_cache(&canonical);
         self.resolver.runtime.invalidate_canonical(&canonical);
         self.resolved_type_cache.lock().clear();
         self.semantic_invalidate(&canonical);
@@ -8513,21 +8475,234 @@ fn choose_less_symbolic_component_meta_type_expr(
         }
     }
 
+    fn alias_body_transport_candidate(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        scope: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                let declaration = query_engine.resolve_type_declaration(scope, name.as_ref());
+                let declaration_scope = if declaration.canonical_source.is_empty() {
+                    scope.to_string()
+                } else {
+                    declaration.canonical_source
+                };
+                let declaration_name = if declaration.resolved_name.is_empty() {
+                    name.as_ref().to_string()
+                } else {
+                    declaration.resolved_name
+                };
+                let (target_scope, target_name) = query_engine.resolve_final_prepared_type_target(
+                    declaration_scope.as_str(),
+                    declaration_name.as_str(),
+                );
+                query_engine.named_decl_body(target_scope.as_str(), target_name.as_str())
+            }
+            other => {
+                let (root_symbol, route) =
+                    crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(other)?;
+                let crate::resolver_core::RouteDemand::MemberPath(path) = route else {
+                    return None;
+                };
+                let [member_name] = path.as_slice() else {
+                    return None;
+                };
+                let member_ty = query_engine.prepared_member_raw_type(
+                    scope,
+                    root_symbol.as_str(),
+                    member_name,
+                )?;
+                let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } = member_ty
+                else {
+                    return None;
+                };
+                if !type_arguments.is_empty() {
+                    return None;
+                }
+                let declaration = query_engine.resolve_type_declaration(scope, name.as_ref());
+                let declaration_scope = if declaration.canonical_source.is_empty() {
+                    scope.to_string()
+                } else {
+                    declaration.canonical_source
+                };
+                let declaration_name = if declaration.resolved_name.is_empty() {
+                    name.as_ref().to_string()
+                } else {
+                    declaration.resolved_name
+                };
+                let (target_scope, target_name) = query_engine.resolve_final_prepared_type_target(
+                    declaration_scope.as_str(),
+                    declaration_name.as_str(),
+                );
+                query_engine.named_decl_body(target_scope.as_str(), target_name.as_str())
+            }
+        }
+    }
+
     fn candidate_beats_current(
         current: &verter_semantic::analysis::type_expr::TypeExpr,
         candidate: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> bool {
+        fn has_structural_top_level(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            match expr {
+                TypeExpr::Parenthesized(inner) => has_structural_top_level(inner),
+                TypeExpr::Ref { .. }
+                | TypeExpr::IndexedAccess { .. }
+                | TypeExpr::Conditional { .. }
+                | TypeExpr::Mapped { .. }
+                | TypeExpr::TypeOf(_)
+                | TypeExpr::TypeParameter(_)
+                | TypeExpr::Unknown { .. }
+                | TypeExpr::Infer { .. } => false,
+                TypeExpr::Primitive(_)
+                | TypeExpr::Literal(_)
+                | TypeExpr::Object(_)
+                | TypeExpr::Function(_)
+                | TypeExpr::Array { .. }
+                | TypeExpr::Tuple { .. }
+                | TypeExpr::Union(_)
+                | TypeExpr::Intersection(_)
+                | TypeExpr::KeyOf(_)
+                | TypeExpr::Rest(_)
+                | TypeExpr::TemplateLiteral { .. }
+                | TypeExpr::RecursiveRef { .. } => true,
+            }
+        }
+
         match (current, candidate) {
             (
                 verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
                 | verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. },
                 verter_semantic::analysis::type_expr::TypeExpr::Object(object),
             ) if !object.properties.is_empty() => true,
+            (
+                verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
+            ) => true,
             _ => {
-                crate::meta_resolve::component_meta_type_expr_symbolic_score(candidate)
-                    < crate::meta_resolve::component_meta_type_expr_symbolic_score(current)
+                if has_structural_top_level(current) && !has_structural_top_level(candidate) {
+                    return false;
+                }
+                crate::meta_resolve::component_meta_type_expr_improves(candidate, current)
             }
         }
+    }
+
+    fn is_props_like_public_ref_name(name: &str) -> bool {
+        name.ends_with("Props")
+    }
+
+    fn collect_props_like_public_refs(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        refs: &mut rustc_hash::FxHashSet<(String, usize)>,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => collect_props_like_public_refs(inner, refs),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if is_props_like_public_ref_name(name) => {
+                refs.insert((name.to_string(), type_arguments.len()));
+                true
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                let mut found = false;
+                for ty in types.iter() {
+                    if collect_props_like_public_refs(ty, refs) {
+                        found = true;
+                        continue;
+                    }
+                    if matches!(
+                        ty,
+                        TypeExpr::Primitive(_)
+                            | TypeExpr::Literal(_)
+                            | TypeExpr::Unknown { .. }
+                            | TypeExpr::TypeParameter(_)
+                    ) {
+                        continue;
+                    }
+                    return false;
+                }
+                found
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_contains_public_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        name: &str,
+        type_argument_arity: usize,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => {
+                expr_contains_public_ref(inner, name, type_argument_arity)
+            }
+            TypeExpr::Ref {
+                name: current_name,
+                type_arguments,
+            } => current_name.as_ref() == name && type_arguments.len() == type_argument_arity,
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
+            TypeExpr::Array { element, .. } => {
+                expr_contains_public_ref(element, name, type_argument_arity)
+            }
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
+            _ => false,
+        }
+    }
+
+    fn should_preserve_imported_props_like_public_refs(
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+        raw_type: Option<&str>,
+        owner_canonical: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        let Some(raw_type) = raw_type else {
+            return false;
+        };
+
+        let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
+        let mut refs = rustc_hash::FxHashSet::default();
+        if !collect_props_like_public_refs(&parsed, &mut refs) || refs.is_empty() {
+            return false;
+        }
+
+        refs.into_iter().all(|(name, type_argument_arity)| {
+            if !expr_contains_public_ref(current, &name, type_argument_arity) {
+                return false;
+            }
+
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, &name);
+            !declaration.canonical_source.is_empty()
+                && declaration.canonical_source != owner_canonical
+        })
+    }
+
+    if should_preserve_imported_props_like_public_refs(
+        current,
+        raw_type,
+        owner_canonical,
+        query_engine,
+    ) {
+        return current.clone();
     }
 
     let mut best = current.clone();
@@ -8556,8 +8731,27 @@ fn choose_less_symbolic_component_meta_type_expr(
 
     for expr in &seed_exprs {
         for scope in &scopes {
+            let safe_route_candidate =
+                crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(expr)
+                    .or_else(|| {
+                        crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(expr)
+                    })
+                    .and_then(|_| {
+                        crate::meta_resolve::materialize_member_route_from_alias_body_in_owner_scope(
+                            expr,
+                            scope.as_str(),
+                            query_engine,
+                        )
+                    });
+            if let Some(candidate) = safe_route_candidate {
+                if candidate_beats_current(&best, &candidate) {
+                    best = candidate;
+                }
+                continue;
+            }
             for candidate in [
                 Some(expr.clone()),
+                alias_body_transport_candidate(expr, scope.as_str(), query_engine),
                 query_engine.project_expr_surface_expr(scope.as_str(), expr),
             ]
             .into_iter()
@@ -8710,6 +8904,170 @@ fn rematerialize_public_component_meta_types(
     if changed {
         populate_public_instance_sidecar(meta);
     }
+}
+
+fn merge_evaluated_prop_types_into_meta(
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+) {
+    let Some(evaluated_types) = evaluated_types else {
+        return;
+    };
+    let evaluated_by_name = evaluated_types
+        .props
+        .iter()
+        .map(|field| (field.name.as_str(), &field.r#type))
+        .collect::<rustc_hash::FxHashMap<_, _>>();
+
+    for prop in &mut meta.props {
+        let Some(evaluated) = evaluated_by_name.get(prop.name.as_str()) else {
+            continue;
+        };
+        if crate::meta_resolve::component_meta_type_expr_improves(evaluated, &prop.type_expr)
+            || matches!(
+                (&prop.type_expr, *evaluated),
+                (
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+                )
+            )
+        {
+            prop.type_expr = (*evaluated).clone();
+        }
+    }
+}
+
+fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
+    host: &VerterHost,
+    owner_canonical: &str,
+    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+    store_view: Option<&HostStoreView>,
+) -> bool {
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    if !meta.props.iter().any(|prop| prop.description.is_none()) {
+        return false;
+    }
+
+    let mut imported_roots = rustc_hash::FxHashSet::default();
+    let mut description_by_name = rustc_hash::FxHashMap::default();
+
+    for dep in resolved.snapshot.macro_type_deps.iter() {
+        if dep.macro_kind != AnalyzedMacroKind::DefineProps {
+            continue;
+        }
+        let Some((dep_canonical, exported_name)) = host.resolve_local_import_symbol_target_in_view(
+            owner_canonical,
+            dep.type_name.as_str(),
+            store_view,
+        ) else {
+            continue;
+        };
+        if !imported_roots.insert((dep_canonical.clone(), exported_name.clone())) {
+            continue;
+        }
+        let Some((raw_source, cached_parse, _)) =
+            host.current_eval_state_in_view(dep_canonical.as_str(), store_view)
+        else {
+            continue;
+        };
+        let projection_source =
+            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+        let Some(projected) =
+            crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
+                projection_source.as_ref(),
+                AnalyzedMacroKind::DefineProps,
+                exported_name.as_str(),
+            )
+        else {
+            continue;
+        };
+        for prop in projected.props {
+            if let Some(description) = prop.description {
+                description_by_name.entry(prop.name).or_insert(description);
+            }
+        }
+    }
+
+    for mac in resolved.snapshot.macros.iter() {
+        if mac.kind != AnalyzedMacroKind::DefineProps {
+            continue;
+        }
+        for (resolved_index, resolved_local) in mac.resolved_local_types.iter().enumerate() {
+            if !(resolved_index == 0
+                || mac
+                    .type_references
+                    .iter()
+                    .any(|type_name| type_name == &resolved_local.name))
+            {
+                continue;
+            }
+            let local_expr = resolved_local.type_expr.clone().unwrap_or_else(|| {
+                verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                    &resolved_local.expanded,
+                )
+            });
+            let expanded_expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
+                &resolved_local.expanded,
+            );
+            for dependency in host
+                .imported_symbol_dependencies_for_expr_in_view(
+                    owner_canonical,
+                    &expanded_expr,
+                    store_view,
+                )
+                .into_iter()
+                .chain(host.imported_symbol_dependencies_for_expr_in_view(
+                    owner_canonical,
+                    &local_expr,
+                    store_view,
+                ))
+            {
+                if !imported_roots.insert((
+                    dependency.canonical_id.clone(),
+                    dependency.exported_name.clone(),
+                )) {
+                    continue;
+                }
+                let Some((raw_source, cached_parse, _)) =
+                    host.current_eval_state_in_view(dependency.canonical_id.as_str(), store_view)
+                else {
+                    continue;
+                };
+                let projection_source =
+                    VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+                let Some(projected) =
+                    crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
+                        projection_source.as_ref(),
+                        AnalyzedMacroKind::DefineProps,
+                        dependency.exported_name.as_str(),
+                    )
+                else {
+                    continue;
+                };
+                for prop in projected.props {
+                    if let Some(description) = prop.description {
+                        description_by_name.entry(prop.name).or_insert(description);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut changed = false;
+    for prop in &mut meta.props {
+        if prop.description.is_some() {
+            continue;
+        }
+        if let Some(description) = description_by_name.get(prop.name.as_str()) {
+            prop.description = Some(description.clone());
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 fn parse_annotation_or_unknown_for_public_instance(
@@ -9010,6 +9368,16 @@ pub(crate) fn extract_component_meta_from_resolved(
         resolved,
         store_view,
     );
+    merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
+    if fill_missing_component_meta_prop_descriptions_from_imported_roots(
+        host,
+        host.resolve_alias_or_canonical(canonical_or_alias).as_str(),
+        &mut meta,
+        resolved,
+        store_view,
+    ) {
+        populate_public_instance_sidecar(&mut meta);
+    }
     if include_fallthrough {
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
         let mut visiting = rustc_hash::FxHashSet::default();
@@ -9062,6 +9430,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         resolved,
         store_view,
     );
+    merge_evaluated_prop_types_into_meta(&mut meta, resolved.evaluated_types.as_ref());
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let mut visiting = rustc_hash::FxHashSet::default();
     let fallthrough_facts = if let Some(resolution) = host

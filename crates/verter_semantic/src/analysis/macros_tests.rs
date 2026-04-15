@@ -1549,6 +1549,43 @@ fn pick_omit_return_none_unresolvable() {
     // The inline literal extracts "display" field but cannot resolve Pick<Full,...>
     assert_eq!(dp.prop_fields.len(), 1);
     assert_eq!(dp.prop_fields[0].name, "display");
+    assert!(
+        dp.resolved_local_types.is_empty(),
+        "inline wrapper refs should not be published as resolved_local_types, got {:?}",
+        dp.resolved_local_types
+            .iter()
+            .map(|ty| ty.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn inline_nested_local_refs_do_not_publish_resolved_local_macro_roots() {
+    let source = r#"
+        interface User { id: number }
+        defineProps<{ user: User; label?: string }>()
+    "#;
+    let alloc = Allocator::default();
+    let macros = parse_and_extract(&alloc, source);
+    let dp = macros
+        .iter()
+        .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+        .unwrap();
+
+    let field_names: Vec<_> = dp
+        .prop_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(field_names, vec!["user", "label"]);
+    assert!(
+        dp.resolved_local_types.is_empty(),
+        "nested inline refs should stay off resolved_local_types, got {:?}",
+        dp.resolved_local_types
+            .iter()
+            .map(|ty| ty.name.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

@@ -2604,7 +2604,6 @@ defineProps<ExternalProps>()
 <template><div /></template>"#,
         )
         .unwrap();
-
     let meta = project
         .host()
         .get_component_meta("/App.vue")
@@ -2684,7 +2683,6 @@ defineEmits<AppEmits>()
 <template><div /></template>"#,
         )
         .unwrap();
-
     let meta = project
         .host()
         .get_component_meta("/App.vue")
@@ -5177,8 +5175,27 @@ defineProps<{
     let first_cache =
         cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
             .expect("first evaluation should populate the cache");
+    let first_meta = session
+        .get_component_meta("/Comp.vue")
+        .unwrap()
+        .expect("first evaluation should produce component meta");
 
-    match evaluated_prop_type(&first, "user") {
+    assert!(
+        matches!(
+            evaluated_prop_type(&first, "user"),
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
+        ),
+        "evaluate_types should keep imported object-like fields symbolic in expanded evaluated types, got {:?}",
+        evaluated_prop_type(&first, "user")
+    );
+    match &first_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "user")
+        .expect("component meta should keep the imported user prop")
+        .type_expr
+    {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -5208,12 +5225,31 @@ defineProps<{
     let second_cache =
         cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
             .expect("dependency update should repopulate the cache");
+    let second_meta = session
+        .get_component_meta("/Comp.vue")
+        .unwrap()
+        .expect("dependency update should keep component meta available");
 
     assert!(
         !Arc::ptr_eq(&first_cache, &second_cache),
         "dependency change must invalidate the owner's resolved-meta cache",
     );
-    match evaluated_prop_type(&second, "user") {
+    assert!(
+        matches!(
+            evaluated_prop_type(&second, "user"),
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
+        ),
+        "evaluate_types should keep imported object-like fields symbolic after cache invalidation too, got {:?}",
+        evaluated_prop_type(&second, "user")
+    );
+    match &second_meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "user")
+        .expect("component meta should keep the imported user prop after invalidation")
+        .type_expr
+    {
         TypeExpr::Object(obj) => {
             let names: Vec<&str> = obj
                 .properties
@@ -8316,31 +8352,10 @@ defineSlots<ButtonSlots>()
             _ => None,
         })
         .expect("default slot props should keep a ui member");
-    let TypeExpr::Object(ui_shape) = ui_prop else {
-        panic!(
-            "slot props ui should be resolved as an object, got {:?}",
-            ui_prop
-        );
-    };
-    let base_prop = ui_shape
-        .properties
-        .iter()
-        .find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == "base" => Some(property),
-            _ => None,
-        })
-        .expect("ui surface should keep a base member");
-    let TypeExpr::Function(base_fn) = &base_prop.ty else {
-        panic!("ui.base should stay callable, got {:?}", base_prop.ty);
-    };
-    let base_param = base_fn
-        .parameters
-        .first()
-        .expect("ui.base should keep its props parameter");
     assert!(
-        matches!(&base_param.ty, TypeExpr::Ref { .. } | TypeExpr::Object(_)),
-        "ui.base should keep a structured props parameter, got {:?}",
-        base_param.ty
+        matches!(ui_prop, TypeExpr::IndexedAccess { .. }),
+        "requested member-path materialization should keep nested slot helpers on the requested route, got {:?}",
+        ui_prop
     );
 }
 
@@ -10616,6 +10631,7 @@ defineSlots<TabsSlots<T>>()
 
 #[test]
 fn component_meta_keeps_realistic_tabs_slot_bindings_with_dynamic_helper_intersection() {
+    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
     project
         .upsert_base(
@@ -10840,6 +10856,108 @@ defineSlots<TabsSlots<T>>()
         vec!["item", "index", "ui"],
         "realistic Tabs slot helpers should keep explicit content bindings, got {:?}",
         binding_names
+    );
+}
+
+// Regression: earlier, materializing a prop field whose type was a `Ref` to
+// an imported generic whose declaration body transitively cycled through a
+// sibling helper (DotPathKeys → DotPathKeys) sent the solver into a declaration
+// scope with full local visibility to every recursive helper.  The solver
+// would then grow the type arena to its hard ceiling during a single
+// projection call, consuming multi-GB of memory before terminating.
+//
+// This fixture narrows the reproduction down to the recursive generic itself,
+// without any of the slot / component-meta surface that the larger realistic
+// fixture carries.  If the owner-scope fallback ever starts walking back into
+// the declaration scope for a transitively recursive helper, this test will
+// either hang or OOM instead of completing in a few tens of milliseconds.
+#[test]
+fn component_meta_does_not_hang_on_transitively_recursive_generic_prop_helper() {
+    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/utils.ts",
+            r#"
+type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
+  ? true
+  : false
+
+type IsPlainObject<T> = IsPrimitive<T> extends true
+  ? false
+  : T extends readonly any[] | ((...args: any[]) => any)
+    ? false
+    : T extends object ? true
+      : false
+
+type DotPathKeys<T> = IsPlainObject<T> extends true
+  ? {
+      [K in keyof T & string]:
+      IsPlainObject<NonNullable<T[K]>> extends true
+        ? K | `${K}.${DotPathKeys<NonNullable<T[K]>>}`
+        : K
+    }[keyof T & string]
+  : never
+
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+
+export type GetItemKeys<
+  I,
+  T extends NestedItem<I> = NestedItem<I>
+> = (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts" generic="T extends { label?: string; nested?: { path?: string } }">
+import type { GetItemKeys } from './utils'
+
+defineProps<{
+  valueKey?: GetItemKeys<T>
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./utils".to_string(),
+            resolved_canonical_id: Some("/src/utils.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let started = std::time::Instant::now();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed.as_secs_f64() < 30.0,
+        "transitively-recursive generic prop helper should not hang \
+         (elapsed {:.2}s)",
+        elapsed.as_secs_f64()
+    );
+
+    let meta = crate::host_manage::extract_component_meta_from_resolved(
+        project.host(),
+        "/src/App.vue",
+        &resolved,
+        true,
+        None,
+    );
+    assert!(
+        meta.props.iter().any(|prop| prop.name == "valueKey"),
+        "valueKey prop should still be produced, got props {:?}",
+        meta.props
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -12926,6 +13044,182 @@ defineProps<{
 }
 
 #[test]
+fn barrel_imported_vue_union_field_stays_symbolic_in_evaluated_types() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TooltipRootProps {
+  delayDuration?: number
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Tooltip.vue",
+            r#"<script lang="ts">
+import type { TooltipRootProps } from 'reka-ui'
+
+export interface TooltipProps extends TooltipRootProps {
+  text?: string
+}
+
+export default {
+  name: 'Tooltip'
+}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/types.ts", "export * from './Tooltip.vue'\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { TooltipProps } from './types'
+
+defineProps<{
+  tooltip?: boolean | TooltipProps
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/types.ts",
+        vec![crate::types::DependencyResolution {
+            specifier: "./Tooltip.vue".to_string(),
+            resolved_canonical_id: Some("/Tooltip.vue".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    project.host().set_import_dependencies(
+        "/Tooltip.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let resolved = project
+        .host()
+        .resolve_component_meta("/App.vue", crate::types::ResolverMode::Expanded)
+        .expect("resolved component meta should exist");
+    let tooltip_field = resolved
+        .evaluated_types
+        .as_ref()
+        .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
+        .expect("expanded evaluated types should keep the tooltip prop");
+
+    let has_symbolic_tooltip = match &tooltip_field.r#type {
+        verter_semantic::analysis::type_expr::TypeExpr::Union(members) => {
+            members.iter().any(|member| {
+                matches!(
+                    member,
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "TooltipProps" && type_arguments.is_empty()
+                )
+            })
+        }
+        _ => false,
+    };
+
+    assert!(
+        has_symbolic_tooltip,
+        "barrel-imported vue unions should keep imported component prop refs symbolic in shallow field evaluation, got {:?}",
+        tooltip_field.r#type
+    );
+}
+
+#[test]
+fn public_component_meta_keeps_imported_props_refs_symbolic() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/node_modules/reka-ui/index.d.ts",
+            r#"
+export interface TooltipContentProps {
+  text?: string
+}
+
+export interface TooltipProviderProps {
+  delayDuration?: number
+  content?: TooltipContentProps
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { TooltipProviderProps } from 'reka-ui'
+
+defineProps<{
+  tooltip?: TooltipProviderProps
+}>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "reka-ui".to_string(),
+            resolved_canonical_id: Some("/node_modules/reka-ui/index.d.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let session = project.open_session().expect("session should open");
+    let declared = session
+        .get_declared_component_meta("/src/App.vue")
+        .expect("declared component meta query should succeed")
+        .expect("declared component meta should exist");
+    let full = session
+        .get_component_meta("/src/App.vue")
+        .expect("full component meta query should succeed")
+        .expect("full component meta should exist");
+
+    for (label, meta) in [("declared", declared), ("full", full)] {
+        let tooltip = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "tooltip")
+            .expect("tooltip prop should exist");
+        assert!(
+            matches!(
+                &tooltip.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "TooltipProviderProps" && type_arguments.is_empty()
+            ),
+            "{label} component meta should keep imported *Props refs symbolic instead of rematerializing them, got {:?}",
+            tooltip.type_expr
+        );
+        assert_eq!(
+            tooltip.raw_type.as_deref(),
+            Some("TooltipProviderProps"),
+            "{label} component meta should preserve the raw imported type text"
+        );
+    }
+}
+
+#[test]
 fn imported_utility_wrapped_field_stays_symbolic_in_evaluated_types() {
     let project = make_project();
     project
@@ -13546,10 +13840,11 @@ fn get_meta(
     canonical_id: &str,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let session = project.open_session().unwrap();
-    session
+    let meta = session
         .get_component_meta(canonical_id)
         .unwrap()
-        .expect("get_component_meta should return metadata")
+        .expect("get_component_meta should return metadata");
+    meta
 }
 
 #[test]
@@ -15813,6 +16108,7 @@ defineProps<Props>()
 
 #[test]
 fn get_component_meta_scales_past_previous_wide_import_budget_fixture() {
+    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
 
     let import_count = 2_005usize;

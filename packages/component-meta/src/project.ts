@@ -165,15 +165,22 @@ export class ComponentMetaSession {
       return undefined;
     }
 
+    const getDeclaredComponentMeta = (
+      this._session as {
+        getDeclaredComponentMeta?: ProjectSession["getDeclaredComponentMeta"];
+      }
+    ).getDeclaredComponentMeta;
     const getResolvedComponentMeta = (
       this._session as {
         getResolvedComponentMeta?: ProjectSession["getResolvedComponentMeta"];
       }
     ).getResolvedComponentMeta;
     const nativeMeta =
-      typeof getResolvedComponentMeta === "function"
-        ? getResolvedComponentMeta.call(this._session, abs)
-        : this._session.getComponentMeta(abs);
+      typeof getDeclaredComponentMeta === "function"
+        ? getDeclaredComponentMeta.call(this._session, abs)
+        : typeof getResolvedComponentMeta === "function"
+          ? getResolvedComponentMeta.call(this._session, abs)
+          : this._session.getComponentMeta(abs);
     if (!nativeMeta) {
       return undefined;
     }

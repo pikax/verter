@@ -69,13 +69,14 @@ fn request_source_performed_compute(source: RequestSource) -> bool {
 
 fn should_skip_imported_registry_seed_refresh(
     owner_canonical: &str,
-    declaration_source: &str,
+    declaration: &ResolvedTypeDeclaration,
     existing_expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
-    !declaration_source.is_empty()
-        && declaration_source != owner_canonical
-        && crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(existing_expr)
-        && !crate::resolver_core::component_meta_registry::component_meta_registry_has_non_object_top_level_surface(existing_expr)
+    crate::resolver_core::component_meta::imported_registry_seed_can_skip_refresh(
+        owner_canonical,
+        declaration,
+        existing_expr,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -485,8 +486,261 @@ fn imported_component_meta_materialization_scope(
     };
 
     let declaration = query_engine.resolve_type_declaration(owner_canonical, root_name);
-    (!declaration.canonical_source.is_empty() && declaration.canonical_source != owner_canonical)
-        .then_some(declaration.canonical_source)
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        owner_canonical.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        root_name.to_string()
+    } else {
+        declaration.resolved_name.clone()
+    };
+    let (final_scope, _) = query_engine
+        .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
+
+    (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
+}
+
+/// Returns `true` when `expr` is (or routes through) a named declaration whose
+/// own body reaches itself through one or more sibling declarations — a
+/// transitively recursive generic helper (e.g. `DotPathKeys` reached via
+/// `GetItemKeys`, or `NestedItem` reached via `Extract<NestedItem<T>, U>`).
+///
+/// Rescuing such a Ref in the declaration's scope restarts the solver in a
+/// scope with full local visibility to every sibling helper, which can exhaust
+/// the structural-expansion budgets during a single projection call even
+/// though the owner-scope result is already a good surface.
+fn expr_has_transitively_recursive_generic_root(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    let route_root_name = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        .map(|(root_name, _)| root_name);
+    let root_name = match expr {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if !type_arguments.is_empty() => name.to_string(),
+        _ => match route_root_name {
+            Some(name) => name,
+            None => return false,
+        },
+    };
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, root_name.as_str());
+    let scope_canonical = if declaration.canonical_source.is_empty() {
+        owner_canonical.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        root_name.clone()
+    } else {
+        declaration.resolved_name.clone()
+    };
+
+    named_decl_body_reaches_cycle(
+        query_engine,
+        scope_canonical.as_str(),
+        resolved_name.as_str(),
+    )
+}
+
+fn named_decl_body_reaches_cycle(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical: &str,
+    root_name: &str,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    fn has_complex_cycle_guard_surface(expr: &TypeExpr) -> bool {
+        match expr {
+            TypeExpr::Parenthesized(inner) => has_complex_cycle_guard_surface(inner),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                types.iter().any(has_complex_cycle_guard_surface)
+                    || types.iter().any(|ty| !matches!(ty, TypeExpr::Object(_)))
+            }
+            TypeExpr::Ref { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::Rest(_)
+            | TypeExpr::TemplateLiteral { .. }
+            | TypeExpr::TypeOf(_) => true,
+            TypeExpr::Object(_)
+            | TypeExpr::Function(_)
+            | TypeExpr::Array { .. }
+            | TypeExpr::Tuple { .. }
+            | TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. } => false,
+        }
+    }
+
+    fn collect_ref_names(expr: &TypeExpr, out: &mut rustc_hash::FxHashMap<String, bool>) {
+        let mut stack = vec![expr];
+
+        while let Some(current) = stack.pop() {
+            match current {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    out.entry(name.to_string())
+                        .and_modify(|has_args| *has_args |= !type_arguments.is_empty())
+                        .or_insert(!type_arguments.is_empty());
+                    for argument in type_arguments.iter().rev() {
+                        stack.push(argument);
+                    }
+                }
+                TypeExpr::Parenthesized(inner)
+                | TypeExpr::Array { element: inner, .. }
+                | TypeExpr::KeyOf(inner)
+                | TypeExpr::Rest(inner) => stack.push(inner),
+                TypeExpr::Tuple { elements, .. } => {
+                    for element in elements.iter().rev() {
+                        stack.push(&element.ty);
+                    }
+                }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    for ty in types.iter().rev() {
+                        stack.push(ty);
+                    }
+                }
+                TypeExpr::Object(object) => {
+                    for member in object.properties.iter().rev() {
+                        match member {
+                            ObjectMember::Property(property) => stack.push(&property.ty),
+                            ObjectMember::IndexSignature(signature) => {
+                                stack.push(&signature.value_type);
+                                stack.push(&signature.key_type);
+                            }
+                            ObjectMember::CallSignature(function)
+                            | ObjectMember::ConstructSignature(function) => {
+                                if let Some(return_type) = function.return_type.as_ref() {
+                                    stack.push(return_type);
+                                }
+                                for param in function.parameters.iter().rev() {
+                                    stack.push(&param.ty);
+                                }
+                            }
+                            ObjectMember::Method(method) => {
+                                if let Some(return_type) = method.function.return_type.as_ref() {
+                                    stack.push(return_type);
+                                }
+                                for param in method.function.parameters.iter().rev() {
+                                    stack.push(&param.ty);
+                                }
+                            }
+                        }
+                    }
+                }
+                TypeExpr::Function(function) => {
+                    if let Some(return_type) = function.return_type.as_ref() {
+                        stack.push(return_type);
+                    }
+                    for param in function.parameters.iter().rev() {
+                        stack.push(&param.ty);
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    stack.push(index);
+                    stack.push(object);
+                }
+                TypeExpr::Conditional {
+                    check,
+                    extends,
+                    true_type,
+                    false_type,
+                } => {
+                    stack.push(false_type);
+                    stack.push(true_type);
+                    stack.push(extends);
+                    stack.push(check);
+                }
+                TypeExpr::Mapped {
+                    source,
+                    name_type,
+                    value,
+                    ..
+                } => {
+                    stack.push(value);
+                    if let Some(name_type) = name_type.as_ref() {
+                        stack.push(name_type);
+                    }
+                    stack.push(source);
+                }
+                TypeExpr::TemplateLiteral { expressions, .. } => {
+                    for expression in expressions.iter().rev() {
+                        stack.push(expression);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // BFS through declaration bodies reachable from `root_name`. Any
+    // declaration body that references itself (directly or transitively via a
+    // sibling helper) marks the whole reachable graph as cyclic from
+    // `root_name`'s point of view. This is the "expensive-to-solve" signal.
+    let mut visited: rustc_hash::FxHashSet<(String, String)> = rustc_hash::FxHashSet::default();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((scope_canonical.to_string(), root_name.to_string(), false));
+    visited.insert((scope_canonical.to_string(), root_name.to_string()));
+    // Bounded traversal: if the reachable decl graph is larger than this we
+    // treat it as "complex enough that imported-scope rescue is not worth the
+    // risk" rather than keep walking.
+    let mut remaining_steps: u32 = 64;
+
+    while let Some((scope, name, path_has_complex_signal)) = queue.pop_front() {
+        if remaining_steps == 0 {
+            return path_has_complex_signal;
+        }
+        remaining_steps -= 1;
+
+        let Some(body) = query_engine.named_decl_body(scope.as_str(), name.as_str()) else {
+            continue;
+        };
+        let mut refs = rustc_hash::FxHashMap::default();
+        collect_ref_names(&body, &mut refs);
+        let body_has_complex_signal =
+            path_has_complex_signal || has_complex_cycle_guard_surface(&body);
+        for (ref_name, ref_has_type_args) in refs {
+            let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
+            // Direct self-reference at this decl: the body talks about
+            // itself through a complex helper surface, which is the
+            // canonical recursive-helper pattern (DotPathKeys, NestedItem,
+            // IsPlainObject, ...). Plain object self-member routes like
+            // `Props['to']` are intentionally excluded.
+            if ref_name == name && cycle_has_complex_signal {
+                return true;
+            }
+            let declaration =
+                query_engine.resolve_type_declaration(scope.as_str(), ref_name.as_str());
+            let next_scope = if declaration.canonical_source.is_empty() {
+                scope.clone()
+            } else {
+                declaration.canonical_source.clone()
+            };
+            let next_name = if declaration.resolved_name.is_empty() {
+                ref_name
+            } else {
+                declaration.resolved_name
+            };
+            let key = (next_scope.clone(), next_name.clone());
+            if visited.insert(key) {
+                queue.push_back((next_scope, next_name, cycle_has_complex_signal));
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
@@ -508,6 +762,17 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     else {
         return owner_materialized;
     };
+
+    // Skip the declaration-scope fallback for transitively-recursive helper
+    // generics (DotPathKeys → NestedItem → DotPathKeys etc.). Those restart
+    // the solver in a scope with full local visibility and can exhaust the
+    // structural budgets during a single projection call even after the owner
+    // scope already produced a good surface.
+    if owner_materialized != *expr
+        && expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
+    {
+        return owner_materialized;
+    }
 
     let imported_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
         expr,
@@ -531,8 +796,472 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     owner_materialized
 }
 
+fn type_expr_has_package_backed_root(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref { name, .. } => {
+            component_meta_ref_resolves_to_package(scope_canonical_id, name.as_ref(), query_engine)
+        }
+        TypeExpr::IndexedAccess { object, .. }
+        | TypeExpr::Array {
+            element: object, ..
+        }
+        | TypeExpr::KeyOf(object)
+        | TypeExpr::Rest(object)
+        | TypeExpr::Parenthesized(object) => {
+            type_expr_has_package_backed_root(object, scope_canonical_id, query_engine)
+        }
+        TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+            type_expr_has_package_backed_root(&element.ty, scope_canonical_id, query_engine)
+        }),
+        _ => false,
+    }
+}
+
+fn type_expr_has_package_backed_object_like_root(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    fn root_name(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> Option<String> {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match expr {
+            TypeExpr::Parenthesized(inner) => root_name(inner),
+            TypeExpr::IndexedAccess { object, .. } => root_name(object),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if matches!(name.as_ref(), "Pick" | "Omit") && type_arguments.len() == 2 => {
+                crate::resolver_core::component_meta_registry::component_meta_registry_ref_name(
+                    &type_arguments[0],
+                )
+                .map(str::to_string)
+            }
+            TypeExpr::Ref { name, .. } => Some(name.to_string()),
+            _ => None,
+        }
+    }
+
+    let Some(root_name) = root_name(expr) else {
+        return false;
+    };
+
+    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    if !declaration_scope.contains("/node_modules/") {
+        return false;
+    }
+
+    if matches!(
+        declaration.kind,
+        crate::resolver_core::ResolvedDeclarationKind::Interface
+            | crate::resolver_core::ResolvedDeclarationKind::Class
+    ) {
+        return true;
+    }
+
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        root_name.clone()
+    } else {
+        declaration.resolved_name
+    };
+    let (target_scope, target_name) = query_engine
+        .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
+    query_engine
+        .named_decl_body(target_scope.as_str(), target_name.as_str())
+        .is_some_and(|body| {
+            crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(&body)
+        })
+}
+
+fn type_expr_needs_member_route_materialization(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            type_arguments.is_empty()
+                && !component_meta_ref_resolves_to_package(
+                    scope_canonical_id,
+                    name.as_ref(),
+                    query_engine,
+                )
+        }
+        TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeParameter(_) => {
+            !expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
+                && !type_expr_has_package_backed_root(expr, scope_canonical_id, query_engine)
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element) => {
+            type_expr_needs_member_route_materialization(element, scope_canonical_id, query_engine)
+        }
+        TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+            type_expr_needs_member_route_materialization(
+                &element.ty,
+                scope_canonical_id,
+                query_engine,
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+    match expr {
+        TypeExpr::IndexedAccess { index, .. } => matches!(
+            index.as_ref(),
+            TypeExpr::Literal(LiteralValue::String(name)) if name.as_str() == "slots"
+        ),
+        TypeExpr::Parenthesized(inner) => type_expr_is_slots_member_route(inner),
+        _ => false,
+    }
+}
+
+pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    fn raw_member_path_leaf(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        path: &[String],
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        fn explicit_object_member<'a>(
+            expr: &'a TypeExpr,
+            member_name: &str,
+        ) -> Option<&'a TypeExpr> {
+            match expr {
+                TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
+                TypeExpr::Object(object) => {
+                    object.properties.iter().find_map(|member| match member {
+                        ObjectMember::Property(property) if property.name == member_name => {
+                            Some(&property.ty)
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            }
+        }
+
+        let mut leaf = expr;
+        for member_name in path {
+            leaf = explicit_object_member(leaf, member_name)?;
+        }
+        Some(leaf.clone())
+    }
+
+    let (root_name, route) = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))?;
+    let declaration = engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        root_name.clone()
+    } else {
+        declaration.resolved_name
+    };
+    let body = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())?;
+    let materialized_body = engine
+        .project_type_surface_expr(scope_canonical_id, root_name.as_str())
+        .or_else(|| engine.solve_scoped(scope_canonical_id, root_name.as_str()))
+        .or_else(|| {
+            let materialized = materialize_component_meta_type_expr_until_stable(
+                &body,
+                scope_canonical_id,
+                engine,
+            );
+            (materialized != body).then_some(materialized)
+        })?;
+
+    let leaf = match route {
+        crate::resolver_core::RouteDemand::Whole => materialized_body,
+        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => materialized_body,
+        crate::resolver_core::RouteDemand::MemberPath(path) => {
+            raw_member_path_leaf(&materialized_body, &path)?
+        }
+        crate::resolver_core::RouteDemand::Pick(ref members)
+        | crate::resolver_core::RouteDemand::Omit(ref members) => {
+            query_engine::project_route_surface(
+                engine,
+                scope_canonical_id,
+                &materialized_body,
+                &route,
+                members,
+            )?
+        }
+    };
+
+    let materialized_leaf =
+        materialize_component_meta_type_expr_until_stable(&leaf, scope_canonical_id, engine);
+    Some(if materialized_leaf != leaf {
+        materialized_leaf
+    } else {
+        leaf
+    })
+}
+
+mod query_engine {
+    use verter_semantic::analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
+
+    pub(crate) fn project_route_surface(
+        _engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        _scope_canonical_id: &str,
+        materialized_body: &TypeExpr,
+        route: &crate::resolver_core::RouteDemand,
+        members: &[String],
+    ) -> Option<TypeExpr> {
+        match route {
+            crate::resolver_core::RouteDemand::Pick(_) => {
+                let TypeExpr::Object(object) = materialized_body else {
+                    return None;
+                };
+                let members: rustc_hash::FxHashSet<_> =
+                    members.iter().map(String::as_str).collect();
+                Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                    properties: object
+                        .properties
+                        .iter()
+                        .filter(|member| match member {
+                            ObjectMember::Property(property) => {
+                                members.contains(property.name.as_str())
+                            }
+                            ObjectMember::Method(method) => members.contains(method.name.as_str()),
+                            _ => false,
+                        })
+                        .cloned()
+                        .collect(),
+                })))
+            }
+            crate::resolver_core::RouteDemand::Omit(_) => {
+                let TypeExpr::Object(object) = materialized_body else {
+                    return None;
+                };
+                let members: rustc_hash::FxHashSet<_> =
+                    members.iter().map(String::as_str).collect();
+                Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                    properties: object
+                        .properties
+                        .iter()
+                        .filter(|member| match member {
+                            ObjectMember::Property(property) => {
+                                !members.contains(property.name.as_str())
+                            }
+                            ObjectMember::Method(method) => !members.contains(method.name.as_str()),
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect(),
+                })))
+            }
+            crate::resolver_core::RouteDemand::Whole => Some(materialized_body.clone()),
+            crate::resolver_core::RouteDemand::MemberPath(path) => {
+                let leaf = super::component_meta_registry_raw_member_path_surface(
+                    materialized_body,
+                    path,
+                )?;
+                Some(path.iter().rfold(leaf, |child, member| {
+                    TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: vec![ObjectMember::Property(ObjectProperty {
+                            name: member.clone(),
+                            ty: child,
+                            optional: true,
+                            readonly: false,
+                        })],
+                    }))
+                }))
+            }
+        }
+    }
+}
+
+fn parsed_field_raw_type(
+    field: &verter_semantic::analysis::type_expand::ExpandedField,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    field
+        .raw_type
+        .as_deref()
+        .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+        .filter(|expr| !expr.is_unknown())
+}
+
+fn top_level_imported_ref_can_stay_symbolic(
+    scope_canonical_id: &str,
+    name: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        name.to_string()
+    } else {
+        declaration.resolved_name.clone()
+    };
+    let (target_scope, target_name) = query_engine
+        .resolve_final_prepared_type_target(declaration_scope.as_str(), declaration_name.as_str());
+    let target_declaration = query_engine
+        .resolve_direct_prepared_type_declaration_metadata(
+            target_scope.as_str(),
+            target_name.as_str(),
+        )
+        .unwrap_or(declaration);
+
+    if matches!(
+        target_declaration.kind,
+        crate::resolver_core::ResolvedDeclarationKind::Interface
+            | crate::resolver_core::ResolvedDeclarationKind::Class
+    ) {
+        return true;
+    }
+
+    query_engine
+        .named_decl_body(target_scope.as_str(), target_name.as_str())
+        .is_some_and(|body| {
+            component_meta_registry_should_keep_raw_symbolic_non_object_alias(
+                &body,
+                target_scope.as_str(),
+                query_engine,
+            )
+        })
+}
+
+fn field_should_preserve_shallow_symbolic_raw_type(
+    scope_canonical_id: &str,
+    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    let Some(raw) = parsed_field_raw_type(field) else {
+        return false;
+    };
+
+    match &raw {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => top_level_imported_ref_can_stay_symbolic(
+            scope_canonical_id,
+            name.as_ref(),
+            query_engine,
+        ),
+        _ if component_meta_registry_public_utility_route(&raw).is_some() => {
+            type_expr_has_package_backed_object_like_root(&raw, scope_canonical_id, query_engine)
+        }
+        verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. } => {
+            type_expr_has_package_backed_object_like_root(&raw, scope_canonical_id, query_engine)
+        }
+        verter_semantic::analysis::type_expr::TypeExpr::TypeOf(_)
+        | verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_) => false,
+        _ => {
+            query_engine
+                .owner_engine_mut()
+                .should_preserve_shallow_field_expr(&raw)
+                && !type_expr_needs_member_route_materialization(
+                    &raw,
+                    scope_canonical_id,
+                    query_engine,
+                )
+        }
+    }
+}
+
+fn define_props_member_can_stay_symbolic_without_rescue(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => define_props_member_can_stay_symbolic_without_rescue(
+            inner,
+            scope_canonical_id,
+            query_engine,
+        ),
+        TypeExpr::Tuple { elements, .. } => elements.iter().all(|element| {
+            define_props_member_can_stay_symbolic_without_rescue(
+                &element.ty,
+                scope_canonical_id,
+                query_engine,
+            )
+        }),
+        TypeExpr::Union(types) => types.iter().all(|ty| {
+            define_props_member_can_stay_symbolic_without_rescue(
+                ty,
+                scope_canonical_id,
+                query_engine,
+            )
+        }),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
+            let declaration_scope = if declaration.canonical_source.is_empty() {
+                scope_canonical_id
+            } else {
+                declaration.canonical_source.as_str()
+            };
+            let resolved_name = if declaration.resolved_name.is_empty() {
+                name.as_ref()
+            } else {
+                declaration.resolved_name.as_str()
+            };
+            query_engine
+                .named_decl_body(declaration_scope, resolved_name)
+                .is_none()
+                || (declaration_scope != scope_canonical_id
+                    && top_level_imported_ref_can_stay_symbolic(
+                        scope_canonical_id,
+                        name.as_ref(),
+                        query_engine,
+                    ))
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::Function(_) => true,
+        _ => false,
+    }
+}
+
 fn materialize_component_meta_field_types(
     scope_canonical_id: &str,
+    snapshot: &FileAnalysisSnapshot,
+    eval_source: &str,
     resolved_macros: &[ResolvedMacroMeta],
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -546,9 +1275,20 @@ fn materialize_component_meta_field_types(
             return;
         }
 
-        let rescued = materialize_component_meta_type_expr_until_stable(
+        let materialize_scope_canonical_id = imported_component_meta_materialization_scope(
             &field.r#type,
             scope_canonical_id,
+            query_engine,
+        )
+        .or_else(|| {
+            parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                imported_component_meta_materialization_scope(raw, scope_canonical_id, query_engine)
+            })
+        })
+        .unwrap_or_else(|| scope_canonical_id.to_string());
+        let rescued = materialize_component_meta_type_expr_until_stable(
+            &field.r#type,
+            materialize_scope_canonical_id.as_str(),
             query_engine,
         );
         if rescued != field.r#type {
@@ -556,28 +1296,987 @@ fn materialize_component_meta_field_types(
         }
     }
 
+    fn route_leaf_beats_wrapper_object(
+        candidate: &verter_semantic::analysis::type_expr::TypeExpr,
+        current: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        let TypeExpr::Object(object) = current else {
+            return false;
+        };
+        let [ObjectMember::Property(property)] = object.properties.as_slice() else {
+            return false;
+        };
+        property.ty == *candidate
+    }
+
+    fn type_expr_contains_named_recursive_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        target_name: &str,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        match expr {
+            TypeExpr::RecursiveRef { name, .. } => name.as_ref() == target_name,
+            TypeExpr::Parenthesized(inner)
+            | TypeExpr::Array { element: inner, .. }
+            | TypeExpr::KeyOf(inner)
+            | TypeExpr::Rest(inner) => type_expr_contains_named_recursive_ref(inner, target_name),
+            TypeExpr::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| type_expr_contains_named_recursive_ref(&element.ty, target_name)),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| type_expr_contains_named_recursive_ref(ty, target_name)),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                ObjectMember::Property(property) => {
+                    type_expr_contains_named_recursive_ref(&property.ty, target_name)
+                }
+                ObjectMember::Method(method) => {
+                    method.function.parameters.iter().any(|parameter| {
+                        type_expr_contains_named_recursive_ref(&parameter.ty, target_name)
+                    }) || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(|return_type| {
+                            type_expr_contains_named_recursive_ref(return_type, target_name)
+                        })
+                }
+                ObjectMember::IndexSignature(signature) => {
+                    type_expr_contains_named_recursive_ref(&signature.key_type, target_name)
+                        || type_expr_contains_named_recursive_ref(
+                            &signature.value_type,
+                            target_name,
+                        )
+                }
+                ObjectMember::CallSignature(function)
+                | ObjectMember::ConstructSignature(function) => {
+                    function.parameters.iter().any(|parameter| {
+                        type_expr_contains_named_recursive_ref(&parameter.ty, target_name)
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        type_expr_contains_named_recursive_ref(return_type, target_name)
+                    })
+                }
+            }),
+            TypeExpr::Function(function) => {
+                function.parameters.iter().any(|parameter| {
+                    type_expr_contains_named_recursive_ref(&parameter.ty, target_name)
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    type_expr_contains_named_recursive_ref(return_type, target_name)
+                })
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                type_expr_contains_named_recursive_ref(object, target_name)
+                    || type_expr_contains_named_recursive_ref(index, target_name)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                type_expr_contains_named_recursive_ref(check, target_name)
+                    || type_expr_contains_named_recursive_ref(extends, target_name)
+                    || type_expr_contains_named_recursive_ref(true_type, target_name)
+                    || type_expr_contains_named_recursive_ref(false_type, target_name)
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                type_expr_contains_named_recursive_ref(source, target_name)
+                    || type_expr_contains_named_recursive_ref(value, target_name)
+                    || name_type.as_deref().is_some_and(|name_type| {
+                        type_expr_contains_named_recursive_ref(name_type, target_name)
+                    })
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => expressions
+                .iter()
+                .any(|expr| type_expr_contains_named_recursive_ref(expr, target_name)),
+            TypeExpr::Ref { type_arguments, .. } => type_arguments
+                .iter()
+                .any(|arg| type_expr_contains_named_recursive_ref(arg, target_name)),
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::Unknown { .. } => false,
+        }
+    }
+
+    fn expand_named_recursive_refs_one_layer(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        target_name: &str,
+        replacement: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        use std::sync::Arc;
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        match expr {
+            TypeExpr::RecursiveRef { name, .. } if name.as_ref() == target_name => {
+                replacement.clone()
+            }
+            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
+                expand_named_recursive_refs_one_layer(inner, target_name, replacement),
+            )),
+            TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                element: Arc::new(expand_named_recursive_refs_one_layer(
+                    element,
+                    target_name,
+                    replacement,
+                )),
+                readonly: *readonly,
+            },
+            TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
+                expand_named_recursive_refs_one_layer(inner, target_name, replacement),
+            )),
+            TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
+                expand_named_recursive_refs_one_layer(inner, target_name, replacement),
+            )),
+            TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+                elements: elements
+                    .iter()
+                    .map(
+                        |element| verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: expand_named_recursive_refs_one_layer(
+                                &element.ty,
+                                target_name,
+                                replacement,
+                            ),
+                            optional: element.optional,
+                            rest: element.rest,
+                        },
+                    )
+                    .collect(),
+                readonly: *readonly,
+            },
+            TypeExpr::Union(types) => TypeExpr::Union(
+                types
+                    .iter()
+                    .map(|ty| expand_named_recursive_refs_one_layer(ty, target_name, replacement))
+                    .collect(),
+            ),
+            TypeExpr::Intersection(types) => TypeExpr::Intersection(
+                types
+                    .iter()
+                    .map(|ty| expand_named_recursive_refs_one_layer(ty, target_name, replacement))
+                    .collect(),
+            ),
+            TypeExpr::Object(object) => {
+                let mut next = object.as_ref().clone();
+                for member in &mut next.properties {
+                    match member {
+                        ObjectMember::Property(property) => {
+                            property.ty = expand_named_recursive_refs_one_layer(
+                                &property.ty,
+                                target_name,
+                                replacement,
+                            );
+                        }
+                        ObjectMember::Method(method) => {
+                            for parameter in &mut method.function.parameters {
+                                parameter.ty = expand_named_recursive_refs_one_layer(
+                                    &parameter.ty,
+                                    target_name,
+                                    replacement,
+                                );
+                            }
+                            if let Some(return_type) = method.function.return_type.as_mut() {
+                                *return_type = Arc::new(expand_named_recursive_refs_one_layer(
+                                    return_type,
+                                    target_name,
+                                    replacement,
+                                ));
+                            }
+                        }
+                        ObjectMember::IndexSignature(signature) => {
+                            signature.key_type = expand_named_recursive_refs_one_layer(
+                                &signature.key_type,
+                                target_name,
+                                replacement,
+                            );
+                            signature.value_type = expand_named_recursive_refs_one_layer(
+                                &signature.value_type,
+                                target_name,
+                                replacement,
+                            );
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            for parameter in &mut function.parameters {
+                                parameter.ty = expand_named_recursive_refs_one_layer(
+                                    &parameter.ty,
+                                    target_name,
+                                    replacement,
+                                );
+                            }
+                            if let Some(return_type) = function.return_type.as_mut() {
+                                *return_type = Arc::new(expand_named_recursive_refs_one_layer(
+                                    return_type,
+                                    target_name,
+                                    replacement,
+                                ));
+                            }
+                        }
+                    }
+                }
+                TypeExpr::Object(Arc::new(next))
+            }
+            TypeExpr::Function(function) => {
+                let mut next = function.as_ref().clone();
+                for parameter in &mut next.parameters {
+                    parameter.ty = expand_named_recursive_refs_one_layer(
+                        &parameter.ty,
+                        target_name,
+                        replacement,
+                    );
+                }
+                if let Some(return_type) = next.return_type.as_mut() {
+                    *return_type = Arc::new(expand_named_recursive_refs_one_layer(
+                        return_type,
+                        target_name,
+                        replacement,
+                    ));
+                }
+                TypeExpr::Function(Arc::new(next))
+            }
+            TypeExpr::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
+                object: Arc::new(expand_named_recursive_refs_one_layer(
+                    object,
+                    target_name,
+                    replacement,
+                )),
+                index: Arc::new(expand_named_recursive_refs_one_layer(
+                    index,
+                    target_name,
+                    replacement,
+                )),
+            },
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => TypeExpr::Conditional {
+                check: Arc::new(expand_named_recursive_refs_one_layer(
+                    check,
+                    target_name,
+                    replacement,
+                )),
+                extends: Arc::new(expand_named_recursive_refs_one_layer(
+                    extends,
+                    target_name,
+                    replacement,
+                )),
+                true_type: Arc::new(expand_named_recursive_refs_one_layer(
+                    true_type,
+                    target_name,
+                    replacement,
+                )),
+                false_type: Arc::new(expand_named_recursive_refs_one_layer(
+                    false_type,
+                    target_name,
+                    replacement,
+                )),
+            },
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                optional,
+                readonly,
+                name_type,
+                value,
+            } => TypeExpr::Mapped {
+                parameter: parameter.clone(),
+                source: Arc::new(expand_named_recursive_refs_one_layer(
+                    source,
+                    target_name,
+                    replacement,
+                )),
+                optional: *optional,
+                readonly: *readonly,
+                name_type: name_type.as_ref().map(|name_type| {
+                    Arc::new(expand_named_recursive_refs_one_layer(
+                        name_type,
+                        target_name,
+                        replacement,
+                    ))
+                }),
+                value: Arc::new(expand_named_recursive_refs_one_layer(
+                    value,
+                    target_name,
+                    replacement,
+                )),
+            },
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => TypeExpr::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: expressions
+                    .iter()
+                    .map(|expr| {
+                        expand_named_recursive_refs_one_layer(expr, target_name, replacement)
+                    })
+                    .collect(),
+            },
+            TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Ref { .. }
+            | TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::Unknown { .. } => expr.clone(),
+        }
+    }
+
+    fn rewrite_named_self_refs_to_recursive_ref(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        target_name: &str,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        use std::sync::Arc;
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        match expr {
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if name.as_ref() == target_name && type_arguments.is_empty() => {
+                TypeExpr::recursive_ref(target_name, Vec::new())
+            }
+            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
+                rewrite_named_self_refs_to_recursive_ref(inner, target_name),
+            )),
+            TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                element: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    element,
+                    target_name,
+                )),
+                readonly: *readonly,
+            },
+            TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
+                rewrite_named_self_refs_to_recursive_ref(inner, target_name),
+            )),
+            TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
+                rewrite_named_self_refs_to_recursive_ref(inner, target_name),
+            )),
+            TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+                elements: elements
+                    .iter()
+                    .map(
+                        |element| verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: rewrite_named_self_refs_to_recursive_ref(&element.ty, target_name),
+                            optional: element.optional,
+                            rest: element.rest,
+                        },
+                    )
+                    .collect(),
+                readonly: *readonly,
+            },
+            TypeExpr::Union(types) => TypeExpr::Union(
+                types
+                    .iter()
+                    .map(|ty| rewrite_named_self_refs_to_recursive_ref(ty, target_name))
+                    .collect(),
+            ),
+            TypeExpr::Intersection(types) => TypeExpr::Intersection(
+                types
+                    .iter()
+                    .map(|ty| rewrite_named_self_refs_to_recursive_ref(ty, target_name))
+                    .collect(),
+            ),
+            TypeExpr::Object(object) => {
+                let mut next = object.as_ref().clone();
+                for member in &mut next.properties {
+                    match member {
+                        ObjectMember::Property(property) => {
+                            property.ty =
+                                rewrite_named_self_refs_to_recursive_ref(&property.ty, target_name);
+                        }
+                        ObjectMember::Method(method) => {
+                            for parameter in &mut method.function.parameters {
+                                parameter.ty = rewrite_named_self_refs_to_recursive_ref(
+                                    &parameter.ty,
+                                    target_name,
+                                );
+                            }
+                            if let Some(return_type) = method.function.return_type.as_mut() {
+                                *return_type = Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                                    return_type,
+                                    target_name,
+                                ));
+                            }
+                        }
+                        ObjectMember::IndexSignature(signature) => {
+                            signature.key_type = rewrite_named_self_refs_to_recursive_ref(
+                                &signature.key_type,
+                                target_name,
+                            );
+                            signature.value_type = rewrite_named_self_refs_to_recursive_ref(
+                                &signature.value_type,
+                                target_name,
+                            );
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            for parameter in &mut function.parameters {
+                                parameter.ty = rewrite_named_self_refs_to_recursive_ref(
+                                    &parameter.ty,
+                                    target_name,
+                                );
+                            }
+                            if let Some(return_type) = function.return_type.as_mut() {
+                                *return_type = Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                                    return_type,
+                                    target_name,
+                                ));
+                            }
+                        }
+                    }
+                }
+                TypeExpr::Object(Arc::new(next))
+            }
+            TypeExpr::Function(function) => {
+                let mut next = function.as_ref().clone();
+                for parameter in &mut next.parameters {
+                    parameter.ty =
+                        rewrite_named_self_refs_to_recursive_ref(&parameter.ty, target_name);
+                }
+                if let Some(return_type) = next.return_type.as_mut() {
+                    *return_type = Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                        return_type,
+                        target_name,
+                    ));
+                }
+                TypeExpr::Function(Arc::new(next))
+            }
+            TypeExpr::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
+                object: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    object,
+                    target_name,
+                )),
+                index: Arc::new(rewrite_named_self_refs_to_recursive_ref(index, target_name)),
+            },
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => TypeExpr::Conditional {
+                check: Arc::new(rewrite_named_self_refs_to_recursive_ref(check, target_name)),
+                extends: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    extends,
+                    target_name,
+                )),
+                true_type: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    true_type,
+                    target_name,
+                )),
+                false_type: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    false_type,
+                    target_name,
+                )),
+            },
+            TypeExpr::Mapped {
+                parameter,
+                source,
+                value,
+                optional,
+                readonly,
+                name_type,
+            } => TypeExpr::Mapped {
+                parameter: parameter.clone(),
+                source: Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                    source,
+                    target_name,
+                )),
+                value: Arc::new(rewrite_named_self_refs_to_recursive_ref(value, target_name)),
+                optional: *optional,
+                readonly: *readonly,
+                name_type: name_type.as_ref().map(|name_type| {
+                    Arc::new(rewrite_named_self_refs_to_recursive_ref(
+                        name_type,
+                        target_name,
+                    ))
+                }),
+            },
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => TypeExpr::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: expressions
+                    .iter()
+                    .map(|expr| rewrite_named_self_refs_to_recursive_ref(expr, target_name))
+                    .collect(),
+            },
+            TypeExpr::Ref { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::Unknown { .. } => expr.clone(),
+        }
+    }
+
+    fn indexed_access_alias_body_transport(
+        scope_canonical_id: &str,
+        raw: &verter_semantic::analysis::type_expr::TypeExpr,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        let (root_symbol, route) = component_meta_registry_public_indexed_access_route(raw)?;
+        let crate::resolver_core::RouteDemand::MemberPath(path) = route else {
+            return None;
+        };
+        let [member_name] = path.as_slice() else {
+            return None;
+        };
+
+        let member_ty = query_engine.prepared_member_raw_type(
+            scope_canonical_id,
+            root_symbol.as_str(),
+            member_name,
+        )?;
+        let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = member_ty
+        else {
+            return None;
+        };
+        if !type_arguments.is_empty() {
+            return None;
+        }
+
+        let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name.as_ref());
+        let declaration_scope = if declaration.canonical_source.is_empty() {
+            scope_canonical_id.to_string()
+        } else {
+            declaration.canonical_source
+        };
+        let declaration_name = if declaration.resolved_name.is_empty() {
+            name.as_ref().to_string()
+        } else {
+            declaration.resolved_name
+        };
+        let (target_scope, target_name) = query_engine.resolve_final_prepared_type_target(
+            declaration_scope.as_str(),
+            declaration_name.as_str(),
+        );
+        let body = query_engine.named_decl_body(target_scope.as_str(), target_name.as_str())?;
+        let replacement = rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str());
+        matches!(
+            replacement,
+            verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+        )
+        .then_some(replacement)
+    }
+
+    let params =
+        verter_semantic::analysis::type_eval_build::collect_define_macro_type_params(eval_source);
+    let mut prop_member_routes = rustc_hash::FxHashMap::<
+        String,
+        Vec<verter_semantic::analysis::type_expr::TypeExpr>,
+    >::default();
     let mut slot_binding_scope_hints = rustc_hash::FxHashMap::<String, Vec<String>>::default();
-    for resolved in resolved_macros.iter().filter(|resolved| {
-        resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
-    }) {
-        let declaration_scope = resolved.declaration.canonical_source.as_str();
-        if declaration_scope.is_empty() {
+    let mut define_props_index = 0usize;
+    for (macro_index, mac) in snapshot.macros.iter().enumerate() {
+        if !mac.is_type_based {
             continue;
         }
-        for slot in &resolved.slots {
-            for binding in &slot.bindings {
-                let entry = slot_binding_scope_hints
-                    .entry(format!("{}.{}", slot.name, binding.name))
-                    .or_default();
-                if !entry.iter().any(|scope| scope == declaration_scope) {
-                    entry.push(declaration_scope.to_string());
+
+        match mac.kind {
+            verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
+                if let Some(lowered) = params.define_props.get(define_props_index) {
+                    let mut prop_names = rustc_hash::FxHashSet::<String>::default();
+                    prop_names.extend(mac.prop_fields.iter().map(|field| field.name.clone()));
+                    for resolved in resolved_macros.iter().filter(|resolved| {
+                        resolved.macro_index == macro_index
+                            && resolved.macro_kind
+                                == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                    }) {
+                        prop_names.extend(resolved.props.iter().map(|field| field.name.clone()));
+                    }
+                    for prop_name in prop_names {
+                        prop_member_routes
+                            .entry(prop_name)
+                            .or_default()
+                            .push(lowered.clone());
+                    }
+                }
+                define_props_index += 1;
+            }
+            verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                for resolved in resolved_macros.iter().filter(|resolved| {
+                    resolved.macro_index == macro_index
+                        && resolved.macro_kind
+                            == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+                }) {
+                    let declaration_scope = resolved.declaration.canonical_source.as_str();
+                    if declaration_scope.is_empty() {
+                        continue;
+                    }
+                    for slot in &resolved.slots {
+                        for binding in &slot.bindings {
+                            let entry = slot_binding_scope_hints
+                                .entry(format!("{}.{}", slot.name, binding.name))
+                                .or_default();
+                            if !entry.iter().any(|scope| scope == declaration_scope) {
+                                entry.push(declaration_scope.to_string());
+                            }
+                        }
+                    }
                 }
             }
+            _ => {}
         }
     }
 
     for field in &mut evaluated_types.props {
+        let preserve_raw = field_should_preserve_shallow_symbolic_raw_type(
+            scope_canonical_id,
+            field,
+            query_engine,
+        );
+        if crate::host_manage::component_meta_debug_enabled() {
+            crate::host_manage::component_meta_debug(format!(
+                "FIELD_MATERIALIZE owner={} field={} raw={:?} current={:?} preserve_raw={}",
+                scope_canonical_id, field.name, field.raw_type, field.r#type, preserve_raw,
+            ));
+        }
+        if preserve_raw {
+            continue;
+        }
+        if let Some(candidate) = evaluated_types
+            .define_props
+            .iter()
+            .flat_map(|define_props| define_props.result.value.properties.iter())
+            .find(|property| property.name == field.name)
+            .map(|property| property.ty.clone())
+        {
+            if component_meta_type_expr_improves(&candidate, &field.r#type)
+                && !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
+            {
+                field.r#type = candidate;
+            }
+        }
         rescue_field(scope_canonical_id, field, query_engine);
+        let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+            type_expr_needs_member_route_materialization(raw, scope_canonical_id, query_engine)
+                || component_meta_registry_public_utility_route(raw).is_some()
+        });
+        let raw_is_unpreserved_top_level_ref =
+            parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+                matches!(
+                    raw,
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
+                        if type_arguments.is_empty()
+                )
+            });
+        if crate::host_manage::component_meta_debug_enabled() {
+            crate::host_manage::component_meta_debug(format!(
+                "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
+                scope_canonical_id,
+                field.name,
+                field.r#type,
+                raw_needs_member_route,
+                raw_is_unpreserved_top_level_ref,
+                type_expr_needs_member_route_materialization(
+                    &field.r#type,
+                    scope_canonical_id,
+                    query_engine,
+                ),
+            ));
+        }
+        if !(raw_needs_member_route
+            || raw_is_unpreserved_top_level_ref
+            || type_expr_needs_member_route_materialization(
+                &field.r#type,
+                scope_canonical_id,
+                query_engine,
+            ))
+        {
+            continue;
+        }
+
+        if let Some(routes) = prop_member_routes.get(&field.name).cloned() {
+            for lowered in routes {
+                let rescued = materialize_component_meta_macro_shape_member_type_expr(
+                    &lowered,
+                    field.name.as_str(),
+                    &field.r#type,
+                    scope_canonical_id,
+                    query_engine,
+                );
+                if component_meta_type_expr_improves(&rescued, &field.r#type) {
+                    field.r#type = rescued;
+                }
+            }
+        }
+        let materialize_scope_canonical_id = imported_component_meta_materialization_scope(
+            &field.r#type,
+            scope_canonical_id,
+            query_engine,
+        )
+        .or_else(|| {
+            parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                imported_component_meta_materialization_scope(raw, scope_canonical_id, query_engine)
+            })
+        })
+        .unwrap_or_else(|| scope_canonical_id.to_string());
+        let raw_route_root_is_package_backed =
+            parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
+                type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
+            });
+        if raw_needs_member_route && !raw_route_root_is_package_backed {
+            let mut owner_alias_route_rescued = false;
+            if let Some(owner_alias_route_surface) =
+                parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                    materialize_member_route_from_alias_body_in_owner_scope(
+                        raw,
+                        scope_canonical_id,
+                        query_engine,
+                    )
+                })
+            {
+                let owner_alias_route_surface = materialize_component_meta_member_surface_expr(
+                    &owner_alias_route_surface,
+                    materialize_scope_canonical_id.as_str(),
+                    query_engine,
+                    false,
+                );
+                if component_meta_type_expr_improves(&owner_alias_route_surface, &field.r#type)
+                    || route_leaf_beats_wrapper_object(&owner_alias_route_surface, &field.r#type)
+                {
+                    field.r#type = owner_alias_route_surface;
+                    owner_alias_route_rescued = true;
+                }
+            }
+            if !owner_alias_route_rescued {
+                let routed_surface = materialize_component_meta_member_surface_expr(
+                    &field.r#type,
+                    materialize_scope_canonical_id.as_str(),
+                    query_engine,
+                    true,
+                );
+                if component_meta_type_expr_improves(&routed_surface, &field.r#type) {
+                    field.r#type = routed_surface;
+                }
+                if let Some(raw_route_surface) =
+                    parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                        query_engine
+                            .project_expr_surface_expr(materialize_scope_canonical_id.as_str(), raw)
+                    })
+                {
+                    let raw_route_surface = materialize_component_meta_member_surface_expr(
+                        &raw_route_surface,
+                        materialize_scope_canonical_id.as_str(),
+                        query_engine,
+                        true,
+                    );
+                    if component_meta_type_expr_improves(&raw_route_surface, &field.r#type)
+                        || route_leaf_beats_wrapper_object(&raw_route_surface, &field.r#type)
+                    {
+                        field.r#type = raw_route_surface;
+                    }
+                }
+                if let Some(projected_route_surface) = query_engine.project_expr_surface_expr(
+                    materialize_scope_canonical_id.as_str(),
+                    &field.r#type,
+                ) {
+                    let projected_route_surface = materialize_component_meta_member_surface_expr(
+                        &projected_route_surface,
+                        materialize_scope_canonical_id.as_str(),
+                        query_engine,
+                        false,
+                    );
+                    if component_meta_type_expr_improves(&projected_route_surface, &field.r#type)
+                        || route_leaf_beats_wrapper_object(&projected_route_surface, &field.r#type)
+                    {
+                        field.r#type = projected_route_surface;
+                    }
+                }
+            }
+        }
+        let rescued = match &field.r#type {
+            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                let declaration = query_engine.resolve_type_declaration(
+                    materialize_scope_canonical_id.as_str(),
+                    name.as_ref(),
+                );
+                let declaration_scope = if declaration.canonical_source.is_empty() {
+                    materialize_scope_canonical_id.clone()
+                } else {
+                    declaration.canonical_source.clone()
+                };
+                let declaration_name = if declaration.resolved_name.is_empty() {
+                    name.as_ref().to_string()
+                } else {
+                    declaration.resolved_name.clone()
+                };
+                let (target_scope, target_name) = query_engine.resolve_final_prepared_type_target(
+                    declaration_scope.as_str(),
+                    declaration_name.as_str(),
+                );
+                let rescued = query_engine
+                    .named_decl_body(target_scope.as_str(), target_name.as_str())
+                    .map(|body| {
+                        rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str())
+                    })
+                    .or_else(|| {
+                        query_engine.solve_scoped(target_scope.as_str(), target_name.as_str())
+                    })
+                    .unwrap_or_else(|| {
+                        materialize_component_meta_type_expr_until_stable(
+                            &field.r#type,
+                            materialize_scope_canonical_id.as_str(),
+                            query_engine,
+                        )
+                    });
+                if crate::host_manage::component_meta_debug_enabled() {
+                    crate::host_manage::component_meta_debug(format!(
+                        "FIELD_MATERIALIZE_REF owner={} field={} current_ref={} materialize_scope={} target_scope={} target_name={} rescued={:?}",
+                        scope_canonical_id,
+                        field.name,
+                        name,
+                        materialize_scope_canonical_id,
+                        target_scope,
+                        target_name,
+                        rescued,
+                    ));
+                }
+                rescued
+            }
+            _ => materialize_component_meta_type_expr_until_stable(
+                &field.r#type,
+                materialize_scope_canonical_id.as_str(),
+                query_engine,
+            ),
+        };
+        if component_meta_type_expr_improves(&rescued, &field.r#type) {
+            field.r#type = rescued;
+        }
+        if let Some(verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        }) = parsed_field_raw_type(field)
+        {
+            if type_arguments.is_empty() {
+                let declaration =
+                    query_engine.resolve_type_declaration(scope_canonical_id, name.as_ref());
+                let declaration_scope = if declaration.canonical_source.is_empty() {
+                    scope_canonical_id.to_string()
+                } else {
+                    declaration.canonical_source
+                };
+                let declaration_name = if declaration.resolved_name.is_empty() {
+                    name.as_ref().to_string()
+                } else {
+                    declaration.resolved_name
+                };
+                let (target_scope, target_name) = query_engine.resolve_final_prepared_type_target(
+                    declaration_scope.as_str(),
+                    declaration_name.as_str(),
+                );
+                if let Some(body) =
+                    query_engine.named_decl_body(target_scope.as_str(), target_name.as_str())
+                {
+                    let replacement =
+                        rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str());
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "FIELD_RAW_REF_BODY owner={} field={} target_scope={} target_name={} body={:?} replacement={:?}",
+                            scope_canonical_id,
+                            field.name,
+                            target_scope,
+                            target_name,
+                            body,
+                            replacement,
+                        ));
+                    }
+                    if matches!(
+                        replacement,
+                        verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                            | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+                    ) && !matches!(
+                        field.r#type,
+                        verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                            | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+                    ) {
+                        field.r#type = replacement;
+                        continue;
+                    }
+                    if type_expr_contains_named_recursive_ref(&field.r#type, target_name.as_str()) {
+                        let expanded = expand_named_recursive_refs_one_layer(
+                            &field.r#type,
+                            target_name.as_str(),
+                            &replacement,
+                        );
+                        if expanded != field.r#type {
+                            field.r#type = expanded;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+            if let Some(replacement) =
+                indexed_access_alias_body_transport(scope_canonical_id, raw, query_engine)
+            {
+                if !matches!(
+                    field.r#type,
+                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_)
+                ) {
+                    field.r#type = replacement;
+                }
+            }
+        }
+        if crate::host_manage::component_meta_debug_enabled() {
+            crate::host_manage::component_meta_debug(format!(
+                "FIELD_MATERIALIZE_FINAL owner={} field={} final={:?}",
+                scope_canonical_id, field.name, field.r#type,
+            ));
+        }
+    }
+    let finalized_prop_types = evaluated_types
+        .props
+        .iter()
+        .map(|field| (field.name.clone(), field.r#type.clone()))
+        .collect::<rustc_hash::FxHashMap<_, _>>();
+    for define_props in &mut evaluated_types.define_props {
+        for property in &mut define_props.result.value.properties {
+            if let Some(finalized) = finalized_prop_types.get(&property.name) {
+                property.ty = finalized.clone();
+            }
+        }
+        if crate::host_manage::component_meta_debug_enabled() {
+            crate::host_manage::component_meta_debug(format!(
+                "FIELD_DEFINE_PROPS_SYNC owner={} props={:?}",
+                scope_canonical_id,
+                define_props
+                    .result
+                    .value
+                    .properties
+                    .iter()
+                    .map(|property| (property.name.clone(), property.ty.clone()))
+                    .collect::<Vec<_>>(),
+            ));
+        }
     }
     for field in &mut evaluated_types.emits {
         rescue_field(scope_canonical_id, field, query_engine);
@@ -608,10 +2307,17 @@ fn materialize_component_meta_field_types(
                     scope_hint,
                     query_engine,
                 );
-                if component_meta_type_expr_symbolic_score(&rescued)
-                    < component_meta_type_expr_symbolic_score(&field.r#type)
-                {
+                if component_meta_type_expr_improves(&rescued, &field.r#type) {
                     field.r#type = rescued;
+                }
+                let surface = materialize_component_meta_member_surface_expr(
+                    &candidate,
+                    scope_hint,
+                    query_engine,
+                    false,
+                );
+                if component_meta_type_expr_improves(&surface, &field.r#type) {
+                    field.r#type = surface;
                 }
             }
         }
@@ -697,16 +2403,106 @@ fn produce_macro_object_shapes_for_purpose(
         match mac.kind {
             verter_semantic::analysis::AnalyzedMacroKind::DefineProps => {
                 let define_props_lowered = params.define_props.get(define_props_index);
+                let define_props_has_matching_resolved_root =
+                    resolved_macros.iter().any(|resolved| {
+                        resolved.macro_index == macro_index
+                            && resolved.macro_kind
+                                == verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                            && mac
+                                .type_references
+                                .iter()
+                                .any(|type_name| type_name == &resolved.type_name)
+                    });
+                let define_props_prefers_prepared_projection =
+                    define_props_lowered.is_some_and(|lowered| {
+                        named_ref_matches_empty_shell_registry_root(
+                            owner_canonical,
+                            lowered,
+                            resolved_type_registry,
+                            resolved_type_registry_meta,
+                        )
+                    });
                 let define_props_needs_projection_rescue =
                     define_props_lowered.is_some_and(|lowered| {
                         type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
                     });
-                if let Some((shape, source)) =
+                if define_props_prefers_prepared_projection {
+                    if let Some(lowered) = define_props_lowered {
+                        let item_started = std::time::Instant::now();
+                        let (shape, source) = produce_one_macro_object_shape(
+                            query_engine,
+                            owner_canonical,
+                            lowered,
+                            has_prop_shape_surface,
+                        );
+                        if source.is_projection() {
+                            projection_hits += 1;
+                        } else if source.is_solver() {
+                            solver_fallbacks += 1;
+                        }
+                        if let Some(shape) = shape {
+                            let count = shape.value.properties.len();
+                            component_meta_trace_event!(
+                                "macro_object_shape",
+                                format!(
+                                    "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                    owner_canonical, macro_index, source.label(), count,
+                                    item_started.elapsed(),
+                                ),
+                            );
+                            evaluated_types.define_props.push(
+                                verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                    macro_index,
+                                    result: shape,
+                                },
+                            );
+                        }
+                    }
+                } else if let Some(lowered) = define_props_lowered.filter(|lowered| {
+                    matches!(
+                        lowered,
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
+                    ) && !define_props_has_matching_resolved_root
+                }) {
+                    let item_started = std::time::Instant::now();
+                    let (shape, source) = produce_one_macro_object_shape(
+                        query_engine,
+                        owner_canonical,
+                        lowered,
+                        has_prop_shape_surface,
+                    );
+                    if source.is_projection() {
+                        projection_hits += 1;
+                    } else if source.is_solver() {
+                        solver_fallbacks += 1;
+                    }
+                    if let Some(shape) = shape {
+                        let count = shape.value.properties.len();
+                        component_meta_trace_event!(
+                            "macro_object_shape",
+                            format!(
+                                "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
+                                owner_canonical,
+                                macro_index,
+                                source.label(),
+                                count,
+                                item_started.elapsed(),
+                            ),
+                        );
+                        evaluated_types.define_props.push(
+                            verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                                macro_index,
+                                result: shape,
+                            },
+                        );
+                    }
+                } else if let Some((shape, source)) =
                     synthesize_define_props_shape_from_known_surface_with_authority(
                         macro_index,
                         snapshot,
                         resolved_macros,
                         evaluated_types,
+                        define_props_lowered,
                         true,
                     )
                 {
@@ -743,6 +2539,7 @@ fn produce_macro_object_shapes_for_purpose(
                             snapshot,
                             resolved_macros,
                             evaluated_types,
+                            define_props_lowered,
                             false,
                         )
                     {
@@ -958,6 +2755,8 @@ fn produce_macro_object_shapes_for_purpose(
             }
             verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
                 let define_slots_lowered = params.define_slots.get(define_slots_index);
+                let define_slots_owner_surface_incomplete = mac.slot_fields.is_empty()
+                    || mac.slot_fields.iter().any(|slot| slot.bindings.is_empty());
                 let define_slots_needs_projection_rescue =
                     define_slots_lowered.is_some_and(|lowered| {
                         type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
@@ -987,7 +2786,11 @@ fn produce_macro_object_shapes_for_purpose(
                             },
                         );
                     } else if let Some(lowered) = define_slots_lowered {
-                        if mac.slot_fields.is_empty() {
+                        // Local slot_fields can preserve only the slot names while
+                        // dropping the callable payload behind a helper alias.
+                        // In that case the lowered-type path still owns the real
+                        // defineSlots object shape.
+                        if define_slots_owner_surface_incomplete {
                             let item_started = std::time::Instant::now();
                             let (shape, source) = produce_one_macro_object_shape_for_slots(
                                 query_engine,
@@ -1152,6 +2955,9 @@ fn define_props_fields_fast_path_allowed(
     {
         return false;
     }
+    if !first_surface.surface_is_authoritative {
+        return false;
+    }
 
     let Some(text) = first_surface.declaration.text.as_deref() else {
         return false;
@@ -1200,17 +3006,45 @@ fn is_direct_local_macro_type_reference(
             .any(|type_name| type_name == resolved_name)
 }
 
+fn define_props_known_surface_shortcut_allowed(
+    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+) -> bool {
+    fn strip_parens(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> &verter_semantic::analysis::type_expr::TypeExpr {
+        match expr {
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                strip_parens(inner)
+            }
+            other => other,
+        }
+    }
+
+    match lowered.map(strip_parens) {
+        Some(verter_semantic::analysis::type_expr::TypeExpr::Object(_)) => true,
+        Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }) => {
+            type_arguments.is_empty()
+        }
+        _ => false,
+    }
+}
+
 fn synthesize_define_props_shape_from_known_surface_with_authority(
     macro_index: usize,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[ResolvedMacroMeta],
     evaluated_types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    lowered: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
     require_authoritative_surface: bool,
 ) -> Option<(ShapeResult, MacroShapeSource)> {
     use verter_semantic::analysis::type_expand::{
         ExpandedObjectShape, ExpandedProperty, ExpansionResult,
     };
     use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+
+    if !define_props_known_surface_shortcut_allowed(lowered) {
+        return None;
+    }
 
     let mac = snapshot.macros.get(macro_index)?;
     let allow_known_surface_shortcuts = !define_props_has_direct_local_root(mac);
@@ -1236,8 +3070,17 @@ fn synthesize_define_props_shape_from_known_surface_with_authority(
     } else {
         None
     };
+    let expanded_fields_cover_resolved_macro = resolved_macro.is_none_or(|resolved_macro| {
+        resolved_macro.props.iter().all(|prop| {
+            evaluated_types
+                .props
+                .iter()
+                .any(|field| field.name == prop.name)
+        })
+    });
     let use_all_expanded_props = allow_known_surface_shortcuts
-        && reuse_expanded_define_props_shape(snapshot, evaluated_types);
+        && reuse_expanded_define_props_shape(snapshot, evaluated_types)
+        && expanded_fields_cover_resolved_macro;
 
     let mut exactness = SolverExactness::ExactConcrete;
     let mut execution_status = ExecutionStatus::Completed;
@@ -1348,6 +3191,45 @@ fn synthesize_define_props_shape_from_registry_root(
         verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape),
         MacroShapeSource::Registry,
     ))
+}
+
+fn named_ref_matches_empty_shell_registry_root(
+    owner_canonical: &str,
+    lowered: &verter_semantic::analysis::type_expr::TypeExpr,
+    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
+    resolved_type_registry_meta: &[ResolvedTypeRegistryMeta],
+) -> bool {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    else {
+        return false;
+    };
+    if !type_arguments.is_empty() {
+        return false;
+    }
+
+    let mut matches = resolved_type_registry
+        .iter()
+        .zip(resolved_type_registry_meta.iter())
+        .filter(|(entry, meta)| {
+            entry.name == name.as_ref()
+                && meta.name == name.as_ref()
+                && meta.declaration.canonical_source == owner_canonical
+        });
+    let Some((entry, _)) = matches.next() else {
+        return false;
+    };
+    if matches.next().is_some() {
+        return false;
+    }
+
+    registry_entry_to_expanded_shape(&entry.type_expr).is_some_and(|shape| {
+        shape.properties.is_empty()
+            && shape.index_signatures.is_empty()
+            && shape.call_signatures.is_empty()
+    })
 }
 
 fn reuse_expanded_define_emits_shape(
@@ -1727,14 +3609,15 @@ fn type_expr_needs_projection_rescue(
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
+    if expr_has_transitively_recursive_generic_root(query_engine, owner_canonical, expr) {
+        return false;
+    }
+
     match expr {
         TypeExpr::Ref {
             name,
             type_arguments,
         } => {
-            if !type_arguments.is_empty() {
-                return true;
-            }
             let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
             let scope_canonical = if declaration.canonical_source.is_empty() {
                 owner_canonical
@@ -1746,11 +3629,16 @@ fn type_expr_needs_projection_rescue(
             } else {
                 declaration.resolved_name.as_str()
             };
-            query_engine
+            let body_needs_projection = query_engine
                 .named_decl_body(scope_canonical, resolved_name)
                 .is_some_and(|body| {
                     type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
-                })
+                });
+            body_needs_projection
+                || (!type_arguments.is_empty()
+                    && query_engine
+                        .named_decl_body(scope_canonical, resolved_name)
+                        .is_none())
         }
         other => type_expr_has_non_object_top_level_surface(query_engine, owner_canonical, other),
     }
@@ -1878,9 +3766,41 @@ fn produce_one_macro_object_shape(
     }
 
     // ── Non-object body: solver first, then projection on warm caches ─
-    let solved = query_engine.owner_engine_mut().solve(lowered);
-    let solver_result =
-        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
+    let scoped_solver_result = match lowered {
+        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => {
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name.as_ref());
+            let defining_canonical = if declaration.canonical_source.is_empty() {
+                owner_canonical.to_string()
+            } else {
+                declaration.canonical_source.clone()
+            };
+            let defining_name = if declaration.resolved_name.is_empty() {
+                name.as_ref().to_string()
+            } else {
+                declaration.resolved_name.clone()
+            };
+            query_engine
+                .solve_scoped(defining_canonical.as_str(), defining_name.as_str())
+                .and_then(|solved_expr| {
+                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
+                        &solved_expr,
+                    );
+                    shape_is_usable(&shape).then(|| {
+                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                            shape,
+                        )
+                    })
+                })
+        }
+        _ => None,
+    };
+    let solver_result = scoped_solver_result.unwrap_or_else(|| {
+        let solved = query_engine.owner_engine_mut().solve(lowered);
+        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved)
+    });
     let solver_count = shape_surface_count(&solver_result);
     let rescue_projection = solver_count == 0
         || type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
@@ -1929,9 +3849,37 @@ fn project_named_ref_prepared_surface_shape(
     owner_canonical: &str,
     lowered: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<ShapeResult> {
-    let verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } = lowered else {
+    let verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = lowered
+    else {
         return None;
     };
+    if !named_ref_can_use_prepared_projection(query_engine, owner_canonical, name.as_ref()) {
+        return None;
+    }
+    if !type_arguments.is_empty() {
+        let declaration = query_engine.resolve_type_declaration(owner_canonical, name.as_ref());
+        let scope_canonical = if declaration.canonical_source.is_empty() {
+            owner_canonical
+        } else {
+            declaration.canonical_source.as_str()
+        };
+        let resolved_name = if declaration.resolved_name.is_empty() {
+            name.as_ref()
+        } else {
+            declaration.resolved_name.as_str()
+        };
+        if !query_engine
+            .named_decl_body(scope_canonical, resolved_name)
+            .is_some_and(|body| {
+                type_expr_has_non_object_top_level_surface(query_engine, scope_canonical, &body)
+            })
+        {
+            return None;
+        }
+    }
 
     let (scope_canonical, resolved_name) =
         resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
@@ -1943,6 +3891,28 @@ fn project_named_ref_prepared_surface_shape(
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(shape)
             })
         })
+}
+
+fn named_ref_can_use_prepared_projection(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    owner_canonical: &str,
+    requested_name: &str,
+) -> bool {
+    let declaration = query_engine.resolve_type_declaration(owner_canonical, requested_name);
+    if declaration.canonical_source.is_empty() || declaration.canonical_source == owner_canonical {
+        return true;
+    }
+
+    match declaration.kind {
+        crate::resolver_core::ResolvedDeclarationKind::Class => {
+            crate::resolver_core::component_meta::imported_declaration_surface_is_authoritative(
+                &declaration,
+            )
+        }
+        crate::resolver_core::ResolvedDeclarationKind::Interface
+        | crate::resolver_core::ResolvedDeclarationKind::TypeAlias => true,
+        crate::resolver_core::ResolvedDeclarationKind::Unknown => false,
+    }
 }
 
 fn resolve_named_ref_prepared_projection_target(
@@ -2313,6 +4283,14 @@ fn classify_named_ref_for_db_projection(
     let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
     let defining_canonical = declaration.canonical_source.clone();
     let defining_name = declaration.resolved_name.clone();
+    if !declaration.canonical_source.is_empty()
+        && declaration.canonical_source != owner_canonical
+        && !crate::resolver_core::component_meta::imported_declaration_surface_is_authoritative(
+            &declaration,
+        )
+    {
+        return None;
+    }
     let safe = match declaration.kind {
         crate::resolver_core::ResolvedDeclarationKind::Interface
         | crate::resolver_core::ResolvedDeclarationKind::Class => query_engine
@@ -2610,14 +4588,26 @@ impl VerterHost {
             )),
         };
         let parts_started = audit_enabled.then(Instant::now);
-        let parts = crate::resolver_core::resolve_component_meta_parts(
-            &resolver_host,
-            canonical,
-            &snapshot,
-            mode == ResolverMode::Expanded,
-            captured,
-            purpose,
-        );
+        let parts = {
+            let _trace = component_meta_trace_scope!(
+                "resolve_component_meta_parts",
+                format!(
+                    "owner={} expanded={} captured={} purpose={:?}",
+                    canonical,
+                    mode == ResolverMode::Expanded,
+                    captured.is_some(),
+                    purpose,
+                ),
+            );
+            crate::resolver_core::resolve_component_meta_parts(
+                &resolver_host,
+                canonical,
+                &snapshot,
+                mode == ResolverMode::Expanded,
+                captured,
+                purpose,
+            )
+        };
         if let Some(started) = parts_started {
             audit_timings.solver_ms = started.elapsed().as_secs_f64() * 1000.0;
         }
@@ -2646,6 +4636,15 @@ impl VerterHost {
                     owner_engine,
                 );
             if should_materialize_registry {
+                let _trace = component_meta_trace_scope!(
+                    "append_component_meta_registry_entries",
+                    format!(
+                        "owner={} evaluated_types={} existing_registry={}",
+                        canonical,
+                        parts.evaluated_types.is_some(),
+                        parts.resolved_type_registry.len(),
+                    ),
+                );
                 self.append_component_meta_registry_entries(
                     canonical,
                     &snapshot,
@@ -2672,32 +4671,72 @@ impl VerterHost {
                     })
                 {
                     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-                    produce_macro_object_shapes_for_purpose(
-                        canonical,
-                        &snapshot,
-                        &parts.resolved_macros,
-                        &parts.resolved_type_registry,
-                        &parts.resolved_type_registry_meta,
-                        &eval_source,
-                        &mut evaluated_types,
-                        &mut query_engine,
-                        purpose,
-                    );
-                    materialize_component_meta_macro_shape_member_types(
-                        canonical,
-                        &snapshot,
-                        &eval_source,
-                        &mut evaluated_types,
-                        &mut query_engine,
-                    );
-                    if !evaluated_types.is_empty() {
-                        enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
-                        materialize_component_meta_field_types(
+                    {
+                        let _trace = component_meta_trace_scope!(
+                            "produce_macro_object_shapes_for_purpose",
+                            format!(
+                                "owner={} resolved_macros={} registry={} purpose={:?}",
+                                canonical,
+                                parts.resolved_macros.len(),
+                                parts.resolved_type_registry.len(),
+                                purpose,
+                            ),
+                        );
+                        produce_macro_object_shapes_for_purpose(
                             canonical,
+                            &snapshot,
                             &parts.resolved_macros,
+                            &parts.resolved_type_registry,
+                            &parts.resolved_type_registry_meta,
+                            &eval_source,
+                            &mut evaluated_types,
+                            &mut query_engine,
+                            purpose,
+                        );
+                    }
+                    {
+                        let _trace = component_meta_trace_scope!(
+                            "materialize_component_meta_macro_shape_member_types",
+                            format!(
+                                "owner={} props={} slot_bindings={} define_props={} define_slots={}",
+                                canonical,
+                                evaluated_types.props.len(),
+                                evaluated_types.slot_bindings.len(),
+                                evaluated_types.define_props.len(),
+                                evaluated_types.define_slots.len(),
+                            ),
+                        );
+                        materialize_component_meta_macro_shape_member_types(
+                            canonical,
+                            &snapshot,
+                            &eval_source,
                             &mut evaluated_types,
                             &mut query_engine,
                         );
+                    }
+                    if !evaluated_types.is_empty() {
+                        enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
+                        {
+                            let _trace = component_meta_trace_scope!(
+                                "materialize_component_meta_field_types",
+                                format!(
+                                    "owner={} props={} events={} slot_bindings={} bindings={}",
+                                    canonical,
+                                    evaluated_types.props.len(),
+                                    evaluated_types.emits.len(),
+                                    evaluated_types.slot_bindings.len(),
+                                    evaluated_types.bindings.len(),
+                                ),
+                            );
+                            materialize_component_meta_field_types(
+                                canonical,
+                                &snapshot,
+                                &eval_source,
+                                &parts.resolved_macros,
+                                &mut evaluated_types,
+                                &mut query_engine,
+                            );
+                        }
                         parts.evaluated_types = Some(evaluated_types);
                     }
                 }
@@ -2957,16 +4996,42 @@ impl VerterHost {
                     )
                 }
                 crate::resolver_core::RouteDemand::MemberPath(path) => {
+                    if raw_body.is_some_and(|expr| {
+                        matches!(
+                            expr,
+                            TypeExpr::Ref {
+                                type_arguments,
+                                ..
+                            } if !type_arguments.is_empty()
+                        ) && component_meta_registry_public_utility_route(expr).is_none()
+                    }) {
+                        let route_expr = build_registry_indexed_access_expr(symbol_name, path);
+                        return Some(wrap_registry_member_path_surface(path, route_expr));
+                    }
                     if let Some(projected) = raw_body.and_then(|expr| {
                         component_meta_registry_raw_member_path_surface(expr, path)
                     }) {
-                        return Some(projected);
+                        return Some(materialize_component_meta_member_surface_expr(
+                            &projected,
+                            scope_canonical_id,
+                            query_engine,
+                            false,
+                        ));
                     }
                     let route_expr = build_registry_indexed_access_expr(symbol_name, path);
                     let leaf = query_engine
                         .project_expr_surface_expr(scope_canonical_id, &route_expr)
                         .unwrap_or(route_expr);
-                    Some(wrap_registry_member_path_surface(path, leaf))
+                    if path.len() > 1 && !component_meta_registry_has_explicit_object_surface(&leaf)
+                    {
+                        return None;
+                    }
+                    Some(materialize_component_meta_member_surface_expr(
+                        &wrap_registry_member_path_surface(path, leaf),
+                        scope_canonical_id,
+                        query_engine,
+                        false,
+                    ))
                 }
                 crate::resolver_core::RouteDemand::Pick(members) => {
                     if let Some(projected) = query_engine.project_route_surface_expr(
@@ -3035,6 +5100,121 @@ impl VerterHost {
                 }
             }
         }
+        fn collect_imported_component_meta_registry_seed_refs(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            published_names: &rustc_hash::FxHashSet<String>,
+            queued_names: &mut rustc_hash::FxHashSet<String>,
+            output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
+            source_hint: Option<&str>,
+        ) {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+            fn drain_filtered_pending(
+                published_names: &rustc_hash::FxHashSet<String>,
+                queued_names: &mut rustc_hash::FxHashSet<String>,
+                output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
+                pending: std::collections::VecDeque<PendingComponentMetaRegistryRef>,
+            ) {
+                for pending in pending {
+                    if matches!(
+                        pending.route,
+                        crate::resolver_core::RouteDemand::MemberPath(ref path) if path.len() > 1
+                    ) {
+                        continue;
+                    }
+                    enqueue_component_meta_registry_ref(
+                        published_names,
+                        queued_names,
+                        output,
+                        pending.name.as_str(),
+                        pending.source_hint.as_deref(),
+                        pending.exported_name.as_deref(),
+                        pending.route,
+                    );
+                }
+            }
+
+            fn collect_one_filtered_expr(
+                expr: &verter_semantic::analysis::type_expr::TypeExpr,
+                published_names: &rustc_hash::FxHashSet<String>,
+                queued_names: &mut rustc_hash::FxHashSet<String>,
+                output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
+                source_hint: Option<&str>,
+            ) {
+                let mut local_queue = std::collections::VecDeque::new();
+                let mut local_names = rustc_hash::FxHashSet::default();
+                collect_component_meta_registry_refs(
+                    expr,
+                    published_names,
+                    &mut local_names,
+                    &mut local_queue,
+                    source_hint,
+                    false,
+                );
+                drain_filtered_pending(published_names, queued_names, output, local_queue);
+            }
+
+            match expr {
+                TypeExpr::Object(obj) => {
+                    for member in &obj.properties {
+                        match member {
+                            ObjectMember::Property(prop) => collect_one_filtered_expr(
+                                &prop.ty,
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            ),
+                            ObjectMember::IndexSignature(sig) => {
+                                collect_one_filtered_expr(
+                                    &sig.key_type,
+                                    published_names,
+                                    queued_names,
+                                    output,
+                                    source_hint,
+                                );
+                                collect_one_filtered_expr(
+                                    &sig.value_type,
+                                    published_names,
+                                    queued_names,
+                                    output,
+                                    source_hint,
+                                );
+                            }
+                            ObjectMember::CallSignature(func)
+                            | ObjectMember::ConstructSignature(func) => collect_one_filtered_expr(
+                                &TypeExpr::Function(func.clone().into()),
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            ),
+                            ObjectMember::Method(method) => collect_one_filtered_expr(
+                                &TypeExpr::Function(method.function.clone().into()),
+                                published_names,
+                                queued_names,
+                                output,
+                                source_hint,
+                            ),
+                        }
+                    }
+                }
+                TypeExpr::Function(func) => collect_one_filtered_expr(
+                    &TypeExpr::Function(func.clone()),
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                ),
+                _ => collect_one_filtered_expr(
+                    expr,
+                    published_names,
+                    queued_names,
+                    output,
+                    source_hint,
+                ),
+            }
+        }
         let debug_enabled = crate::host_manage::component_meta_debug_enabled();
         let import_refresh_started = debug_enabled.then(std::time::Instant::now);
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
@@ -3053,7 +5233,7 @@ impl VerterHost {
             );
             if should_skip_imported_registry_seed_refresh(
                 owner_canonical,
-                declaration_source.as_str(),
+                &meta.declaration,
                 &entry.type_expr,
             ) {
                 continue;
@@ -3166,16 +5346,25 @@ impl VerterHost {
             .unwrap_or_default();
         let seed_scan_started = debug_enabled.then(std::time::Instant::now);
         for (index, entry) in resolved_type_registry.iter().enumerate() {
-            let source_hint = resolved_type_registry_meta
-                .get(index)
-                .map(|meta| meta.declaration.canonical_source.as_str());
-            if source_hint.is_some_and(|source| {
-                should_skip_imported_registry_seed_refresh(
-                    owner_canonical,
-                    source,
-                    &entry.type_expr,
-                )
-            }) {
+            let Some(meta) = resolved_type_registry_meta.get(index) else {
+                continue;
+            };
+            let source_hint = Some(meta.declaration.canonical_source.as_str());
+            let entry_import_root = owner_component_meta_registry_import_root(
+                self,
+                snapshot,
+                entry.name.as_str(),
+                store_view,
+            );
+            let entry_is_imported = entry_import_root.as_ref().is_some_and(|(canonical_id, _)| {
+                !canonical_id.is_empty() && canonical_id != owner_canonical
+            }) || (!meta.declaration.canonical_source.is_empty()
+                && meta.declaration.canonical_source != owner_canonical);
+            if should_skip_imported_registry_seed_refresh(
+                owner_canonical,
+                &meta.declaration,
+                &entry.type_expr,
+            ) {
                 continue;
             }
             let source_expr = source_hint
@@ -3183,14 +5372,24 @@ impl VerterHost {
                 .and_then(|_| {
                     query_engine.owner_collection_expr(owner_canonical, entry.name.as_str())
                 });
-            collect_component_meta_registry_refs(
-                source_expr.as_ref().unwrap_or(&entry.type_expr),
-                &published_names,
-                &mut queued_names,
-                &mut referenced_names,
-                source_hint,
-                false,
-            );
+            if entry_is_imported {
+                collect_imported_component_meta_registry_seed_refs(
+                    source_expr.as_ref().unwrap_or(&entry.type_expr),
+                    &published_names,
+                    &mut queued_names,
+                    &mut referenced_names,
+                    source_hint,
+                );
+            } else {
+                collect_component_meta_registry_refs(
+                    source_expr.as_ref().unwrap_or(&entry.type_expr),
+                    &published_names,
+                    &mut queued_names,
+                    &mut referenced_names,
+                    source_hint,
+                    false,
+                );
+            }
         }
         let seed_scan_elapsed_ms = seed_scan_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -3328,7 +5527,16 @@ impl VerterHost {
                         Some(&resolved.body),
                         true,
                     )
-                    .unwrap_or_else(|| resolved.body.clone());
+                    .or_else(|| match &pending_route {
+                        crate::resolver_core::RouteDemand::Whole => Some(resolved.body.clone()),
+                        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
+                            Some(resolved.body.clone())
+                        }
+                        _ => None,
+                    });
+                    let Some(type_expr) = type_expr else {
+                        continue;
+                    };
                     let surface_elapsed_ms = surface_started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or_default();
@@ -3494,9 +5702,6 @@ impl VerterHost {
             {
                 continue;
             }
-            if component_meta_registry_has_explicit_object_surface(&entry.type_expr) {
-                continue;
-            }
             if component_meta_registry_has_non_object_top_level_surface(&entry.type_expr)
                 && component_meta_registry_should_keep_raw_symbolic_non_object_alias(
                     &entry.type_expr,
@@ -3506,12 +5711,32 @@ impl VerterHost {
             {
                 continue;
             }
-            entry.type_expr = materialize_component_meta_member_surface_expr(
+            let raw_body = query_engine.named_decl_body(
+                scope_canonical,
+                if !meta.declaration.resolved_name.is_empty() {
+                    meta.declaration.resolved_name.as_str()
+                } else {
+                    entry.name.as_str()
+                },
+            );
+            let materialized = materialize_component_meta_member_surface_expr(
                 &entry.type_expr,
                 scope_canonical,
                 query_engine,
                 false,
             );
+            entry.type_expr = raw_body
+                .as_ref()
+                .filter(|raw| type_expr_needs_nested_symbolic_route_preservation(raw))
+                .map_or(materialized.clone(), |raw| {
+                    preserve_nested_symbolic_member_routes(
+                        &materialized,
+                        raw,
+                        scope_canonical,
+                        query_engine,
+                        false,
+                    )
+                });
             if let Some(started) = _entry_started {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms >= 5.0 {
@@ -3951,21 +6176,24 @@ impl VerterHost {
             }
         }
 
-        for kind in [
-            crate::resolver_core::DerivedFactKind::Route,
-            crate::resolver_core::DerivedFactKind::ImportRoute,
-        ] {
-            if let Some(hash) = store_view
-                .and_then(|view| view.derived_hash(canonical, kind))
-                .or_else(|| self.current_derived_fact_hash_in_view(canonical, kind, store_view))
-            {
-                let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    canonical_id: canonical.to_string(),
-                    kind,
-                    hash,
-                };
-                if seen.insert(fact.clone()) {
-                    facts.push(fact);
+        let include_derived_facts = store_view.is_none_or(|view| view.tracks_whole_hash(canonical));
+        if include_derived_facts {
+            for kind in [
+                crate::resolver_core::DerivedFactKind::Route,
+                crate::resolver_core::DerivedFactKind::ImportRoute,
+            ] {
+                if let Some(hash) = store_view
+                    .and_then(|view| view.derived_hash(canonical, kind))
+                    .or_else(|| self.current_derived_fact_hash_in_view(canonical, kind, store_view))
+                {
+                    let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+                        canonical_id: canonical.to_string(),
+                        kind,
+                        hash,
+                    };
+                    if seen.insert(fact.clone()) {
+                        facts.push(fact);
+                    }
                 }
             }
         }
@@ -3988,7 +6216,9 @@ impl VerterHost {
                 // Read-only: only compute Route hash if shallow state already exists.
                 // Do NOT call ensure_shallow_* here — fact validation must be side-effect-free.
                 let state = self.shallow_file_state_in_view(canonical_id, store_view)?;
-                Some(crate::resolver_store::hash_route_surface(&state))
+                state
+                    .has_resolvable_surface()
+                    .then(|| crate::resolver_store::hash_route_surface(&state))
             }
             crate::resolver_core::DerivedFactKind::ImportRoute => {
                 // Read-only: ImportRoute fact capture must not promote a
@@ -4037,8 +6267,8 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_has_non_object_top_level_surface,
     component_meta_registry_public_indexed_access_route,
     component_meta_registry_public_utility_route, component_meta_registry_raw_member_path_surface,
-    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
-    PendingComponentMetaRegistryRef,
+    enqueue_component_meta_registry_ref, owner_component_meta_registry_import_root,
+    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
 };
 
 fn materialize_component_meta_member_surface_expr(
@@ -4064,6 +6294,70 @@ fn materialize_component_meta_macro_shape_member_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
+    fn slot_member_needs_binding_rescue(
+        ty: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+        fn slot_binding_param_needs_materialization(
+            ty: &verter_semantic::analysis::type_expr::TypeExpr,
+        ) -> bool {
+            use verter_semantic::analysis::type_expr::TypeExpr;
+
+            match ty {
+                TypeExpr::Parenthesized(inner) => slot_binding_param_needs_materialization(inner),
+                TypeExpr::Object(_) => false,
+                TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+                    types.iter().any(slot_binding_param_needs_materialization)
+                }
+                _ => true,
+            }
+        }
+
+        match ty {
+            TypeExpr::Parenthesized(inner) => slot_member_needs_binding_rescue(inner),
+            TypeExpr::Intersection(types) | TypeExpr::Union(types) => {
+                types.iter().any(slot_member_needs_binding_rescue)
+            }
+            TypeExpr::Function(function) => {
+                if function.parameters.is_empty() {
+                    return false;
+                }
+                function
+                    .parameters
+                    .iter()
+                    .any(|parameter| slot_binding_param_needs_materialization(&parameter.ty))
+            }
+            TypeExpr::Object(object) => {
+                let mut saw_callable = false;
+                for member in &object.properties {
+                    match member {
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            saw_callable = true;
+                            if function.parameters.iter().any(|parameter| {
+                                slot_binding_param_needs_materialization(&parameter.ty)
+                            }) {
+                                return true;
+                            }
+                        }
+                        ObjectMember::Method(method) => {
+                            saw_callable = true;
+                            if method.function.parameters.iter().any(|parameter| {
+                                slot_binding_param_needs_materialization(&parameter.ty)
+                            }) {
+                                return true;
+                            }
+                        }
+                        ObjectMember::Property(_) | ObjectMember::IndexSignature(_) => {}
+                    }
+                }
+                !saw_callable
+            }
+            _ => true,
+        }
+    }
+
     fn shape_needs_member_rescue(
         scope_canonical_id: &str,
         shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
@@ -4093,39 +6387,84 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
                             query_engine,
                             scope_canonical_id,
                             lowered,
-                        ) || shape_needs_member_rescue(
-                            scope_canonical_id,
-                            &define_props.result.value,
-                            query_engine,
                         );
+                        let needs_projection_rescue = lowered_needs_projection_rescue
+                            || shape_needs_member_rescue(
+                                scope_canonical_id,
+                                &define_props.result.value,
+                                query_engine,
+                            );
                         if needs_projection_rescue {
-                            if let Some(projected_shape) = query_engine
-                                .project_expr_surface_shape(scope_canonical_id, lowered)
-                                .filter(has_prop_shape_surface)
+                            if lowered_needs_projection_rescue
+                                && define_props.result.value.properties.is_empty()
                             {
-                                let projected_result =
-                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                        projected_shape,
-                                    );
-                                if projection_result_beats_solver_shape(
-                                    &projected_result,
-                                    &define_props.result,
-                                ) {
-                                    define_props.result = projected_result;
+                                if let Some(projected_shape) = query_engine
+                                    .project_expr_surface_shape(scope_canonical_id, lowered)
+                                    .filter(has_prop_shape_surface)
+                                {
+                                    let projected_result =
+                                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                            projected_shape,
+                                        );
+                                    if projection_result_beats_solver_shape(
+                                        &projected_result,
+                                        &define_props.result,
+                                    ) {
+                                        define_props.result = projected_result;
+                                    }
                                 }
                             }
                             for property in &mut define_props.result.value.properties {
-                                if !type_expr_needs_projection_rescue(
-                                    query_engine,
-                                    scope_canonical_id,
+                                if type_expr_is_slots_member_route(&property.ty) {
+                                    continue;
+                                }
+                                let preserve_symbolic_field_surface = evaluated_types
+                                    .props
+                                    .iter()
+                                    .find(|field| field.name == property.name)
+                                    .is_some_and(|field| {
+                                        field_should_preserve_shallow_symbolic_raw_type(
+                                            scope_canonical_id,
+                                            field,
+                                            query_engine,
+                                        )
+                                    });
+                                if preserve_symbolic_field_surface {
+                                    continue;
+                                }
+                                if define_props_member_can_stay_symbolic_without_rescue(
                                     &property.ty,
+                                    scope_canonical_id,
+                                    query_engine,
                                 ) {
                                     continue;
                                 }
+                                let property_needs_projection_rescue =
+                                    type_expr_needs_projection_rescue(
+                                        query_engine,
+                                        scope_canonical_id,
+                                        &property.ty,
+                                    );
+                                if !property_needs_projection_rescue
+                                    && !type_expr_needs_member_route_materialization(
+                                        &property.ty,
+                                        scope_canonical_id,
+                                        query_engine,
+                                    )
+                                {
+                                    continue;
+                                }
+                                let _trace = component_meta_trace_scope!(
+                                    "materialize_define_props_member",
+                                    format!(
+                                        "owner={} name={} ty={:?}",
+                                        scope_canonical_id, property.name, property.ty,
+                                    ),
+                                );
                                 property.ty =
                                     materialize_component_meta_macro_shape_member_type_expr(
                                         lowered,
@@ -4147,31 +6486,37 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
                             query_engine,
                             scope_canonical_id,
                             lowered,
-                        ) || shape_needs_member_rescue(
-                            scope_canonical_id,
-                            &define_emits.result.value,
-                            query_engine,
                         );
+                        let needs_projection_rescue = lowered_needs_projection_rescue
+                            || shape_needs_member_rescue(
+                                scope_canonical_id,
+                                &define_emits.result.value,
+                                query_engine,
+                            );
                         if needs_projection_rescue {
-                            if let Some(projected_shape) = query_engine
-                                .project_expr_surface_shape(scope_canonical_id, lowered)
-                                .filter(
-                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
-                                )
+                            if lowered_needs_projection_rescue
+                                && define_emits.result.value.properties.is_empty()
                             {
-                                let projected_result =
-                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                        projected_shape,
-                                    );
-                                if projection_result_beats_solver_shape(
-                                    &projected_result,
-                                    &define_emits.result,
-                                ) {
-                                    define_emits.result = projected_result;
+                                if let Some(projected_shape) = query_engine
+                                    .project_expr_surface_shape(scope_canonical_id, lowered)
+                                    .filter(
+                                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                    )
+                                {
+                                    let projected_result =
+                                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                            projected_shape,
+                                        );
+                                    if projection_result_beats_solver_shape(
+                                        &projected_result,
+                                        &define_emits.result,
+                                    ) {
+                                        define_emits.result = projected_result;
+                                    }
                                 }
                             }
                             for property in &mut define_emits.result.value.properties {
@@ -4182,6 +6527,13 @@ fn materialize_component_meta_macro_shape_member_types(
                                 ) {
                                     continue;
                                 }
+                                let _trace = component_meta_trace_scope!(
+                                    "materialize_define_emits_member",
+                                    format!(
+                                        "owner={} name={} ty={:?}",
+                                        scope_canonical_id, property.name, property.ty,
+                                    ),
+                                );
                                 property.ty =
                                     materialize_component_meta_macro_shape_member_type_expr(
                                         lowered,
@@ -4203,41 +6555,66 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let needs_projection_rescue = type_expr_needs_projection_rescue(
+                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
                             query_engine,
                             scope_canonical_id,
                             lowered,
-                        ) || shape_needs_member_rescue(
-                            scope_canonical_id,
-                            &define_slots.result.value,
-                            query_engine,
                         );
-                        if needs_projection_rescue {
-                            if let Some(projected_shape) = query_engine
-                                .project_expr_surface_shape(scope_canonical_id, lowered)
-                                .filter(
-                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
-                                )
+                        let needs_projection_rescue = lowered_needs_projection_rescue
+                            || shape_needs_member_rescue(
+                                scope_canonical_id,
+                                &define_slots.result.value,
+                                query_engine,
+                            );
+                        let needs_slot_binding_rescue = define_slots
+                            .result
+                            .value
+                            .properties
+                            .iter()
+                            .any(|property| slot_member_needs_binding_rescue(&property.ty));
+                        if needs_projection_rescue || needs_slot_binding_rescue {
+                            if lowered_needs_projection_rescue
+                                && define_slots.result.value.properties.is_empty()
                             {
-                                let projected_result =
-                                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                        projected_shape,
-                                    );
-                                if projection_result_beats_solver_shape(
-                                    &projected_result,
-                                    &define_slots.result,
-                                ) {
-                                    define_slots.result = projected_result;
+                                if let Some(projected_shape) = query_engine
+                                    .project_expr_surface_shape(scope_canonical_id, lowered)
+                                    .filter(
+                                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                    )
+                                {
+                                    if needs_projection_rescue {
+                                        let projected_result =
+                                            verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                                projected_shape,
+                                            );
+                                        if projection_result_beats_solver_shape(
+                                            &projected_result,
+                                            &define_slots.result,
+                                        ) {
+                                            define_slots.result = projected_result;
+                                        }
+                                    }
                                 }
                             }
                             for property in &mut define_slots.result.value.properties {
-                                if !type_expr_needs_projection_rescue(
-                                    query_engine,
-                                    scope_canonical_id,
-                                    &property.ty,
-                                ) {
+                                let property_needs_projection_rescue =
+                                    type_expr_needs_projection_rescue(
+                                        query_engine,
+                                        scope_canonical_id,
+                                        &property.ty,
+                                    );
+                                if !property_needs_projection_rescue
+                                    && !slot_member_needs_binding_rescue(&property.ty)
+                                {
                                     continue;
                                 }
+                                let _trace = component_meta_trace_scope!(
+                                    "materialize_define_slots_member",
+                                    format!(
+                                        "owner={} name={} ty={:?}",
+                                        scope_canonical_id, property.name, property.ty,
+                                    ),
+                                );
                                 property.ty =
                                     materialize_component_meta_macro_shape_member_type_expr(
                                         lowered,
@@ -4264,6 +6641,27 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    fn wrapped_member_leaf(
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        member_name: &str,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        let verter_semantic::analysis::type_expr::TypeExpr::Object(object) = expr else {
+            return None;
+        };
+        let [verter_semantic::analysis::type_expr::ObjectMember::Property(property)] =
+            object.properties.as_slice()
+        else {
+            return None;
+        };
+        (property.name == member_name).then(|| property.ty.clone())
+    }
+
+    let current_is_route_expr = matches!(
+        current,
+        verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess { .. }
+    ) || component_meta_registry_public_utility_route(current)
+        .or_else(|| component_meta_registry_public_indexed_access_route(current))
+        .is_some();
     let route_expr = verter_semantic::analysis::type_expr::TypeExpr::IndexedAccess {
         object: std::sync::Arc::new(lowered.clone()),
         index: std::sync::Arc::new(
@@ -4278,22 +6676,49 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         materialize_scope_canonical_id.as_str(),
         query_engine,
     );
+    let mut best = if current_is_route_expr {
+        wrapped_member_leaf(&current_materialized, member_name).unwrap_or(current_materialized)
+    } else {
+        current_materialized
+    };
+    if current_is_route_expr {
+        if let Some(candidate) = materialize_member_route_from_alias_body_in_owner_scope(
+            current,
+            scope_canonical_id,
+            query_engine,
+        ) {
+            if component_meta_type_expr_improves(&candidate, &best) {
+                best = candidate;
+            }
+        }
+    }
+    let projected_candidate =
+        query_engine.project_expr_surface_expr(scope_canonical_id, &route_expr);
+    let solved_candidate = query_engine.solve_expr_type_expr(scope_canonical_id, &route_expr);
 
-    if let Some(solved) = query_engine.solve_expr_type_expr(scope_canonical_id, &route_expr) {
-        let solved_materialized = materialize_component_meta_type_expr_until_stable(
-            &solved,
+    for candidate in [projected_candidate, solved_candidate]
+        .into_iter()
+        .flatten()
+    {
+        if expr_has_transitively_recursive_generic_root(
+            query_engine,
+            scope_canonical_id,
+            &candidate,
+        ) && !component_meta_type_expr_improves(&candidate, &best)
+        {
+            continue;
+        }
+        let candidate_materialized = materialize_component_meta_type_expr_until_stable(
+            &candidate,
             materialize_scope_canonical_id.as_str(),
             query_engine,
         );
-        if component_meta_type_expr_symbolic_score(&current_materialized)
-            < component_meta_type_expr_symbolic_score(&solved_materialized)
-        {
-            return current_materialized;
+        if component_meta_type_expr_improves(&candidate_materialized, &best) {
+            best = candidate_materialized;
         }
-        return solved_materialized;
     }
 
-    current_materialized
+    best
 }
 
 pub(crate) fn component_meta_type_expr_symbolic_score(
@@ -4301,118 +6726,310 @@ pub(crate) fn component_meta_type_expr_symbolic_score(
 ) -> usize {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-    match expr {
-        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => 0,
-        TypeExpr::Parenthesized(inner)
-        | TypeExpr::Array { element: inner, .. }
-        | TypeExpr::KeyOf(inner)
-        | TypeExpr::Rest(inner) => component_meta_type_expr_symbolic_score(inner),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .map(|element| component_meta_type_expr_symbolic_score(&element.ty))
-            .sum(),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .map(component_meta_type_expr_symbolic_score)
-            .sum(),
-        TypeExpr::Object(object) => object
-            .properties
-            .iter()
-            .map(|member| match member {
-                ObjectMember::Property(property) => {
-                    component_meta_type_expr_symbolic_score(&property.ty)
+    let mut score = 0usize;
+    let mut stack = vec![expr];
+
+    while let Some(current) = stack.pop() {
+        match current {
+            TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
+            TypeExpr::Parenthesized(inner)
+            | TypeExpr::Array { element: inner, .. }
+            | TypeExpr::KeyOf(inner)
+            | TypeExpr::Rest(inner) => stack.push(inner),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter().rev() {
+                    stack.push(&element.ty);
                 }
-                ObjectMember::Method(method) => {
-                    method
-                        .function
-                        .parameters
-                        .iter()
-                        .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
-                        .sum::<usize>()
-                        + method
-                            .function
-                            .return_type
-                            .as_deref()
-                            .map(component_meta_type_expr_symbolic_score)
-                            .unwrap_or_default()
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                for ty in types.iter().rev() {
+                    stack.push(ty);
                 }
-                ObjectMember::IndexSignature(signature) => {
-                    component_meta_type_expr_symbolic_score(&signature.key_type)
-                        + component_meta_type_expr_symbolic_score(&signature.value_type)
+            }
+            TypeExpr::Object(object) => {
+                for member in object.properties.iter().rev() {
+                    match member {
+                        ObjectMember::Property(property) => stack.push(&property.ty),
+                        ObjectMember::Method(method) => {
+                            if let Some(return_type) = method.function.return_type.as_deref() {
+                                stack.push(return_type);
+                            }
+                            for parameter in method.function.parameters.iter().rev() {
+                                stack.push(&parameter.ty);
+                            }
+                        }
+                        ObjectMember::IndexSignature(signature) => {
+                            stack.push(&signature.value_type);
+                            stack.push(&signature.key_type);
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            if let Some(return_type) = function.return_type.as_deref() {
+                                stack.push(return_type);
+                            }
+                            for parameter in function.parameters.iter().rev() {
+                                stack.push(&parameter.ty);
+                            }
+                        }
+                    }
                 }
-                ObjectMember::CallSignature(function)
-                | ObjectMember::ConstructSignature(function) => {
-                    function
-                        .parameters
-                        .iter()
-                        .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
-                        .sum::<usize>()
-                        + function
-                            .return_type
-                            .as_deref()
-                            .map(component_meta_type_expr_symbolic_score)
-                            .unwrap_or_default()
+            }
+            TypeExpr::Function(function) => {
+                if let Some(return_type) = function.return_type.as_deref() {
+                    stack.push(return_type);
                 }
-            })
-            .sum(),
-        TypeExpr::Function(function) => {
-            function
-                .parameters
-                .iter()
-                .map(|param| component_meta_type_expr_symbolic_score(&param.ty))
-                .sum::<usize>()
-                + function
-                    .return_type
-                    .as_deref()
-                    .map(component_meta_type_expr_symbolic_score)
-                    .unwrap_or_default()
+                for parameter in function.parameters.iter().rev() {
+                    stack.push(&parameter.ty);
+                }
+            }
+            TypeExpr::Ref { type_arguments, .. } => {
+                score += 1;
+                for argument in type_arguments.iter().rev() {
+                    stack.push(argument);
+                }
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                score += 1;
+                stack.push(index);
+                stack.push(object);
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                score += 1;
+                stack.push(false_type);
+                stack.push(true_type);
+                stack.push(extends);
+                stack.push(check);
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                score += 1;
+                if let Some(name_type) = name_type.as_deref() {
+                    stack.push(name_type);
+                }
+                stack.push(value);
+                stack.push(source);
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                score += 1;
+                for expression in expressions.iter().rev() {
+                    stack.push(expression);
+                }
+            }
+            TypeExpr::RecursiveRef { type_arguments, .. } => {
+                score += 1;
+                for argument in type_arguments.iter().rev() {
+                    stack.push(argument);
+                }
+            }
+            TypeExpr::TypeOf(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::TypeParameter(_)
+            | TypeExpr::Infer { .. } => {
+                score += 1;
+            }
         }
-        TypeExpr::Ref { type_arguments, .. } => {
-            1 + type_arguments
-                .iter()
-                .map(component_meta_type_expr_symbolic_score)
-                .sum::<usize>()
-        }
-        TypeExpr::IndexedAccess { object, index } => {
-            1 + component_meta_type_expr_symbolic_score(object)
-                + component_meta_type_expr_symbolic_score(index)
-        }
-        TypeExpr::Conditional {
-            check,
-            extends,
-            true_type,
-            false_type,
-        } => {
-            1 + component_meta_type_expr_symbolic_score(check)
-                + component_meta_type_expr_symbolic_score(extends)
-                + component_meta_type_expr_symbolic_score(true_type)
-                + component_meta_type_expr_symbolic_score(false_type)
-        }
-        TypeExpr::Mapped {
-            source,
-            value,
-            name_type,
-            ..
-        } => {
-            1 + component_meta_type_expr_symbolic_score(source)
-                + component_meta_type_expr_symbolic_score(value)
-                + name_type
-                    .as_deref()
-                    .map(component_meta_type_expr_symbolic_score)
-                    .unwrap_or_default()
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => {
-            1 + expressions
-                .iter()
-                .map(component_meta_type_expr_symbolic_score)
-                .sum::<usize>()
-        }
-        TypeExpr::TypeOf(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. }
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Infer { .. } => 1,
     }
+
+    score
+}
+
+fn component_meta_type_expr_generic_detail_score(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> usize {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    let mut score = 0usize;
+    let mut stack = vec![expr];
+
+    while let Some(current) = stack.pop() {
+        match current {
+            TypeExpr::TypeParameter(parameter) => {
+                score += 1;
+                if let Some(default) = parameter.default.as_deref() {
+                    stack.push(default);
+                }
+                if let Some(constraint) = parameter.constraint.as_deref() {
+                    stack.push(constraint);
+                }
+            }
+            TypeExpr::Parenthesized(inner)
+            | TypeExpr::Array { element: inner, .. }
+            | TypeExpr::KeyOf(inner)
+            | TypeExpr::Rest(inner) => stack.push(inner),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter().rev() {
+                    stack.push(&element.ty);
+                }
+            }
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                for ty in types.iter().rev() {
+                    stack.push(ty);
+                }
+            }
+            TypeExpr::Object(object) => {
+                for member in object.properties.iter().rev() {
+                    match member {
+                        ObjectMember::Property(property) => stack.push(&property.ty),
+                        ObjectMember::Method(method) => {
+                            for type_parameter in method.function.type_parameters.iter().rev() {
+                                score += 1;
+                                if let Some(default) = type_parameter.default.as_deref() {
+                                    stack.push(default);
+                                }
+                                if let Some(constraint) = type_parameter.constraint.as_deref() {
+                                    stack.push(constraint);
+                                }
+                            }
+                            if let Some(return_type) = method.function.return_type.as_deref() {
+                                stack.push(return_type);
+                            }
+                            for parameter in method.function.parameters.iter().rev() {
+                                stack.push(&parameter.ty);
+                            }
+                        }
+                        ObjectMember::IndexSignature(signature) => {
+                            stack.push(&signature.value_type);
+                            stack.push(&signature.key_type);
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            for type_parameter in function.type_parameters.iter().rev() {
+                                score += 1;
+                                if let Some(default) = type_parameter.default.as_deref() {
+                                    stack.push(default);
+                                }
+                                if let Some(constraint) = type_parameter.constraint.as_deref() {
+                                    stack.push(constraint);
+                                }
+                            }
+                            if let Some(return_type) = function.return_type.as_deref() {
+                                stack.push(return_type);
+                            }
+                            for parameter in function.parameters.iter().rev() {
+                                stack.push(&parameter.ty);
+                            }
+                        }
+                    }
+                }
+            }
+            TypeExpr::Function(function) => {
+                for type_parameter in function.type_parameters.iter().rev() {
+                    score += 1;
+                    if let Some(default) = type_parameter.default.as_deref() {
+                        stack.push(default);
+                    }
+                    if let Some(constraint) = type_parameter.constraint.as_deref() {
+                        stack.push(constraint);
+                    }
+                }
+                if let Some(return_type) = function.return_type.as_deref() {
+                    stack.push(return_type);
+                }
+                for parameter in function.parameters.iter().rev() {
+                    stack.push(&parameter.ty);
+                }
+            }
+            TypeExpr::Ref { type_arguments, .. }
+            | TypeExpr::RecursiveRef { type_arguments, .. } => {
+                for argument in type_arguments.iter().rev() {
+                    stack.push(argument);
+                }
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                stack.push(index);
+                stack.push(object);
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                stack.push(false_type);
+                stack.push(true_type);
+                stack.push(extends);
+                stack.push(check);
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                ..
+            } => {
+                if let Some(name_type) = name_type.as_deref() {
+                    stack.push(name_type);
+                }
+                stack.push(value);
+                stack.push(source);
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for expression in expressions.iter().rev() {
+                    stack.push(expression);
+                }
+            }
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::Infer { .. } => {}
+        }
+    }
+
+    score
+}
+
+fn component_meta_type_expr_has_structural_top_level(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    match expr {
+        TypeExpr::Parenthesized(inner) => component_meta_type_expr_has_structural_top_level(inner),
+        TypeExpr::Ref { .. }
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Conditional { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::Infer { .. } => false,
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Object(_)
+        | TypeExpr::Function(_)
+        | TypeExpr::Array { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Union(_)
+        | TypeExpr::Intersection(_)
+        | TypeExpr::KeyOf(_)
+        | TypeExpr::Rest(_)
+        | TypeExpr::TemplateLiteral { .. }
+        | TypeExpr::RecursiveRef { .. } => true,
+    }
+}
+
+pub(crate) fn component_meta_type_expr_improves(
+    candidate: &verter_semantic::analysis::type_expr::TypeExpr,
+    current: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    let candidate_score = component_meta_type_expr_symbolic_score(candidate);
+    let current_score = component_meta_type_expr_symbolic_score(current);
+
+    candidate_score < current_score
+        || (component_meta_type_expr_has_structural_top_level(candidate)
+            && !component_meta_type_expr_has_structural_top_level(current))
+        || (candidate_score == current_score
+            && component_meta_type_expr_generic_detail_score(candidate)
+                > component_meta_type_expr_generic_detail_score(current))
 }
 
 fn component_meta_registry_prefers_structural_materialization(
@@ -4760,6 +7377,368 @@ fn preserve_package_backed_symbolic_refs(
     }
 }
 
+fn nested_symbolic_member_route_should_stay_symbolic(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    fn declaration_body_keeps_nested_member_route_symbolic(body: &TypeExpr) -> bool {
+        match body {
+            TypeExpr::Parenthesized(inner) => {
+                declaration_body_keeps_nested_member_route_symbolic(inner)
+            }
+            TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty() => true,
+            _ => component_meta_registry_public_utility_route(body)
+                .or_else(|| component_meta_registry_public_indexed_access_route(body))
+                .is_some(),
+        }
+    }
+
+    let Some((root_name, _)) = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+    else {
+        return false;
+    };
+    let declaration = engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        root_name
+    } else {
+        declaration.resolved_name
+    };
+    let Some(body) = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())
+    else {
+        return false;
+    };
+    declaration_body_keeps_nested_member_route_symbolic(&body)
+}
+
+fn type_expr_contains_public_member_route(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    if component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        .is_some()
+    {
+        return true;
+    }
+
+    match expr {
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => type_expr_contains_public_member_route(inner),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| type_expr_contains_public_member_route(&element.ty)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            types.iter().any(type_expr_contains_public_member_route)
+        }
+        TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+            ObjectMember::Property(property) => {
+                type_expr_contains_public_member_route(&property.ty)
+            }
+            ObjectMember::Method(method) => {
+                method
+                    .function
+                    .parameters
+                    .iter()
+                    .any(|param| type_expr_contains_public_member_route(&param.ty))
+                    || method
+                        .function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(type_expr_contains_public_member_route)
+            }
+            ObjectMember::IndexSignature(signature) => {
+                type_expr_contains_public_member_route(&signature.key_type)
+                    || type_expr_contains_public_member_route(&signature.value_type)
+            }
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                function
+                    .parameters
+                    .iter()
+                    .any(|param| type_expr_contains_public_member_route(&param.ty))
+                    || function
+                        .return_type
+                        .as_deref()
+                        .is_some_and(type_expr_contains_public_member_route)
+            }
+        }),
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .any(|param| type_expr_contains_public_member_route(&param.ty))
+                || function
+                    .return_type
+                    .as_deref()
+                    .is_some_and(type_expr_contains_public_member_route)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            type_expr_contains_public_member_route(check)
+                || type_expr_contains_public_member_route(extends)
+                || type_expr_contains_public_member_route(true_type)
+                || type_expr_contains_public_member_route(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            type_expr_contains_public_member_route(source)
+                || type_expr_contains_public_member_route(value)
+                || name_type
+                    .as_deref()
+                    .is_some_and(type_expr_contains_public_member_route)
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(type_expr_contains_public_member_route),
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_contains_public_member_route),
+        TypeExpr::IndexedAccess { object, index } => {
+            type_expr_contains_public_member_route(object)
+                || type_expr_contains_public_member_route(index)
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn type_expr_needs_nested_symbolic_route_preservation(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    match expr {
+        TypeExpr::Parenthesized(inner)
+        | TypeExpr::Array { element: inner, .. }
+        | TypeExpr::KeyOf(inner)
+        | TypeExpr::Rest(inner) => type_expr_needs_nested_symbolic_route_preservation(inner),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| type_expr_needs_nested_symbolic_route_preservation(&element.ty)),
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+            .iter()
+            .any(type_expr_needs_nested_symbolic_route_preservation),
+        TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+            ObjectMember::Property(property) => match &property.ty {
+                TypeExpr::Function(function) => function
+                    .parameters
+                    .iter()
+                    .any(|param| type_expr_contains_public_member_route(&param.ty)),
+                other => type_expr_needs_nested_symbolic_route_preservation(other),
+            },
+            ObjectMember::Method(method) => method
+                .function
+                .parameters
+                .iter()
+                .any(|param| type_expr_contains_public_member_route(&param.ty)),
+            ObjectMember::IndexSignature(signature) => {
+                type_expr_needs_nested_symbolic_route_preservation(&signature.key_type)
+                    || type_expr_needs_nested_symbolic_route_preservation(&signature.value_type)
+            }
+            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
+                function
+                    .parameters
+                    .iter()
+                    .any(|param| type_expr_contains_public_member_route(&param.ty))
+            }
+        }),
+        TypeExpr::Function(function) => function
+            .parameters
+            .iter()
+            .any(|param| type_expr_contains_public_member_route(&param.ty)),
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            type_expr_needs_nested_symbolic_route_preservation(check)
+                || type_expr_needs_nested_symbolic_route_preservation(extends)
+                || type_expr_needs_nested_symbolic_route_preservation(true_type)
+                || type_expr_needs_nested_symbolic_route_preservation(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            type_expr_needs_nested_symbolic_route_preservation(source)
+                || type_expr_needs_nested_symbolic_route_preservation(value)
+                || name_type
+                    .as_deref()
+                    .is_some_and(type_expr_needs_nested_symbolic_route_preservation)
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(type_expr_needs_nested_symbolic_route_preservation),
+        TypeExpr::Ref { type_arguments, .. } => type_arguments
+            .iter()
+            .any(type_expr_needs_nested_symbolic_route_preservation),
+        TypeExpr::IndexedAccess { object, index } => {
+            type_expr_needs_nested_symbolic_route_preservation(object)
+                || type_expr_needs_nested_symbolic_route_preservation(index)
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. }
+        | TypeExpr::RecursiveRef { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::Infer { .. } => false,
+    }
+}
+
+fn preserve_nested_symbolic_member_routes(
+    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
+    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    nested: bool,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+
+    let should_keep_symbolic = nested
+        && nested_symbolic_member_route_should_stay_symbolic(raw, scope_canonical_id, engine);
+    if should_keep_symbolic {
+        return raw.clone();
+    }
+
+    match (materialized, raw) {
+        (TypeExpr::Object(materialized_object), TypeExpr::Object(raw_object)) => {
+            let mut object = materialized_object.as_ref().clone();
+            let raw_properties = raw_object
+                .properties
+                .iter()
+                .filter_map(|member| match member {
+                    ObjectMember::Property(property) => Some((property.name.as_str(), member)),
+                    ObjectMember::Method(method) => Some((method.name.as_str(), member)),
+                    _ => None,
+                })
+                .collect::<rustc_hash::FxHashMap<_, _>>();
+            for member in &mut object.properties {
+                match member {
+                    ObjectMember::Property(property) => {
+                        let Some(raw_member) = raw_properties.get(property.name.as_str()) else {
+                            continue;
+                        };
+                        let ObjectMember::Property(raw_property) = raw_member else {
+                            continue;
+                        };
+                        property.ty = preserve_nested_symbolic_member_routes(
+                            &property.ty,
+                            &raw_property.ty,
+                            scope_canonical_id,
+                            engine,
+                            true,
+                        );
+                    }
+                    ObjectMember::Method(method) => {
+                        let Some(raw_member) = raw_properties.get(method.name.as_str()) else {
+                            continue;
+                        };
+                        let ObjectMember::Method(raw_method) = raw_member else {
+                            continue;
+                        };
+                        for (param, raw_param) in method
+                            .function
+                            .parameters
+                            .iter_mut()
+                            .zip(raw_method.function.parameters.iter())
+                        {
+                            param.ty = preserve_nested_symbolic_member_routes(
+                                &param.ty,
+                                &raw_param.ty,
+                                scope_canonical_id,
+                                engine,
+                                true,
+                            );
+                        }
+                        if let (Some(return_type), Some(raw_return_type)) = (
+                            method.function.return_type.as_mut(),
+                            raw_method.function.return_type.as_deref(),
+                        ) {
+                            *return_type = Arc::new(preserve_nested_symbolic_member_routes(
+                                return_type,
+                                raw_return_type,
+                                scope_canonical_id,
+                                engine,
+                                true,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            TypeExpr::Object(Arc::new(object))
+        }
+        (TypeExpr::Function(materialized_function), TypeExpr::Function(raw_function)) => {
+            let mut function = materialized_function.as_ref().clone();
+            for (param, raw_param) in function
+                .parameters
+                .iter_mut()
+                .zip(raw_function.parameters.iter())
+            {
+                param.ty = preserve_nested_symbolic_member_routes(
+                    &param.ty,
+                    &raw_param.ty,
+                    scope_canonical_id,
+                    engine,
+                    true,
+                );
+            }
+            if let (Some(return_type), Some(raw_return_type)) = (
+                function.return_type.as_mut(),
+                raw_function.return_type.as_deref(),
+            ) {
+                *return_type = Arc::new(preserve_nested_symbolic_member_routes(
+                    return_type,
+                    raw_return_type,
+                    scope_canonical_id,
+                    engine,
+                    true,
+                ));
+            }
+            TypeExpr::Function(Arc::new(function))
+        }
+        (TypeExpr::Parenthesized(materialized_inner), TypeExpr::Parenthesized(raw_inner)) => {
+            TypeExpr::Parenthesized(Arc::new(preserve_nested_symbolic_member_routes(
+                materialized_inner,
+                raw_inner,
+                scope_canonical_id,
+                engine,
+                nested,
+            )))
+        }
+        _ => materialized.clone(),
+    }
+}
+
 pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -4878,6 +7857,116 @@ fn component_meta_ref_resolves_to_package(
     declaration.canonical_source.contains("/node_modules/")
 }
 
+fn registry_member_route_inline_materializable(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    fn declaration_body_prefers_inline_materialization(
+        body: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        match body {
+            TypeExpr::Parenthesized(inner) => {
+                declaration_body_prefers_inline_materialization(inner)
+            }
+            TypeExpr::Object(_) => true,
+            TypeExpr::Ref { type_arguments, .. } => type_arguments.is_empty(),
+            _ if component_meta_registry_public_utility_route(body)
+                .or_else(|| component_meta_registry_public_indexed_access_route(body))
+                .is_some() =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    if type_expr_has_package_backed_root(expr, scope_canonical_id, engine)
+        || expr_has_transitively_recursive_generic_root(engine, scope_canonical_id, expr)
+    {
+        return false;
+    }
+
+    let Some((root_name, _)) = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+    else {
+        return false;
+    };
+
+    let prepared_body = engine
+        .named_decl_body(scope_canonical_id, root_name.as_str())
+        .or_else(|| {
+            let declaration =
+                engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
+            if matches!(
+                declaration.kind,
+                crate::resolver_core::ResolvedDeclarationKind::Interface
+                    | crate::resolver_core::ResolvedDeclarationKind::Class
+            ) {
+                return Some(verter_semantic::analysis::type_expr::TypeExpr::named(
+                    root_name.clone(),
+                ));
+            }
+            let declaration_scope = if declaration.canonical_source.is_empty() {
+                scope_canonical_id.to_string()
+            } else {
+                declaration.canonical_source
+            };
+            let declaration_name = if declaration.resolved_name.is_empty() {
+                root_name
+            } else {
+                declaration.resolved_name
+            };
+            engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())
+        });
+
+    prepared_body
+        .as_ref()
+        .is_some_and(declaration_body_prefers_inline_materialization)
+}
+
+fn materialize_inline_registry_member_route_from_decl_body(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    let (root_name, route) = component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))?;
+    let declaration = engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
+    let declaration_scope = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source
+    };
+    let declaration_name = if declaration.resolved_name.is_empty() {
+        root_name
+    } else {
+        declaration.resolved_name
+    };
+    let body = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())?;
+    let structural = materialize_component_meta_registry_structural_expr(
+        &body,
+        declaration_scope.as_str(),
+        engine,
+    );
+    let source = if component_meta_registry_has_explicit_object_surface(&structural) {
+        structural
+    } else {
+        body
+    };
+
+    match route {
+        crate::resolver_core::RouteDemand::Whole => Some(source),
+        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => Some(source),
+        crate::resolver_core::RouteDemand::MemberPath(path) => {
+            component_meta_registry_raw_member_path_surface(&source, &path)
+        }
+        _ => None,
+    }
+}
+
 fn materialize_component_meta_member_surface_expr_with_active_stack(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -4898,6 +7987,33 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
     }
 
     if nested_surface {
+        if registry_member_route_inline_materializable(expr, scope_canonical_id, engine) {
+            if let Some(inline_route_surface) =
+                materialize_inline_registry_member_route_from_decl_body(
+                    expr,
+                    scope_canonical_id,
+                    engine,
+                )
+            {
+                if inline_route_surface != *expr {
+                    let result = materialize_component_meta_member_surface_expr_with_active_stack(
+                        &inline_route_surface,
+                        scope_canonical_id,
+                        engine,
+                        true,
+                        active,
+                    );
+                    engine.store_materialized_member_surface(
+                        scope_canonical_id,
+                        expr,
+                        nested_surface,
+                        result.clone(),
+                    );
+                    active.remove(expr);
+                    return result;
+                }
+            }
+        }
         let projected = match expr {
             TypeExpr::Ref {
                 name,
@@ -4909,6 +8025,17 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                 } else {
                     engine.project_type_surface_expr(scope_canonical_id, name.as_ref())
                 }
+            }
+            _ if component_meta_registry_public_utility_route(expr)
+                .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+                .is_some()
+                && !registry_member_route_inline_materializable(
+                    expr,
+                    scope_canonical_id,
+                    engine,
+                ) =>
+            {
+                None
             }
             _ => engine.project_expr_surface_expr(scope_canonical_id, expr),
         };
@@ -4982,8 +8109,15 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
         }
     }
 
-    let structural =
-        materialize_component_meta_registry_structural_expr(expr, scope_canonical_id, engine);
+    let structural = if component_meta_registry_public_utility_route(expr)
+        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
+        .is_some()
+        && !registry_member_route_inline_materializable(expr, scope_canonical_id, engine)
+    {
+        expr.clone()
+    } else {
+        materialize_component_meta_registry_structural_expr(expr, scope_canonical_id, engine)
+    };
     if structural != *expr {
         let result = materialize_component_meta_member_surface_expr_with_active_stack(
             &structural,
@@ -5034,6 +8168,22 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                         let should_materialize = match &property.ty {
                             TypeExpr::Function(_) => !nested_surface,
                             TypeExpr::Object(_) => true,
+                            TypeExpr::IndexedAccess { .. } => {
+                                registry_member_route_inline_materializable(
+                                    &property.ty,
+                                    scope_canonical_id,
+                                    engine,
+                                )
+                            }
+                            TypeExpr::Ref { name, .. }
+                                if matches!(name.as_ref(), "Pick" | "Omit") =>
+                            {
+                                registry_member_route_inline_materializable(
+                                    &property.ty,
+                                    scope_canonical_id,
+                                    engine,
+                                )
+                            }
                             TypeExpr::Ref {
                                 name,
                                 type_arguments,
@@ -5623,6 +8773,127 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             evaluated_types,
             tracked_dependencies,
         }
+    }
+
+    fn projectable_owner_local_macro_roots(
+        &self,
+        owner_canonical: &str,
+        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+    ) -> Vec<String> {
+        fn macro_lacks_direct_local_surface(
+            mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        ) -> bool {
+            match mac.kind {
+                verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
+                | verter_semantic::analysis::AnalyzedMacroKind::DefineModel => {
+                    mac.prop_fields.is_empty()
+                }
+                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                    mac.emit_fields.is_empty()
+                }
+                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                    mac.slot_fields.is_empty()
+                }
+                verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
+                | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+            }
+        }
+
+        let mut candidate_roots = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+
+        for resolved in &mac.resolved_local_types {
+            let is_direct_local = mac
+                .type_references
+                .iter()
+                .any(|type_name| type_name == &resolved.name);
+            if is_direct_local && seen.insert(resolved.name.as_str()) {
+                candidate_roots.push(resolved.name.as_str());
+            }
+        }
+
+        if candidate_roots.is_empty() && macro_lacks_direct_local_surface(mac) {
+            let owner_has_symbol = self
+                .host
+                .route_owned_shallow_state_in_view(owner_canonical, self.store_view);
+            for type_name in &mac.type_references {
+                if type_name.contains('.') || !seen.insert(type_name.as_str()) {
+                    continue;
+                }
+                let owner_local_decl = owner_has_symbol
+                    .as_ref()
+                    .is_some_and(|state| state.symbol(type_name).is_some())
+                    || self
+                        .resolve_type_declaration(owner_canonical, type_name)
+                        .canonical_source
+                        == owner_canonical;
+                if owner_local_decl {
+                    candidate_roots.push(type_name.as_str());
+                }
+            }
+        }
+
+        if candidate_roots.is_empty() {
+            return Vec::new();
+        }
+
+        let owner_solver_host =
+            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+                self.host,
+                self.store_view,
+                owner_canonical,
+            );
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+            self.host,
+            self.store_view,
+            &owner_solver_host,
+        );
+
+        candidate_roots
+            .into_iter()
+            .filter(|root_name| {
+                query_engine
+                    .project_prepared_type_surface_shape(owner_canonical, root_name)
+                    .is_some_and(|shape| match mac.kind {
+                        verter_semantic::analysis::AnalyzedMacroKind::DefineProps
+                        | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
+                        | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
+                        | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => true,
+                        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                            !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+                        }
+                        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose
+                        | verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                    })
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn resolve_owner_local_macro_surface(
+        &self,
+        owner_canonical: &str,
+        root_name: &str,
+        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+    ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
+        let owner_solver_host =
+            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
+                self.host,
+                self.store_view,
+                owner_canonical,
+            );
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
+            self.host,
+            self.store_view,
+            &owner_solver_host,
+        );
+        let shape = query_engine.project_prepared_type_surface_shape(owner_canonical, root_name)?;
+        Some(
+            crate::resolver_core::component_meta::project_macro_surfaces_from_expanded_shape(
+                macro_kind, &shape,
+            ),
+        )
     }
 
     fn resolve_macro_elements(

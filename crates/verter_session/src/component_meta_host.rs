@@ -9,6 +9,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use crate::resolver_core::type_expansion::TypeExpansionError;
 use crate::resolver_core::type_expansion_host::{
@@ -33,6 +35,16 @@ use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
 use crate::host_manage::component_meta_trace_scope;
 use crate::VerterHost;
+
+#[cfg(test)]
+static HEAVY_COMPONENT_META_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_heavy_component_meta_test() -> std::sync::MutexGuard<'static, ()> {
+    HEAVY_COMPONENT_META_TEST_MUTEX
+        .lock()
+        .expect("heavy component-meta test mutex should not be poisoned")
+}
 
 // ---------------------------------------------------------------------------
 // Error
@@ -1046,6 +1058,7 @@ export type ComponentConfig<
     /// type graphs complete without hang or budget error.
     #[test]
     fn component_meta_budget_errors_surface_on_new_session_api() {
+        let _heavy_test_guard = lock_heavy_component_meta_test();
         let host = make_host();
 
         let import_count = 2_005usize;
@@ -1114,11 +1127,15 @@ defineProps<Props>()
             import_count,
             "large finite heritage graph should produce all {import_count} props"
         );
-        // Spot-check first and last
+        // Spot-check the first prop and confirm the highest-numbered prop is
+        // still present; projected surfaces are sorted lexicographically.
         assert_eq!(meta.props[0].name, "p0");
-        assert_eq!(
-            meta.props.last().unwrap().name,
-            format!("p{}", import_count - 1)
+        assert!(
+            meta.props
+                .iter()
+                .any(|prop| prop.name == format!("p{}", import_count - 1)),
+            "large finite heritage graph should retain p{} somewhere in the deterministic lexical surface order",
+            import_count - 1
         );
     }
 

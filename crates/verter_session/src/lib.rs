@@ -1478,31 +1478,38 @@ impl VerterHost {
                     old_export_signatures,
                     new_export_signatures,
                 );
-                let evict_targets = if dep_is_newly_added {
+                let evict_targets = if dep_is_newly_added || cleared.is_empty() {
                     &owners
                 } else {
                     &cleared
                 };
+                if !evict_targets.is_empty() {
+                    self.eval_env_cache.lock().clear();
+                }
                 for owner in evict_targets {
-                    // Soft-invalidate rather than hard-evict so that stale
-                    // store views can still find the previous generation of
-                    // facts (with the old import routes) via the previous chain.
-                    self.resolver.runtime.module_facts.invalidate(owner);
+                    self.resolver.runtime.invalidate_canonical(owner);
                 }
             }
 
             #[cfg(not(feature = "scheduler"))]
             {
                 let ws = self.workspace.read();
-                deps::smart_invalidate_dependents_with_owners(
+                let cleared = deps::smart_invalidate_dependents_with_owners(
                     &self.files,
-                    owners,
+                    owners.clone(),
                     Some(ws.as_ref()),
                     &self.config,
                     dependency_id,
                     old_export_signatures,
                     new_export_signatures,
                 );
+                let evict_targets = if cleared.is_empty() { owners } else { cleared };
+                if !evict_targets.is_empty() {
+                    self.eval_env_cache.lock().clear();
+                }
+                for owner in evict_targets {
+                    self.resolver.runtime.invalidate_canonical(&owner);
+                }
             }
         }
 

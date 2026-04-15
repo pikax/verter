@@ -8,12 +8,14 @@ use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectPrope
 use verter_semantic::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
+use verter_span::Span;
 
 use crate::resolver_core::{
     component_meta_registry::component_meta_registry_has_non_object_top_level_surface,
     project_macro_surfaces, resolve_local_type_declaration, resolve_type_declaration,
     surface_projector::{
         project_macro_surfaces_from_expanded_text, project_macro_surfaces_from_source_type_name,
+        ProjectedMacroSurfaces,
     },
     DeclarationMetadataResolver, FactVersionRef, ResolvedNativeProp, ResolvedTypeDeclaration,
 };
@@ -156,6 +158,33 @@ pub trait ComponentMetaResolverHost: DeclarationMetadataResolver {
         purpose: ComponentMetaResolutionPurpose,
     ) -> ComponentMetaEvalOutputs;
 
+    fn projectable_owner_local_macro_roots(
+        &self,
+        _owner_canonical: &str,
+        _mac: &AnalyzedMacro,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn has_projectable_owner_local_macro_surface(
+        &self,
+        owner_canonical: &str,
+        mac: &AnalyzedMacro,
+    ) -> bool {
+        !self
+            .projectable_owner_local_macro_roots(owner_canonical, mac)
+            .is_empty()
+    }
+
+    fn resolve_owner_local_macro_surface(
+        &self,
+        _owner_canonical: &str,
+        _root_name: &str,
+        _macro_kind: AnalyzedMacroKind,
+    ) -> Option<ProjectedMacroSurfaces> {
+        None
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn resolve_macro_elements(
         &self,
@@ -282,14 +311,40 @@ where
 
     let imports = host.snapshot_imports(snapshot);
     let macros = host.snapshot_macros(snapshot);
+    let projectable_owner_local_roots = if expanded {
+        {
+            macros
+                .iter()
+                .map(|mac| host.projectable_owner_local_macro_roots(owner_canonical, mac))
+                .collect::<Vec<_>>()
+        }
+    } else {
+        Default::default()
+    };
+    let projectable_owner_local_surfaces = if expanded {
+        {
+            projectable_owner_local_roots
+                .iter()
+                .map(|roots| !roots.is_empty())
+                .collect::<Vec<_>>()
+        }
+    } else {
+        Default::default()
+    };
     let macro_type_deps: Vec<MacroTypeDep> = host.snapshot_macro_type_deps(snapshot).to_vec();
+    let owner_source = if expanded {
+        host.read_source(owner_canonical)
+    } else {
+        None
+    };
     for dep in &macro_type_deps {
         if purpose == ComponentMetaResolutionPurpose::Fallthrough
             && !macro_kind_needed_for_fallthrough(dep.macro_kind)
         {
             continue;
         }
-        let direct_macro_reference = is_direct_macro_type_reference(macros, dep);
+        let direct_macro_reference =
+            is_direct_macro_type_reference(macros, dep, owner_source.as_deref());
         if expanded {
             if let Some(mac) = macros.get(dep.macro_index) {
                 let authoritative_owner = macro_has_authoritative_owner_surface(
@@ -299,16 +354,29 @@ where
                 );
                 let authoritative_resolved_local =
                     macro_has_authoritative_resolved_local_surface(mac);
+                let projectable_owner_local = projectable_owner_local_surfaces
+                    .get(dep.macro_index)
+                    .copied()
+                    .unwrap_or(false);
+                let projectable_owner_local_suppresses_dep = projectable_owner_local
+                    && !(purpose == ComponentMetaResolutionPurpose::Full
+                        && dep.macro_kind == AnalyzedMacroKind::DefineEmits);
                 let local_type_root = macro_has_direct_local_type_root(mac);
                 let skip_non_direct_dep = !direct_macro_reference
-                    && (authoritative_owner || authoritative_resolved_local);
+                    && (authoritative_resolved_local
+                        || projectable_owner_local_suppresses_dep
+                        || authoritative_owner);
                 let skip_fallthrough_define_emits = purpose
                     == ComponentMetaResolutionPurpose::Fallthrough
                     && dep.macro_kind == AnalyzedMacroKind::DefineEmits
                     && mac.is_type_based
                     && (!direct_macro_reference || authoritative_owner || local_type_root);
+                let skip_authoritative_resolved_local = authoritative_resolved_local
+                    && !(purpose == ComponentMetaResolutionPurpose::Full
+                        && direct_macro_reference
+                        && dep.macro_kind == AnalyzedMacroKind::DefineEmits);
                 if skip_non_direct_dep
-                    || authoritative_resolved_local
+                    || skip_authoritative_resolved_local
                     || skip_fallthrough_define_emits
                 {
                     if skip_fallthrough_define_emits {
@@ -430,7 +498,7 @@ where
                 project_macro_surfaces(declaration_source.as_deref(), dep.macro_kind, &elements);
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
-            if is_direct_macro_type_reference(macros, dep)
+            if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
                 && !package_backed_dep
                 && should_seed_direct_macro_registry_entry(&declaration)
                 && seen_registry_names.insert(dep.type_name.clone())
@@ -445,33 +513,57 @@ where
                     declaration: declaration.clone(),
                 });
             }
-            resolved_macros.push(ResolvedMacroMeta {
-                macro_index,
-                macro_kind: dep.macro_kind,
-                type_name: dep.type_name.clone(),
-                import_source: dep.import_source.clone(),
-                surface_is_authoritative: true,
-                declaration,
-                native_props: projected.native_props,
-                props: projected.props,
-                emits: projected.emits,
-                slots: projected.slots,
-                jsdoc,
-            });
+            let projectable_owner_local = projectable_owner_local_surfaces
+                .get(dep.macro_index)
+                .copied()
+                .unwrap_or(false);
+            let imported_surface_is_authoritative =
+                imported_declaration_surface_is_authoritative(&declaration);
+            let keep_direct_imported_vue_macro = projectable_owner_local
+                && purpose == ComponentMetaResolutionPurpose::Full
+                && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                && dep.macro_kind == AnalyzedMacroKind::DefineProps
+                && declaration.canonical_source.ends_with(".vue");
+            if !projectable_owner_local || keep_direct_imported_vue_macro {
+                resolved_macros.push(ResolvedMacroMeta {
+                    macro_index,
+                    macro_kind: dep.macro_kind,
+                    type_name: dep.type_name.clone(),
+                    import_source: dep.import_source.clone(),
+                    surface_is_authoritative: imported_surface_is_authoritative,
+                    declaration,
+                    native_props: projected.native_props,
+                    props: projected.props,
+                    emits: projected.emits,
+                    slots: projected.slots,
+                    jsdoc,
+                });
+            }
         } else {
-            resolved_macros.push(ResolvedMacroMeta {
-                macro_index,
-                macro_kind: dep.macro_kind,
-                type_name: dep.type_name.clone(),
-                import_source: dep.import_source.clone(),
-                surface_is_authoritative: false,
-                declaration,
-                native_props: Vec::new(),
-                props: Vec::new(),
-                emits: Vec::new(),
-                slots: Vec::new(),
-                jsdoc,
-            });
+            let projectable_owner_local = projectable_owner_local_surfaces
+                .get(dep.macro_index)
+                .copied()
+                .unwrap_or(false);
+            let keep_direct_imported_vue_macro = projectable_owner_local
+                && purpose == ComponentMetaResolutionPurpose::Full
+                && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                && dep.macro_kind == AnalyzedMacroKind::DefineProps
+                && declaration.canonical_source.ends_with(".vue");
+            if !projectable_owner_local || keep_direct_imported_vue_macro {
+                resolved_macros.push(ResolvedMacroMeta {
+                    macro_index,
+                    macro_kind: dep.macro_kind,
+                    type_name: dep.type_name.clone(),
+                    import_source: dep.import_source.clone(),
+                    surface_is_authoritative: false,
+                    declaration,
+                    native_props: Vec::new(),
+                    props: Vec::new(),
+                    emits: Vec::new(),
+                    slots: Vec::new(),
+                    jsdoc,
+                });
+            }
         }
     }
 
@@ -562,7 +654,14 @@ where
                 // from the queried root surface during registry append, which
                 // keeps publication demand-driven instead of prepublishing the
                 // entire same-file helper chain.
-                if resolved_index == 0 && seen_registry_names.insert(resolved.name.clone()) {
+                let direct_named_reference = mac
+                    .type_references
+                    .iter()
+                    .any(|type_name| type_name == &resolved.name);
+                if resolved_index == 0
+                    && direct_named_reference
+                    && seen_registry_names.insert(resolved.name.clone())
+                {
                     resolved_type_registry.push(ResolvedTypeAnalysis {
                         name: resolved.name.clone(),
                         type_expr: resolved.type_expr.clone().unwrap_or_else(|| {
@@ -587,6 +686,99 @@ where
                                 resolved.span,
                             )
                         },
+                    });
+                }
+            }
+
+            let macro_has_imported_type_deps = macro_type_deps
+                .iter()
+                .any(|dep| dep.macro_index == macro_index);
+            if mac.kind == AnalyzedMacroKind::DefineEmits
+                && (purpose == ComponentMetaResolutionPurpose::Fallthrough
+                    || !macro_has_imported_type_deps)
+            {
+                for root_name in projectable_owner_local_roots
+                    .get(macro_index)
+                    .into_iter()
+                    .flatten()
+                {
+                    if resolved_macros
+                        .iter()
+                        .any(|meta| meta.macro_index == macro_index && meta.type_name == *root_name)
+                    {
+                        continue;
+                    }
+
+                    let Some(projected) = host.resolve_owner_local_macro_surface(
+                        owner_canonical,
+                        root_name,
+                        mac.kind,
+                    ) else {
+                        continue;
+                    };
+
+                    if projected.props.is_empty()
+                        && projected.emits.is_empty()
+                        && projected.slots.is_empty()
+                        && projected.native_props.is_empty()
+                    {
+                        continue;
+                    }
+
+                    let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
+                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                    } else {
+                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                    };
+                    let jsdoc = if skip_macro_declaration_metadata_for_purpose(purpose) {
+                        None
+                    } else {
+                        host.resolve_jsdoc_block(
+                            owner_canonical,
+                            declaration.span,
+                            true,
+                            &mut tracked_deps,
+                            &mut cache,
+                            &mut visiting,
+                        )
+                    };
+                    resolved_macros.push(ResolvedMacroMeta {
+                        macro_index,
+                        macro_kind: mac.kind,
+                        type_name: root_name.clone(),
+                        import_source: String::new(),
+                        surface_is_authoritative: true,
+                        declaration,
+                        native_props: projected.native_props,
+                        props: projected.props,
+                        emits: projected.emits,
+                        slots: projected.slots,
+                        jsdoc,
+                    });
+                }
+            }
+
+            for root_name in projectable_owner_local_roots
+                .get(macro_index)
+                .into_iter()
+                .flatten()
+            {
+                if seen_registry_names.insert(root_name.clone()) {
+                    let declaration = if skip_macro_declaration_metadata_for_purpose(purpose) {
+                        placeholder_type_declaration(root_name.as_str(), root_name.as_str())
+                    } else {
+                        host.resolve_type_declaration(owner_canonical, root_name.as_str())
+                    };
+                    resolved_type_registry.push(ResolvedTypeAnalysis {
+                        name: root_name.clone(),
+                        type_expr: TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                            properties: Vec::new(),
+                        })),
+                        type_expansion: None,
+                    });
+                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                        name: root_name.clone(),
+                        declaration,
                     });
                 }
             }
@@ -642,6 +834,7 @@ mod tests {
         source: String,
         external_macro_elements: BTreeMap<(String, String), ResolvedElements>,
         eval_outputs: ComponentMetaEvalOutputs,
+        projectable_owner_local_roots: BTreeSet<String>,
     }
 
     impl crate::resolver_core::DeclarationMetadataResolver for TestHost {
@@ -709,6 +902,36 @@ mod tests {
             _purpose: ComponentMetaResolutionPurpose,
         ) -> ComponentMetaEvalOutputs {
             self.eval_outputs.clone()
+        }
+
+        fn projectable_owner_local_macro_roots(
+            &self,
+            _owner_canonical: &str,
+            mac: &AnalyzedMacro,
+        ) -> Vec<String> {
+            self.projectable_owner_local_roots
+                .iter()
+                .filter(|root_name| mac.type_references.iter().any(|name| name == *root_name))
+                .cloned()
+                .collect()
+        }
+
+        fn resolve_owner_local_macro_surface(
+            &self,
+            _owner_canonical: &str,
+            root_name: &str,
+            macro_kind: AnalyzedMacroKind,
+        ) -> Option<ProjectedMacroSurfaces> {
+            self.projectable_owner_local_roots
+                .contains(root_name)
+                .then(|| {
+                    project_macro_surfaces_from_source_type_name(
+                        self.source.as_str(),
+                        macro_kind,
+                        root_name,
+                    )
+                })
+                .flatten()
         }
 
         fn resolve_macro_elements(
@@ -1281,6 +1504,7 @@ defineEmits<Emits>()
             source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1342,6 +1566,51 @@ defineEmits<Emits>()
     }
 
     #[test]
+    fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_types() {
+        let source = "type AppEmits = { change: [value: string] }";
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::new(),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::from(["AppEmits".to_string()]),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineEmits,
+                is_type_based: true,
+                type_references: vec!["AppEmits".to_string()],
+                binding_name: Some("emit".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: Vec::new(),
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: Vec::new(),
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert_eq!(resolved.resolved_macros.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].type_name, "AppEmits");
+        assert_eq!(resolved.resolved_macros[0].emits.len(), 1);
+        assert_eq!(resolved.resolved_macros[0].emits[0].name, "change");
+    }
+
+    #[test]
     fn local_resolved_slot_types_project_symbolic_pick_bindings() {
         let source = r#"
 interface CalendarCellTriggerProps {
@@ -1359,6 +1628,7 @@ defineSlots<CalendarSlots>()
             source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1458,6 +1728,7 @@ type LocalItem = {
             source: source.to_string(),
             external_macro_elements,
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1582,6 +1853,7 @@ type Props = Pick<ImportedBase, 'href'>
                 }),
                 tracked_dependencies: BTreeSet::new(),
             },
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1672,6 +1944,7 @@ type Props = Pick<ImportedBase, 'href'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1773,6 +2046,7 @@ type Props = {
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1871,6 +2145,7 @@ type Props = {
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -1964,6 +2239,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2025,6 +2301,92 @@ type Props = Omit<ImportedBase, 'hidden'>
     }
 
     #[test]
+    fn resolve_component_meta_parts_skips_direct_imported_macro_resolution_when_owner_local_prepared_surface_is_available(
+    ) {
+        let source = r#"
+type Props = Omit<ImportedBase, 'hidden'>
+"#;
+        let host = TestHost {
+            source: source.to_string(),
+            external_macro_elements: BTreeMap::from([(
+                ("./types".to_string(), "ImportedBase".to_string()),
+                ResolvedElements {
+                    props: vec![ResolvedProp {
+                        span: Span::new(0, 0),
+                        key: Span::new(0, 0),
+                        key_name: Some("label".to_string()),
+                        optional: true,
+                        types: vec![RuntimeType::String],
+                        visibility: ResolvedMemberVisibility::Public,
+                        type_span: None,
+                        type_text: Some("string".to_string()),
+                        map_local: false,
+                        span_is_absolute: true,
+                    }],
+                    ..ResolvedElements::default()
+                },
+            )]),
+            eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::from(["Props".to_string()]),
+        };
+        let snapshot = TestSnapshot {
+            imports: Vec::new(),
+            macros: vec![AnalyzedMacro {
+                kind: AnalyzedMacroKind::DefineProps,
+                is_type_based: true,
+                type_references: vec!["Props".to_string(), "ImportedBase".to_string()],
+                binding_name: Some("props".to_string()),
+                model_name: None,
+                has_inherit_attrs_false: false,
+                prop_fields: Vec::new(),
+                emit_fields: Vec::new(),
+                slot_fields: Vec::new(),
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+                expose_fields: Vec::new(),
+                resolved_local_types: vec![ResolvedLocalType {
+                    name: "Props".to_string(),
+                    expanded: "{}".to_string(),
+                    type_expr: Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+                        properties: Vec::new(),
+                    }))),
+                    span: Span::new(0, source.len() as u32),
+                }],
+                span: Span::new(0, source.len() as u32),
+            }],
+            macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+                type_name: "ImportedBase".to_string(),
+                import_source: "./types".to_string(),
+                macro_kind: AnalyzedMacroKind::DefineProps,
+                macro_index: 0,
+                macro_span: Span::new(0, source.len() as u32),
+            }],
+        };
+
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &snapshot,
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+
+        assert!(
+            resolved
+                .resolved_macros
+                .iter()
+                .all(|entry| entry.type_name != "ImportedBase"),
+            "prepared owner-local wrapper surfaces should keep direct imported macro deps off resolved_macros: {:?}",
+            resolved
+                .resolved_macros
+                .iter()
+                .map(|entry| entry.type_name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
         let host = TestHost {
             source: String::new(),
@@ -2047,6 +2409,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2133,6 +2496,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 },
             )]),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2188,6 +2552,7 @@ interface Helper {
             source: source.to_string(),
             external_macro_elements: BTreeMap::new(),
             eval_outputs: ComponentMetaEvalOutputs::default(),
+            projectable_owner_local_roots: BTreeSet::new(),
         };
         let snapshot = TestSnapshot {
             imports: Vec::new(),
@@ -2284,18 +2649,567 @@ pub fn resolved_elements_to_type_expr_via_type_text(
     TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
 }
 
+pub(crate) fn project_macro_surfaces_from_expanded_shape(
+    macro_kind: AnalyzedMacroKind,
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> ProjectedMacroSurfaces {
+    match macro_kind {
+        AnalyzedMacroKind::DefineProps
+        | AnalyzedMacroKind::WithDefaults
+        | AnalyzedMacroKind::DefineModel => ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: shape
+                .properties
+                .iter()
+                .map(|property| verter_semantic::analysis::AnalyzedPropField {
+                    name: property.name.clone(),
+                    is_optional: property.optional,
+                    span: verter_span::Span::default(),
+                    type_annotation: render_type_expr_for_projected_surface(&property.ty),
+                    description: None,
+                    tags: Vec::new(),
+                    resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                    resolution_error: None,
+                })
+                .collect(),
+            emits: Vec::new(),
+            slots: Vec::new(),
+        },
+        AnalyzedMacroKind::DefineEmits => ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: Vec::new(),
+            emits: projected_emit_fields_from_shape(shape),
+            slots: Vec::new(),
+        },
+        AnalyzedMacroKind::DefineSlots => ProjectedMacroSurfaces {
+            native_props: Vec::new(),
+            props: Vec::new(),
+            emits: Vec::new(),
+            slots: projected_slot_fields_from_shape(shape),
+        },
+        AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
+            ProjectedMacroSurfaces::default()
+        }
+    }
+}
+
+fn projected_emit_fields_from_shape(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> Vec<verter_semantic::analysis::AnalyzedEmitField> {
+    use verter_semantic::analysis::type_expr::{LiteralValue, TupleElement, TypeExpr};
+
+    let mut emits = shape
+        .properties
+        .iter()
+        .map(|property| verter_semantic::analysis::AnalyzedEmitField {
+            name: property.name.clone(),
+            span: verter_span::Span::default(),
+            payload_type: event_payload_raw_signature_from_type_expr_for_projected_surface(
+                &property.ty,
+            ),
+            description: None,
+            tags: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+    for signature in &shape.call_signatures {
+        let Some(first) = signature.parameters.first() else {
+            continue;
+        };
+        let payload = TypeExpr::Tuple {
+            elements: std::sync::Arc::from(
+                signature
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .map(|parameter| TupleElement {
+                        label: (!parameter.name.is_empty()).then(|| parameter.name.clone()),
+                        ty: parameter.ty.clone(),
+                        optional: parameter.optional,
+                        rest: parameter.rest,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            readonly: false,
+        };
+        let payload_type =
+            event_payload_raw_signature_from_type_expr_for_projected_surface(&payload);
+        match &first.ty {
+            TypeExpr::Literal(LiteralValue::String(name)) => {
+                emits.push(verter_semantic::analysis::AnalyzedEmitField {
+                    name: name.clone(),
+                    span: verter_span::Span::default(),
+                    payload_type: payload_type.clone(),
+                    description: None,
+                    tags: Vec::new(),
+                })
+            }
+            TypeExpr::Union(types) => {
+                for ty in types.iter() {
+                    let TypeExpr::Literal(LiteralValue::String(name)) = ty else {
+                        continue;
+                    };
+                    emits.push(verter_semantic::analysis::AnalyzedEmitField {
+                        name: name.clone(),
+                        span: verter_span::Span::default(),
+                        payload_type: payload_type.clone(),
+                        description: None,
+                        tags: Vec::new(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = FxHashSet::default();
+    emits.retain(|emit| seen.insert(emit.name.clone()));
+    emits
+}
+
+fn projected_slot_fields_from_shape(
+    shape: &verter_semantic::analysis::type_expand::ExpandedObjectShape,
+) -> Vec<verter_semantic::analysis::AnalyzedSlotField> {
+    shape
+        .properties
+        .iter()
+        .filter_map(|property| {
+            let rendered = render_type_expr_for_projected_surface(&property.ty);
+            let (bindings, return_type) =
+                crate::resolver_core::surface_projector::extract_slot_info_from_type_text(
+                    None,
+                    rendered.as_deref(),
+                );
+            if bindings.is_empty() && return_type.is_none() {
+                return None;
+            }
+            Some(verter_semantic::analysis::AnalyzedSlotField {
+                name: property.name.clone(),
+                is_required: !property.optional,
+                span: verter_span::Span::default(),
+                bindings,
+                return_type,
+                description: None,
+                tags: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn event_payload_raw_signature_from_type_expr_for_projected_surface(
+    payload: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<String> {
+    render_type_expr_for_projected_surface(payload).filter(|rendered| rendered.starts_with('['))
+}
+
+fn render_type_expr_for_projected_surface(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<String> {
+    use verter_semantic::analysis::type_expr::{
+        LiteralValue, ObjectMember, PrimitiveName, TypeExpr,
+    };
+
+    match expr {
+        TypeExpr::Primitive(name) => Some(match name {
+            PrimitiveName::String => "string".to_string(),
+            PrimitiveName::Number => "number".to_string(),
+            PrimitiveName::Boolean => "boolean".to_string(),
+            PrimitiveName::BigInt => "bigint".to_string(),
+            PrimitiveName::Symbol => "symbol".to_string(),
+            PrimitiveName::Null => "null".to_string(),
+            PrimitiveName::Undefined => "undefined".to_string(),
+            PrimitiveName::Void => "void".to_string(),
+            PrimitiveName::Any => "any".to_string(),
+            PrimitiveName::Unknown => "unknown".to_string(),
+            PrimitiveName::Never => "never".to_string(),
+            PrimitiveName::Object => "object".to_string(),
+        }),
+        TypeExpr::Literal(LiteralValue::String(value)) => Some(format!("{value:?}")),
+        TypeExpr::Literal(LiteralValue::Number(value)) => Some(value.to_string()),
+        TypeExpr::Literal(LiteralValue::Boolean(value)) => Some(value.to_string()),
+        TypeExpr::Literal(LiteralValue::BigInt(value)) => Some(value.clone()),
+        TypeExpr::Union(types) => Some(
+            types
+                .iter()
+                .map(render_type_expr_for_projected_surface)
+                .collect::<Option<Vec<_>>>()?
+                .join(" | "),
+        ),
+        TypeExpr::Intersection(types) => Some(
+            types
+                .iter()
+                .map(render_type_expr_for_projected_surface)
+                .collect::<Option<Vec<_>>>()?
+                .join(" & "),
+        ),
+        TypeExpr::Array { element, readonly } => {
+            let rendered = render_type_expr_for_projected_surface(element)?;
+            Some(if *readonly {
+                format!("readonly {rendered}[]")
+            } else {
+                format!("{rendered}[]")
+            })
+        }
+        TypeExpr::Tuple { elements, readonly } => {
+            let rendered = elements
+                .iter()
+                .map(|element| {
+                    let mut rendered = String::new();
+                    if let Some(label) = &element.label {
+                        rendered.push_str(label);
+                        if element.optional {
+                            rendered.push('?');
+                        }
+                        rendered.push_str(": ");
+                    }
+                    if element.rest {
+                        rendered.push_str("...");
+                    }
+                    rendered.push_str(&render_type_expr_for_projected_surface(&element.ty)?);
+                    Some(rendered)
+                })
+                .collect::<Option<Vec<_>>>()?
+                .join(", ");
+            Some(if *readonly {
+                format!("readonly [{rendered}]")
+            } else {
+                format!("[{rendered}]")
+            })
+        }
+        TypeExpr::Object(object) => {
+            let rendered = object
+                .properties
+                .iter()
+                .map(|member| match member {
+                    ObjectMember::Property(property) => Some(format!(
+                        "{}{}: {}",
+                        property.name,
+                        if property.optional { "?" } else { "" },
+                        render_type_expr_for_projected_surface(&property.ty)?
+                    )),
+                    ObjectMember::Method(method) => Some(format!(
+                        "{}{}{}",
+                        method.name,
+                        if method.optional { "?" } else { "" },
+                        render_function_type_for_projected_surface(&method.function)?
+                            .strip_prefix('(')
+                            .unwrap_or("")
+                    )),
+                    ObjectMember::CallSignature(function) => {
+                        render_function_type_for_projected_surface(function)
+                    }
+                    ObjectMember::ConstructSignature(_) | ObjectMember::IndexSignature(_) => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+                .join("; ");
+            Some(format!("{{ {rendered} }}"))
+        }
+        TypeExpr::Function(function) => render_function_type_for_projected_surface(function),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            if type_arguments.is_empty() {
+                Some(name.to_string())
+            } else {
+                let args = type_arguments
+                    .iter()
+                    .map(render_type_expr_for_projected_surface)
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!("{}<{}>", name, args.join(", ")))
+            }
+        }
+        TypeExpr::Parenthesized(inner) => Some(format!(
+            "({})",
+            render_type_expr_for_projected_surface(inner)?
+        )),
+        TypeExpr::Rest(inner) => Some(format!(
+            "...{}",
+            render_type_expr_for_projected_surface(inner)?
+        )),
+        _ => None,
+    }
+}
+
+fn render_function_type_for_projected_surface(
+    function: &verter_semantic::analysis::type_expr::FunctionExpr,
+) -> Option<String> {
+    let params = function
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let mut rendered = String::new();
+            if parameter.rest {
+                rendered.push_str("...");
+            }
+            rendered.push_str(parameter.name.as_deref().unwrap_or("_"));
+            if parameter.optional {
+                rendered.push('?');
+            }
+            rendered.push_str(": ");
+            rendered.push_str(&render_type_expr_for_projected_surface(&parameter.ty)?);
+            Some(rendered)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+    let return_type = function
+        .return_type
+        .as_deref()
+        .and_then(render_type_expr_for_projected_surface)
+        .unwrap_or_else(|| "void".to_string());
+    Some(format!("({params}) => {return_type}"))
+}
+
 fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {
     dep.macro_kind == AnalyzedMacroKind::DefineSlots
         && dep.import_source == "vue"
         && dep.type_name == "Slot"
 }
 
-fn is_direct_macro_type_reference(macros: &[AnalyzedMacro], dep: &MacroTypeDep) -> bool {
-    macros.get(dep.macro_index).is_some_and(|mac| {
-        mac.type_references
+fn is_direct_macro_type_reference(
+    macros: &[AnalyzedMacro],
+    dep: &MacroTypeDep,
+    owner_source: Option<&str>,
+) -> bool {
+    let Some(mac) = macros.get(dep.macro_index) else {
+        return false;
+    };
+    if !mac
+        .type_references
+        .iter()
+        .any(|type_name| type_name == &dep.type_name)
+    {
+        return false;
+    }
+
+    owner_source
+        .and_then(|source| direct_macro_type_reference_expr(source, mac.span))
+        .map(|expr| type_expr_has_direct_macro_reference(&expr, dep.type_name.as_str()))
+        .unwrap_or(true)
+}
+
+fn direct_macro_type_reference_expr(source: &str, span: Span) -> Option<TypeExpr> {
+    let snippet = source.get(span.start as usize..span.end as usize)?.trim();
+    let open_angle = snippet.find('<')?;
+    let close_angle = find_matching_angle(snippet, open_angle)?;
+    let type_args = snippet.get(open_angle + 1..close_angle)?.trim();
+    if type_args.is_empty() {
+        return None;
+    }
+
+    let first_type_arg = split_top_level_type_args(type_args)
+        .into_iter()
+        .next()
+        .unwrap_or(type_args)
+        .trim();
+    if first_type_arg.is_empty() {
+        return None;
+    }
+
+    Some(verter_semantic::analysis::type_expr_lower::parse_type_annotation(first_type_arg))
+}
+
+fn find_matching_angle(text: &str, open_index: usize) -> Option<usize> {
+    let mut angle_depth = 0i32;
+    let mut paren_depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut brace_depth = 0i32;
+    let mut in_string = false;
+    let mut string_delim = '\0';
+    let mut escape = false;
+
+    for (index, ch) in text.char_indices().skip(open_index) {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == string_delim {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => {
+                in_string = true;
+                string_delim = ch;
+            }
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            '<' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                angle_depth += 1;
+            }
+            '>' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                angle_depth -= 1;
+                if angle_depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_top_level_type_args(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut angle_depth = 0i32;
+    let mut paren_depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut brace_depth = 0i32;
+    let mut in_string = false;
+    let mut string_delim = '\0';
+    let mut escape = false;
+
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == string_delim {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => {
+                in_string = true;
+                string_delim = ch;
+            }
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth -= 1,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            '<' => angle_depth += 1,
+            '>' => angle_depth -= 1,
+            ',' if angle_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                parts.push(text[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(text[start..].trim());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn type_expr_has_direct_macro_reference(expr: &TypeExpr, needle: &str) -> bool {
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            name.as_ref() == needle
+                || type_arguments
+                    .iter()
+                    .any(|arg| type_expr_has_direct_macro_reference(arg, needle))
+        }
+        TypeExpr::Intersection(types) | TypeExpr::Union(types) => types
             .iter()
-            .any(|type_name| type_name == &dep.type_name)
-    })
+            .any(|inner| type_expr_has_direct_macro_reference(inner, needle)),
+        TypeExpr::Array { element, .. } => type_expr_has_direct_macro_reference(element, needle),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| type_expr_has_direct_macro_reference(&element.ty, needle)),
+        TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) | TypeExpr::KeyOf(inner) => {
+            type_expr_has_direct_macro_reference(inner, needle)
+        }
+        TypeExpr::TypeOf(value_ref) => value_ref.path.iter().any(|segment| segment == needle),
+        TypeExpr::IndexedAccess { object, index } => {
+            type_expr_has_direct_macro_reference(object, needle)
+                || type_expr_has_direct_macro_reference(index, needle)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            type_expr_has_direct_macro_reference(check, needle)
+                || type_expr_has_direct_macro_reference(extends, needle)
+                || type_expr_has_direct_macro_reference(true_type, needle)
+                || type_expr_has_direct_macro_reference(false_type, needle)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            type_expr_has_direct_macro_reference(source, needle)
+                || type_expr_has_direct_macro_reference(value, needle)
+                || name_type
+                    .as_deref()
+                    .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
+        }
+        TypeExpr::Function(function) => {
+            function
+                .parameters
+                .iter()
+                .any(|param| type_expr_has_direct_macro_reference(&param.ty, needle))
+                || function
+                    .return_type
+                    .as_deref()
+                    .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
+                || function.type_parameters.iter().any(|param| {
+                    param
+                        .constraint
+                        .as_deref()
+                        .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
+                        || param
+                            .default
+                            .as_deref()
+                            .is_some_and(|expr| type_expr_has_direct_macro_reference(expr, needle))
+                })
+        }
+        TypeExpr::TemplateLiteral { expressions, .. } => expressions
+            .iter()
+            .any(|expr| type_expr_has_direct_macro_reference(expr, needle)),
+        TypeExpr::RecursiveRef {
+            name,
+            type_arguments,
+            conditional_context,
+        } => {
+            name.as_ref() == needle
+                || type_arguments
+                    .iter()
+                    .any(|arg| type_expr_has_direct_macro_reference(arg, needle))
+                || conditional_context.iter().any(|ctx| {
+                    type_expr_has_direct_macro_reference(&ctx.check, needle)
+                        || type_expr_has_direct_macro_reference(&ctx.extends, needle)
+                })
+        }
+        TypeExpr::TypeParameter(param) => param.name == needle,
+        TypeExpr::Infer { name } => name == needle,
+        TypeExpr::Object(_)
+        | TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Unknown { .. } => false,
+    }
 }
 
 fn is_direct_local_macro_type_reference(
@@ -2485,6 +3399,53 @@ fn should_seed_direct_macro_registry_entry(declaration: &ResolvedTypeDeclaration
     };
     let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(body_text);
     !component_meta_registry_has_non_object_top_level_surface(&parsed)
+}
+
+pub(crate) fn imported_declaration_surface_is_authoritative(
+    declaration: &ResolvedTypeDeclaration,
+) -> bool {
+    use crate::resolver_core::ResolvedDeclarationKind;
+
+    let Some(text) = declaration.text.as_deref() else {
+        return false;
+    };
+
+    match declaration.kind {
+        ResolvedDeclarationKind::TypeAlias => {
+            let Some(body_text) = type_alias_body_text(text) else {
+                return false;
+            };
+            matches!(
+                verter_semantic::analysis::type_expr_lower::parse_type_annotation(body_text),
+                TypeExpr::Object(_)
+            )
+        }
+        ResolvedDeclarationKind::Interface => {
+            !declaration_text_has_any_marker(text, &["extends", "typeof", "keyof", "['", "[\""])
+        }
+        ResolvedDeclarationKind::Class => !declaration_text_has_any_marker(
+            text,
+            &["extends", "implements", "typeof", "keyof", "['", "[\""],
+        ),
+        ResolvedDeclarationKind::Unknown => false,
+    }
+}
+
+pub(crate) fn imported_registry_seed_can_skip_refresh(
+    owner_canonical: &str,
+    declaration: &ResolvedTypeDeclaration,
+    existing_expr: &TypeExpr,
+) -> bool {
+    !declaration.canonical_source.is_empty()
+        && declaration.canonical_source != owner_canonical
+        && imported_declaration_surface_is_authoritative(declaration)
+        && crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(existing_expr)
+        && !component_meta_registry_has_non_object_top_level_surface(existing_expr)
+}
+
+fn declaration_text_has_any_marker(text: &str, markers: &[&str]) -> bool {
+    let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    markers.iter().any(|marker| compact.contains(marker))
 }
 
 fn type_alias_body_text(text: &str) -> Option<&str> {
