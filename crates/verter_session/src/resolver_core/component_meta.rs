@@ -506,17 +506,14 @@ where
                 && projected.slots.is_empty()
                 && projected.native_props.is_empty()
             {
-                if let Some(source_projected) = declaration_source
-                    .as_deref()
-                    .and_then(|source| {
-                        let projection_source = source_for_local_type_projection(source);
-                        project_macro_surfaces_from_source_type_name(
-                            projection_source.as_ref(),
-                            dep.macro_kind,
-                            dep_exported_name.as_ref(),
-                        )
-                    })
-                {
+                if let Some(source_projected) = declaration_source.as_deref().and_then(|source| {
+                    let projection_source = source_for_local_type_projection(source);
+                    project_macro_surfaces_from_source_type_name(
+                        projection_source.as_ref(),
+                        dep.macro_kind,
+                        dep_exported_name.as_ref(),
+                    )
+                }) {
                     projected = source_projected;
                 }
             }
@@ -599,45 +596,61 @@ where
                 && declaration.canonical_source.ends_with(".vue");
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
-            let (surface_props, surface_emits, surface_slots, surface_native_props, surface_authoritative) =
-                if let Some(projected) = projected_from_source.filter(|p| {
-                    !p.props.is_empty() || !p.emits.is_empty() || !p.slots.is_empty() || !p.native_props.is_empty()
-                }) {
-                    if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                        && !package_backed_dep
-                        && should_seed_direct_macro_registry_entry(&declaration)
-                        && seen_registry_names.insert(dep.type_name.clone())
-                    {
-                        resolved_type_registry.push(ResolvedTypeAnalysis {
-                            name: dep.type_name.clone(),
-                            type_expr: projected_macro_surfaces_to_type_expr(dep.macro_kind, &projected),
-                            type_expansion: None,
-                        });
-                        resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                            name: dep.type_name.clone(),
-                            declaration: declaration.clone(),
-                        });
-                    }
-                    (projected.props, projected.emits, projected.slots, projected.native_props,
-                     imported_declaration_surface_is_authoritative(&declaration))
-                } else {
-                    if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                        && !package_backed_dep
-                        && should_seed_direct_macro_registry_entry(&declaration)
-                        && seen_registry_names.insert(dep.type_name.clone())
-                    {
-                        resolved_type_registry.push(ResolvedTypeAnalysis {
-                            name: dep.type_name.clone(),
-                            type_expr: TypeExpr::named(dep.type_name.clone()),
-                            type_expansion: None,
-                        });
-                        resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
-                            name: dep.type_name.clone(),
-                            declaration: declaration.clone(),
-                        });
-                    }
-                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false)
-                };
+            let (
+                surface_props,
+                surface_emits,
+                surface_slots,
+                surface_native_props,
+                surface_authoritative,
+            ) = if let Some(projected) = projected_from_source.filter(|p| {
+                !p.props.is_empty()
+                    || !p.emits.is_empty()
+                    || !p.slots.is_empty()
+                    || !p.native_props.is_empty()
+            }) {
+                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                    && !package_backed_dep
+                    && should_seed_direct_macro_registry_entry(&declaration)
+                    && seen_registry_names.insert(dep.type_name.clone())
+                {
+                    resolved_type_registry.push(ResolvedTypeAnalysis {
+                        name: dep.type_name.clone(),
+                        type_expr: projected_macro_surfaces_to_type_expr(
+                            dep.macro_kind,
+                            &projected,
+                        ),
+                        type_expansion: None,
+                    });
+                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                        name: dep.type_name.clone(),
+                        declaration: declaration.clone(),
+                    });
+                }
+                (
+                    projected.props,
+                    projected.emits,
+                    projected.slots,
+                    projected.native_props,
+                    imported_declaration_surface_is_authoritative(&declaration),
+                )
+            } else {
+                if is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
+                    && !package_backed_dep
+                    && should_seed_direct_macro_registry_entry(&declaration)
+                    && seen_registry_names.insert(dep.type_name.clone())
+                {
+                    resolved_type_registry.push(ResolvedTypeAnalysis {
+                        name: dep.type_name.clone(),
+                        type_expr: TypeExpr::named(dep.type_name.clone()),
+                        type_expansion: None,
+                    });
+                    resolved_type_registry_meta.push(ResolvedTypeRegistryMeta {
+                        name: dep.type_name.clone(),
+                        declaration: declaration.clone(),
+                    });
+                }
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), false)
+            };
             if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
@@ -2722,24 +2735,21 @@ pub fn projected_macro_surfaces_to_type_expr(
     macro_kind: AnalyzedMacroKind,
     projected: &ProjectedMacroSurfaces,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let prop_properties = projected
-        .props
-        .iter()
-        .map(|prop| {
-            let ty = prop
-                .type_annotation
-                .as_deref()
-                .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: "unknown".to_string(),
-                });
-            ObjectMember::Property(ObjectProperty {
-                name: prop.name.clone(),
-                ty,
-                optional: prop.is_optional,
-                readonly: false,
-            })
-        });
+    let prop_properties = projected.props.iter().map(|prop| {
+        let ty = prop
+            .type_annotation
+            .as_deref()
+            .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
+            .unwrap_or(TypeExpr::Unknown {
+                raw: "unknown".to_string(),
+            });
+        ObjectMember::Property(ObjectProperty {
+            name: prop.name.clone(),
+            ty,
+            optional: prop.is_optional,
+            readonly: false,
+        })
+    });
 
     let emit_properties = projected.emits.iter().map(|emit| {
         let ty = emit

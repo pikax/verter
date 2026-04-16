@@ -809,8 +809,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.host
                     .ensure_loaded(canonical_id)
                     .then(|| {
-                        self.host
-                            .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
+                        self.host.prepared_type_decl_in_view(
+                            canonical_id,
+                            symbol_name,
+                            self.store_view,
+                        )
                     })
                     .flatten()
             });
@@ -1973,9 +1976,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     ObjectMember::Property(property) if property.name == member_name => {
                         Some(property.ty.clone())
                     }
-                    ObjectMember::Method(method) if method.name == member_name => {
-                        Some(TypeExpr::Function(std::sync::Arc::new(method.function.clone())))
-                    }
+                    ObjectMember::Method(method) if method.name == member_name => Some(
+                        TypeExpr::Function(std::sync::Arc::new(method.function.clone())),
+                    ),
                     _ => None,
                 })?;
                 let projected_member = self
@@ -2037,12 +2040,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::TypeOf(value_ref) => {
                 let solver_host = self.solver_host_for_scope(active_scope_canonical_id);
                 let root_name = value_ref.path.first()?;
-                let root_identity = solver_host.root_identity(active_scope_canonical_id, root_name)?;
+                let root_identity =
+                    solver_host.root_identity(active_scope_canonical_id, root_name)?;
                 let prepared_value = solver_host.resolve_prepared_value_decl(&root_identity)?;
 
                 if let Some(object_shape) = prepared_value.object_shape.as_ref() {
-                    let object_expr =
-                        TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
+                    let object_expr = TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
                     return self.projected_member_surface_keys(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
@@ -3169,14 +3172,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     prepared_type_param_substitutions(prepared.as_ref(), &[])
                 {
                     if !default_substitutions.is_empty() {
-                        let result = self.project_prepared_member_path_route_projection_from_symbol(
-                            resolution_scope_canonical_id,
-                            active_scope_canonical_id,
-                            symbol_name,
-                            path,
-                            &default_substitutions,
-                            visited,
-                        );
+                        let result = self
+                            .project_prepared_member_path_route_projection_from_symbol(
+                                resolution_scope_canonical_id,
+                                active_scope_canonical_id,
+                                symbol_name,
+                                path,
+                                &default_substitutions,
+                                visited,
+                            );
                         visited.remove(&visit_key);
                         return result;
                     }
@@ -8405,7 +8409,11 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
                 "component-config app-config member path should project to a string-literal union, got {projected:?}"
             );
         };
-        assert_eq!(members.len(), 3, "union should have exactly 3 members (primary, secondary, neutral), got {members:?}");
+        assert_eq!(
+            members.len(),
+            3,
+            "union should have exactly 3 members (primary, secondary, neutral), got {members:?}"
+        );
         assert!(
             members.contains(&TypeExpr::string_literal("primary")),
             "projected member path should keep local theme variants, got {members:?}",
@@ -8542,7 +8550,11 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
                 "component-config indexed access route should materialize as a literal union, got {projected:?}"
             );
         };
-        assert_eq!(members.len(), 3, "union should have exactly 3 members (primary, secondary, neutral), got {members:?}");
+        assert_eq!(
+            members.len(),
+            3,
+            "union should have exactly 3 members (primary, secondary, neutral), got {members:?}"
+        );
         assert!(
             members.contains(&TypeExpr::string_literal("primary")),
             "projected indexed-access route should keep theme variants, got {members:?}",

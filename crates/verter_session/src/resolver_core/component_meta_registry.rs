@@ -66,11 +66,9 @@ pub(crate) fn upsert_component_meta_registry_entry(
         .position(|entry| entry.name == name)
     {
         let existing = resolved_type_registry[index].type_expr.clone();
-        let preferred = merge_component_meta_registry_candidates(
-            Some(existing.clone()),
-            Some(type_expr),
-        )
-        .unwrap_or(existing.clone());
+        let preferred =
+            merge_component_meta_registry_candidates(Some(existing.clone()), Some(type_expr))
+                .unwrap_or(existing.clone());
         if preferred != existing {
             resolved_type_registry[index].type_expr = preferred.clone();
             if let Some(meta) = resolved_type_registry_meta.get_mut(index) {
@@ -170,18 +168,12 @@ pub(crate) fn enqueue_component_meta_registry_ref(
         .filter(|exported| !exported.is_empty())
         .map(str::to_string);
     if !queued_names.insert(name.to_string()) {
-        if let Some(existing) = referenced_names
-            .iter_mut()
-            .find(|pending| {
-                pending.name == name
-                    && pending.source_hint == source_hint
-                    && pending.exported_name == exported_name
-                    && component_meta_registry_can_merge_pending_route(
-                        &pending.route,
-                        &route,
-                    )
-            })
-        {
+        if let Some(existing) = referenced_names.iter_mut().find(|pending| {
+            pending.name == name
+                && pending.source_hint == source_hint
+                && pending.exported_name == exported_name
+                && component_meta_registry_can_merge_pending_route(&pending.route, &route)
+        }) {
             existing.route = crate::resolver_core::merge_route_demands(&existing.route, &route);
         } else {
             referenced_names.push_back(PendingComponentMetaRegistryRef {
@@ -272,7 +264,9 @@ fn merge_component_meta_registry_candidates_bounded(
     right: Option<verter_semantic::analysis::type_expr::TypeExpr>,
     depth: u8,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+    use verter_semantic::analysis::type_expr::{
+        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+    };
 
     fn merge_member_types(left: &TypeExpr, right: &TypeExpr, depth: u8) -> TypeExpr {
         if depth >= MAX_REGISTRY_MERGE_DEPTH {
@@ -291,13 +285,12 @@ fn merge_component_meta_registry_candidates_bounded(
             return None;
         };
 
-        let mut merged_members = left_obj.properties.iter().cloned().collect::<Vec<_>>();
+        let mut merged_members = left_obj.properties.to_vec();
         for right_member in &right_obj.properties {
             match right_member {
                 ObjectMember::Property(right_property) => {
-                    if let Some(ObjectMember::Property(existing_property)) = merged_members
-                        .iter_mut()
-                        .find(|member| {
+                    if let Some(ObjectMember::Property(existing_property)) =
+                        merged_members.iter_mut().find(|member| {
                             matches!(
                                 member,
                                 ObjectMember::Property(property)
@@ -334,10 +327,9 @@ fn merge_component_meta_registry_candidates_bounded(
     }
 
     match (left, right) {
-        (Some(left), Some(right)) => {
-            merge_object_members(&left, &right, depth)
-                .or_else(|| choose_preferred_component_meta_registry_candidate(Some(left), Some(right)))
-        }
+        (Some(left), Some(right)) => merge_object_members(&left, &right, depth).or_else(|| {
+            choose_preferred_component_meta_registry_candidate(Some(left), Some(right))
+        }),
         (left, right) => choose_preferred_component_meta_registry_candidate(left, right),
     }
 }
@@ -1626,12 +1618,8 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                         verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_)
                     )
                 });
-            let import_root = owner_component_meta_registry_import_root(
-                host,
-                snapshot,
-                name,
-                store_view,
-            );
+            let import_root =
+                owner_component_meta_registry_import_root(host, snapshot, name, store_view);
             let package_backed = import_root
                 .as_ref()
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
@@ -2140,9 +2128,7 @@ fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&
     match expr {
         TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
         TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == member_name => {
-                Some(&property.ty)
-            }
+            ObjectMember::Property(property) if property.name == member_name => Some(&property.ty),
             _ => None,
         }),
         _ => None,
@@ -2151,10 +2137,7 @@ fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&
 
 /// Walk a member path (sequence of property names) into a [`TypeExpr::Object`]
 /// and return the leaf type.  Returns `None` if any segment is missing.
-pub(crate) fn raw_member_path_leaf(
-    expr: &TypeExpr,
-    path: &[String],
-) -> Option<TypeExpr> {
+pub(crate) fn raw_member_path_leaf(expr: &TypeExpr, path: &[String]) -> Option<TypeExpr> {
     let mut leaf = expr;
     for member_name in path {
         leaf = explicit_object_member(leaf, member_name)?;
@@ -2283,7 +2266,10 @@ mod tests {
             2,
             "deep member-path requests must not be collapsed into a top-level pick for the same root"
         );
-        assert_eq!(output[0].route, RouteDemand::Pick(vec!["slots".to_string()]));
+        assert_eq!(
+            output[0].route,
+            RouteDemand::Pick(vec!["slots".to_string()])
+        );
         assert_eq!(
             output[1].route,
             RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()])
@@ -2325,7 +2311,11 @@ mod tests {
             panic!("merged partial route candidates should stay object-shaped");
         };
 
-        assert_eq!(shape.properties.len(), 2, "merged object should have exactly 2 properties (slots, variants)");
+        assert_eq!(
+            shape.properties.len(),
+            2,
+            "merged object should have exactly 2 properties (slots, variants)"
+        );
         assert!(shape.properties.iter().any(|member| {
             matches!(member, ObjectMember::Property(property) if property.name == "slots")
         }));
@@ -2342,7 +2332,11 @@ mod tests {
         let TypeExpr::Object(variants_shape) = variants else {
             panic!("variants should stay object-shaped after merge, got {variants:?}");
         };
-        assert_eq!(variants_shape.properties.len(), 1, "variants should have exactly 1 property (color)");
+        assert_eq!(
+            variants_shape.properties.len(),
+            1,
+            "variants should have exactly 1 property (color)"
+        );
         assert!(variants_shape.properties.iter().any(|member| {
             matches!(member, ObjectMember::Property(property) if property.name == "color")
         }));

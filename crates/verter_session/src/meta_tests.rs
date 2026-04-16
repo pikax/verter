@@ -13701,7 +13701,8 @@ defineProps<{
         .find(|prop| prop.name == "description")
         .expect("description prop should exist");
 
-    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &description.type_expr else {
+    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &description.type_expr
+    else {
         panic!(
             "declared component meta should keep imported alias unions structural, got {:?}",
             description.type_expr
@@ -14567,8 +14568,17 @@ defineSlots<ButtonSlots>()
         .expect("component meta query should succeed")
         .expect("component meta should exist");
 
-    assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
-    assert!(meta.events.is_empty(), "should have no events, got {:?}", meta.events.iter().map(|e| &e.name).collect::<Vec<_>>());
+    assert_eq!(
+        meta.props.len(),
+        3,
+        "should have exactly 3 props (color, activeColor, ui), got {:?}",
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    assert!(
+        meta.events.is_empty(),
+        "should have no events, got {:?}",
+        meta.events.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
 
     for prop_name in ["color", "activeColor"] {
         let prop = meta
@@ -14577,7 +14587,10 @@ defineSlots<ButtonSlots>()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
         assert_union_string_literals(&prop.type_expr, &["primary", "secondary"]);
-        assert!(!matches!(&prop.type_expr, TypeExpr::Unknown { .. }), "variant prop should not degrade to Unknown");
+        assert!(
+            !matches!(&prop.type_expr, TypeExpr::Unknown { .. }),
+            "variant prop should not degrade to Unknown"
+        );
     }
 
     let ui = meta
@@ -14591,7 +14604,11 @@ defineSlots<ButtonSlots>()
             ui.type_expr
         );
     };
-    assert_eq!(ui_shape.properties.len(), 2, "ui prop should have exactly 2 properties (base, label)");
+    assert_eq!(
+        ui_shape.properties.len(),
+        2,
+        "ui prop should have exactly 2 properties (base, label)"
+    );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
@@ -14613,7 +14630,11 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|slot| slot.name == "default")
         .expect("default slot should exist");
-    assert_eq!(default_slot.bindings.len(), 1, "default slot should have exactly 1 binding (ui)");
+    assert_eq!(
+        default_slot.bindings.len(),
+        1,
+        "default slot should have exactly 1 binding (ui)"
+    );
     let ui_binding = default_slot
         .bindings
         .iter()
@@ -14625,7 +14646,11 @@ defineSlots<ButtonSlots>()
             ui_binding.type_expr
         );
     };
-    assert_eq!(binding_shape.properties.len(), 2, "slot ui binding should have exactly 2 properties (base, label)");
+    assert_eq!(
+        binding_shape.properties.len(),
+        2,
+        "slot ui binding should have exactly 2 properties (base, label)"
+    );
     assert!(
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
@@ -14780,8 +14805,17 @@ defineSlots<ButtonSlots>()
         .expect("component meta query should succeed")
         .expect("component meta should exist");
 
-    assert_eq!(meta.props.len(), 3, "should have exactly 3 props (color, activeColor, ui), got {:?}", meta.props.iter().map(|p| &p.name).collect::<Vec<_>>());
-    assert!(meta.events.is_empty(), "should have no events, got {:?}", meta.events.iter().map(|e| &e.name).collect::<Vec<_>>());
+    assert_eq!(
+        meta.props.len(),
+        3,
+        "should have exactly 3 props (color, activeColor, ui), got {:?}",
+        meta.props.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    assert!(
+        meta.events.is_empty(),
+        "should have no events, got {:?}",
+        meta.events.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
 
     for prop_name in ["color", "activeColor"] {
         let prop = meta
@@ -14790,7 +14824,10 @@ defineSlots<ButtonSlots>()
             .find(|prop| prop.name == prop_name)
             .expect("variant prop should exist");
         assert_union_string_literals(&prop.type_expr, &["primary", "secondary", "neutral"]);
-        assert!(!matches!(&prop.type_expr, TypeExpr::Unknown { .. }), "variant prop should not degrade to Unknown");
+        assert!(
+            !matches!(&prop.type_expr, TypeExpr::Unknown { .. }),
+            "variant prop should not degrade to Unknown"
+        );
     }
 
     let ui = meta
@@ -14804,7 +14841,11 @@ defineSlots<ButtonSlots>()
             ui.type_expr
         );
     };
-    assert_eq!(ui_shape.properties.len(), 2, "ui prop should have exactly 2 properties (base, label)");
+    assert_eq!(
+        ui_shape.properties.len(),
+        2,
+        "ui prop should have exactly 2 properties (base, label)"
+    );
     assert!(
         ui_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
@@ -14826,7 +14867,11 @@ defineSlots<ButtonSlots>()
         .iter()
         .find(|slot| slot.name == "default")
         .expect("default slot should exist");
-    assert_eq!(default_slot.bindings.len(), 1, "default slot should have exactly 1 binding (ui)");
+    assert_eq!(
+        default_slot.bindings.len(),
+        1,
+        "default slot should have exactly 1 binding (ui)"
+    );
     let ui_binding = default_slot
         .bindings
         .iter()
@@ -14838,7 +14883,11 @@ defineSlots<ButtonSlots>()
             ui_binding.type_expr
         );
     };
-    assert_eq!(binding_shape.properties.len(), 2, "slot ui binding should have exactly 2 properties (base, label)");
+    assert_eq!(
+        binding_shape.properties.len(),
+        2,
+        "slot ui binding should have exactly 2 properties (base, label)"
+    );
     assert!(
         binding_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
@@ -14854,7 +14903,6 @@ defineSlots<ButtonSlots>()
         ui_binding.type_expr
     );
 }
-
 
 #[test]
 fn explicit_root_bindings_are_subtracted() {

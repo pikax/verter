@@ -258,6 +258,22 @@ pub struct VerterHost {
     pub(crate) semantic_db: parking_lot::Mutex<verter_semantic::db::SemanticDb>,
     /// Current query profile for execution policy decisions.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
+    /// Host-owned external type analysis cache (migrated from thread-local).
+    /// Keyed by (canonical_id, source_type); content-hash validated per lookup.
+    pub(crate) external_type_analysis_cache: parking_lot::Mutex<
+        rustc_hash::FxHashMap<
+            crate::host_manage::ExternalTypeAnalysisCacheKey,
+            crate::host_manage::ExternalTypeAnalysisCacheEntry,
+        >,
+    >,
+    /// Host-owned route-owned shallow state cache (migrated from thread-local).
+    /// Keyed by canonical_id; workspace-generation and content-hash validated.
+    pub(crate) route_owned_shallow_cache: parking_lot::Mutex<
+        rustc_hash::FxHashMap<
+            crate::host_resolve::RouteOwnedShallowStateCacheKey,
+            crate::host_resolve::RouteOwnedShallowStateCacheEntry,
+        >,
+    >,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -315,6 +331,8 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
+            external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         }
     }
 
@@ -342,6 +360,8 @@ impl VerterHost {
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
+            external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
         }
     }
 

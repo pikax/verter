@@ -300,13 +300,12 @@ fn external_type_frontier_layer_result_detail(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RouteOwnedShallowStateCacheKey {
-    host_instance_id: u64,
+pub(crate) struct RouteOwnedShallowStateCacheKey {
     canonical_id: String,
 }
 
 #[derive(Clone)]
-struct RouteOwnedShallowStateCacheEntry {
+pub(crate) struct RouteOwnedShallowStateCacheEntry {
     workspace_generation: u64,
     whole_hash: Hash16,
     raw_source: Arc<str>,
@@ -319,12 +318,6 @@ pub(crate) struct RouteOwnedShallowStateSnapshot {
     pub canonical_id: String,
     pub whole_hash: Hash16,
     pub route_hash: Option<Hash16>,
-}
-
-thread_local! {
-    static HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE: RefCell<
-        FxHashMap<RouteOwnedShallowStateCacheKey, RouteOwnedShallowStateCacheEntry>
-    > = RefCell::new(FxHashMap::default());
 }
 
 fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
@@ -575,31 +568,25 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
 impl VerterHost {
     pub(crate) fn invalidate_route_owned_shallow_cache(&self, canonical_id: &str) {
         let key = RouteOwnedShallowStateCacheKey {
-            host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
         };
-        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
-            cache.borrow_mut().remove(&key);
-        });
+        self.route_owned_shallow_cache.lock().remove(&key);
     }
 
     pub(crate) fn snapshot_route_owned_shallow_cache_entries(
         &self,
     ) -> Vec<RouteOwnedShallowStateSnapshot> {
-        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
-            cache
-                .borrow()
-                .iter()
-                .filter(|&(key, _entry)| key.host_instance_id == self.instance_id)
-                .map(|(key, entry)| RouteOwnedShallowStateSnapshot {
-                    canonical_id: key.canonical_id.clone(),
-                    whole_hash: entry.whole_hash,
-                    route_hash: entry.shallow_state.has_resolvable_surface().then(|| {
-                        crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref())
-                    }),
-                })
-                .collect()
-        })
+        let cache = self.route_owned_shallow_cache.lock();
+        cache
+            .iter()
+            .map(|(key, entry)| RouteOwnedShallowStateSnapshot {
+                canonical_id: key.canonical_id.clone(),
+                whole_hash: entry.whole_hash,
+                route_hash: entry.shallow_state.has_resolvable_surface().then(|| {
+                    crate::resolver_store::hash_route_surface(entry.shallow_state.as_ref())
+                }),
+            })
+            .collect()
     }
 
     /// Expand a relative import specifier into all candidate canonical IDs.
@@ -2525,7 +2512,6 @@ impl VerterHost {
         _workspace_generation: u64,
     ) -> RouteOwnedShallowStateCacheKey {
         RouteOwnedShallowStateCacheKey {
-            host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
         }
     }
@@ -2555,8 +2541,7 @@ impl VerterHost {
             store_view,
             workspace_generation,
         );
-        let entry =
-            HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| cache.borrow().get(&key).cloned())?;
+        let entry = self.route_owned_shallow_cache.lock().get(&key).cloned()?;
 
         if let Some(view_hash) = store_view.and_then(|view| view.whole_hash(canonical_id)) {
             if view_hash != entry.whole_hash {
@@ -2693,19 +2678,17 @@ impl VerterHost {
             store_view,
             workspace_generation,
         );
-        HOST_ROUTE_OWNED_SHALLOW_STATE_CACHE.with(|cache| {
-            cache.borrow_mut().insert(
-                key,
-                RouteOwnedShallowStateCacheEntry {
-                    workspace_generation,
-                    whole_hash,
-                    raw_source,
-                    cached_parse,
-                    raw_snapshot,
-                    shallow_state,
-                },
-            );
-        });
+        self.route_owned_shallow_cache.lock().insert(
+            key,
+            RouteOwnedShallowStateCacheEntry {
+                workspace_generation,
+                whole_hash,
+                raw_source,
+                cached_parse,
+                raw_snapshot,
+                shallow_state,
+            },
+        );
     }
 
     fn route_shallow_state_in_view(

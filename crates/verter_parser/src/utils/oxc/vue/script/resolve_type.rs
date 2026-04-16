@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     io::Write,
     path::PathBuf,
     rc::Rc,
@@ -493,7 +493,16 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Child contexts share this cache so repeated local/interface expansion
     /// can reuse one resolved shape within the request.
     resolved_named_types: Rc<RefCell<FxHashMap<ResolvedNamedTypeCacheKey, Rc<ResolvedElements>>>>,
+    /// Shared recursion depth counter. Incremented on each `resolve_type_elements_inner_*`
+    /// call and decremented on return. When the counter exceeds [`MAX_TYPE_RESOLUTION_DEPTH`],
+    /// further expansion is skipped to prevent stack overflow on deeply nested generic types.
+    /// Shared via `Rc` so child contexts (from `instantiate_type_params_ctx`) track the same depth.
+    resolution_depth: Rc<Cell<u16>>,
 }
+
+/// Maximum recursion depth for in-file type resolution. Prevents stack overflow
+/// on deeply nested generic types (e.g. `InputMenuProps<T, VK, M>` chains).
+const MAX_TYPE_RESOLUTION_DEPTH: u16 = 64;
 
 #[derive(Debug, Clone)]
 pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
@@ -596,6 +605,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             companion_cache_key: Rc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
             trace_label: None,
             resolved_named_types: Rc::new(RefCell::new(FxHashMap::default())),
+            resolution_depth: Rc::new(Cell::new(0)),
         }
     }
 
@@ -2532,6 +2542,21 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     result: &mut ResolvedElements,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
 ) {
+    let prev_depth = ctx.resolution_depth.get();
+    if prev_depth >= MAX_TYPE_RESOLUTION_DEPTH {
+        return;
+    }
+    ctx.resolution_depth.set(prev_depth + 1);
+    resolve_type_elements_inner_with_ctx_guarded(node, base_offset, result, ctx);
+    ctx.resolution_depth.set(prev_depth);
+}
+
+fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &mut TypeResolutionContext<'ctx, 'a>,
+) {
     match node {
         // { prop: Type }
         TSType::TSTypeLiteral(lit) => {
@@ -2746,6 +2771,22 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
 /// Inner resolution function that uses an immutable context (doesn't collect diagnostics).
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+) {
+    let prev_depth = ctx.resolution_depth.get();
+    if prev_depth >= MAX_TYPE_RESOLUTION_DEPTH {
+        return;
+    }
+    ctx.resolution_depth.set(prev_depth + 1);
+    resolve_type_elements_inner_with_ctx_ref_guarded(node, base_offset, result, ctx);
+    ctx.resolution_depth.set(prev_depth);
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn resolve_type_elements_inner_with_ctx_ref_guarded<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
     result: &mut ResolvedElements,

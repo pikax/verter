@@ -958,12 +958,9 @@ pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
                 continue;
             }
 
-            let materialize_scope = imported_component_meta_materialization_scope(
-                &leaf,
-                scope_canonical_id,
-                engine,
-            )
-            .unwrap_or_else(|| scope_canonical_id.to_string());
+            let materialize_scope =
+                imported_component_meta_materialization_scope(&leaf, scope_canonical_id, engine)
+                    .unwrap_or_else(|| scope_canonical_id.to_string());
             let materialized = materialize_component_meta_member_surface_expr(
                 &leaf,
                 materialize_scope.as_str(),
@@ -3254,7 +3251,9 @@ fn synthesize_macro_shape_from_registry_lowered_root(
 ) -> Option<(ShapeResult, MacroShapeSource)> {
     fn root_name(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> Option<&str> {
         match expr {
-            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => root_name(inner),
+            verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
+                root_name(inner)
+            }
             verter_semantic::analysis::type_expr::TypeExpr::Ref { name, .. } => Some(name.as_ref()),
             _ => None,
         }
@@ -4207,28 +4206,27 @@ fn produce_one_macro_object_shape_for_slots(
                 })
             })
         });
-    let imported_scope_projected =
-        project_named_ref_imported_scope_shape(
-            query_engine,
-            owner_canonical,
-            lowered,
-            &has_shape_surface,
-        )
-        .and_then(|shape| {
-            let projected_expr = expanded_shape_to_type_expr(&shape.value);
-            let resolved_expr =
-                verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
-                    &projected_expr,
-                    query_engine.owner_engine_mut(),
-                );
-            registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
-                has_shape_surface(&resolved_shape).then(|| {
-                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                        resolved_shape,
-                    )
-                })
+    let imported_scope_projected = project_named_ref_imported_scope_shape(
+        query_engine,
+        owner_canonical,
+        lowered,
+        &has_shape_surface,
+    )
+    .and_then(|shape| {
+        let projected_expr = expanded_shape_to_type_expr(&shape.value);
+        let resolved_expr =
+            verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
+                &projected_expr,
+                query_engine.owner_engine_mut(),
+            );
+        registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+            has_shape_surface(&resolved_shape).then(|| {
+                verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                    resolved_shape,
+                )
             })
-        });
+        })
+    });
     let projected = [projected, imported_scope_projected]
         .into_iter()
         .flatten()
@@ -5042,7 +5040,9 @@ impl VerterHost {
             raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
             prefer_explicit_raw_surface: bool,
         ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-            use verter_semantic::analysis::type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+            use verter_semantic::analysis::type_expr::{
+                ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
+            };
 
             let imported_generic_alias_root = raw_body.is_some_and(|expr| {
                 let TypeExpr::Ref {
@@ -5115,9 +5115,9 @@ impl VerterHost {
             if prefer_explicit_raw_surface
                 && raw_body.is_some_and(component_meta_registry_has_explicit_object_surface)
             {
-                return raw_body
-                    .cloned()
-                    .map(|candidate| maybe_refine_imported_generic_alias_object(candidate, query_engine));
+                return raw_body.cloned().map(|candidate| {
+                    maybe_refine_imported_generic_alias_object(candidate, query_engine)
+                });
             }
             if raw_body.is_some_and(|expr| {
                 component_meta_registry_has_non_object_top_level_surface(expr)
@@ -5158,22 +5158,25 @@ impl VerterHost {
                         },
                     )
                 })
-                .map(|candidate| maybe_refine_imported_generic_alias_object(candidate, query_engine))
+                .map(|candidate| {
+                    maybe_refine_imported_generic_alias_object(candidate, query_engine)
+                })
                 .or_else(|| {
                     raw_body.and_then(|expr| {
-                        (!component_meta_registry_has_non_object_top_level_surface(expr))
-                            .then(|| {
+                        (!component_meta_registry_has_non_object_top_level_surface(expr)).then(
+                            || {
                                 maybe_refine_imported_generic_alias_object(
                                     expr.clone(),
                                     query_engine,
                                 )
-                            })
+                            },
+                        )
                     })
                 })
                 .or_else(|| {
-                    raw_body
-                        .cloned()
-                        .map(|candidate| maybe_refine_imported_generic_alias_object(candidate, query_engine))
+                    raw_body.cloned().map(|candidate| {
+                        maybe_refine_imported_generic_alias_object(candidate, query_engine)
+                    })
                 })
         }
         fn build_registry_indexed_access_expr(
@@ -6120,9 +6123,11 @@ impl VerterHost {
                         false,
                     )
                 });
-            entry.type_expr = raw_body.as_ref().map_or(preserved_nested_routes.clone(), |raw| {
-                preserve_registry_callable_param_member_routes(&preserved_nested_routes, raw)
-            });
+            entry.type_expr = raw_body
+                .as_ref()
+                .map_or(preserved_nested_routes.clone(), |raw| {
+                    preserve_registry_callable_param_member_routes(&preserved_nested_routes, raw)
+                });
             if let Some(started) = _entry_started {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms >= 5.0 {
@@ -6650,12 +6655,20 @@ use crate::resolver_core::component_meta_registry::{
     component_meta_registry_expr_references_name,
     component_meta_registry_has_explicit_object_surface,
     component_meta_registry_has_non_object_top_level_surface,
-    merge_component_meta_registry_candidates,
     component_meta_registry_public_indexed_access_route,
     component_meta_registry_public_utility_route, component_meta_registry_raw_member_path_surface,
-    enqueue_component_meta_registry_ref, owner_component_meta_registry_import_root,
-    upsert_component_meta_registry_entry, PendingComponentMetaRegistryRef,
+    enqueue_component_meta_registry_ref, merge_component_meta_registry_candidates,
+    owner_component_meta_registry_import_root, upsert_component_meta_registry_entry,
+    PendingComponentMetaRegistryRef,
 };
+
+/// Maximum recursion depth for type expression materialization.
+/// Prevents stack overflow on deeply nested generic types.
+const MAX_MATERIALIZE_DEPTH: u16 = 48;
+
+thread_local! {
+    static MATERIALIZE_DEPTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
 
 fn materialize_component_meta_member_surface_expr(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -7181,19 +7194,19 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                 | TypeExpr::TypeParameter(_)
                 | TypeExpr::Infer { .. } => true,
                 TypeExpr::Array { element, .. } => inner(element),
-                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| inner(&element.ty)),
-                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                    types.iter().any(inner)
+                TypeExpr::Tuple { elements, .. } => {
+                    elements.iter().any(|element| inner(&element.ty))
                 }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().any(inner),
                 TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
                     ObjectMember::Property(property) => inner(&property.ty),
                     ObjectMember::Method(method) => {
-                        method.function.parameters.iter().any(|param| inner(&param.ty))
-                            || method
-                                .function
-                                .return_type
-                                .as_deref()
-                                .is_some_and(inner)
+                        method
+                            .function
+                            .parameters
+                            .iter()
+                            .any(|param| inner(&param.ty))
+                            || method.function.return_type.as_deref().is_some_and(inner)
                     }
                     ObjectMember::IndexSignature(signature) => {
                         inner(&signature.key_type) || inner(&signature.value_type)
@@ -7405,7 +7418,10 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             query_engine.solve_expr_type_expr(candidate_scope.as_str(), &route_expr)
         };
 
-        for candidate in [projected_candidate, solved_candidate].into_iter().flatten() {
+        for candidate in [projected_candidate, solved_candidate]
+            .into_iter()
+            .flatten()
+        {
             if expr_has_transitively_recursive_generic_root(
                 query_engine,
                 scope_canonical_id,
@@ -8110,11 +8126,7 @@ fn preserve_registry_callable_param_member_routes(
     use rustc_hash::FxHashMap;
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-    fn inner(
-        materialized: &TypeExpr,
-        raw: &TypeExpr,
-        preserve_routes: bool,
-    ) -> TypeExpr {
+    fn inner(materialized: &TypeExpr, raw: &TypeExpr, preserve_routes: bool) -> TypeExpr {
         if preserve_routes
             && (component_meta_registry_public_utility_route(raw).is_some()
                 || component_meta_registry_public_indexed_access_route(raw).is_some())
@@ -8125,18 +8137,25 @@ fn preserve_registry_callable_param_member_routes(
         match (materialized, raw) {
             (TypeExpr::Object(materialized_object), TypeExpr::Object(raw_object)) => {
                 let mut object = materialized_object.as_ref().clone();
-                let mut raw_properties =
-                    FxHashMap::with_capacity_and_hasher(raw_object.properties.len(), Default::default());
-                let mut raw_methods =
-                    FxHashMap::with_capacity_and_hasher(raw_object.properties.len(), Default::default());
-                let mut raw_callables =
-                    FxHashMap::with_capacity_and_hasher(raw_object.properties.len(), Default::default());
+                let mut raw_properties = FxHashMap::with_capacity_and_hasher(
+                    raw_object.properties.len(),
+                    Default::default(),
+                );
+                let mut raw_methods = FxHashMap::with_capacity_and_hasher(
+                    raw_object.properties.len(),
+                    Default::default(),
+                );
+                let mut raw_callables = FxHashMap::with_capacity_and_hasher(
+                    raw_object.properties.len(),
+                    Default::default(),
+                );
                 for candidate in &raw_object.properties {
                     match candidate {
                         ObjectMember::Property(property) => {
                             raw_properties.insert(property.name.as_str(), property);
                             if let TypeExpr::Function(function) = &property.ty {
-                                raw_callables.insert(property.name.as_str(), function.as_ref().clone());
+                                raw_callables
+                                    .insert(property.name.as_str(), function.as_ref().clone());
                             }
                         }
                         ObjectMember::Method(method) => {
@@ -8187,9 +8206,7 @@ fn preserve_registry_callable_param_member_routes(
                                     &TypeExpr::Function(std::sync::Arc::new(
                                         method.function.clone(),
                                     )),
-                                    &TypeExpr::Function(std::sync::Arc::new(
-                                        raw_callable.clone(),
-                                    )),
+                                    &TypeExpr::Function(std::sync::Arc::new(raw_callable.clone())),
                                     preserve_routes,
                                 ) {
                                     TypeExpr::Function(function) => function.as_ref().clone(),
@@ -8836,6 +8853,32 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
     nested_surface: bool,
     active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    if engine.has_fuse_tripped() {
+        return expr.clone();
+    }
+    let prev_depth = MATERIALIZE_DEPTH.get();
+    if prev_depth >= MAX_MATERIALIZE_DEPTH {
+        return expr.clone();
+    }
+    MATERIALIZE_DEPTH.set(prev_depth + 1);
+    let result = materialize_component_meta_member_surface_expr_with_active_stack_guarded(
+        expr,
+        scope_canonical_id,
+        engine,
+        nested_surface,
+        active,
+    );
+    MATERIALIZE_DEPTH.set(prev_depth);
+    result
+}
+
+fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    nested_surface: bool,
+    active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     fn expand_generic_ref_for_materialization(
@@ -8894,13 +8937,14 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                         index: index.clone(),
                     };
                     if expanded_route != *expr {
-                        let result = materialize_component_meta_member_surface_expr_with_active_stack(
-                            &expanded_route,
-                            scope_canonical_id,
-                            engine,
-                            nested_surface,
-                            active,
-                        );
+                        let result =
+                            materialize_component_meta_member_surface_expr_with_active_stack(
+                                &expanded_route,
+                                scope_canonical_id,
+                                engine,
+                                nested_surface,
+                                active,
+                            );
                         engine.store_materialized_member_surface(
                             scope_canonical_id,
                             expr,
@@ -9007,9 +9051,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack(
                     engine.project_type_surface_expr(scope_canonical_id, name.as_ref())
                 }
             }
-            _ if is_public_route && !inline_materializable => {
-                None
-            }
+            _ if is_public_route && !inline_materializable => None,
             _ => engine.project_expr_surface_expr(scope_canonical_id, expr),
         };
         if let Some(projected) = projected {

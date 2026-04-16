@@ -66,7 +66,7 @@ pub fn project_macro_surfaces(
             }
         }
         AnalyzedMacroKind::DefineEmits => {
-            let emits = elements
+            let mut emits: Vec<AnalyzedEmitField> = elements
                 .emits
                 .iter()
                 .map(|emit| {
@@ -81,6 +81,35 @@ pub fn project_macro_surfaces(
                     }
                 })
                 .collect();
+
+            // Property-style emit definitions (e.g., from mapped types like
+            // `{ [K in 'open' | 'close']?: [] }`) end up in `elements.props`
+            // rather than `elements.emits`.  Convert them to emit entries when
+            // no call-signature emits were found.
+            if emits.is_empty() {
+                let mut seen = rustc_hash::FxHashSet::default();
+                for prop in &elements.props {
+                    if !prop.visibility.is_public() {
+                        continue;
+                    }
+                    let name = match &prop.key_name {
+                        Some(name) => name.clone(),
+                        None => continue,
+                    };
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    let (description, tags) = member_jsdoc(source, prop.span);
+                    let payload_type = raw_prop_type_text(source, prop);
+                    emits.push(AnalyzedEmitField {
+                        name,
+                        span: verter_span::Span::default(),
+                        payload_type,
+                        description,
+                        tags,
+                    });
+                }
+            }
 
             ProjectedMacroSurfaces {
                 native_props,

@@ -943,11 +943,10 @@ mod tests {
         // Build an expression tree with pointer-based variants (Union, Object,
         // Function, IndexedAccess, Array) and verify that repeat lookups hit
         // the ptr cache without building ExprMemoKey or GraphNode.
-        let inner_obj = TypeExpr::Object(Arc::new(
-            verter_semantic::analysis::type_expr::ObjectExpr {
+        let inner_obj =
+            TypeExpr::Object(Arc::new(verter_semantic::analysis::type_expr::ObjectExpr {
                 properties: vec![],
-            },
-        ));
+            }));
         let union = TypeExpr::Union(Arc::from(vec![
             inner_obj.clone(),
             TypeExpr::Primitive(PrimitiveName::String),
@@ -962,7 +961,10 @@ mod tests {
         // First pass: builds everything.
         let id1 = builder.node_id(&array);
         let builds_after_first = builder.debug_graph_node_build_count();
-        assert!(builds_after_first > 0, "first pass should build graph nodes");
+        assert!(
+            builds_after_first > 0,
+            "first pass should build graph nodes"
+        );
         assert_eq!(
             builder.debug_expr_ptr_cache_hits(),
             0,

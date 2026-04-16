@@ -17,8 +17,6 @@ import {
   nativeTypeRegistryToMap,
   type NativeComponentMetaResult,
   type NativeJsdocTag,
-  type NativeResolvedMacroMeta,
-  type NativeResolvedNativeProp,
 } from "../native-component-meta.js";
 import type { TypeDescriptor } from "../type-ir.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
@@ -117,37 +115,10 @@ const LINK_COMPONENT_PROP_DESCRIPTION_FALLBACKS = new Map<string, string>([
   ],
 ]);
 
-// NOTE(compat-shim): Nuxt UI component size enum values in canonical order.
-const COMPAT_INDEXED_SIZE_LITERAL_ORDER = [
-  "2xl",
-  "3xs",
-  "2xs",
-  "xs",
-  "sm",
-  "md",
-  "lg",
-  "xl",
-  "3xl",
-] as const;
-
 interface CompatPropDocEnrichment {
   description?: string;
   tags?: Tag[];
   canonicalSource?: string;
-}
-
-interface SourcePropFallback extends CompatPropDocEnrichment {
-  rawType?: string;
-  required?: boolean;
-}
-
-interface SourceEventFallback {
-  rawSignature: string;
-}
-
-interface ReferencedComponentObjectArm {
-  typeName: string;
-  schema: PropertyMetaSchema;
 }
 
 let compatBrandedStringObjectSchemaCache:
@@ -158,8 +129,6 @@ let compatHtmlElementObjectSchemaCache:
   | Extract<PropertyMetaSchema, { kind: "object" }>
   | null
   | undefined;
-const compatNuxtUiBenchmarkArtifactCache = new Map<string, any>();
-
 let compatTypeScriptModule: any;
 
 function isCompatVisibleSlotName(name: string): boolean {
@@ -792,62 +761,6 @@ function getCompatHtmlElementObjectSchema():
   return compatHtmlElementObjectSchemaCache ?? undefined;
 }
 
-function readCompatNuxtUiBenchmarkArtifact(relativePath: string): any | undefined {
-  if (compatNuxtUiBenchmarkArtifactCache.has(relativePath)) {
-    return compatNuxtUiBenchmarkArtifactCache.get(relativePath);
-  }
-
-  try {
-    const benchmarkFixtureUrl = new URL(
-      `../../../benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/${relativePath}.json`,
-      import.meta.url,
-    );
-    const artifact = JSON.parse(readFileSync(benchmarkFixtureUrl, "utf8"));
-    compatNuxtUiBenchmarkArtifactCache.set(relativePath, artifact);
-    return artifact;
-  } catch {
-    compatNuxtUiBenchmarkArtifactCache.set(relativePath, null);
-    return undefined;
-  }
-}
-
-function getCompatNuxtUiBenchmarkRelativePath(
-  projectRoot: string,
-  absPath: string,
-): string | undefined {
-  const normalizedProjectRoot = runtimeNormalizePath(projectRoot).replace(/\/+$/, "");
-  if (!normalizedProjectRoot.endsWith("/nuxt-ui")) {
-    return undefined;
-  }
-
-  const normalizedAbsPath = runtimeNormalizePath(absPath);
-  const prefix = `${normalizedProjectRoot}/`;
-  if (!normalizedAbsPath.startsWith(prefix)) {
-    return undefined;
-  }
-
-  const relativePath = normalizedAbsPath.slice(prefix.length);
-  return relativePath;
-}
-
-function buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact: any): VolarComponentMeta {
-  const wrapEntries = (entries: any[] | undefined) =>
-    Array.isArray(entries)
-      ? entries.map((entry: any) => ({
-          global: false,
-          ...entry,
-        }))
-      : [];
-
-  return {
-    type: 0,
-    props: wrapEntries(benchmarkArtifact?.props),
-    events: wrapEntries(benchmarkArtifact?.events),
-    slots: wrapEntries(benchmarkArtifact?.slots),
-    exposed: wrapEntries(benchmarkArtifact?.exposed),
-  };
-}
-
 function normalizeCompatSchemaLeaf(part: string): string {
   if (part === "(string & {})") {
     return "string & {}";
@@ -1290,19 +1203,6 @@ function buildCompatEventSchemaFromTupleType(tupleType: string): PropertyMetaSch
     const namedMatch = /^[A-Za-z_$][A-Za-z0-9_$]*\??:\s*([\s\S]+)$/.exec(normalized);
     return namedMatch ? namedMatch[1]!.trim() : normalized;
   });
-}
-
-function buildCompatSourceEventPropertyMeta(name: string, rawSignature: string): PropertyMeta {
-  const type = normalizeTypeString(extractEventTupleType(rawSignature) ?? "[]");
-  return {
-    name,
-    description: "",
-    type,
-    required: false,
-    global: false,
-    tags: [],
-    schema: buildCompatEventSchemaFromTupleType(type),
-  };
 }
 
 function shouldAttemptExpandedCompatSchema(typeText: string): boolean {
@@ -2269,90 +2169,6 @@ function normalizeCompatObjectLiteralTypeText(typeText: string): string {
   return `{ ${members.join("; ")}; }`;
 }
 
-function shouldPreferDeclaredRawTypeForSchema(
-  rawType: string,
-  currentType: string | undefined,
-): boolean {
-  const normalizedRaw = normalizeTypeString(stripTopLevelUndefinedFromTypeString(rawType).trim());
-  const normalizedCurrent = normalizeTypeString(currentType ?? "").trim();
-  if (!normalizedRaw || normalizedRaw === normalizedCurrent) {
-    return false;
-  }
-
-  return (
-    (looksLikeBareTypeReference(normalizedRaw) || looksLikeIndexedAccessType(normalizedRaw)) &&
-    (normalizedCurrent.includes('"') ||
-      normalizedCurrent.includes("{") ||
-      normalizedCurrent.includes("graphNode("))
-  );
-}
-
-function applyDeclaredMemberRawTypesToSchema(
-  schema: PropertyMetaSchema,
-  infoMap: Map<string, SourcePropFallback>,
-): PropertyMetaSchema {
-  if (typeof schema === "string" || Array.isArray(schema) || schema == null) {
-    return schema;
-  }
-
-  if (schema.kind === "enum" && Array.isArray(schema.schema)) {
-    return {
-      ...schema,
-      schema: schema.schema.map((entry) => applyDeclaredMemberRawTypesToSchema(entry, infoMap)),
-    };
-  }
-
-  if (
-    schema.kind === "object" &&
-    !Array.isArray(schema.schema) &&
-    schema.schema != null &&
-    typeof schema.schema === "object"
-  ) {
-    const updatedSchema = Object.fromEntries(
-      Object.entries(schema.schema).map(([name, entry]) => {
-        if (
-          entry &&
-          typeof entry === "object" &&
-          !Array.isArray(entry) &&
-          "type" in entry &&
-          "schema" in entry
-        ) {
-          const fallback = infoMap.get(name);
-          const prop = { ...(entry as PropertyMeta) };
-          if (
-            fallback?.rawType &&
-            shouldPreferDeclaredRawTypeForSchema(fallback.rawType, prop.type)
-          ) {
-            const normalizedRaw = normalizeTypeString(fallback.rawType);
-            prop.type = normalizedRaw;
-            if (typeof prop.schema === "string") {
-              prop.schema = normalizedRaw;
-            } else if (
-              prop.schema &&
-              typeof prop.schema === "object" &&
-              !Array.isArray(prop.schema) &&
-              "type" in prop.schema
-            ) {
-              prop.schema = {
-                ...prop.schema,
-                type: normalizedRaw,
-              };
-            }
-          }
-          return [name, prop];
-        }
-        return [name, entry];
-      }),
-    );
-    return {
-      ...schema,
-      schema: updatedSchema,
-    };
-  }
-
-  return schema;
-}
-
 function looksLikeEventNameParameter(param: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*\s*:\s*["'`]/.test(param.trim());
 }
@@ -2662,33 +2478,6 @@ function applyPropDocFallback(
   }
 }
 
-function extractReferencedComponentPropTypes(
-  rawType: string | undefined,
-): Array<{ typeName: string; arrayWrapped: boolean }> {
-  if (!rawType) {
-    return [];
-  }
-  return splitTopLevelTypeUnion(stripTopLevelUndefinedFromTypeString(normalizeTypeString(rawType)))
-    .map((part) => stripSingleOuterParens(part.trim()))
-    .flatMap((part) => {
-      const directMatch = /^([A-Z][A-Za-z0-9_$]*Props)$/.exec(part);
-      if (directMatch) {
-        return [{ typeName: directMatch[1]!, arrayWrapped: false }];
-      }
-
-      const arrayMatch = /^([A-Z][A-Za-z0-9_$]*Props)\[\]$/.exec(part);
-      if (arrayMatch) {
-        return [{ typeName: arrayMatch[1]!, arrayWrapped: true }];
-      }
-
-      return [];
-    });
-}
-
-function extractReferencedComponentPropTypeNames(rawType: string | undefined): string[] {
-  return extractReferencedComponentPropTypes(rawType).map((entry) => entry.typeName);
-}
-
 function extractCompatDefaultLiteralValue(tags: Tag[]): string | undefined {
   const tagText = tags.find((tag) => tag.name === "defaultValue")?.text?.trim();
   if (!tagText) {
@@ -2748,390 +2537,6 @@ function reorderCompatLiteralUnionTypeByDefaultValue(prop: PropertyMeta): void {
   };
 }
 
-function propertyMetaSchemaKey(entry: PropertyMetaSchema): string {
-  return typeof entry === "string" ? `s:${entry}` : `o:${JSON.stringify(entry)}`;
-}
-
-function collectReferencedUnionScalarEntries(
-  rawType: string | undefined,
-  required: boolean,
-  existingEntries: PropertyMetaSchema[],
-): { scalarEntries: PropertyMetaSchema[]; hasUndefined: boolean } {
-  const scalarEntries: PropertyMetaSchema[] = [];
-  const seen = new Set<string>();
-  const pushEntry = (entry: PropertyMetaSchema) => {
-    const key = propertyMetaSchemaKey(entry);
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    scalarEntries.push(entry);
-  };
-
-  let hasUndefined = !required;
-
-  for (const part of splitTopLevelTypeUnion(normalizeTypeString(rawType ?? ""))) {
-    const normalized = stripSingleOuterParens(part.trim());
-    if (!normalized) {
-      continue;
-    }
-    if (normalized === "undefined") {
-      hasUndefined = true;
-      continue;
-    }
-    if (/^[A-Z][A-Za-z0-9_$]*Props(?:\[\])?$/.test(normalized)) {
-      continue;
-    }
-    if (normalized === "boolean") {
-      pushEntry("false");
-      pushEntry("true");
-      continue;
-    }
-    if (
-      normalized === "string" ||
-      normalized === "number" ||
-      normalized === "null" ||
-      normalized === "any"
-    ) {
-      pushEntry(normalized);
-      continue;
-    }
-    if (
-      (normalized.startsWith('"') && normalized.endsWith('"')) ||
-      (normalized.startsWith("'") && normalized.endsWith("'"))
-    ) {
-      pushEntry(JSON.stringify(normalized.slice(1, -1)));
-    }
-  }
-
-  for (const entry of existingEntries) {
-    if (entry === "undefined") {
-      hasUndefined = true;
-      continue;
-    }
-    pushEntry(entry);
-  }
-
-  return { scalarEntries, hasUndefined };
-}
-
-function normalizeEmbeddedIndexedSizeDisplay(
-  prop: PropertyMeta,
-  rawType: string | undefined,
-): boolean {
-  if (!rawType || !/\[(["'])size\1\]/.test(rawType)) {
-    return false;
-  }
-
-  const literalValues: string[] = [];
-  const pushLiteralValue = (entry: string) => {
-    if (/^".*"$/.test(entry)) {
-      literalValues.push(JSON.parse(entry));
-    }
-  };
-
-  if (
-    typeof prop.schema !== "string" &&
-    !Array.isArray(prop.schema) &&
-    prop.schema.kind === "enum" &&
-    Array.isArray(prop.schema.schema)
-  ) {
-    for (const entry of prop.schema.schema) {
-      if (typeof entry === "string" && entry !== "undefined") {
-        pushLiteralValue(entry);
-      }
-    }
-  } else {
-    for (const part of splitTopLevelTypeUnion(stripTopLevelUndefinedFromTypeString(prop.type))) {
-      pushLiteralValue(part.trim());
-    }
-  }
-
-  const uniqueValues = literalValues.filter(
-    (value, index) => literalValues.indexOf(value) === index,
-  );
-  if (
-    uniqueValues.length === 0 ||
-    !uniqueValues.every((value) =>
-      COMPAT_INDEXED_SIZE_LITERAL_ORDER.includes(
-        value as (typeof COMPAT_INDEXED_SIZE_LITERAL_ORDER)[number],
-      ),
-    )
-  ) {
-    return false;
-  }
-
-  const orderedValues = COMPAT_INDEXED_SIZE_LITERAL_ORDER.filter((value) =>
-    uniqueValues.includes(value),
-  );
-  const orderedType = `${orderedValues.map((value) => JSON.stringify(value)).join(" | ")}${
-    prop.required ? "" : " | undefined"
-  }`;
-  prop.type = orderedType;
-  if (typeof prop.schema === "string") {
-    prop.schema = orderedType;
-  } else if (!Array.isArray(prop.schema) && prop.schema.kind === "enum") {
-    prop.schema = {
-      ...prop.schema,
-      type: orderedType,
-    };
-  }
-  return true;
-}
-
-function isPureDirectReferencedComponentType(rawType: string | undefined): boolean {
-  const referencedTypes = extractReferencedComponentPropTypes(rawType);
-  if (referencedTypes.length !== 1 || referencedTypes[0]?.arrayWrapped) {
-    return false;
-  }
-
-  const normalizedParts = splitTopLevelTypeUnion(normalizeTypeString(rawType ?? ""))
-    .map((part) => stripSingleOuterParens(part.trim()))
-    .filter(Boolean);
-  return normalizedParts.every(
-    (part) => part === referencedTypes[0]!.typeName || part === "undefined",
-  );
-}
-
-function extractDeclaredInterfacePropTypeMap(
-  source: string,
-  typeName: string,
-): Map<string, string> {
-  const typePattern = new RegExp(`(?:export\\s+)?interface\\s+${typeName}\\b`);
-  const match = typePattern.exec(source);
-  if (!match) {
-    return new Map();
-  }
-
-  const openBraceIndex = source.indexOf("{", match.index);
-  if (openBraceIndex < 0) {
-    return new Map();
-  }
-  const closeBraceIndex = findMatchingBrace(source, openBraceIndex);
-  if (closeBraceIndex < 0) {
-    return new Map();
-  }
-
-  const body = source.slice(openBraceIndex + 1, closeBraceIndex);
-  const propTypes = new Map<string, string>();
-  for (const rawLine of body.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (
-      !line ||
-      line.startsWith("/**") ||
-      line.startsWith("*") ||
-      line.startsWith("*/") ||
-      line.startsWith("//")
-    ) {
-      continue;
-    }
-    const match = /^([A-Za-z_$][A-Za-z0-9_$]*)\??:\s*(.+?)[,;]?$/.exec(line);
-    if (!match) {
-      continue;
-    }
-    propTypes.set(match[1], normalizeTypeString(match[2].trim()));
-  }
-  return propTypes;
-}
-
-function extractDeclaredInterfacePropInfoMap(
-  source: string,
-  typeName: string,
-): Map<string, SourcePropFallback> {
-  const typePattern = new RegExp(`(?:export\\s+)?interface\\s+${typeName}\\b`);
-  const match = typePattern.exec(source);
-  if (!match) {
-    return new Map();
-  }
-
-  const openBraceIndex = source.indexOf("{", match.index);
-  if (openBraceIndex < 0) {
-    return new Map();
-  }
-  const closeBraceIndex = findMatchingBrace(source, openBraceIndex);
-  if (closeBraceIndex < 0) {
-    return new Map();
-  }
-
-  const bodyStart = openBraceIndex + 1;
-  const body = source.slice(bodyStart, closeBraceIndex);
-  const typeMap = extractDeclaredInterfacePropTypeMap(source, typeName);
-  const infoMap = new Map<string, SourcePropFallback>();
-  for (const [name, rawType] of typeMap) {
-    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(
-      String.raw`(?:^|\n)\s*(?:readonly\s+)?(?:['"]${escapedName}['"]|${escapedName})(\?)?\s*:`,
-      "m",
-    );
-    const bodyMatch = pattern.exec(body);
-    const jsdoc =
-      bodyMatch !== null
-        ? extractJsdocBlockBefore(source, bodyStart + bodyMatch.index)
-        : { tags: [] as Tag[] };
-    infoMap.set(name, {
-      rawType,
-      required: bodyMatch ? bodyMatch[1] !== "?" : undefined,
-      ...(jsdoc.description ? { description: jsdoc.description } : {}),
-      ...(jsdoc.tags.length > 0 ? { tags: jsdoc.tags } : {}),
-    });
-  }
-  return infoMap;
-}
-
-function extractDeclaredInterfaceExtends(source: string, typeName: string): string[] {
-  const typePattern = new RegExp(`(?:export\\s+)?interface\\s+${typeName}\\b([^\\{]*)\\{`);
-  const match = typePattern.exec(source);
-  const header = match?.[1];
-  if (!header) {
-    return [];
-  }
-
-  const extendsIndex = findTopLevelExtendsKeyword(header);
-  if (extendsIndex < 0) {
-    return [];
-  }
-
-  return splitTopLevelCommaList(header.slice(extendsIndex + "extends".length))
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function findTopLevelExtendsKeyword(header: string): number {
-  let angleDepth = 0;
-  for (let index = 0; index < header.length; index++) {
-    const ch = header[index];
-    if (ch === "<") {
-      angleDepth++;
-      continue;
-    }
-    if (ch === ">") {
-      angleDepth = Math.max(0, angleDepth - 1);
-      continue;
-    }
-    if (
-      angleDepth === 0 &&
-      header.slice(index, index + "extends".length) === "extends" &&
-      /\s/.test(header[index - 1] ?? " ") &&
-      /\s/.test(header[index + "extends".length] ?? " ")
-    ) {
-      return index;
-    }
-  }
-
-  return -1;
-}
-
-function extractDefinePropsRootTypeName(source: string): string | undefined {
-  const match = /defineProps\s*<\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(source);
-  return match?.[1];
-}
-
-function extractDefineEmitsRootTypeName(source: string): string | undefined {
-  const match = /defineEmits\s*<\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(source);
-  return match?.[1];
-}
-
-function extractDeclaredInterfaceBody(source: string, typeName: string): string | undefined {
-  const typePattern = new RegExp(`(?:export\\s+)?interface\\s+${typeName}\\b`);
-  const match = typePattern.exec(source);
-  if (!match) {
-    return undefined;
-  }
-
-  const openBraceIndex = source.indexOf("{", match.index);
-  if (openBraceIndex < 0) {
-    return undefined;
-  }
-  const closeBraceIndex = findMatchingBrace(source, openBraceIndex);
-  if (closeBraceIndex < 0) {
-    return undefined;
-  }
-
-  return source.slice(openBraceIndex + 1, closeBraceIndex);
-}
-
-function extractDeclaredInterfaceEventInfoMap(
-  source: string,
-  typeName: string,
-): Map<string, SourceEventFallback> {
-  const body = extractDeclaredInterfaceBody(source, typeName);
-  if (!body) {
-    return new Map();
-  }
-
-  const infoMap = new Map<string, SourceEventFallback>();
-  for (const entry of splitTopLevelObjectMembers(body)) {
-    const trimmed = entry.trim().replace(/;$/, "");
-    if (!trimmed) {
-      continue;
-    }
-
-    const tupleMatch =
-      /^(?:readonly\s+)?(?:["']([^"']+)["']|([A-Za-z_$][A-Za-z0-9_$:-]*))(?:\?)?\s*:\s*(\[[\s\S]+\])$/.exec(
-        trimmed,
-      );
-    if (tupleMatch) {
-      const name = tupleMatch[1] ?? tupleMatch[2];
-      if (name) {
-        infoMap.set(name, {
-          rawSignature: normalizeTypeString(tupleMatch[3]!.trim()),
-        });
-      }
-      continue;
-    }
-
-    const paramsSource = extractFunctionParameterSource(trimmed);
-    if (paramsSource === undefined) {
-      continue;
-    }
-    const params = splitTopLevelCommaList(paramsSource);
-    const eventNameMatch = /^(?:e|event)\s*:\s*["']([^"']+)["']$/.exec(params[0]?.trim() ?? "");
-    if (!eventNameMatch) {
-      continue;
-    }
-
-    infoMap.set(eventNameMatch[1]!, {
-      rawSignature: trimmed,
-    });
-  }
-
-  return infoMap;
-}
-
-function extractFunctionReturnObjectLiteral(
-  source: string,
-  functionName: string,
-): string | undefined {
-  const functionPattern = new RegExp(`function\\s+${functionName}\\s*\\([^)]*\\)\\s*\\{`, "m");
-  const match = functionPattern.exec(source);
-  if (!match) {
-    return undefined;
-  }
-
-  const openBraceIndex = source.indexOf("{", match.index);
-  if (openBraceIndex < 0) {
-    return undefined;
-  }
-  const closeBraceIndex = findMatchingBrace(source, openBraceIndex);
-  if (closeBraceIndex < 0) {
-    return undefined;
-  }
-
-  const body = source.slice(openBraceIndex + 1, closeBraceIndex);
-  const returnMatch = /return\s*\{/.exec(body);
-  if (!returnMatch) {
-    return undefined;
-  }
-
-  const absoluteOpenBrace = openBraceIndex + 1 + returnMatch.index + returnMatch[0].length - 1;
-  const absoluteCloseBrace = findMatchingBrace(source, absoluteOpenBrace);
-  if (absoluteCloseBrace < 0) {
-    return undefined;
-  }
-
-  return source.slice(absoluteOpenBrace, absoluteCloseBrace + 1);
-}
-
 function sourceDeclaresExportedType(source: string, typeName: string): boolean {
   const escaped = typeName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const exportedFromList =
@@ -3181,36 +2586,6 @@ function extractExportedTypeAliasExpression(source: string, typeName: string): s
   const remainder = source.slice(start);
   const [line] = remainder.split(/\r?\n/, 1);
   return line?.trim().replace(/;$/, "") || undefined;
-}
-
-function extractExportedObjectTypeAliasPropInfoMap(
-  source: string,
-  typeName: string,
-): Map<string, SourcePropFallback> {
-  const expression = extractExportedTypeAliasExpression(source, typeName);
-  if (!expression || !expression.trim().startsWith("{")) {
-    return new Map();
-  }
-
-  const normalized = expression.trim();
-  const body = normalized.slice(1, -1);
-  const infoMap = new Map<string, SourcePropFallback>();
-  for (const entry of splitTopLevelObjectMembers(body)) {
-    const trimmed = entry.trim();
-    const match =
-      /^(?:readonly\s+)?(?:["']([^"']+)["']|([A-Za-z_$][A-Za-z0-9_$-]*))(\?)?\s*:\s*([\s\S]+)$/.exec(
-        trimmed,
-      );
-    if (!match) {
-      continue;
-    }
-    const name = match[1] ?? match[2];
-    infoMap.set(name, {
-      rawType: normalizeTypeString(match[4]!.trim()),
-      required: match[3] !== "?",
-    });
-  }
-  return infoMap;
 }
 
 function extractImportedLocalSpecifiers(source: string): Map<string, string> {
@@ -3318,6 +2693,8 @@ export class ComponentMetaChecker {
   private _session: ProjectSession | null = null;
   private _runtime: MetaRuntimeImpl | null = null;
   private _ownsRuntime = false;
+  private static readonly MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE = 2048;
+  private static readonly MAX_GLOBAL_TS_TYPE_SCHEMA_CACHE_SIZE = 512;
   private expandedTypeSchemaCache = new Map<string, PropertyMetaSchema>();
   private globalTsTypeSchemaCache = new Map<string, PropertyMetaSchema>();
   private globalTsTypeProgram:
@@ -3481,14 +2858,6 @@ export class ComponentMetaChecker {
     return undefined;
   }
 
-  private async resolveImportedTypeSource(
-    ownerPath: string,
-    typeName: string,
-    depth = 0,
-  ): Promise<string | undefined> {
-    return (await this.resolveImportedTypeReference(ownerPath, typeName, depth))?.path;
-  }
-
   private async resolveImportedSpecifierTypeSource(
     ownerPath: string,
     specifier: string,
@@ -3621,315 +2990,23 @@ export class ComponentMetaChecker {
     return undefined;
   }
 
-  private async buildSourcePropFallbackMap(
-    ownerPath: string,
-  ): Promise<Map<string, SourcePropFallback>> {
-    const source = await this.readCanonicalSourceText(ownerPath);
-    if (!source) {
-      return new Map();
-    }
-
-    const rootTypeName = extractDefinePropsRootTypeName(source);
-    if (!rootTypeName) {
-      return new Map();
-    }
-
-    return this.collectDeclaredInterfacePropFallbacks(ownerPath, rootTypeName, new Set());
-  }
-
-  private async buildSourceEventFallbackMap(
-    ownerPath: string,
-  ): Promise<Map<string, SourceEventFallback>> {
-    const source = await this.readCanonicalSourceText(ownerPath);
-    if (!source) {
-      return new Map();
-    }
-
-    const rootTypeName = extractDefineEmitsRootTypeName(source);
-    if (!rootTypeName) {
-      return new Map();
-    }
-
-    return this.collectDeclaredEventFallbacks(ownerPath, rootTypeName, new Set());
-  }
-
-  private async collectDeclaredInterfacePropFallbacks(
-    ownerPath: string,
-    typeName: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourcePropFallback>> {
-    const visitKey = `${runtimeNormalizePath(ownerPath)}::${typeName}`;
-    if (seen.has(visitKey)) {
-      return new Map();
-    }
-    seen.add(visitKey);
-
-    const source = await this.readCanonicalSourceText(ownerPath);
-    if (!source) {
-      return new Map();
-    }
-
-    const combined = new Map<string, SourcePropFallback>();
-    for (const extendExpr of extractDeclaredInterfaceExtends(source, typeName)) {
-      const inherited = await this.resolveExtendedInterfacePropFallbacks(
-        ownerPath,
-        extendExpr,
-        seen,
-      );
-      for (const [name, info] of inherited) {
-        combined.set(name, info);
-      }
-    }
-
-    for (const [name, info] of extractDeclaredInterfacePropInfoMap(source, typeName)) {
-      combined.set(name, {
-        ...info,
-        canonicalSource: runtimeNormalizePath(ownerPath),
-      });
-    }
-
-    return combined;
-  }
-
-  private async resolveExtendedInterfacePropFallbacks(
-    ownerPath: string,
-    extendExpr: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourcePropFallback>> {
-    const omitMatch = /^Omit<\s*([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?\s*,\s*([\s\S]+)\s*>$/.exec(
-      extendExpr,
-    );
-    if (omitMatch) {
-      const inherited = await this.resolveNamedInterfacePropFallbacks(
-        ownerPath,
-        omitMatch[1]!,
-        seen,
-      );
-      for (const omitted of extractStringLiteralTypeMembers(omitMatch[2]!)) {
-        inherited.delete(omitted);
-      }
-      return inherited;
-    }
-
-    const directMatch = /^([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?$/.exec(extendExpr.trim());
-    if (!directMatch) {
-      return new Map();
-    }
-
-    return this.resolveNamedInterfacePropFallbacks(ownerPath, directMatch[1]!, seen);
-  }
-
-  private async resolveNamedInterfacePropFallbacks(
-    ownerPath: string,
-    typeName: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourcePropFallback>> {
-    const ownerSource = await this.readCanonicalSourceText(ownerPath);
-    if (ownerSource && sourceDeclaresType(ownerSource, typeName)) {
-      return this.collectDeclaredInterfacePropFallbacks(ownerPath, typeName, seen);
-    }
-
-    const imported = await this.resolveImportedTypeReference(ownerPath, typeName);
-    if (!imported) {
-      return new Map();
-    }
-
-    return this.collectDeclaredInterfacePropFallbacks(imported.path, imported.typeName, seen);
-  }
-
-  private async collectDeclaredEventFallbacks(
-    ownerPath: string,
-    typeName: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourceEventFallback>> {
-    const visitKey = `${runtimeNormalizePath(ownerPath)}::event::${typeName}`;
-    if (seen.has(visitKey)) {
-      return new Map();
-    }
-    seen.add(visitKey);
-
-    const source = await this.readCanonicalSourceText(ownerPath);
-    if (!source) {
-      return new Map();
-    }
-
-    const localEvents = extractDeclaredInterfaceEventInfoMap(source, typeName);
-    if (localEvents.size > 0) {
-      const combined = new Map<string, SourceEventFallback>();
-      for (const extendExpr of extractDeclaredInterfaceExtends(source, typeName)) {
-        const inherited = await this.resolveExtendedEventFallbacks(ownerPath, extendExpr, seen);
-        for (const [name, info] of inherited) {
-          combined.set(name, info);
-        }
-      }
-      for (const [name, info] of localEvents) {
-        combined.set(name, info);
-      }
-      return combined;
-    }
-
-    const aliasExpression = extractExportedTypeAliasExpression(source, typeName);
-    if (aliasExpression) {
-      return this.resolveEventAliasFallbacks(ownerPath, aliasExpression, seen);
-    }
-
-    const imported = await this.resolveImportedTypeReference(ownerPath, typeName);
-    if (!imported) {
-      return new Map();
-    }
-
-    return this.collectDeclaredEventFallbacks(imported.path, imported.typeName, seen);
-  }
-
-  private async resolveExtendedEventFallbacks(
-    ownerPath: string,
-    extendExpr: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourceEventFallback>> {
-    const omitMatch = /^Omit<\s*([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?\s*,\s*([\s\S]+)\s*>$/.exec(
-      extendExpr,
-    );
-    if (omitMatch) {
-      const inherited = await this.collectDeclaredEventFallbacks(ownerPath, omitMatch[1]!, seen);
-      for (const omitted of extractStringLiteralTypeMembers(omitMatch[2]!)) {
-        inherited.delete(omitted);
-      }
-      return inherited;
-    }
-
-    const directMatch = /^([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?$/.exec(extendExpr.trim());
-    if (!directMatch) {
-      return new Map();
-    }
-
-    return this.collectDeclaredEventFallbacks(ownerPath, directMatch[1]!, seen);
-  }
-
-  private async resolveEventAliasFallbacks(
-    ownerPath: string,
-    aliasExpression: string,
-    seen: Set<string>,
-  ): Promise<Map<string, SourceEventFallback>> {
-    const omitMatch = /^Omit<\s*([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?\s*,\s*([\s\S]+)\s*>$/.exec(
-      aliasExpression.trim(),
-    );
-    if (omitMatch) {
-      const inherited = await this.collectDeclaredEventFallbacks(ownerPath, omitMatch[1]!, seen);
-      for (const omitted of extractStringLiteralTypeMembers(omitMatch[2]!)) {
-        inherited.delete(omitted);
-      }
-      return inherited;
-    }
-
-    const directMatch = /^([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?$/.exec(aliasExpression.trim());
-    if (!directMatch) {
-      return new Map();
-    }
-
-    return this.collectDeclaredEventFallbacks(ownerPath, directMatch[1]!, seen);
-  }
-
-  private async resolveDeclaredTypeMemberFallbacks(
-    ownerPath: string,
-    typeName: string,
-  ): Promise<Map<string, SourcePropFallback>> {
-    const ownerSource = await this.readCanonicalSourceText(ownerPath);
-    if (ownerSource) {
-      const interfaceInfo = extractDeclaredInterfacePropInfoMap(ownerSource, typeName);
-      if (interfaceInfo.size > 0) {
-        return interfaceInfo;
-      }
-
-      const aliasInfo = extractExportedObjectTypeAliasPropInfoMap(ownerSource, typeName);
-      if (aliasInfo.size > 0) {
-        return aliasInfo;
-      }
-    }
-
-    const imported = await this.resolveImportedTypeReference(ownerPath, typeName);
-    if (!imported) {
-      return new Map();
-    }
-
-    const importedSource = await this.readCanonicalSourceText(imported.path);
-    if (!importedSource) {
-      return new Map();
-    }
-
-    const interfaceInfo = extractDeclaredInterfacePropInfoMap(importedSource, imported.typeName);
-    if (interfaceInfo.size > 0) {
-      return interfaceInfo;
-    }
-
-    return extractExportedObjectTypeAliasPropInfoMap(importedSource, imported.typeName);
-  }
-
-  private async resolveDeclaredTypeSource(
-    ownerPath: string,
-    typeName: string,
-  ): Promise<{ path: string; source: string } | undefined> {
-    const ownerSource = await this.readCanonicalSourceText(ownerPath);
-    if (ownerSource && sourceDeclaresType(ownerSource, typeName)) {
-      return {
-        path: runtimeNormalizePath(ownerPath),
-        source: ownerSource,
-      };
-    }
-
-    const imported = await this.resolveImportedTypeReference(ownerPath, typeName);
-    if (!imported) {
-      return undefined;
-    }
-
-    const importedSource = await this.readCanonicalSourceText(imported.path);
-    if (!importedSource) {
-      return undefined;
-    }
-
-    return {
-      path: runtimeNormalizePath(imported.path),
-      source: importedSource,
-    };
-  }
-
-  private async tryBuildExpandedUtilitySchema(
-    ownerPath: string,
+  private tryBuildExpandedUtilitySchema(
     typeText: string,
     seen: Set<string>,
-  ): Promise<PropertyMetaSchema | undefined> {
+  ): PropertyMetaSchema | undefined {
     const pickOrOmitMatch =
       /^(Pick|Omit)<\s*([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?\s*,\s*([\s\S]+)\s*>$/.exec(
         typeText,
       );
     if (pickOrOmitMatch) {
-      const keyMembers = extractStringLiteralTypeMembers(pickOrOmitMatch[3]!);
-      if (keyMembers.length === 0) {
-        return undefined;
-      }
-      const baseSchema = await this.buildExpandedDeclaredNamedTypeSchema(
-        ownerPath,
-        pickOrOmitMatch[2]!,
-        pickOrOmitMatch[2]!,
-        seen,
-      );
-      if (isCompatObjectRecordSchema(baseSchema)) {
-        const keys = new Set(keyMembers);
-        const entries = Object.entries(baseSchema.schema).filter(([name]) =>
-          pickOrOmitMatch[1] === "Pick" ? keys.has(name) : !keys.has(name),
-        );
-        return {
-          kind: "object",
-          type: typeText,
-          schema: Object.fromEntries(entries),
-        };
-      }
+      // Named type base cannot be resolved from type string alone
+      return undefined;
     }
 
     const partialMatch = /^Partial<\s*([\s\S]+)\s*>$/.exec(typeText);
     if (partialMatch) {
       const innerType = normalizeTypeString(partialMatch[1]!.trim());
-      const innerSchema = await this.buildExpandedCompatSchemaFromTypeText(
-        ownerPath,
+      const innerSchema = this.buildExpandedCompatSchemaFromTypeText(
         innerType,
         seen,
       );
@@ -3959,43 +3036,20 @@ export class ComponentMetaChecker {
       };
     }
 
-    const returnTypeMatch = /^ReturnType<\s*typeof\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*>$/.exec(
-      typeText,
-    );
-    if (returnTypeMatch) {
-      const source = await this.readCanonicalSourceText(ownerPath);
-      const objectLiteral = source
-        ? extractFunctionReturnObjectLiteral(source, returnTypeMatch[1]!)
-        : undefined;
-      if (!objectLiteral) {
-        return undefined;
-      }
-
-      const objectSchema = await this.buildExpandedCompatObjectSchemaFromTypeText(
-        ownerPath,
-        objectLiteral,
-        seen,
-      );
-      return {
-        ...objectSchema,
-        type: typeText,
-      };
-    }
-
+    // ReturnType<typeof X> requires source file reading — passthrough
     return undefined;
   }
 
-  private async buildExpandedCompatSchemaFromTypeText(
-    ownerPath: string,
+  private buildExpandedCompatSchemaFromTypeText(
     typeText: string,
     seen: Set<string> = new Set(),
-  ): Promise<PropertyMetaSchema | undefined> {
+  ): PropertyMetaSchema | undefined {
     const normalizedTypeText = normalizeTypeString(stripSingleOuterParens(typeText.trim()));
     if (!normalizedTypeText) {
       return undefined;
     }
 
-    const cacheKey = `${runtimeNormalizePath(ownerPath)}::${normalizedTypeText}`;
+    const cacheKey = normalizedTypeText;
     if (this.expandedTypeSchemaCache.has(cacheKey)) {
       return this.expandedTypeSchemaCache.get(cacheKey);
     }
@@ -4013,7 +3067,7 @@ export class ComponentMetaChecker {
     if (unionParts.length > 1) {
       const schemaEntries: PropertyMetaSchema[] = [];
       for (const part of unionParts) {
-        const expanded = await this.buildExpandedCompatSchemaFromTypeText(ownerPath, part, seen);
+        const expanded = this.buildExpandedCompatSchemaFromTypeText(part, seen);
         schemaEntries.push(
           ...flattenSchemaEnumEntries(expanded ?? this.buildCompatSchemaLeafFromTypeText(part)),
         );
@@ -4024,6 +3078,7 @@ export class ComponentMetaChecker {
         type: normalizedTypeText,
         schema: sortCompatSchemaEnumEntries(schemaEntries),
       };
+      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
@@ -4034,36 +3089,35 @@ export class ComponentMetaChecker {
       const result = {
         kind: "object" as const,
         type: normalizedTypeText,
-        schema: (await Promise.all(
-          intersectionParts.map(
-            async (part) =>
-              (await this.buildExpandedCompatSchemaFromTypeText(ownerPath, part, seen)) ??
-              this.buildCompatSchemaLeafFromTypeText(part),
-          ),
-        )) as unknown as Record<string, PropertyMetaSchema>,
+        schema: intersectionParts.map(
+          (part) =>
+            this.buildExpandedCompatSchemaFromTypeText(part, seen) ??
+            this.buildCompatSchemaLeafFromTypeText(part),
+        ) as unknown as Record<string, PropertyMetaSchema>,
       };
+      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
     }
 
     if (normalizedTypeText.startsWith("{") && normalizedTypeText.endsWith("}")) {
-      const result = await this.buildExpandedCompatObjectSchemaFromTypeText(
-        ownerPath,
+      const result = this.buildExpandedCompatObjectSchemaFromTypeText(
         normalizedTypeText,
         seen,
       );
+      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
     }
 
-    const utilitySchema = await this.tryBuildExpandedUtilitySchema(
-      ownerPath,
+    const utilitySchema = this.tryBuildExpandedUtilitySchema(
       normalizedTypeText,
       seen,
     );
     if (utilitySchema) {
+      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, utilitySchema);
       seen.delete(cacheKey);
       return utilitySchema;
@@ -4073,19 +3127,8 @@ export class ComponentMetaChecker {
       /^([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?$/.exec(normalizedTypeText) ??
       /^([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(normalizedTypeText);
     if (typeRefMatch) {
-      const declaredSchema = await this.buildExpandedDeclaredNamedTypeSchema(
-        ownerPath,
-        typeRefMatch[1]!,
-        normalizedTypeText,
-        seen,
-      );
-      if (declaredSchema) {
-        this.expandedTypeSchemaCache.set(cacheKey, declaredSchema);
-        seen.delete(cacheKey);
-        return declaredSchema;
-      }
-
-      const globalTsSchema = await this.buildGlobalTypeSchemaFromTs(typeRefMatch[1]!, seen);
+      // Named types that can't be parsed from the type string alone — passthrough
+      const globalTsSchema = this.buildGlobalTypeSchemaFromTs(typeRefMatch[1]!, seen);
       if (globalTsSchema) {
         const result =
           typeof globalTsSchema === "object" &&
@@ -4097,6 +3140,7 @@ export class ComponentMetaChecker {
                 type: normalizedTypeText,
               }
             : globalTsSchema;
+        if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
         this.expandedTypeSchemaCache.set(cacheKey, result);
         seen.delete(cacheKey);
         return result;
@@ -4104,6 +3148,7 @@ export class ComponentMetaChecker {
     }
 
     const fallback = this.buildCompatSchemaLeafFromTypeText(normalizedTypeText);
+    if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
     this.expandedTypeSchemaCache.set(cacheKey, fallback);
     seen.delete(cacheKey);
     return fallback;
@@ -4126,11 +3171,10 @@ export class ComponentMetaChecker {
     return buildCompatSchemaFromRawType(normalizedTypeText) ?? normalizedTypeText;
   }
 
-  private async buildExpandedCompatObjectSchemaFromTypeText(
-    ownerPath: string,
+  private buildExpandedCompatObjectSchemaFromTypeText(
     typeText: string,
     seen: Set<string>,
-  ): Promise<PropertyMetaSchema> {
+  ): PropertyMetaSchema {
     const normalizedTypeText = normalizeCompatObjectLiteralTypeText(typeText.trim());
     const body = normalizedTypeText.slice(1, -1).trim();
     const properties: Record<string, PropertyMeta> = {};
@@ -4150,7 +3194,7 @@ export class ComponentMetaChecker {
       const rawType = normalizeTypeString(match[4]!.trim());
       const type = normalizeOptionalCompatTypeText(rawType, required);
       const schema = normalizeOptionalPropSchema(
-        (await this.buildExpandedCompatSchemaFromTypeText(ownerPath, rawType, seen)) ??
+        this.buildExpandedCompatSchemaFromTypeText(rawType, seen) ??
           this.buildCompatSchemaLeafFromTypeText(rawType),
         type,
         required,
@@ -4172,110 +3216,6 @@ export class ComponentMetaChecker {
       type: normalizedTypeText,
       schema: properties,
     };
-  }
-
-  private async buildExpandedDeclaredNamedTypeSchema(
-    ownerPath: string,
-    typeName: string,
-    displayTypeText: string,
-    seen: Set<string>,
-  ): Promise<PropertyMetaSchema | undefined> {
-    const resolved = await this.resolveDeclaredTypeSource(ownerPath, typeName);
-    if (!resolved) {
-      return undefined;
-    }
-
-    const interfaceInfo = await this.collectDeclaredInterfacePropFallbacks(
-      resolved.path,
-      typeName,
-      new Set(),
-    );
-    if (interfaceInfo.size > 0) {
-      const schema: Record<string, PropertyMeta> = {};
-      for (const [name, info] of interfaceInfo) {
-        const required = info.required ?? true;
-        const rawType = normalizeTypeString(info.rawType ?? "unknown");
-        const type = normalizeOptionalCompatTypeText(rawType, required);
-        const memberSchema = normalizeOptionalPropSchema(
-          (await this.buildExpandedCompatSchemaFromTypeText(resolved.path, rawType, seen)) ??
-            this.buildCompatSchemaLeafFromTypeText(rawType),
-          type,
-          required,
-        );
-
-        schema[name] = {
-          name,
-          global: false,
-          description: info.description ?? "",
-          tags: info.tags ?? [],
-          required,
-          type,
-          schema: memberSchema,
-        };
-      }
-
-      return {
-        kind: "object",
-        type: displayTypeText,
-        schema,
-      };
-    }
-
-    const aliasInfo = extractExportedObjectTypeAliasPropInfoMap(resolved.source, typeName);
-    if (aliasInfo.size > 0) {
-      const schema: Record<string, PropertyMeta> = {};
-      for (const [name, info] of aliasInfo) {
-        const required = info.required ?? true;
-        const rawType = normalizeTypeString(info.rawType ?? "unknown");
-        const type = normalizeOptionalCompatTypeText(rawType, required);
-        const memberSchema = normalizeOptionalPropSchema(
-          (await this.buildExpandedCompatSchemaFromTypeText(resolved.path, rawType, seen)) ??
-            this.buildCompatSchemaLeafFromTypeText(rawType),
-          type,
-          required,
-        );
-
-        schema[name] = {
-          name,
-          global: false,
-          description: info.description ?? "",
-          tags: info.tags ?? [],
-          required,
-          type,
-          schema: memberSchema,
-        };
-      }
-
-      return {
-        kind: "object",
-        type: displayTypeText,
-        schema,
-      };
-    }
-
-    const aliasExpression = extractExportedTypeAliasExpression(resolved.source, typeName);
-    if (!aliasExpression) {
-      return undefined;
-    }
-
-    const aliasSchema = await this.buildExpandedCompatSchemaFromTypeText(
-      resolved.path,
-      aliasExpression,
-      seen,
-    );
-    if (
-      aliasSchema &&
-      typeof aliasSchema === "object" &&
-      !Array.isArray(aliasSchema) &&
-      "type" in aliasSchema
-    ) {
-      return {
-        ...aliasSchema,
-        type: displayTypeText,
-      };
-    }
-
-    return aliasSchema;
   }
 
   private getGlobalTsTypeProgram():
@@ -4338,10 +3278,10 @@ export class ComponentMetaChecker {
     return this.globalTsTypeProgram;
   }
 
-  private async buildGlobalTypeSchemaFromTs(
+  private buildGlobalTypeSchemaFromTs(
     typeName: string,
     seen: Set<string>,
-  ): Promise<PropertyMetaSchema | undefined> {
+  ): PropertyMetaSchema | undefined {
     void seen;
     if (this.globalTsTypeSchemaCache.has(typeName)) {
       return this.globalTsTypeSchemaCache.get(typeName);
@@ -4349,6 +3289,7 @@ export class ComponentMetaChecker {
 
     const schema = typeName === "HTMLElement" ? getCompatHtmlElementObjectSchema() : undefined;
     if (schema) {
+      if (this.globalTsTypeSchemaCache.size >= ComponentMetaChecker.MAX_GLOBAL_TS_TYPE_SCHEMA_CACHE_SIZE) this.globalTsTypeSchemaCache.clear();
       this.globalTsTypeSchemaCache.set(typeName, schema);
     }
     return schema;
@@ -4507,153 +3448,6 @@ export class ComponentMetaChecker {
       name: tag.name,
       ...(tag.text ? { text: ts.displayPartsToString(tag.text) } : {}),
     }));
-  }
-
-  private async applyDeclaredTypeSchemaHints(
-    ownerPath: string,
-    prop: PropertyMeta,
-    rawType: string | undefined,
-  ): Promise<void> {
-    const strippedRawType = rawType
-      ? stripTopLevelUndefinedFromTypeString(rawType).trim()
-      : undefined;
-    const match = strippedRawType?.match(/^([A-Za-z_$][A-Za-z0-9_$]*)(?:<[\s\S]+>)?$/);
-    if (!match) {
-      return;
-    }
-
-    const infoMap = await this.resolveDeclaredTypeMemberFallbacks(ownerPath, match[1]!);
-    if (infoMap.size === 0) {
-      return;
-    }
-
-    prop.schema = applyDeclaredMemberRawTypesToSchema(prop.schema, infoMap);
-  }
-
-  private async tryResolveThemeBackedInterfaceProp(
-    ownerPath: string,
-    prop: PropertyMeta,
-    nativeProp: PropMeta | undefined,
-  ): Promise<Pick<PropertyMeta, "type" | "schema"> | undefined> {
-    if (!prop.type.includes("graphNode(")) {
-      return undefined;
-    }
-
-    const typeName = nativeProp?.rawType?.trim();
-    if (!typeName || !/^[A-Z][A-Za-z0-9_$]*Props$/.test(typeName)) {
-      return undefined;
-    }
-
-    const typeSourcePath = await this.resolveImportedTypeSource(ownerPath, typeName);
-    if (!typeSourcePath) {
-      return undefined;
-    }
-
-    const typeSource = await this.readCanonicalSourceText(typeSourcePath);
-    if (!typeSource) {
-      return undefined;
-    }
-
-    const declaredPropTypes = extractDeclaredInterfacePropTypeMap(typeSource, typeName);
-    if (declaredPropTypes.size === 0) {
-      return undefined;
-    }
-
-    const members: PropertyMeta[] = [];
-    for (const [memberName, memberRawType] of declaredPropTypes) {
-      const variantsMatch =
-        /^([A-Za-z_$][A-Za-z0-9_$]*)\[['"]variants['"]\]\[['"]([^'"]+)['"]\]$/.exec(memberRawType);
-      if (variantsMatch) {
-        const resolved = await this.resolveThemeBackedAliasKeys(
-          typeSourcePath,
-          typeSource,
-          variantsMatch[1]!,
-          ["variants", variantsMatch[2]!],
-        );
-        if (resolved.length > 0) {
-          const literalEntries = resolved.map((entry) => JSON.stringify(entry));
-          const memberType = `${literalEntries.join(" | ")} | undefined`;
-          members.push(
-            buildCompatInlinePropertyMeta(memberName, memberType, {
-              kind: "enum",
-              type: memberType,
-              schema: [...literalEntries, "undefined"],
-            }),
-          );
-          continue;
-        }
-      }
-
-      const slotsMatch = /^([A-Za-z_$][A-Za-z0-9_$]*)\[['"]slots['"]\]$/.exec(memberRawType);
-      if (slotsMatch) {
-        const resolved = await this.resolveThemeBackedAliasKeys(
-          typeSourcePath,
-          typeSource,
-          slotsMatch[1]!,
-          ["slots"],
-        );
-        if (resolved.length > 0) {
-          const objectType = `{ ${resolved.map((entry) => `${entry}?: string`).join("; ")}; }`;
-          members.push(
-            buildCompatInlinePropertyMeta(memberName, `${objectType} | undefined`, {
-              kind: "enum",
-              type: `${objectType} | undefined`,
-              schema: [
-                {
-                  kind: "object",
-                  type: objectType,
-                  schema: Object.fromEntries(
-                    resolved.map((entry) => [
-                      entry,
-                      buildCompatInlinePropertyMeta(
-                        entry,
-                        "string | undefined",
-                        "string | undefined",
-                      ),
-                    ]),
-                  ),
-                },
-                "undefined",
-              ],
-            }),
-          );
-          continue;
-        }
-      }
-
-      members.push(
-        buildCompatInlinePropertyMeta(
-          memberName,
-          `${normalizeTypeString(memberRawType)} | undefined`,
-          {
-            kind: "enum",
-            type: `${normalizeTypeString(memberRawType)} | undefined`,
-            schema: [`${normalizeTypeString(memberRawType)}`, "undefined"],
-          },
-        ),
-      );
-    }
-
-    if (members.length === 0) {
-      return undefined;
-    }
-
-    const objectType = `{ ${members.map((member) => `${member.name}?: ${member.type}`).join("; ")}; }`;
-    return {
-      type: `${objectType} | undefined`,
-      schema: {
-        kind: "enum",
-        type: `${objectType} | undefined`,
-        schema: [
-          {
-            kind: "object",
-            type: objectType,
-            schema: Object.fromEntries(members.map((member) => [member.name, member])),
-          },
-          "undefined",
-        ],
-      },
-    };
   }
 
   private async resolveThemeBackedAliasKeys(
@@ -4834,69 +3628,6 @@ export class ComponentMetaChecker {
     };
   }
 
-  private async resolveImportedPropsComponentSource(
-    ownerPath: string,
-    typeName: string,
-    depth = 0,
-  ): Promise<string | undefined> {
-    if (depth > 2) {
-      return undefined;
-    }
-    const source = await this.readCanonicalSourceText(ownerPath);
-    if (!source) {
-      return undefined;
-    }
-
-    const importMatches = source.matchAll(/import\s+type\s*\{([^}]*)\}\s+from\s+['"]([^'"]+)['"]/g);
-    for (const match of importMatches) {
-      const imported = match[1]
-        ?.split(",")
-        .map((entry) =>
-          entry
-            .trim()
-            .split(/\s+as\s+/i)
-            .pop()
-            ?.trim(),
-        )
-        .filter((entry): entry is string => Boolean(entry));
-      if (!imported?.includes(typeName)) {
-        continue;
-      }
-      const resolvedImport = await this.resolveModulePath(ownerPath, match[2]!);
-      if (!resolvedImport) {
-        continue;
-      }
-      const directSource = await this.readCanonicalSourceText(resolvedImport);
-      if (
-        resolvedImport.endsWith(".vue") &&
-        directSource?.includes(`export interface ${typeName}`)
-      ) {
-        return resolvedImport;
-      }
-      if (!directSource) {
-        continue;
-      }
-      const reexportMatches = directSource.matchAll(
-        /export(?:\s+type)?\s*(?:\*\s*from|\{[^}]*\b[A-Za-z_$][A-Za-z0-9_$]*\b[^}]*\}\s*from)\s+['"]([^'"]+)['"]/g,
-      );
-      for (const reexport of reexportMatches) {
-        const resolvedReexport = await this.resolveModulePath(resolvedImport, reexport[1]!);
-        if (!resolvedReexport) {
-          continue;
-        }
-        const reexportSource = await this.readCanonicalSourceText(resolvedReexport);
-        if (
-          resolvedReexport.endsWith(".vue") &&
-          reexportSource?.includes(`export interface ${typeName}`)
-        ) {
-          return resolvedReexport;
-        }
-      }
-    }
-
-    return undefined;
-  }
-
   private async resolveModulePath(
     fromFile: string,
     specifier: string,
@@ -4955,368 +3686,6 @@ export class ComponentMetaChecker {
     return undefined;
   }
 
-  private async buildReferencedComponentPropSchema(
-    ownerPath: string,
-    prop: PropertyMeta,
-    rawType: string | undefined,
-  ): Promise<PropertyMetaSchema | undefined> {
-    const normalizedRawType = rawType?.trim();
-    const referencedTypes = extractReferencedComponentPropTypes(normalizedRawType);
-    if (referencedTypes.length !== 1) {
-      return undefined;
-    }
-    const referencedType = referencedTypes[0]!;
-    const typeName = referencedType.typeName;
-
-    const componentSource = await this.resolveImportedPropsComponentSource(ownerPath, typeName);
-    if (!componentSource || componentSource === ownerPath) {
-      return undefined;
-    }
-
-    const referencedMeta = await this.getComponentMeta(componentSource);
-    if (!referencedMeta.props.length) {
-      return undefined;
-    }
-
-    const componentSourceText = await this.readCanonicalSourceText(componentSource);
-    const declaredPropTypes = componentSourceText
-      ? extractDeclaredInterfacePropTypeMap(componentSourceText, typeName)
-      : new Map<string, string>();
-    const sourceFallbackMap = await this.buildSourcePropFallbackMap(componentSource);
-    const compactedProps = await Promise.all(
-      referencedMeta.props.map((referencedProp) =>
-        this.compactEmbeddedReferencedPropMetaRecursive(
-          componentSource,
-          referencedProp,
-          sourceFallbackMap.get(referencedProp.name)?.rawType ??
-            declaredPropTypes.get(referencedProp.name),
-          { collapseIndexedSize: false },
-        ),
-      ),
-    );
-    for (const [propName, info] of sourceFallbackMap) {
-      if (!info.rawType || compactedProps.some((propEntry) => propEntry.name === propName)) {
-        continue;
-      }
-      const normalizedSourceType = normalizeTypeString(info.rawType);
-      const typeText =
-        normalizedSourceType === "any"
-          ? "any"
-          : normalizeOptionalCompatTypeText(normalizedSourceType, info.required ?? false);
-      let schema: PropertyMetaSchema = typeText;
-      if (typeText !== "any" && shouldAttemptExpandedCompatSchema(info.rawType)) {
-        const expandedSchema = await this.buildExpandedCompatSchemaFromTypeText(
-          info.canonicalSource ?? componentSource,
-          info.rawType,
-        );
-        if (expandedSchema) {
-          schema = normalizeOptionalPropSchema(expandedSchema, typeText, info.required ?? false);
-        }
-      }
-      compactedProps.push({
-        global: false,
-        name: propName,
-        required: info.required ?? false,
-        description: info.description ?? "",
-        tags: info.tags ?? [],
-        type: typeText,
-        schema,
-      });
-    }
-
-    const objectSchema: PropertyMetaSchema = {
-      kind: "object",
-      type: typeName,
-      schema: Object.fromEntries(
-        compactedProps.map((referencedProp) => [referencedProp.name, referencedProp]),
-      ),
-    };
-
-    const resolvedSchema = referencedType.arrayWrapped
-      ? {
-          kind: "array" as const,
-          type: `${typeName}[]`,
-          schema: [objectSchema],
-        }
-      : objectSchema;
-
-    if (
-      typeof prop.schema !== "string" &&
-      !Array.isArray(prop.schema) &&
-      prop.schema.kind === "enum" &&
-      Array.isArray(prop.schema.schema)
-    ) {
-      const normalizedEntries = prop.schema.schema.flatMap((entry: PropertyMetaSchema) =>
-        entry === "boolean" ? ["false", "true"] : [entry],
-      );
-      const existingScalarEntries = normalizedEntries.filter((entry: PropertyMetaSchema) => {
-        if (typeof entry === "string") {
-          return true;
-        }
-        if (referencedType.arrayWrapped) {
-          return !(
-            (entry?.kind === "array" && entry.type === `${typeName}[]`) ||
-            (entry?.kind === "object" && entry.type === typeName)
-          );
-        }
-        return !(entry?.kind === "object" && entry.type === typeName);
-      });
-      const { scalarEntries, hasUndefined } = collectReferencedUnionScalarEntries(
-        normalizedRawType,
-        prop.required,
-        existingScalarEntries,
-      );
-
-      return {
-        kind: "enum",
-        type: prop.type,
-        schema: [
-          ...scalarEntries.filter((entry) => entry !== "undefined"),
-          ...(hasUndefined ? ["undefined"] : []),
-          resolvedSchema,
-        ],
-      };
-    }
-
-    return {
-      kind: "enum",
-      type: prop.type,
-      schema: [...(prop.required ? [] : ["undefined"]), resolvedSchema],
-    };
-  }
-
-  private async resolveReferencedComponentObjectArm(
-    ownerPath: string,
-    typeName: string,
-    visited = new Set<string>(),
-    options?: { collapseIndexedSize?: boolean },
-  ): Promise<ReferencedComponentObjectArm | undefined> {
-    const componentSource = await this.resolveImportedPropsComponentSource(ownerPath, typeName);
-    if (!componentSource || componentSource === ownerPath) {
-      return undefined;
-    }
-    const visitKey = `${runtimeNormalizePath(componentSource)}::${typeName}`;
-    if (visited.has(visitKey)) {
-      return undefined;
-    }
-    const nextVisited = new Set(visited);
-    nextVisited.add(visitKey);
-
-    const referencedMeta = await this.getComponentMeta(componentSource);
-    if (!referencedMeta.props.length) {
-      return undefined;
-    }
-
-    const componentSourceText = await this.readCanonicalSourceText(componentSource);
-    const declaredPropTypes = componentSourceText
-      ? extractDeclaredInterfacePropTypeMap(componentSourceText, typeName)
-      : new Map<string, string>();
-    const sourceFallbackMap = await this.buildSourcePropFallbackMap(componentSource);
-    const declaredProps =
-      sourceFallbackMap.size > 0 || declaredPropTypes.size > 0
-        ? await Promise.all(
-            referencedMeta.props
-              .filter((referencedProp) =>
-                sourceFallbackMap.size > 0
-                  ? sourceFallbackMap.has(referencedProp.name)
-                  : declaredPropTypes.has(referencedProp.name),
-              )
-              .map((referencedProp) =>
-                this.compactEmbeddedReferencedPropMetaRecursive(
-                  componentSource,
-                  referencedProp,
-                  sourceFallbackMap.get(referencedProp.name)?.rawType ??
-                    declaredPropTypes.get(referencedProp.name),
-                  options,
-                  nextVisited,
-                ),
-              ),
-          )
-        : referencedMeta.props;
-    if (!declaredProps.length) {
-      return undefined;
-    }
-
-    return {
-      typeName,
-      schema: {
-        kind: "object",
-        type: typeName,
-        schema: Object.fromEntries(
-          declaredProps.map((referencedProp) => [referencedProp.name, referencedProp]),
-        ),
-      },
-    };
-  }
-
-  private async compactEmbeddedReferencedPropMetaRecursive(
-    ownerPath: string,
-    prop: PropertyMeta,
-    rawType: string | undefined,
-    options?: { collapseIndexedSize?: boolean },
-    visited = new Set<string>(),
-  ): Promise<PropertyMeta> {
-    const compacted = this.compactEmbeddedReferencedPropMeta(prop, rawType, options);
-    const rewrittenSchema = await this.buildReferencedComponentUnionSchema(
-      ownerPath,
-      compacted.schema,
-      compacted.required,
-      rawType,
-      visited,
-    );
-    if (rewrittenSchema) {
-      compacted.schema = rewrittenSchema;
-    }
-    if (!normalizeEmbeddedIndexedSizeDisplay(compacted, rawType)) {
-      reorderCompatLiteralUnionTypeByDefaultValue(compacted);
-    }
-    return compacted;
-  }
-
-  private async buildReferencedComponentUnionSchema(
-    ownerPath: string,
-    schema: PropertyMetaSchema,
-    required: boolean,
-    rawType: string | undefined,
-    visited = new Set<string>(),
-  ): Promise<PropertyMetaSchema | undefined> {
-    if (
-      typeof schema === "string" ||
-      Array.isArray(schema) ||
-      schema.kind !== "enum" ||
-      !Array.isArray(schema.schema)
-    ) {
-      return undefined;
-    }
-
-    const typeNames = extractReferencedComponentPropTypeNames(rawType);
-    if (typeNames.length === 0) {
-      return undefined;
-    }
-
-    const objectArms = (
-      await Promise.all(
-        typeNames.map((typeName) =>
-          this.resolveReferencedComponentObjectArm(ownerPath, typeName, visited, {
-            collapseIndexedSize: isPureDirectReferencedComponentType(rawType) ? false : undefined,
-          }),
-        ),
-      )
-    ).filter((entry): entry is ReferencedComponentObjectArm => entry !== undefined);
-    if (objectArms.length === 0) {
-      return undefined;
-    }
-
-    const normalizedEntries = schema.schema.flatMap((entry: PropertyMetaSchema) =>
-      entry === "boolean" ? ["false", "true"] : [entry],
-    );
-    const existingScalarEntries = normalizedEntries.filter((entry: PropertyMetaSchema) => {
-      if (typeof entry === "string") {
-        return true;
-      }
-      return !objectArms.some((arm) => entry?.kind === "object" && entry.type === arm.typeName);
-    });
-    const { scalarEntries, hasUndefined } = collectReferencedUnionScalarEntries(
-      rawType,
-      required,
-      existingScalarEntries,
-    );
-
-    return {
-      ...schema,
-      schema: [
-        ...scalarEntries.filter((entry) => entry !== "undefined"),
-        ...(hasUndefined ? ["undefined"] : []),
-        ...objectArms.map((arm) => arm.schema),
-      ],
-    };
-  }
-
-  private compactEmbeddedReferencedPropMeta(
-    prop: PropertyMeta,
-    rawType: string | undefined,
-    options?: { collapseIndexedSize?: boolean },
-  ): PropertyMeta {
-    const { default: _default, ...rest } = prop;
-    const normalizedRawType = rawType
-      ? normalizeOptionalCompatTypeText(normalizeTypeString(rawType), prop.required)
-      : undefined;
-    const normalizedPropType = normalizeTypeString(prop.type).trim();
-    const effectiveType = normalizedRawType ?? normalizedPropType;
-    const compacted: PropertyMeta = {
-      ...rest,
-      tags: prop.tags.filter(
-        (tag) =>
-          !(tag.name === "defaultValue" && typeof tag.text === "string" && /^`.*`$/.test(tag.text)),
-      ),
-    };
-
-    // NOTE(compat-shim): Nuxt UI-specific prop name guards.
-    // "src" is excluded because its string type has a branded URL schema.
-    // "width" and "standalone" are special-cased to preserve their raw schemas.
-    if (effectiveType === "string | undefined" && prop.name !== "src") {
-      compacted.schema = "string | undefined";
-    } else if (effectiveType === "Numberish | undefined" && prop.name === "width") {
-      compacted.schema = "Numberish | undefined";
-    } else if (effectiveType === "boolean | undefined" && prop.name === "standalone") {
-      compacted.schema = "boolean | undefined";
-    } else if (
-      options?.collapseIndexedSize !== false &&
-      rawType &&
-      /\[(["'])size\1\]/.test(rawType)
-    ) {
-      const collapsedIndexedType =
-        typeof compacted.schema !== "string" &&
-        !Array.isArray(compacted.schema) &&
-        compacted.schema.kind === "enum"
-          ? compacted.schema.type
-          : compacted.type;
-      compacted.type = collapsedIndexedType;
-      compacted.schema = collapsedIndexedType;
-    }
-
-    if (
-      effectiveType.includes('""') &&
-      stripTopLevelUndefinedFromTypeString(compacted.type).includes('"anonymous"')
-    ) {
-      compacted.type = '"" | "anonymous" | "use-credentials" | undefined';
-      if (
-        typeof compacted.schema !== "string" &&
-        !Array.isArray(compacted.schema) &&
-        compacted.schema.kind === "enum"
-      ) {
-        compacted.schema = {
-          ...compacted.schema,
-          type: compacted.type,
-          schema: [
-            '""',
-            '"anonymous"',
-            '"use-credentials"',
-            ...(prop.required ? [] : ["undefined"]),
-          ],
-        };
-      }
-    }
-
-    return compacted;
-  }
-
-  private async applyReferencedComponentUnionSchema(
-    ownerPath: string,
-    prop: PropertyMeta,
-    rawType: string | undefined,
-  ): Promise<void> {
-    const rewrittenSchema = await this.buildReferencedComponentUnionSchema(
-      ownerPath,
-      prop.schema,
-      prop.required,
-      rawType,
-    );
-    if (rewrittenSchema) {
-      prop.schema = rewrittenSchema;
-    }
-  }
-
   /**
    * Get component metadata in Volar-compatible shape.
    */
@@ -5324,18 +3693,6 @@ export class ComponentMetaChecker {
     this.ensureActive();
     const absPath = runtimeResolvePath(this.projectRoot, filePath);
     await this.ensureFile(absPath);
-    if (this.options.benchmarkArtifacts) {
-      const benchmarkRelativePath = getCompatNuxtUiBenchmarkRelativePath(
-        this.projectRoot,
-        absPath,
-      );
-      const benchmarkArtifact = benchmarkRelativePath
-        ? readCompatNuxtUiBenchmarkArtifact(benchmarkRelativePath)
-        : undefined;
-      if (benchmarkArtifact) {
-        return buildCompatMetaFromBenchmarkArtifact(benchmarkArtifact);
-      }
-    }
     if (this._session) {
       const getDeclaredComponentMeta = (
         this._session as {
@@ -5371,25 +3728,10 @@ export class ComponentMetaChecker {
       );
       const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
       const docMap = await this.buildResolvedPropDocMap(resolvedNativeMeta);
-      const sourceFallbackMap = await this.buildSourcePropFallbackMap(absPath);
       const nativePropsByName = new Map(mappedMeta.props.map((p) => [p.name, p]));
       for (const prop of result.props) {
         const nativeProp = nativePropsByName.get(prop.name);
-        const sourceFallback = sourceFallbackMap.get(prop.name);
-        const effectiveRawType = sourceFallback?.rawType ?? nativeProp?.rawType;
-        if (nativeProp && sourceFallback?.rawType && !nativeProp.rawType) {
-          const remapped = mapPropMeta(
-            {
-              ...nativeProp,
-              rawType: sourceFallback.rawType,
-            },
-            this.options,
-            typeRegistry,
-          );
-          prop.type = remapped.type;
-          prop.schema = remapped.schema;
-        }
-        applyPropDocFallback(prop, docMap.get(prop.name) ?? sourceFallback);
+        applyPropDocFallback(prop, docMap.get(prop.name));
         if (prop.type === "Booleanish | undefined" || prop.type === "Booleanish") {
           prop.schema = {
             kind: "enum",
@@ -5397,46 +3739,17 @@ export class ComponentMetaChecker {
             schema: ['"false"', '"true"', "false", "true", ...(prop.required ? [] : ["undefined"])],
           };
         }
-        await this.applyDeclaredTypeSchemaHints(absPath, prop, effectiveRawType);
-        const expandedTypeText = sourceFallback?.rawType ?? prop.type;
+        const expandedTypeText = nativeProp?.rawType ?? prop.type;
         if (
           stripTopLevelUndefinedFromTypeString(prop.type).trim() !== "any" &&
           shouldAttemptExpandedCompatSchema(expandedTypeText)
         ) {
-          const expandedSchema = await this.buildExpandedCompatSchemaFromTypeText(
-            sourceFallback?.canonicalSource ?? absPath,
-            expandedTypeText,
-          );
+          const expandedSchema = this.buildExpandedCompatSchemaFromTypeText(expandedTypeText);
           if (expandedSchema) {
             prop.schema = normalizeOptionalPropSchema(expandedSchema, prop.type, prop.required);
           }
         }
-        const themeBackedResolved = await this.tryResolveThemeBackedInterfaceProp(
-          absPath,
-          prop,
-          nativeProp,
-        );
-        if (themeBackedResolved) {
-          prop.type = themeBackedResolved.type;
-          prop.schema = themeBackedResolved.schema;
-        }
-        await this.applyReferencedComponentUnionSchema(absPath, prop, effectiveRawType);
-        const referencedComponentSchema = await this.buildReferencedComponentPropSchema(
-          absPath,
-          prop,
-          effectiveRawType,
-        );
-        if (referencedComponentSchema) {
-          prop.schema = referencedComponentSchema;
-        }
         reorderCompatLiteralUnionTypeByDefaultValue(prop);
-      }
-      const sourceEventFallbacks = await this.buildSourceEventFallbackMap(absPath);
-      for (const [name, info] of sourceEventFallbacks) {
-        if (result.events.some((event) => event.name === name)) {
-          continue;
-        }
-        result.events.push(buildCompatSourceEventPropertyMeta(name, info.rawSignature));
       }
       return result;
     }

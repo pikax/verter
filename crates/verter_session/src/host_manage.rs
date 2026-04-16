@@ -318,8 +318,14 @@ struct ParsedTypeResolutionContextCacheEntry {
     type_context: Rc<crate::ParsedTypeResolutionContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ExternalTypeAnalysisCacheKey {
+    canonical_id: String,
+    source_type: oxc_span::SourceType,
+}
+
 #[derive(Clone)]
-struct ExternalTypeAnalysisCacheEntry {
+pub(crate) struct ExternalTypeAnalysisCacheEntry {
     whole_hash: Hash16,
     analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
 }
@@ -341,9 +347,11 @@ thread_local! {
     static HOST_PARSED_TYPE_CONTEXT_CACHE: RefCell<
         rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ParsedTypeResolutionContextCacheEntry>
     > = RefCell::new(rustc_hash::FxHashMap::default());
-    static HOST_EXTERNAL_TYPE_ANALYSIS_CACHE: RefCell<
-        rustc_hash::FxHashMap<ParsedEvalProgramCacheKey, ExternalTypeAnalysisCacheEntry>
-    > = RefCell::new(rustc_hash::FxHashMap::default());
+    // TODO(follow-up): Move HOST_PARSED_EVAL_PROGRAM_CACHE and HOST_PARSED_TYPE_CONTEXT_CACHE
+    // to host-owned caches. Currently blocked by !Send types:
+    // - ParsedEvalProgram uses self_cell with oxc_allocator::Allocator (!Send arena)
+    // - ParsedTypeResolutionContext's dependent contains Rc<RefCell<>> fields
+    // The proper fix requires converting OXC arena types to Send+Sync (upstream concern).
 }
 
 fn component_meta_trace_output_lock() -> &'static Mutex<()> {
@@ -2041,26 +2049,28 @@ impl VerterHost {
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
         bool,
     ) {
-        let cache_key = ParsedEvalProgramCacheKey {
-            host_instance_id: self.instance_id,
+        let cache_key = ExternalTypeAnalysisCacheKey {
             canonical_id: canonical_id.to_string(),
             source_type: Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
         };
-        HOST_EXTERNAL_TYPE_ANALYSIS_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
+        {
+            let cache = self.external_type_analysis_cache.lock();
             if let Some(entry) = cache.get(&cache_key) {
                 if entry.whole_hash == whole_hash {
                     return (Arc::clone(&entry.analysis), true);
                 }
             }
+        }
 
-            let analysis = self.build_external_type_analysis(
-                canonical_id,
-                whole_hash,
-                raw_source,
-                cached_parse,
-                eval_source,
-            );
+        let analysis = self.build_external_type_analysis(
+            canonical_id,
+            whole_hash,
+            raw_source,
+            cached_parse,
+            eval_source,
+        );
+        {
+            let mut cache = self.external_type_analysis_cache.lock();
             cache.insert(
                 cache_key,
                 ExternalTypeAnalysisCacheEntry {
@@ -2068,8 +2078,8 @@ impl VerterHost {
                     analysis: Arc::clone(&analysis),
                 },
             );
-            (analysis, false)
-        })
+        }
+        (analysis, false)
     }
 
     fn external_type_resolution_inputs_in_view(
@@ -2149,11 +2159,11 @@ impl VerterHost {
                 .borrow_mut()
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
-        HOST_EXTERNAL_TYPE_ANALYSIS_CACHE.with(|cache| {
-            cache
-                .borrow_mut()
-                .retain(|key, _| key.host_instance_id != host_instance_id);
-        });
+        self.external_type_analysis_cache.lock().clear();
+        // Note: route_owned_shallow_cache is NOT cleared here — it's invalidated
+        // per-file by invalidate_route_owned_shallow_cache() and validated by
+        // content-hash on lookup. Clearing it on every epoch bump would defeat
+        // the caching benefit for unchanged imported files.
     }
 
     fn build_external_type_analysis(
@@ -8762,10 +8772,7 @@ fn choose_less_symbolic_component_meta_type_expr(
         verter_semantic::analysis::type_expr::TypeExpr,
         rustc_hash::FxHashSet<(String, usize)>,
     )> {
-        let Some(raw_type) = raw_type else {
-            return None;
-        };
-
+        let raw_type = raw_type?;
         let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
         let mut refs = rustc_hash::FxHashSet::default();
         if !collect_props_like_public_refs(&parsed, &mut refs) || refs.is_empty() {
@@ -8773,21 +8780,19 @@ fn choose_less_symbolic_component_meta_type_expr(
         }
 
         let all_imported = refs.iter().all(|(name, _)| {
-            let declaration = query_engine.resolve_type_declaration(owner_canonical, &name);
+            let declaration = query_engine.resolve_type_declaration(owner_canonical, name);
             !declaration.canonical_source.is_empty()
                 && declaration.canonical_source != owner_canonical
         });
         all_imported.then_some((parsed, refs))
     }
 
-    if let Some((parsed, refs)) = imported_props_like_public_raw_type(
-        raw_type,
-        owner_canonical,
-        query_engine,
-    ) {
-        let keeps_all_refs = refs
-            .iter()
-            .all(|(name, type_argument_arity)| expr_contains_public_ref(current, name, *type_argument_arity));
+    if let Some((parsed, refs)) =
+        imported_props_like_public_raw_type(raw_type, owner_canonical, query_engine)
+    {
+        let keeps_all_refs = refs.iter().all(|(name, type_argument_arity)| {
+            expr_contains_public_ref(current, name, *type_argument_arity)
+        });
         return if keeps_all_refs {
             current.clone()
         } else {
@@ -9024,9 +9029,7 @@ fn choose_less_symbolic_component_meta_type_expr(
             }
         }
 
-        let Some(raw_type) = raw_type else {
-            return None;
-        };
+        let raw_type = raw_type?;
         let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
         if !is_plain_named_alias_ref(&parsed) {
             return None;
@@ -9211,7 +9214,10 @@ fn rematerialize_public_component_meta_types(
                 Some(root_surface.clone())
             }
             crate::resolver_core::RouteDemand::MemberPath(path) => {
-                crate::resolver_core::component_meta_registry::raw_member_path_leaf(root_surface, &path)
+                crate::resolver_core::component_meta_registry::raw_member_path_leaf(
+                    root_surface,
+                    &path,
+                )
             }
             _ => None,
         }
@@ -9246,7 +9252,10 @@ fn rematerialize_public_component_meta_types(
     let mut define_props_scopes = Vec::new();
     let mut define_slots_scopes = Vec::new();
     let mut registry_scopes = Vec::new();
-    let mut resolved_registry_by_name: rustc_hash::FxHashMap<&str, &verter_semantic::analysis::type_expr::TypeExpr> = rustc_hash::FxHashMap::default();
+    let mut resolved_registry_by_name: rustc_hash::FxHashMap<
+        &str,
+        &verter_semantic::analysis::type_expr::TypeExpr,
+    > = rustc_hash::FxHashMap::default();
     for entry in &resolved.resolved_type_registry {
         resolved_registry_by_name.insert(entry.name.as_str(), &entry.type_expr);
     }
@@ -9300,7 +9309,11 @@ fn rematerialize_public_component_meta_types(
     let mut changed = false;
 
     for prop in &mut meta.props {
-        if prop.raw_type.as_deref().is_none_or(|raw| raw.trim().is_empty()) {
+        if prop
+            .raw_type
+            .as_deref()
+            .is_none_or(|raw| raw.trim().is_empty())
+        {
             continue;
         }
         let _trace = component_meta_trace_scope!(
@@ -9493,7 +9506,9 @@ fn merge_evaluated_prop_types_into_meta(
         use verter_semantic::analysis::type_expr::TypeExpr;
 
         match expr {
-            TypeExpr::Parenthesized(inner) => expr_contains_public_ref(inner, name, type_argument_arity),
+            TypeExpr::Parenthesized(inner) => {
+                expr_contains_public_ref(inner, name, type_argument_arity)
+            }
             TypeExpr::Ref {
                 name: current_name,
                 type_arguments,
@@ -9506,7 +9521,9 @@ fn merge_evaluated_prop_types_into_meta(
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
                 .iter()
                 .any(|ty| expr_contains_public_ref(ty, name, type_argument_arity)),
-            TypeExpr::Array { element, .. } => expr_contains_public_ref(element, name, type_argument_arity),
+            TypeExpr::Array { element, .. } => {
+                expr_contains_public_ref(element, name, type_argument_arity)
+            }
             TypeExpr::Tuple { elements, .. } => elements
                 .iter()
                 .any(|element| expr_contains_public_ref(&element.ty, name, type_argument_arity)),
@@ -9535,9 +9552,11 @@ fn merge_evaluated_prop_types_into_meta(
             store_view,
         );
         if !imported_props_like_refs.is_empty()
-            && !imported_props_like_refs.iter().all(|(name, type_argument_arity)| {
-                expr_contains_public_ref(evaluated, name, *type_argument_arity)
-            })
+            && !imported_props_like_refs
+                .iter()
+                .all(|(name, type_argument_arity)| {
+                    expr_contains_public_ref(evaluated, name, *type_argument_arity)
+                })
         {
             continue;
         }
