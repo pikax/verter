@@ -676,6 +676,27 @@ where
             {
                 continue;
             }
+            let macro_has_imported_type_deps = macro_type_deps
+                .iter()
+                .any(|dep| dep.macro_index == macro_index);
+            let projectable_owner_local = projectable_owner_local_surfaces
+                .get(macro_index)
+                .copied()
+                .unwrap_or(false);
+            // When the owner has cross-file heritage (extends Omit<External>),
+            // the source-text path can only resolve same-file members.
+            // The prepared surface supplements it with the full shape
+            // including inherited members from the cross-file chain.
+            let prepared_surface_will_handle = projectable_owner_local
+                && macro_has_imported_type_deps
+                && matches!(
+                    mac.kind,
+                    AnalyzedMacroKind::DefineProps
+                        | AnalyzedMacroKind::WithDefaults
+                        | AnalyzedMacroKind::DefineModel
+                        | AnalyzedMacroKind::DefineSlots
+                );
+
             let owner_source = host.read_source(owner_canonical);
             for (resolved_index, resolved) in mac.resolved_local_types.iter().enumerate() {
                 if !is_direct_local_macro_type_reference(
@@ -685,9 +706,6 @@ where
                 ) {
                     continue;
                 }
-                if !resolved_macros
-                    .iter()
-                    .any(|meta| meta.macro_index == macro_index && meta.type_name == resolved.name)
                 {
                     if let Some(projected) = owner_source
                         .as_deref()
@@ -792,25 +810,22 @@ where
                 }
             }
 
-            let macro_has_imported_type_deps = macro_type_deps
-                .iter()
-                .any(|dep| dep.macro_index == macro_index);
-            if mac.kind == AnalyzedMacroKind::DefineEmits
-                && (purpose == ComponentMetaResolutionPurpose::Fallthrough
-                    || !macro_has_imported_type_deps)
+            // Use the owner-local prepared surface to produce the
+            // authoritative macro entry.  For DefineEmits without imported
+            // deps this adds a new entry.  For DefineProps/WithDefaults
+            // with imported heritage, this REPLACES the source-text entry's
+            // surface with the full prepared projection (which resolves
+            // cross-file extends chains like `Omit<ExternalType, K>`).
+            if prepared_surface_will_handle
+                || (mac.kind == AnalyzedMacroKind::DefineEmits
+                    && (purpose == ComponentMetaResolutionPurpose::Fallthrough
+                        || !macro_has_imported_type_deps))
             {
                 for root_name in projectable_owner_local_roots
                     .get(macro_index)
                     .into_iter()
                     .flatten()
                 {
-                    if resolved_macros
-                        .iter()
-                        .any(|meta| meta.macro_index == macro_index && meta.type_name == *root_name)
-                    {
-                        continue;
-                    }
-
                     let Some(projected) = host.resolve_owner_local_macro_surface(
                         owner_canonical,
                         root_name,
@@ -823,6 +838,29 @@ where
                         && projected.emits.is_empty()
                         && projected.slots.is_empty()
                         && projected.native_props.is_empty()
+                    {
+                        continue;
+                    }
+
+                    // When the prepared surface handles a DefineProps with
+                    // imported heritage, replace the existing source-text
+                    // entry (which only has same-file members) with the full
+                    // prepared surface.  Downstream synthesis expects exactly
+                    // one entry per macro_index+type_name, so we must not add
+                    // a second entry.
+                    if prepared_surface_will_handle {
+                        if let Some(existing) = resolved_macros.iter_mut().find(|meta| {
+                            meta.macro_index == macro_index && meta.type_name == *root_name
+                        }) {
+                            existing.native_props = projected.native_props;
+                            existing.props = projected.props;
+                            existing.emits = projected.emits;
+                            existing.slots = projected.slots;
+                            continue;
+                        }
+                    } else if resolved_macros
+                        .iter()
+                        .any(|meta| meta.macro_index == macro_index && meta.type_name == *root_name)
                     {
                         continue;
                     }

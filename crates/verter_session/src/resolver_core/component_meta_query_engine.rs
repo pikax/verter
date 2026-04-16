@@ -8754,4 +8754,102 @@ defineProps<{
             "prepared structural substitution slow-lane guard should not leak across test threads",
         );
     }
+
+    /// Reproduces the App.vue pattern from nuxt-ui: an interface in a `.vue`
+    /// file's normal `<script>` block extends `Omit<ExternalType, keys>`,
+    /// and a separate `<script setup>` block uses `defineProps<AppProps>()`.
+    /// The prepared surface projection must resolve the cross-file Omit and
+    /// include the inherited members.
+    #[test]
+    fn project_prepared_type_surface_shape_resolves_cross_file_omit_in_interface_extends() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/external.ts".to_string(),
+            Arc::from(
+                r#"
+export interface ConfigProviderProps {
+  dir?: string
+  locale?: string
+  scrollBody?: boolean
+  nonce?: string
+  useId?: () => string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { ConfigProviderProps } from './external'
+
+export interface AppProps extends Omit<ConfigProviderProps, 'useId' | 'locale'> {
+  tooltip?: string
+  portal?: boolean | string
+}
+</script>
+
+<script setup lang="ts">
+const props = defineProps<AppProps>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+
+        let store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let mut query_engine =
+            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+
+        let shape = query_engine
+            .project_prepared_type_surface_shape("/src/App.vue", "AppProps")
+            .expect("cross-file Omit in interface extends should produce a projectable surface");
+
+        let member_names: Vec<&str> = shape.properties.iter().map(|p| p.name.as_str()).collect();
+
+        // Own members
+        assert!(
+            member_names.contains(&"tooltip"),
+            "own member 'tooltip' must be present, got {member_names:?}",
+        );
+        assert!(
+            member_names.contains(&"portal"),
+            "own member 'portal' must be present, got {member_names:?}",
+        );
+
+        // Inherited from ConfigProviderProps after Omit<..., 'useId' | 'locale'>
+        assert!(
+            member_names.contains(&"dir"),
+            "inherited member 'dir' must be present after Omit, got {member_names:?}",
+        );
+        assert!(
+            member_names.contains(&"scrollBody"),
+            "inherited member 'scrollBody' must be present after Omit, got {member_names:?}",
+        );
+        assert!(
+            member_names.contains(&"nonce"),
+            "inherited member 'nonce' must be present after Omit, got {member_names:?}",
+        );
+
+        // Omitted keys must NOT be present
+        assert!(
+            !member_names.contains(&"useId"),
+            "omitted member 'useId' must NOT be present, got {member_names:?}",
+        );
+        assert!(
+            !member_names.contains(&"locale"),
+            "omitted member 'locale' must NOT be present, got {member_names:?}",
+        );
+    }
 }
