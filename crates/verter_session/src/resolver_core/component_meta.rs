@@ -378,12 +378,13 @@ where
                 // For DefineEmits with a non-direct imported type dep
                 // (e.g. `type AppEmits = { change: [...] } & ImportedEmits`),
                 // the local emit surface is partial — the intersection's
-                // imported branch was not resolvable locally.  Don't let the
+                // imported branch was not resolvable locally. Don't let the
                 // partial local surface block the imported dep from merging.
+                let define_emits_partial_intersection =
+                    dep.macro_kind == AnalyzedMacroKind::DefineEmits && !direct_macro_reference;
                 let authoritative_owner_effective = authoritative_owner
-                    && !(dep.macro_kind == AnalyzedMacroKind::DefineEmits
-                        && !direct_macro_reference)
-                    && dep_referenced_in_macro_types;
+                    && dep_referenced_in_macro_types
+                    && !define_emits_partial_intersection;
                 let skip_non_direct_dep = !direct_macro_reference
                     && (authoritative_resolved_local
                         || projectable_owner_local_suppresses_dep
@@ -570,11 +571,14 @@ where
                 .unwrap_or(false);
             let imported_surface_is_authoritative =
                 imported_declaration_surface_is_authoritative(&declaration);
-            let keep_direct_imported_vue_macro = projectable_owner_local
-                && purpose == ComponentMetaResolutionPurpose::Full
-                && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                && dep.macro_kind == AnalyzedMacroKind::DefineProps
-                && declaration.canonical_source.ends_with(".vue");
+            let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+                projectable_owner_local,
+                purpose,
+                macros,
+                dep,
+                owner_source.as_deref(),
+                &declaration,
+            );
             if !projectable_owner_local || keep_direct_imported_vue_macro {
                 resolved_macros.push(ResolvedMacroMeta {
                     macro_index,
@@ -611,11 +615,14 @@ where
                 .get(dep.macro_index)
                 .copied()
                 .unwrap_or(false);
-            let keep_direct_imported_vue_macro = projectable_owner_local
-                && purpose == ComponentMetaResolutionPurpose::Full
-                && is_direct_macro_type_reference(macros, dep, owner_source.as_deref())
-                && dep.macro_kind == AnalyzedMacroKind::DefineProps
-                && declaration.canonical_source.ends_with(".vue");
+            let keep_direct_imported_vue_macro = keep_direct_imported_vue_macro(
+                projectable_owner_local,
+                purpose,
+                macros,
+                dep,
+                owner_source.as_deref(),
+                &declaration,
+            );
             let package_backed_dep = dep_canonical.contains("/node_modules/")
                 || declaration.canonical_source.contains("/node_modules/");
             let (
@@ -3205,6 +3212,27 @@ fn is_direct_macro_type_reference(
         .and_then(|source| direct_macro_type_reference_expr(source, mac.span))
         .map(|expr| type_expr_has_direct_macro_reference(&expr, dep.type_name.as_str()))
         .unwrap_or(true)
+}
+
+/// Whether to keep a resolved imported macro entry for the `Full` path even
+/// when the owner already has a projectable local surface.
+///
+/// This carves out the `defineProps<ImportedVueProps>()` case: the imported
+/// component's surface is the authoritative one and must be kept in
+/// `resolved_macros`, otherwise the owner's local projection would replace it.
+fn keep_direct_imported_vue_macro(
+    projectable_owner_local: bool,
+    purpose: ComponentMetaResolutionPurpose,
+    macros: &[AnalyzedMacro],
+    dep: &MacroTypeDep,
+    owner_source: Option<&str>,
+    declaration: &ResolvedTypeDeclaration,
+) -> bool {
+    projectable_owner_local
+        && purpose == ComponentMetaResolutionPurpose::Full
+        && is_direct_macro_type_reference(macros, dep, owner_source)
+        && dep.macro_kind == AnalyzedMacroKind::DefineProps
+        && declaration.canonical_source.ends_with(".vue")
 }
 
 fn direct_macro_type_reference_expr(source: &str, span: Span) -> Option<TypeExpr> {

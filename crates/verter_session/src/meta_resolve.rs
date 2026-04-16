@@ -4526,6 +4526,84 @@ fn classify_named_ref_for_db_projection(
     safe.then_some((defining_canonical, defining_name))
 }
 
+/// Collect every type-reference name mentioned inside `expr` (including names
+/// reachable through object members, unions/intersections, indexed access,
+/// tuples, arrays, parenthesized and function type nodes).
+///
+/// Used to decide which registry-referenced names are already "seeded" by
+/// published entries and therefore must keep their own registry publication
+/// instead of being inlined as indexed-access paths.
+fn collect_type_expr_ref_names(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    out: &mut rustc_hash::FxHashSet<String>,
+) {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+            ..
+        } => {
+            out.insert(name.to_string());
+            for arg in type_arguments.iter() {
+                collect_type_expr_ref_names(arg, out);
+            }
+        }
+        TypeExpr::Object(obj) => {
+            for member in &obj.properties {
+                match member {
+                    ObjectMember::Property(prop) => collect_type_expr_ref_names(&prop.ty, out),
+                    ObjectMember::IndexSignature(sig) => {
+                        collect_type_expr_ref_names(&sig.key_type, out);
+                        collect_type_expr_ref_names(&sig.value_type, out);
+                    }
+                    ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                        for param in &func.parameters {
+                            collect_type_expr_ref_names(&param.ty, out);
+                        }
+                        if let Some(ret) = &func.return_type {
+                            collect_type_expr_ref_names(ret, out);
+                        }
+                    }
+                    ObjectMember::Method(method) => {
+                        for param in &method.function.parameters {
+                            collect_type_expr_ref_names(&param.ty, out);
+                        }
+                        if let Some(ret) = &method.function.return_type {
+                            collect_type_expr_ref_names(ret, out);
+                        }
+                    }
+                }
+            }
+        }
+        TypeExpr::Array { element, .. } => collect_type_expr_ref_names(element, out),
+        TypeExpr::Tuple { elements, .. } => {
+            for el in elements.iter() {
+                collect_type_expr_ref_names(&el.ty, out);
+            }
+        }
+        TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+            for ty in types.iter() {
+                collect_type_expr_ref_names(ty, out);
+            }
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            collect_type_expr_ref_names(object, out);
+            collect_type_expr_ref_names(index, out);
+        }
+        TypeExpr::Parenthesized(inner) => collect_type_expr_ref_names(inner, out),
+        TypeExpr::Function(func) => {
+            for param in &func.parameters {
+                collect_type_expr_ref_names(&param.ty, out);
+            }
+            if let Some(ret) = &func.return_type {
+                collect_type_expr_ref_names(ret, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl VerterHost {
     /// Single host-backed resolver API for cross-file component-meta enrichment.
     ///
@@ -5087,79 +5165,6 @@ impl VerterHost {
         ) {
             if !canonical_id.is_empty() && canonical_id != owner_canonical {
                 tracked_dependencies.insert(canonical_id.to_string());
-            }
-        }
-        fn collect_type_expr_ref_names(
-            expr: &verter_semantic::analysis::type_expr::TypeExpr,
-            out: &mut rustc_hash::FxHashSet<String>,
-        ) {
-            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-            match expr {
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                    ..
-                } => {
-                    out.insert(name.to_string());
-                    for arg in type_arguments.iter() {
-                        collect_type_expr_ref_names(arg, out);
-                    }
-                }
-                TypeExpr::Object(obj) => {
-                    for member in &obj.properties {
-                        match member {
-                            ObjectMember::Property(prop) => {
-                                collect_type_expr_ref_names(&prop.ty, out)
-                            }
-                            ObjectMember::IndexSignature(sig) => {
-                                collect_type_expr_ref_names(&sig.key_type, out);
-                                collect_type_expr_ref_names(&sig.value_type, out);
-                            }
-                            ObjectMember::CallSignature(func)
-                            | ObjectMember::ConstructSignature(func) => {
-                                for param in &func.parameters {
-                                    collect_type_expr_ref_names(&param.ty, out);
-                                }
-                                if let Some(ret) = &func.return_type {
-                                    collect_type_expr_ref_names(ret, out);
-                                }
-                            }
-                            ObjectMember::Method(method) => {
-                                for param in &method.function.parameters {
-                                    collect_type_expr_ref_names(&param.ty, out);
-                                }
-                                if let Some(ret) = &method.function.return_type {
-                                    collect_type_expr_ref_names(ret, out);
-                                }
-                            }
-                        }
-                    }
-                }
-                TypeExpr::Array { element, .. } => collect_type_expr_ref_names(element, out),
-                TypeExpr::Tuple { elements, .. } => {
-                    for el in elements.iter() {
-                        collect_type_expr_ref_names(&el.ty, out);
-                    }
-                }
-                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                    for ty in types.iter() {
-                        collect_type_expr_ref_names(ty, out);
-                    }
-                }
-                TypeExpr::IndexedAccess { object, index } => {
-                    collect_type_expr_ref_names(object, out);
-                    collect_type_expr_ref_names(index, out);
-                }
-                TypeExpr::Parenthesized(inner) => collect_type_expr_ref_names(inner, out),
-                TypeExpr::Function(func) => {
-                    for param in &func.parameters {
-                        collect_type_expr_ref_names(&param.ty, out);
-                    }
-                    if let Some(ret) = &func.return_type {
-                        collect_type_expr_ref_names(ret, out);
-                    }
-                }
-                _ => {}
             }
         }
         fn imported_registry_alias_should_stay_symbolic(
@@ -5950,16 +5955,23 @@ impl VerterHost {
             for entry in resolved_type_registry.iter() {
                 collect_type_expr_ref_names(&entry.type_expr, &mut names);
             }
-            // Also include names that are already queued via seed scanning
-            // of published registry entries.
-            for pending in referenced_names.iter() {
-                if published_names.iter().any(|_published| {
-                    pending
+            // Also include owner-local names queued alongside a seeded
+            // published entry. When the registry already has published
+            // entries, any owner-local pending name was transitively
+            // enqueued through seed scanning and must keep its own
+            // registry entry instead of being inlined as an indexed-access
+            // alias. When there are no published entries yet, pending
+            // names come purely from public-field scanning and may still
+            // be inlined; do not protect them here.
+            if !published_names.is_empty() {
+                for pending in referenced_names.iter() {
+                    if pending
                         .source_hint
                         .as_deref()
                         .is_none_or(|s| s.is_empty() || s == owner_canonical)
-                }) {
-                    names.insert(pending.name.clone());
+                    {
+                        names.insert(pending.name.clone());
+                    }
                 }
             }
             names
@@ -6115,9 +6127,20 @@ impl VerterHost {
                     if pending_route_is_whole
                         && imported_registry_alias_should_stay_symbolic(&resolved.body)
                     {
-                        // Only update existing entries — do not introduce new
-                        // symbolic placeholders for imported non-object helpers
-                        // that were only discovered from public field types.
+                        // Imported non-object helpers (mapped/conditional/
+                        // indexed-access/typeof aliases) must not be expanded
+                        // into the owner registry on a whole-type route — the
+                        // consumer will resolve them through member paths.
+                        //
+                        // If we already published a richer entry under this
+                        // name, refresh its declaration metadata (the merge in
+                        // upsert_component_meta_registry_entry keeps the
+                        // richer body, so the bare Named placeholder is
+                        // discarded by `merge_component_meta_registry_candidates`).
+                        //
+                        // If the name was never published, skip publication
+                        // entirely — a bare Named placeholder only leaks a
+                        // symbolic helper that the consumer didn't ask for.
                         if published_names.contains(&type_name) {
                             upsert_component_meta_registry_entry(
                                 owner_canonical,
