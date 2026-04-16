@@ -9592,10 +9592,21 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
     }
 
     let mut imported_roots = rustc_hash::FxHashSet::default();
-    let mut description_by_name = rustc_hash::FxHashMap::default();
+    let mut jsdoc_by_name: rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    > = rustc_hash::FxHashMap::default();
 
     for dep in resolved.snapshot.macro_type_deps.iter() {
-        if dep.macro_kind != AnalyzedMacroKind::DefineProps {
+        if !matches!(
+            dep.macro_kind,
+            AnalyzedMacroKind::DefineProps
+                | AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineModel
+        ) {
             continue;
         }
         let Some((dep_canonical, exported_name)) = host.resolve_local_import_symbol_target_in_view(
@@ -9608,31 +9619,23 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
         if !imported_roots.insert((dep_canonical.clone(), exported_name.clone())) {
             continue;
         }
-        let Some((raw_source, cached_parse, _)) =
-            host.current_eval_state_in_view(dep_canonical.as_str(), store_view)
-        else {
-            continue;
-        };
-        let projection_source =
-            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
-        let Some(projected) =
-            crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
-                projection_source.as_ref(),
-                AnalyzedMacroKind::DefineProps,
-                exported_name.as_str(),
-            )
-        else {
-            continue;
-        };
-        for prop in projected.props {
-            if let Some(description) = prop.description {
-                description_by_name.entry(prop.name).or_insert(description);
-            }
-        }
+        collect_jsdoc_descriptions_from_root(
+            host,
+            &dep_canonical,
+            &exported_name,
+            store_view,
+            &mut imported_roots,
+            &mut jsdoc_by_name,
+        );
     }
 
     for mac in resolved.snapshot.macros.iter() {
-        if mac.kind != AnalyzedMacroKind::DefineProps {
+        if !matches!(
+            mac.kind,
+            AnalyzedMacroKind::DefineProps
+                | AnalyzedMacroKind::WithDefaults
+                | AnalyzedMacroKind::DefineModel
+        ) {
             continue;
         }
         for (resolved_index, resolved_local) in mac.resolved_local_types.iter().enumerate() {
@@ -9671,27 +9674,14 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
                 )) {
                     continue;
                 }
-                let Some((raw_source, cached_parse, _)) =
-                    host.current_eval_state_in_view(dependency.canonical_id.as_str(), store_view)
-                else {
-                    continue;
-                };
-                let projection_source =
-                    VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
-                let Some(projected) =
-                    crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
-                        projection_source.as_ref(),
-                        AnalyzedMacroKind::DefineProps,
-                        dependency.exported_name.as_str(),
-                    )
-                else {
-                    continue;
-                };
-                for prop in projected.props {
-                    if let Some(description) = prop.description {
-                        description_by_name.entry(prop.name).or_insert(description);
-                    }
-                }
+                collect_jsdoc_descriptions_from_root(
+                    host,
+                    &dependency.canonical_id,
+                    &dependency.exported_name,
+                    store_view,
+                    &mut imported_roots,
+                    &mut jsdoc_by_name,
+                );
             }
         }
     }
@@ -9701,13 +9691,275 @@ fn fill_missing_component_meta_prop_descriptions_from_imported_roots(
         if prop.description.is_some() {
             continue;
         }
-        if let Some(description) = description_by_name.get(prop.name.as_str()) {
-            prop.description = Some(description.clone());
+        if let Some((description, tags)) = jsdoc_by_name.get(prop.name.as_str()) {
+            if let Some(desc) = description {
+                prop.description = Some(desc.clone());
+            }
+            if prop.tags.is_empty() && !tags.is_empty() {
+                prop.tags = tags.clone();
+            }
             changed = true;
         }
     }
 
     changed
+}
+
+/// Try to project JSDoc descriptions from a resolved dependency file.
+/// When the type is not locally defined (barrel re-export), follows the
+/// re-export chain via `resolve_imported_type_root_in_view` to reach the
+/// actual defining file where JSDoc comments live.
+fn collect_jsdoc_descriptions_from_root(
+    host: &VerterHost,
+    dep_canonical: &str,
+    exported_name: &str,
+    store_view: Option<&HostStoreView>,
+    imported_roots: &mut rustc_hash::FxHashSet<(String, String)>,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) {
+    // Try projection in the initial resolved file first
+    if try_project_jsdoc_descriptions(
+        host,
+        dep_canonical,
+        exported_name,
+        store_view,
+        jsdoc_by_name,
+    ) {
+        // Projection succeeded, but inherited props from external types may still
+        // lack JSDoc. Follow heritage imports (e.g., LinkProps extends NuxtLinkProps
+        // extends Omit<RouterLinkProps, 'to'> where RouterLinkProps is from vue-router).
+        follow_heritage_type_imports(
+            host,
+            dep_canonical,
+            exported_name,
+            store_view,
+            imported_roots,
+            jsdoc_by_name,
+        );
+        return;
+    }
+
+    // Type was not locally defined in dep_canonical (barrel re-export).
+    // BFS through the import chain to find the defining file. Handles:
+    //   `import { T } from './other'; export { T };`
+    //   `export { T } from './other';`
+    //   `export * from './other';` (wildcard — may fan out to multiple candidates)
+    let mut queue: Vec<(String, String)> =
+        vec![(dep_canonical.to_string(), exported_name.to_string())];
+    let mut steps = 0usize;
+    while let Some((current_canonical, current_name)) = queue.pop() {
+        steps += 1;
+        if steps > 16 {
+            break;
+        }
+        let Some((raw_source, cached_parse, _)) =
+            host.current_eval_state_in_view(current_canonical.as_str(), store_view)
+        else {
+            continue;
+        };
+        let eval_source =
+            VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+        let candidates =
+            crate::resolver_core::surface_projector::find_type_import_sources_in_source(
+                eval_source.as_ref(),
+                current_name.as_str(),
+            );
+        if candidates.is_empty() {
+            continue;
+        }
+        for (import_specifier, imported_name) in candidates {
+            let next_canonical = host
+                .resolve_route_type_edge_in_view(
+                    current_canonical.as_str(),
+                    import_specifier.as_str(),
+                    store_view,
+                )
+                .or_else(|| {
+                    resolve_relative_type_specifier(
+                        current_canonical.as_str(),
+                        import_specifier.as_str(),
+                        |path| host.current_eval_state_in_view(path, store_view).is_some(),
+                    )
+                });
+            let Some(next_canonical) = next_canonical else {
+                continue;
+            };
+            if next_canonical == current_canonical {
+                continue;
+            }
+            if !imported_roots.insert((next_canonical.clone(), imported_name.clone())) {
+                continue;
+            }
+            if try_project_jsdoc_descriptions(
+                host,
+                &next_canonical,
+                &imported_name,
+                store_view,
+                jsdoc_by_name,
+            ) {
+                // Also follow heritage imports from this file
+                follow_heritage_type_imports(
+                    host,
+                    &next_canonical,
+                    &imported_name,
+                    store_view,
+                    imported_roots,
+                    jsdoc_by_name,
+                );
+                return;
+            }
+            queue.push((next_canonical, imported_name));
+        }
+    }
+}
+
+/// After projection succeeds on a file, follow the type's heritage chain imports
+/// to collect JSDoc from external dependencies (e.g., vue-router's RouterLinkProps).
+/// Uses `collect_jsdoc_descriptions_from_root` for each heritage import so barrel
+/// chains within the external package are also followed.
+fn follow_heritage_type_imports(
+    host: &VerterHost,
+    defining_canonical: &str,
+    type_name: &str,
+    store_view: Option<&HostStoreView>,
+    imported_roots: &mut rustc_hash::FxHashSet<(String, String)>,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) {
+    let Some((raw_source, cached_parse, _)) =
+        host.current_eval_state_in_view(defining_canonical, store_view)
+    else {
+        return;
+    };
+    let eval_source = VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+    let heritage_imports =
+        crate::resolver_core::surface_projector::find_heritage_type_imports_in_source(
+            eval_source.as_ref(),
+            type_name,
+        );
+    for (import_specifier, imported_name) in heritage_imports {
+        let next_canonical = host
+            .resolve_route_type_edge_in_view(
+                defining_canonical,
+                import_specifier.as_str(),
+                store_view,
+            )
+            .or_else(|| {
+                resolve_relative_type_specifier(
+                    defining_canonical,
+                    import_specifier.as_str(),
+                    |path| host.current_eval_state_in_view(path, store_view).is_some(),
+                )
+            });
+        let Some(next_canonical) = next_canonical else {
+            continue;
+        };
+        if !imported_roots.insert((next_canonical.clone(), imported_name.clone())) {
+            continue;
+        }
+        // Use full BFS collection so barrel chains within the external
+        // package are also traversed (e.g., vue-router.d.ts → index-*.d.ts).
+        collect_jsdoc_descriptions_from_root(
+            host,
+            &next_canonical,
+            &imported_name,
+            store_view,
+            imported_roots,
+            jsdoc_by_name,
+        );
+    }
+}
+
+/// Resolve a relative import specifier against a canonical file path
+/// using TS-first extension mapping. For `./index3.js` from
+/// `.../dist/index.d.ts`, tries `.../dist/index3.d.ts` first, then
+/// `.../dist/index3.ts`, etc.
+fn resolve_relative_type_specifier(
+    owner_canonical: &str,
+    specifier: &str,
+    file_exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if !specifier.starts_with("./") && !specifier.starts_with("../") {
+        return None; // Only relative specifiers
+    }
+
+    // Get parent directory of the owner file
+    let parent = owner_canonical.rsplit_once('/').map(|(dir, _)| dir)?;
+
+    // Strip the extension from the specifier
+    let base = specifier
+        .strip_suffix(".js")
+        .or_else(|| specifier.strip_suffix(".mjs"))
+        .or_else(|| specifier.strip_suffix(".cjs"))
+        .unwrap_or(specifier);
+
+    // Strip leading ./ for path joining
+    let relative = base.strip_prefix("./").unwrap_or(base);
+
+    // TS-first extension candidates
+    for ext in &[".d.ts", ".d.cts", ".d.mts", ".ts", ".tsx"] {
+        let candidate = format!("{parent}/{relative}{ext}");
+        if file_exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Load source for `dep_canonical`, resolve `exported_name` as DefineProps,
+/// and collect any JSDoc descriptions/tags into `jsdoc_by_name`.
+/// Returns true if the type was found and projected successfully.
+fn try_project_jsdoc_descriptions(
+    host: &VerterHost,
+    dep_canonical: &str,
+    exported_name: &str,
+    store_view: Option<&HostStoreView>,
+    jsdoc_by_name: &mut rustc_hash::FxHashMap<
+        String,
+        (
+            Option<String>,
+            Vec<verter_semantic::analysis::types::JsdocTag>,
+        ),
+    >,
+) -> bool {
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let Some((raw_source, cached_parse, _)) =
+        host.current_eval_state_in_view(dep_canonical, store_view)
+    else {
+        return false;
+    };
+    let projection_source =
+        VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
+    let Some(projected) =
+        crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
+            projection_source.as_ref(),
+            AnalyzedMacroKind::DefineProps,
+            exported_name,
+        )
+    else {
+        return false;
+    };
+    for prop in projected.props {
+        if prop.description.is_some() || !prop.tags.is_empty() {
+            jsdoc_by_name
+                .entry(prop.name)
+                .or_insert((prop.description, prop.tags));
+        }
+    }
+    true
 }
 
 fn parse_annotation_or_unknown_for_public_instance(

@@ -199,6 +199,91 @@ pub fn project_macro_surfaces_from_source_type_name(
     Some(project_macro_surfaces(Some(source), macro_kind, &resolved))
 }
 
+/// When a type is not locally defined in a source file (e.g., barrel re-export),
+/// find its import source specifiers and imported name so the caller can follow
+/// the import chain. Handles `import { T } from '...'; export { T };`,
+/// `export { T } from '...'`, and `export * from '...'` patterns.
+///
+/// Returns all candidates. For direct/named re-exports returns one entry.
+/// For `export *` wildcards returns one entry per wildcard source.
+pub fn find_type_import_sources_in_source(source: &str, type_name: &str) -> Vec<(String, String)> {
+    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;
+
+    let source = source.trim();
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(&alloc, source, source_type).parse();
+    if parsed.panicked {
+        return Vec::new();
+    }
+
+    let analysis = analyze_external_type_program(&parsed.program);
+
+    // Check direct re-export: `export { T } from '...'`
+    if let Some((specifier, imported_name)) = analysis.direct_reexport_target(type_name) {
+        return vec![(specifier.to_string(), imported_name.to_string())];
+    }
+
+    // Check import+export pattern: `import { T } from '...'; export { T };`
+    let local_name = analysis
+        .local_export_symbol_target(type_name)
+        .unwrap_or(type_name);
+    if let Some((specifier, imported_name)) = analysis.local_import_symbol_target(local_name) {
+        return vec![(specifier.to_string(), imported_name.to_string())];
+    }
+
+    // Return all wildcard re-export sources as candidates
+    analysis
+        .wildcard_reexport_sources()
+        .iter()
+        .map(|specifier| (specifier.clone(), type_name.to_string()))
+        .collect()
+}
+
+/// Given a source file and a locally-defined type name, return the imported
+/// type dependencies that the type transitively references through its
+/// heritage chain (extends, intersection, etc.).
+///
+/// Each entry is `(import_specifier, imported_name)` — e.g.,
+/// `("vue-router", "RouterLinkProps")` for a type that extends an imported
+/// interface.
+pub fn find_heritage_type_imports_in_source(
+    source: &str,
+    type_name: &str,
+) -> Vec<(String, String)> {
+    use verter_compiler::utils::oxc::vue::resolve_type::analyze_external_type_program;
+
+    let source = source.trim();
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(&alloc, source, source_type).parse();
+    if parsed.panicked {
+        return Vec::new();
+    }
+
+    let analysis = analyze_external_type_program(&parsed.program);
+    let required_import_names = analysis.required_import_names(type_name);
+
+    required_import_names
+        .into_iter()
+        .filter_map(|name| {
+            analysis
+                .local_import_symbol_target(&name)
+                .map(|(specifier, imported_name)| {
+                    (specifier.to_string(), imported_name.to_string())
+                })
+        })
+        .collect()
+}
+
 pub fn extract_slot_info_from_type_text(
     source: Option<&str>,
     type_text: Option<&str>,

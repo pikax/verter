@@ -14364,6 +14364,470 @@ defineProps<ButtonProps>()
     );
 }
 
+#[test]
+fn jsdoc_descriptions_propagate_through_barrel_reexports() {
+    let project = make_project();
+    // Defining file: actual interface with JSDoc comments
+    project
+        .upsert_base(
+            "/src/external-types.ts",
+            r#"
+interface TooltipRootProps {
+  /**
+   * The open state of the tooltip when it is initially rendered.
+   * Use when you do not need to control its open state.
+   */
+  defaultOpen?: boolean;
+  /**
+   * The controlled open state of the tooltip.
+   */
+  open?: boolean;
+  /**
+   * Override the duration given to the `Provider` to customise
+   * the open delay for a specific tooltip.
+   *
+   * @defaultValue 700
+   */
+  delayDuration?: number;
+  /**
+   * When `true`, clicking on trigger will not close the content.
+   * @defaultValue false
+   */
+  disableClosingTrigger?: boolean;
+  /**
+   * When `true`, disable tooltip
+   * @defaultValue false
+   */
+  disabled?: boolean;
+}
+
+export { TooltipRootProps }
+"#,
+        )
+        .unwrap();
+    // Barrel re-export file: imports from defining file and re-exports
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+import { TooltipRootProps } from "./external-types";
+export { TooltipRootProps };
+"#,
+        )
+        .unwrap();
+    // Component imports from the barrel file and extends the type
+    project
+        .upsert_base(
+            "/src/Tooltip.vue",
+            r#"<script lang="ts">
+import type { TooltipRootProps } from './types'
+
+export interface TooltipProps extends TooltipRootProps {
+  /** The text content of the tooltip. */
+  text?: string
+}
+</script>
+<script setup lang="ts">
+const props = defineProps<TooltipProps>()
+</script>
+<template><div>{{ props.text }}</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Tooltip.vue")
+        .expect("should return component meta");
+
+    // Local prop should have its JSDoc
+    let text = meta
+        .props
+        .iter()
+        .find(|p| p.name == "text")
+        .expect("text prop should exist");
+    assert_eq!(
+        text.description.as_deref(),
+        Some("The text content of the tooltip.")
+    );
+
+    // Props inherited from the external package through barrel re-export
+    // should also have their JSDoc descriptions
+    let default_open = meta
+        .props
+        .iter()
+        .find(|p| p.name == "defaultOpen")
+        .expect("defaultOpen prop should exist");
+    assert_eq!(
+        default_open.description.as_deref(),
+        Some("The open state of the tooltip when it is initially rendered.\nUse when you do not need to control its open state."),
+        "defaultOpen JSDoc should propagate through barrel re-export"
+    );
+
+    let open = meta
+        .props
+        .iter()
+        .find(|p| p.name == "open")
+        .expect("open prop should exist");
+    assert_eq!(
+        open.description.as_deref(),
+        Some("The controlled open state of the tooltip."),
+        "open JSDoc should propagate through barrel re-export"
+    );
+
+    let delay = meta
+        .props
+        .iter()
+        .find(|p| p.name == "delayDuration")
+        .expect("delayDuration prop should exist");
+    assert_eq!(
+        delay.description.as_deref(),
+        Some("Override the duration given to the `Provider` to customise\nthe open delay for a specific tooltip."),
+        "delayDuration JSDoc should propagate through barrel re-export"
+    );
+    assert_eq!(
+        delay.tags.len(),
+        1,
+        "delayDuration should have @defaultValue tag"
+    );
+    assert_eq!(delay.tags[0].name, "defaultValue");
+    assert_eq!(delay.tags[0].text.as_deref(), Some("700"));
+
+    let disabled = meta
+        .props
+        .iter()
+        .find(|p| p.name == "disabled")
+        .expect("disabled prop should exist");
+    assert_eq!(
+        disabled.description.as_deref(),
+        Some("When `true`, disable tooltip"),
+        "disabled JSDoc should propagate through barrel re-export"
+    );
+    assert_eq!(
+        disabled.tags.len(),
+        1,
+        "disabled should have @defaultValue tag"
+    );
+    assert_eq!(disabled.tags[0].name, "defaultValue");
+    assert_eq!(disabled.tags[0].text.as_deref(), Some("false"));
+
+    // Negative assertion: props that don't exist should not appear
+    assert!(
+        meta.props.iter().all(|p| p.name != "nonexistent"),
+        "no phantom props should be generated"
+    );
+}
+
+#[test]
+fn jsdoc_descriptions_propagate_through_barrel_reexports_with_defaults() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/external-types.ts",
+            r#"
+interface TooltipRootProps {
+  /**
+   * The open state of the tooltip when it is initially rendered.
+   * Use when you do not need to control its open state.
+   */
+  defaultOpen?: boolean;
+  /**
+   * The controlled open state of the tooltip.
+   */
+  open?: boolean;
+}
+
+export { TooltipRootProps }
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+import { TooltipRootProps } from "./external-types";
+export { TooltipRootProps };
+"#,
+        )
+        .unwrap();
+    // Uses withDefaults wrapping defineProps — macro_kind is WithDefaults
+    project
+        .upsert_base(
+            "/src/Tooltip.vue",
+            r#"<script lang="ts">
+import type { TooltipRootProps } from './types'
+
+export interface TooltipProps extends TooltipRootProps {
+  /** The text content of the tooltip. */
+  text?: string
+  portal?: boolean
+}
+</script>
+<script setup lang="ts">
+const props = withDefaults(defineProps<TooltipProps>(), {
+  portal: true
+})
+</script>
+<template><div>{{ props.text }}</div></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Tooltip.vue")
+        .expect("should return component meta");
+
+    let default_open = meta
+        .props
+        .iter()
+        .find(|p| p.name == "defaultOpen")
+        .expect("defaultOpen prop should exist");
+    assert_eq!(
+        default_open.description.as_deref(),
+        Some("The open state of the tooltip when it is initially rendered.\nUse when you do not need to control its open state."),
+        "defaultOpen JSDoc should propagate through barrel with withDefaults"
+    );
+
+    let open = meta
+        .props
+        .iter()
+        .find(|p| p.name == "open")
+        .expect("open prop should exist");
+    assert_eq!(
+        open.description.as_deref(),
+        Some("The controlled open state of the tooltip."),
+        "open JSDoc should propagate through barrel with withDefaults"
+    );
+}
+
+#[test]
+fn jsdoc_descriptions_propagate_through_wildcard_reexport() {
+    let project = make_project();
+    // Defining file with JSDoc-annotated interface
+    project
+        .upsert_base(
+            "/src/link-props.ts",
+            r#"
+export interface LinkProps {
+  /**
+   * Force the link to be active independent of the current route.
+   */
+  active?: boolean;
+  /**
+   * Class to apply when the link is active
+   * @defaultValue ""
+   */
+  activeClass?: string;
+  /**
+   * The element or component this component should render as when not a link.
+   */
+  as?: string;
+}
+"#,
+        )
+        .unwrap();
+    // Barrel using `export *` wildcard re-export
+    project
+        .upsert_base(
+            "/src/types/index.ts",
+            r#"
+export * from '../link-props';
+"#,
+        )
+        .unwrap();
+    // Component that imports from the barrel
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './types/index'
+
+export interface ButtonProps extends LinkProps {
+  /** The button label. */
+  label?: string
+}
+</script>
+<script setup lang="ts">
+const props = defineProps<ButtonProps>()
+</script>
+<template><button>{{ props.label }}</button></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Button.vue")
+        .expect("should return component meta");
+
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("label prop should exist");
+    assert_eq!(label.description.as_deref(), Some("The button label."),);
+
+    let active = meta
+        .props
+        .iter()
+        .find(|p| p.name == "active")
+        .expect("active prop should exist");
+    assert_eq!(
+        active.description.as_deref(),
+        Some("Force the link to be active independent of the current route."),
+        "active JSDoc should propagate through export * barrel"
+    );
+
+    let active_class = meta
+        .props
+        .iter()
+        .find(|p| p.name == "activeClass")
+        .expect("activeClass prop should exist");
+    assert_eq!(
+        active_class.description.as_deref(),
+        Some("Class to apply when the link is active"),
+        "activeClass JSDoc should propagate through export * barrel"
+    );
+    assert_eq!(
+        active_class.tags.len(),
+        1,
+        "activeClass should have @defaultValue tag"
+    );
+    assert_eq!(active_class.tags[0].name, "defaultValue");
+
+    let as_prop = meta
+        .props
+        .iter()
+        .find(|p| p.name == "as")
+        .expect("as prop should exist");
+    assert_eq!(
+        as_prop.description.as_deref(),
+        Some("The element or component this component should render as when not a link."),
+        "as JSDoc should propagate through export * barrel"
+    );
+}
+
+#[test]
+fn jsdoc_descriptions_propagate_through_heritage_chain_imports() {
+    let project = make_project();
+    // External file: defines RouterLinkProps with JSDoc
+    project
+        .upsert_base(
+            "/src/router-types.ts",
+            r#"
+export interface RouterLinkProps {
+  /**
+   * Calls `router.replace` instead of `router.push`.
+   */
+  replace?: boolean;
+  /**
+   * Class to apply when the link is active
+   */
+  activeClass?: string;
+  /**
+   * Class to apply when the link is exact active
+   */
+  exactActiveClass?: string;
+}
+"#,
+        )
+        .unwrap();
+    // Intermediate file: LinkProps extends imported RouterLinkProps
+    project
+        .upsert_base(
+            "/src/link.ts",
+            r#"
+import { RouterLinkProps } from './router-types'
+
+export interface LinkProps extends RouterLinkProps {
+  /** Force the link to be active. */
+  active?: boolean;
+  /** The URL to navigate to. */
+  href?: string;
+}
+"#,
+        )
+        .unwrap();
+    // Component imports from the intermediate file
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script lang="ts">
+import type { LinkProps } from './link'
+
+export interface ButtonProps extends LinkProps {
+  /** The button label. */
+  label?: string
+}
+</script>
+<script setup lang="ts">
+const props = defineProps<ButtonProps>()
+</script>
+<template><button>{{ props.label }}</button></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Button.vue")
+        .expect("should return component meta");
+
+    // Local prop
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("label");
+    assert_eq!(label.description.as_deref(), Some("The button label."));
+
+    // Directly on LinkProps
+    let active = meta
+        .props
+        .iter()
+        .find(|p| p.name == "active")
+        .expect("active");
+    assert_eq!(
+        active.description.as_deref(),
+        Some("Force the link to be active."),
+    );
+
+    // On LinkProps (one level of local heritage)
+    let href = meta.props.iter().find(|p| p.name == "href").expect("href");
+    assert_eq!(href.description.as_deref(), Some("The URL to navigate to."),);
+
+    // From RouterLinkProps (heritage chain import from separate file)
+    let replace = meta
+        .props
+        .iter()
+        .find(|p| p.name == "replace")
+        .expect("replace");
+    assert_eq!(
+        replace.description.as_deref(),
+        Some("Calls `router.replace` instead of `router.push`."),
+        "replace JSDoc should propagate through heritage chain import"
+    );
+
+    let active_class = meta
+        .props
+        .iter()
+        .find(|p| p.name == "activeClass")
+        .expect("activeClass");
+    assert_eq!(
+        active_class.description.as_deref(),
+        Some("Class to apply when the link is active"),
+        "activeClass JSDoc should propagate through heritage chain import"
+    );
+
+    let exact_active = meta
+        .props
+        .iter()
+        .find(|p| p.name == "exactActiveClass")
+        .expect("exactActiveClass");
+    assert_eq!(
+        exact_active.description.as_deref(),
+        Some("Class to apply when the link is exact active"),
+        "exactActiveClass JSDoc should propagate through heritage chain import"
+    );
+}
+
 // ===========================================================================
 // Phase 3: Fallthrough inheritance resolver
 // ===========================================================================
