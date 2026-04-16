@@ -5798,11 +5798,18 @@ impl VerterHost {
                     pending_route,
                 ));
             }
-            if !query_engine.can_resolve_registry_symbol(
+            let _can_resolve = query_engine.can_resolve_registry_symbol(
                 owner_canonical,
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 pending_source_hint,
-            ) {
+            );
+            if crate::host_manage::component_meta_debug_enabled() && !_can_resolve {
+                crate::host_manage::component_meta_debug(format!(
+                    "REGISTRY_SKIP_UNRESOLVABLE owner={} name={} source_hint={:?} exported={:?}",
+                    owner_canonical, type_name, pending_source_hint, pending_exported_name,
+                ));
+            }
+            if !_can_resolve {
                 continue;
             }
             let requested_exported_name = pending_exported_name.unwrap_or(type_name.as_str());
@@ -5810,14 +5817,27 @@ impl VerterHost {
                 .filter(|source| !source.is_empty() && *source != owner_canonical)
             {
                 if !query_engine.allow_imported_root() {
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "REGISTRY_SKIP_BUDGET owner={} name={}",
+                            owner_canonical, type_name,
+                        ));
+                    }
                     continue;
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 let _imported_pending_started = crate::host_manage::component_meta_debug_enabled()
                     .then(std::time::Instant::now);
-                if let Some(resolved) = query_engine
-                    .resolve_imported_registry_symbol(source_hint, requested_exported_name)
+                let _resolved_import = query_engine
+                    .resolve_imported_registry_symbol(source_hint, requested_exported_name);
+                if crate::host_manage::component_meta_debug_enabled() && _resolved_import.is_none()
                 {
+                    crate::host_manage::component_meta_debug(format!(
+                        "REGISTRY_IMPORT_MISS owner={} name={} source={} exported={}",
+                        owner_canonical, type_name, source_hint, requested_exported_name,
+                    ));
+                }
+                if let Some(resolved) = _resolved_import {
                     let imported_resolve_elapsed_ms = _imported_pending_started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or_default();
@@ -5865,6 +5885,15 @@ impl VerterHost {
                         crate::resolver_core::RouteDemand::MemberPath(path) => path.is_empty(),
                         _ => false,
                     };
+                    if crate::host_manage::component_meta_debug_enabled() {
+                        crate::host_manage::component_meta_debug(format!(
+                            "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_variant={:?}",
+                            owner_canonical, type_name,
+                            imported_registry_alias_should_stay_symbolic(&resolved.body),
+                            pending_route_is_whole,
+                            std::mem::discriminant(&resolved.body),
+                        ));
+                    }
                     if pending_route_is_whole
                         && imported_registry_alias_should_stay_symbolic(&resolved.body)
                     {

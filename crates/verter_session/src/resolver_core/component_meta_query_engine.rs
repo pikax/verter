@@ -8570,6 +8570,158 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
     }
 
     #[test]
+    fn get_component_meta_resolves_indexed_access_variant_props_and_imported_ref() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/tv.ts".to_string(),
+            Arc::from(
+                r#"
+type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+  [K in keyof T['variants']]: keyof T['variants'][K]
+}
+
+export type ComponentConfig<
+  T extends Record<string, any>,
+  A extends Record<string, any>,
+  K extends string,
+> = {
+  variants: ComponentVariants<T>
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/theme.ts".to_string(),
+            Arc::from(
+                r#"
+export default {
+  variants: {
+    color: { primary: '', secondary: '' },
+    variant: { solid: '', outline: '' },
+  }
+} as const
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/AvatarProps.ts".to_string(),
+            Arc::from(
+                r#"
+export interface AvatarProps {
+  src?: string
+  alt?: string
+  size?: 'sm' | 'md' | 'lg'
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Alert.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { ComponentConfig } from './tv'
+import type { AvatarProps } from './AvatarProps'
+import theme from './theme'
+
+type Alert = ComponentConfig<typeof theme, Record<string, any>, 'alert'>
+
+defineProps<{
+  color?: Alert['variants']['color']
+  variant?: Alert['variants']['variant']
+  avatar?: AvatarProps
+}>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Alert.vue"));
+        host.set_import_dependencies(
+            "/src/Alert.vue",
+            vec![
+                crate::DependencyResolution {
+                    specifier: "./tv".to_string(),
+                    resolved_canonical_id: Some("/src/tv.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./AvatarProps".to_string(),
+                    resolved_canonical_id: Some("/src/AvatarProps.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::DependencyResolution {
+                    specifier: "./theme".to_string(),
+                    resolved_canonical_id: Some("/src/theme.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let meta = host
+            .get_component_meta("/src/Alert.vue")
+            .expect("Alert.vue should have component meta");
+
+        // Check IndexedAccess resolution: color should resolve to string literal union
+        let color_prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == "color")
+            .expect("should have color prop");
+        let is_resolved_color = matches!(
+            &color_prop.type_expr,
+            TypeExpr::Union(_) | TypeExpr::Literal(_)
+        );
+        assert!(
+            is_resolved_color,
+            "color prop should resolve to a literal union, got {:?}",
+            color_prop.type_expr,
+        );
+
+        // Check IndexedAccess resolution: variant should resolve to string literal union
+        let variant_prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == "variant")
+            .expect("should have variant prop");
+        let is_resolved_variant = matches!(
+            &variant_prop.type_expr,
+            TypeExpr::Union(_) | TypeExpr::Literal(_)
+        );
+        assert!(
+            is_resolved_variant,
+            "variant prop should resolve to a literal union, got {:?}",
+            variant_prop.type_expr,
+        );
+
+        // Imported Props-like refs stay symbolic in the native API — the compat
+        // layer expands them in the schema field while the type string preserves
+        // the named form (e.g. "AvatarProps | undefined").
+        let avatar_prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == "avatar")
+            .expect("should have avatar prop");
+        assert!(
+            matches!(
+                &avatar_prop.type_expr,
+                TypeExpr::Ref { name, type_arguments }
+                    if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
+            ),
+            "avatar prop should stay as symbolic Ref('AvatarProps'), got {:?}",
+            avatar_prop.type_expr,
+        );
+    }
+
+    #[test]
     fn slow_lane_forbid_guards_are_thread_local() {
         let _structural_guard = forbid_structural_slow_lane_for_tests();
         let _direct_pick_guard = forbid_direct_pick_routed_expr_slow_lane_for_tests();

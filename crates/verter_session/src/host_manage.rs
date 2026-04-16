@@ -9190,6 +9190,7 @@ fn rematerialize_public_component_meta_types(
             &'a verter_semantic::analysis::type_expr::TypeExpr,
         >,
     ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        // Try route-based lookup (IndexedAccess / utility types)
         let route = raw_type
             .filter(|raw| !raw.trim().is_empty())
             .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation)
@@ -9204,23 +9205,25 @@ fn rematerialize_public_component_meta_types(
                     .or_else(|| {
                         crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(current)
                     })
-            })?;
-        let (root_name, route) = route;
-        let root_surface = *resolved_registry_by_name.get(root_name.as_str())?;
-
-        match route {
-            crate::resolver_core::RouteDemand::Whole => Some(root_surface.clone()),
-            crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
-                Some(root_surface.clone())
-            }
-            crate::resolver_core::RouteDemand::MemberPath(path) => {
-                crate::resolver_core::component_meta_registry::raw_member_path_leaf(
-                    root_surface,
-                    &path,
-                )
-            }
-            _ => None,
+            });
+        if let Some((root_name, route)) = route {
+            let root_surface = *resolved_registry_by_name.get(root_name.as_str())?;
+            return match route {
+                crate::resolver_core::RouteDemand::Whole => Some(root_surface.clone()),
+                crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => {
+                    Some(root_surface.clone())
+                }
+                crate::resolver_core::RouteDemand::MemberPath(path) => {
+                    crate::resolver_core::component_meta_registry::raw_member_path_leaf(
+                        root_surface,
+                        &path,
+                    )
+                }
+                _ => None,
+            };
         }
+
+        None
     }
 
     let _trace = component_meta_trace_scope!(
