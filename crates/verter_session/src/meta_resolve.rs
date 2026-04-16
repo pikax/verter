@@ -1177,9 +1177,7 @@ fn top_level_imported_ref_can_stay_symbolic(
         // concrete member shapes.
         let body_needs_materialization = query_engine
             .named_decl_body(target_scope.as_str(), target_name.as_str())
-            .is_some_and(|body| {
-                interface_body_has_members_needing_materialization(&body)
-            });
+            .is_some_and(|body| interface_body_has_members_needing_materialization(&body));
         if !body_needs_materialization {
             return true;
         }
@@ -5097,7 +5095,11 @@ impl VerterHost {
         ) {
             use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
             match expr {
-                TypeExpr::Ref { name, type_arguments, .. } => {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                    ..
+                } => {
                     out.insert(name.to_string());
                     for arg in type_arguments.iter() {
                         collect_type_expr_ref_names(arg, out);
@@ -5106,12 +5108,15 @@ impl VerterHost {
                 TypeExpr::Object(obj) => {
                     for member in &obj.properties {
                         match member {
-                            ObjectMember::Property(prop) => collect_type_expr_ref_names(&prop.ty, out),
+                            ObjectMember::Property(prop) => {
+                                collect_type_expr_ref_names(&prop.ty, out)
+                            }
                             ObjectMember::IndexSignature(sig) => {
                                 collect_type_expr_ref_names(&sig.key_type, out);
                                 collect_type_expr_ref_names(&sig.value_type, out);
                             }
-                            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                            ObjectMember::CallSignature(func)
+                            | ObjectMember::ConstructSignature(func) => {
                                 for param in &func.parameters {
                                     collect_type_expr_ref_names(&param.ty, out);
                                 }
@@ -5948,10 +5953,12 @@ impl VerterHost {
             // Also include names that are already queued via seed scanning
             // of published registry entries.
             for pending in referenced_names.iter() {
-                if published_names
-                    .iter()
-                    .any(|_published| pending.source_hint.as_deref().is_none_or(|s| s.is_empty() || s == owner_canonical))
-                {
+                if published_names.iter().any(|_published| {
+                    pending
+                        .source_hint
+                        .as_deref()
+                        .is_none_or(|s| s.is_empty() || s == owner_canonical)
+                }) {
                     names.insert(pending.name.clone());
                 }
             }
@@ -6222,13 +6229,12 @@ impl VerterHost {
             // Owner-local type aliases whose body is a generic ref to an
             // imported type should resolve inline via indexed access rather
             // than creating a separate registry entry.
-            let pending_route_is_whole_local = matches!(
-                pending_route,
-                crate::resolver_core::RouteDemand::Whole
-            ) || matches!(
-                pending_route,
-                crate::resolver_core::RouteDemand::MemberPath(ref p) if p.is_empty()
-            );
+            let pending_route_is_whole_local =
+                matches!(pending_route, crate::resolver_core::RouteDemand::Whole)
+                    || matches!(
+                        pending_route,
+                        crate::resolver_core::RouteDemand::MemberPath(ref p) if p.is_empty()
+                    );
             if declaration_owner == owner_canonical
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
@@ -6239,8 +6245,8 @@ impl VerterHost {
                 }) = owner_collection_expr.as_ref()
                 {
                     if !type_arguments.is_empty() {
-                        let body_decl = query_engine
-                            .resolve_type_declaration(owner_canonical, body_ref_name);
+                        let body_decl =
+                            query_engine.resolve_type_declaration(owner_canonical, body_ref_name);
                         let body_scope = if body_decl.canonical_source.is_empty() {
                             owner_canonical
                         } else {

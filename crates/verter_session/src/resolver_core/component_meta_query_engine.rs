@@ -1056,7 +1056,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         cached.as_surface().cloned()
     }
 
-
     fn project_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,

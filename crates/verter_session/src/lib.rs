@@ -1347,7 +1347,12 @@ impl VerterHost {
             }
 
             let loaded = self.integrate_scheduler_snapshot(canonical_id);
-            if loaded {
+            // First-time loads are purely additive: they populate host state for a
+            // file that no previously-captured view tracks, so they cannot invalidate
+            // any existing snapshot's facts. Only re-loads (content reload after an
+            // evict) may have changed the file's hash relative to what older views
+            // pinned, so only those need to bump the global mutation epoch.
+            if loaded && reload_from_workspace {
                 self.bump_store_view_epoch();
             }
             loaded

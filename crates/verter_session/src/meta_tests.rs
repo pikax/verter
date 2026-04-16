@@ -386,7 +386,7 @@ fn snapshot_view_is_stale_but_coherent_after_host_changes() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn ensure_loaded_advances_store_view_epoch() {
+fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -405,8 +405,36 @@ fn ensure_loaded_advances_store_view_epoch() {
     );
 
     let after_view = project.host().snapshot_view();
-    assert_ne!(before_epoch, after_view.mutation_epoch());
-    assert_ne!(before_view.compat_token(), after_view.compat_token());
+    // First-time loads are purely additive and must not bump the global mutation
+    // epoch: existing views never tracked the new file, so their facts about
+    // other files remain consistent. Bumping here would invalidate every other
+    // view-pinned read mid-query (e.g. inside ComponentMetaQueryEngine when its
+    // own `ensure_loaded` fallback warms a dependency).
+    assert_eq!(
+        before_epoch,
+        after_view.mutation_epoch(),
+        "first-time load must not advance the mutation epoch"
+    );
+    assert_eq!(
+        before_view.compat_token(),
+        after_view.compat_token(),
+        "first-time load must not change compat tokens of existing views"
+    );
+
+    // Reloading the same file via evict + ensure_loaded IS a content-change
+    // boundary that must invalidate older views.
+    project.host().evict("/workspace/App.vue");
+    let post_evict_epoch = project.host().current_store_view_epoch();
+    assert!(
+        project.ensure_loaded("/workspace/App.vue").unwrap(),
+        "evicted file must reload via ensure_loaded"
+    );
+    let reload_view = project.host().snapshot_view();
+    assert_ne!(
+        post_evict_epoch,
+        reload_view.mutation_epoch(),
+        "reload after evict must advance the mutation epoch"
+    );
 }
 
 #[test]

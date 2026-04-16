@@ -8870,9 +8870,7 @@ fn choose_less_symbolic_component_meta_type_expr(
         // Bare Ref from a workspace-local file: materializing to Object
         // is strictly better. Only preserve package-backed (node_modules)
         // imports where the consumer has no control over the type shape.
-        if is_plain_named_alias_ref(current)
-            && !declaration_scope.contains("/node_modules/")
-        {
+        if is_plain_named_alias_ref(current) && !declaration_scope.contains("/node_modules/") {
             return false;
         }
 
