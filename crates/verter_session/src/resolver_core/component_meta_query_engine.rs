@@ -998,9 +998,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
         };
 
+        // When the requested symbol is not declared at the passed scope but
+        // is instead re-exported through a barrel (e.g. `reka-ui/dist/index.d.ts`
+        // re-exports `ListboxRootProps` from `dist/index3.d.ts`), chase the
+        // re-export chain to the declaring file so the prepared bundle lookup
+        // hits the actual declaration. This is a pure routing step — the
+        // projection cache still keys on the original scope so repeated queries
+        // stay cheap, but the projection itself runs against the declaring
+        // scope where the prepared decl lives.
+        let (resolved_scope, resolved_symbol) =
+            self.resolve_final_prepared_type_target(scope_canonical_id, symbol_name);
+
         let Some(store_view) = self.store_view else {
             return self
-                .project_prepared_root_surface(scope_canonical_id, symbol_name)
+                .project_prepared_root_surface(&resolved_scope, &resolved_symbol)
                 .map(projected_surface_unwrap_or_clone);
         };
 
@@ -1014,18 +1025,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let facts = self
             .type_surface_facts(scope_canonical_id)
             .unwrap_or_default();
+        let resolved_scope_ref = resolved_scope.as_str();
+        let resolved_symbol_ref = resolved_symbol.as_str();
         let cached = host
             .resolver
             .runtime
             .type_surfaces
             .get_or_project_with_facts(op_key, store_view, || {
                 if host
-                    .prepared_type_decl_in_view(scope_canonical_id, symbol_name, Some(store_view))
+                    .prepared_type_decl_in_view(
+                        resolved_scope_ref,
+                        resolved_symbol_ref,
+                        Some(store_view),
+                    )
                     .is_none()
                 {
                     return Some((TypeSurfaceOpResult::Miss, facts.clone()));
                 }
-                self.project_prepared_root_surface(scope_canonical_id, symbol_name)
+                self.project_prepared_root_surface(resolved_scope_ref, resolved_symbol_ref)
                     .map(|surface| {
                         (
                             TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(
@@ -1038,6 +1055,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             })?;
         cached.as_surface().cloned()
     }
+
 
     fn project_prepared_root_surface(
         &mut self,

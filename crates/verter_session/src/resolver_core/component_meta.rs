@@ -358,14 +358,36 @@ where
                     .get(dep.macro_index)
                     .copied()
                     .unwrap_or(false);
+                // When the dep's type name is not present in the macro's
+                // own type_references (e.g. `defineProps<ChildProps>()`
+                // where `interface ChildProps extends Omit<ButtonProps, …>`
+                // pulls `ButtonProps` in through heritage rather than a
+                // direct macro reference), the owner's local projection
+                // cannot stand in for the imported surface — suppressing it
+                // would drop the heritage dep from the meta output. Only
+                // suppress when the dep is macro-visible directly.
+                let dep_referenced_in_macro_types = mac
+                    .type_references
+                    .iter()
+                    .any(|type_name| type_name == &dep.type_name);
                 let projectable_owner_local_suppresses_dep = projectable_owner_local
+                    && dep_referenced_in_macro_types
                     && !(purpose == ComponentMetaResolutionPurpose::Full
                         && dep.macro_kind == AnalyzedMacroKind::DefineEmits);
                 let local_type_root = macro_has_direct_local_type_root(mac);
+                // For DefineEmits with a non-direct imported type dep
+                // (e.g. `type AppEmits = { change: [...] } & ImportedEmits`),
+                // the local emit surface is partial — the intersection's
+                // imported branch was not resolvable locally.  Don't let the
+                // partial local surface block the imported dep from merging.
+                let authoritative_owner_effective = authoritative_owner
+                    && !(dep.macro_kind == AnalyzedMacroKind::DefineEmits
+                        && !direct_macro_reference)
+                    && dep_referenced_in_macro_types;
                 let skip_non_direct_dep = !direct_macro_reference
                     && (authoritative_resolved_local
                         || projectable_owner_local_suppresses_dep
-                        || authoritative_owner);
+                        || authoritative_owner_effective);
                 let skip_fallthrough_define_emits = purpose
                     == ComponentMetaResolutionPurpose::Fallthrough
                     && dep.macro_kind == AnalyzedMacroKind::DefineEmits
@@ -695,6 +717,7 @@ where
                         | AnalyzedMacroKind::WithDefaults
                         | AnalyzedMacroKind::DefineModel
                         | AnalyzedMacroKind::DefineSlots
+                        | AnalyzedMacroKind::DefineEmits
                 );
 
             let owner_source = host.read_source(owner_canonical);

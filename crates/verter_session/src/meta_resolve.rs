@@ -1114,6 +1114,34 @@ fn parsed_field_raw_type(
         .filter(|expr| !expr.is_unknown())
 }
 
+fn interface_body_has_members_needing_materialization(
+    body: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> bool {
+    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+    fn member_type_needs_materialization(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::Conditional { .. } => true,
+            TypeExpr::Parenthesized(inner) => member_type_needs_materialization(inner),
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                types.iter().any(member_type_needs_materialization)
+            }
+            _ => false,
+        }
+    }
+    match body {
+        TypeExpr::Object(obj) => obj.properties.iter().any(|member| match member {
+            ObjectMember::Property(prop) => member_type_needs_materialization(&prop.ty),
+            _ => false,
+        }),
+        TypeExpr::Intersection(types) => types
+            .iter()
+            .any(interface_body_has_members_needing_materialization),
+        _ => false,
+    }
+}
+
 fn top_level_imported_ref_can_stay_symbolic(
     scope_canonical_id: &str,
     name: &str,
@@ -1144,7 +1172,17 @@ fn top_level_imported_ref_can_stay_symbolic(
         crate::resolver_core::ResolvedDeclarationKind::Interface
             | crate::resolver_core::ResolvedDeclarationKind::Class
     ) {
-        return true;
+        // Interfaces with members that need materialization (IndexedAccess,
+        // Mapped types) should not stay symbolic — the consumer needs the
+        // concrete member shapes.
+        let body_needs_materialization = query_engine
+            .named_decl_body(target_scope.as_str(), target_name.as_str())
+            .is_some_and(|body| {
+                interface_body_has_members_needing_materialization(&body)
+            });
+        if !body_needs_materialization {
+            return true;
+        }
     }
 
     query_engine
@@ -2222,6 +2260,19 @@ fn materialize_component_meta_field_types(
                         field.r#type = replacement;
                         continue;
                     }
+                    // When the field type is a bare Ref to the target type,
+                    // apply the body replacement directly (initial expansion).
+                    if matches!(
+                        &field.r#type,
+                        verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                            name: ref_name,
+                            type_arguments,
+                        } if type_arguments.is_empty()
+                            && ref_name.as_ref() == target_name.as_str()
+                    ) {
+                        field.r#type = replacement;
+                        continue;
+                    }
                     if type_expr_contains_named_recursive_ref(&field.r#type, target_name.as_str()) {
                         let expanded = expand_named_recursive_refs_one_layer(
                             &field.r#type,
@@ -2230,6 +2281,29 @@ fn materialize_component_meta_field_types(
                         );
                         if expanded != field.r#type {
                             field.r#type = expanded;
+                        }
+                    } else {
+                        // The define_props macro shape projection may have
+                        // expanded the top-level type one layer (producing an
+                        // Object body) while leaving nested self-references
+                        // as bare `Ref{target}` instead of `RecursiveRef`.
+                        // Rewrite those bare self-refs to `RecursiveRef` and
+                        // expand one more layer so the transport carries the
+                        // same two-level shape the RecursiveRef path would
+                        // produce.
+                        let with_recursive_refs = rewrite_named_self_refs_to_recursive_ref(
+                            &field.r#type,
+                            target_name.as_str(),
+                        );
+                        if with_recursive_refs != field.r#type {
+                            let expanded = expand_named_recursive_refs_one_layer(
+                                &with_recursive_refs,
+                                target_name.as_str(),
+                                &replacement,
+                            );
+                            if expanded != field.r#type {
+                                field.r#type = expanded;
+                            }
                         }
                     }
                 }
@@ -5017,6 +5091,72 @@ impl VerterHost {
                 tracked_dependencies.insert(canonical_id.to_string());
             }
         }
+        fn collect_type_expr_ref_names(
+            expr: &verter_semantic::analysis::type_expr::TypeExpr,
+            out: &mut rustc_hash::FxHashSet<String>,
+        ) {
+            use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
+            match expr {
+                TypeExpr::Ref { name, type_arguments, .. } => {
+                    out.insert(name.to_string());
+                    for arg in type_arguments.iter() {
+                        collect_type_expr_ref_names(arg, out);
+                    }
+                }
+                TypeExpr::Object(obj) => {
+                    for member in &obj.properties {
+                        match member {
+                            ObjectMember::Property(prop) => collect_type_expr_ref_names(&prop.ty, out),
+                            ObjectMember::IndexSignature(sig) => {
+                                collect_type_expr_ref_names(&sig.key_type, out);
+                                collect_type_expr_ref_names(&sig.value_type, out);
+                            }
+                            ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+                                for param in &func.parameters {
+                                    collect_type_expr_ref_names(&param.ty, out);
+                                }
+                                if let Some(ret) = &func.return_type {
+                                    collect_type_expr_ref_names(ret, out);
+                                }
+                            }
+                            ObjectMember::Method(method) => {
+                                for param in &method.function.parameters {
+                                    collect_type_expr_ref_names(&param.ty, out);
+                                }
+                                if let Some(ret) = &method.function.return_type {
+                                    collect_type_expr_ref_names(ret, out);
+                                }
+                            }
+                        }
+                    }
+                }
+                TypeExpr::Array { element, .. } => collect_type_expr_ref_names(element, out),
+                TypeExpr::Tuple { elements, .. } => {
+                    for el in elements.iter() {
+                        collect_type_expr_ref_names(&el.ty, out);
+                    }
+                }
+                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
+                    for ty in types.iter() {
+                        collect_type_expr_ref_names(ty, out);
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    collect_type_expr_ref_names(object, out);
+                    collect_type_expr_ref_names(index, out);
+                }
+                TypeExpr::Parenthesized(inner) => collect_type_expr_ref_names(inner, out),
+                TypeExpr::Function(func) => {
+                    for param in &func.parameters {
+                        collect_type_expr_ref_names(&param.ty, out);
+                    }
+                    if let Some(ret) = &func.return_type {
+                        collect_type_expr_ref_names(ret, out);
+                    }
+                }
+                _ => {}
+            }
+        }
         fn imported_registry_alias_should_stay_symbolic(
             expr: &verter_semantic::analysis::type_expr::TypeExpr,
         ) -> bool {
@@ -5044,21 +5184,27 @@ impl VerterHost {
                 ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
             };
 
-            let imported_generic_alias_root = raw_body.is_some_and(|expr| {
+            let imported_generic_alias_scope: Option<String> = raw_body.and_then(|expr| {
                 let TypeExpr::Ref {
                     name,
                     type_arguments,
                 } = expr
                 else {
-                    return false;
+                    return None;
                 };
                 if type_arguments.is_empty() {
-                    return false;
+                    return None;
                 }
                 let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
-                !declaration.canonical_source.is_empty()
+                if !declaration.canonical_source.is_empty()
                     && declaration.canonical_source != scope_canonical_id
+                {
+                    Some(declaration.canonical_source.clone())
+                } else {
+                    None
+                }
             });
+            let imported_generic_alias_root = imported_generic_alias_scope.is_some();
 
             let maybe_refine_imported_generic_alias_object =
                 |candidate: TypeExpr,
@@ -5087,9 +5233,54 @@ impl VerterHost {
                                         scope_canonical_id,
                                         query_engine,
                                     );
+                                // For generic Ref members (e.g. ComponentVariants<T>),
+                                // try expanding and solving in the correct scope so
+                                // concrete args produce concrete member shapes.
+                                let solved = match &stabilized {
+                                    TypeExpr::Ref { type_arguments, .. }
+                                        if !type_arguments.is_empty() =>
+                                    {
+                                        let materialize_scope =
+                                            imported_component_meta_materialization_scope(
+                                                &stabilized,
+                                                scope_canonical_id,
+                                                query_engine,
+                                            )
+                                            .or_else(|| imported_generic_alias_scope.clone())
+                                            .unwrap_or_else(|| {
+                                                scope_canonical_id.to_string()
+                                            });
+                                        let expanded = query_engine
+                                            .expand_local_generic_ref_expr(
+                                                materialize_scope.as_str(),
+                                                &stabilized,
+                                            )
+                                            .unwrap_or_else(|| stabilized.clone());
+                                        query_engine
+                                            .solve_expr_type_expr(
+                                                materialize_scope.as_str(),
+                                                &expanded,
+                                            )
+                                            .map(|solved| {
+                                                materialize_component_meta_member_surface_expr(
+                                                    &solved,
+                                                    materialize_scope.as_str(),
+                                                    query_engine,
+                                                    true,
+                                                )
+                                            })
+                                            .unwrap_or_else(|| stabilized.clone())
+                                    }
+                                    _ => stabilized.clone(),
+                                };
                                 ObjectMember::Property(ObjectProperty {
                                     name: property.name.clone(),
                                     ty: if component_meta_type_expr_improves(
+                                        &solved,
+                                        &property.ty,
+                                    ) {
+                                        solved
+                                    } else if component_meta_type_expr_improves(
                                         &stabilized,
                                         &property.ty,
                                     ) {
@@ -5746,6 +5937,26 @@ impl VerterHost {
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or_default();
 
+        // Names referenced from already-seeded registry entries.
+        // Helpers that a published type transitively references should
+        // still be published even when they are imported generic aliases.
+        let seeded_dependency_names: rustc_hash::FxHashSet<String> = {
+            let mut names = rustc_hash::FxHashSet::default();
+            for entry in resolved_type_registry.iter() {
+                collect_type_expr_ref_names(&entry.type_expr, &mut names);
+            }
+            // Also include names that are already queued via seed scanning
+            // of published registry entries.
+            for pending in referenced_names.iter() {
+                if published_names
+                    .iter()
+                    .any(|_published| pending.source_hint.as_deref().is_none_or(|s| s.is_empty() || s == owner_canonical))
+                {
+                    names.insert(pending.name.clone());
+                }
+            }
+            names
+        };
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
         let _loop_start = std::time::Instant::now();
@@ -5897,20 +6108,25 @@ impl VerterHost {
                     if pending_route_is_whole
                         && imported_registry_alias_should_stay_symbolic(&resolved.body)
                     {
-                        upsert_component_meta_registry_entry(
-                            owner_canonical,
-                            resolved_type_registry,
-                            resolved_type_registry_meta,
-                            &mut published_names,
-                            &mut queued_names,
-                            &mut referenced_names,
-                            type_name.clone(),
-                            verter_semantic::analysis::type_expr::TypeExpr::named(
+                        // Only update existing entries — do not introduce new
+                        // symbolic placeholders for imported non-object helpers
+                        // that were only discovered from public field types.
+                        if published_names.contains(&type_name) {
+                            upsert_component_meta_registry_entry(
+                                owner_canonical,
+                                resolved_type_registry,
+                                resolved_type_registry_meta,
+                                &mut published_names,
+                                &mut queued_names,
+                                &mut referenced_names,
                                 type_name.clone(),
-                            ),
-                            declaration,
-                            None,
-                        );
+                                verter_semantic::analysis::type_expr::TypeExpr::named(
+                                    type_name.clone(),
+                                ),
+                                declaration,
+                                None,
+                            );
+                        }
                         continue;
                     }
                     track_component_meta_dependency(
@@ -6003,12 +6219,65 @@ impl VerterHost {
             };
             let owner_collection_expr =
                 query_engine.owner_collection_expr(owner_canonical, type_name.as_str());
+            // Owner-local type aliases whose body is a generic ref to an
+            // imported type should resolve inline via indexed access rather
+            // than creating a separate registry entry.
+            let pending_route_is_whole_local = matches!(
+                pending_route,
+                crate::resolver_core::RouteDemand::Whole
+            ) || matches!(
+                pending_route,
+                crate::resolver_core::RouteDemand::MemberPath(ref p) if p.is_empty()
+            );
+            if declaration_owner == owner_canonical
+                && !pending_route_is_whole_local
+                && !seeded_dependency_names.contains(&type_name)
+            {
+                if let Some(verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name: body_ref_name,
+                    type_arguments,
+                }) = owner_collection_expr.as_ref()
+                {
+                    if !type_arguments.is_empty() {
+                        let body_decl = query_engine
+                            .resolve_type_declaration(owner_canonical, body_ref_name);
+                        let body_scope = if body_decl.canonical_source.is_empty() {
+                            owner_canonical
+                        } else {
+                            body_decl.canonical_source.as_str()
+                        };
+                        if body_scope != owner_canonical {
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Owner-local generic aliases publish the full shape so all
+            // members (including those from deep indexed-access paths that
+            // were already resolved inline) appear in the registry entry.
+            let effective_local_route =
+                if declaration_owner == owner_canonical && !pending_route_is_whole_local {
+                    if owner_collection_expr.as_ref().is_some_and(|expr| {
+                        matches!(
+                            expr,
+                            verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                                type_arguments, ..
+                            } if !type_arguments.is_empty()
+                        )
+                    }) {
+                        crate::resolver_core::RouteDemand::Whole
+                    } else {
+                        pending_route.clone()
+                    }
+                } else {
+                    pending_route.clone()
+                };
             materialized = materialized.or_else(|| {
                 materialize_component_meta_registry_candidate_for_route(
                     query_engine,
                     owner_canonical,
                     type_name.as_str(),
-                    &pending_route,
+                    &effective_local_route,
                     owner_collection_expr.as_ref(),
                     true,
                 )

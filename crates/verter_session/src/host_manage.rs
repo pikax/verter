@@ -8867,6 +8867,15 @@ fn choose_less_symbolic_component_meta_type_expr(
             return false;
         }
 
+        // Bare Ref from a workspace-local file: materializing to Object
+        // is strictly better. Only preserve package-backed (node_modules)
+        // imports where the consumer has no control over the type shape.
+        if is_plain_named_alias_ref(current)
+            && !declaration_scope.contains("/node_modules/")
+        {
+            return false;
+        }
+
         let resolved_name = if declaration.resolved_name.is_empty() {
             name.as_ref()
         } else {
@@ -9561,7 +9570,21 @@ fn merge_evaluated_prop_types_into_meta(
                     expr_contains_public_ref(evaluated, name, *type_argument_arity)
                 })
         {
-            continue;
+            // Allow the merge when the evaluated type is a materialized Object
+            // and the current type_expr is a bare Ref — the evaluate_types path
+            // already decided to materialize this imported type.
+            let evaluated_is_materialized_form = matches!(
+                (evaluated, &prop.type_expr),
+                (
+                    verter_semantic::analysis::type_expr::TypeExpr::Object(_),
+                    verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                        type_arguments, ..
+                    }
+                ) if type_arguments.is_empty()
+            );
+            if !evaluated_is_materialized_form {
+                continue;
+            }
         }
         if crate::meta_resolve::component_meta_type_expr_improves(evaluated, &prop.type_expr)
             || matches!(
