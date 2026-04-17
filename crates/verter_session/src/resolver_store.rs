@@ -4,7 +4,8 @@ use crate::VerterHost;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
-#[cfg(not(feature = "scheduler"))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+#[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 
 const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
@@ -81,7 +82,8 @@ impl HostStoreView {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&host.files);
             for (canonical_id, entry) in files.iter() {
@@ -168,7 +170,8 @@ impl HostStoreView {
                     })
                 }
 
-                #[cfg(not(feature = "scheduler"))]
+                // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+                #[cfg(target_arch = "wasm32")]
                 {
                     let files = read_lock(&host.files);
                     files.get(&canonical_id).and_then(|entry| {
