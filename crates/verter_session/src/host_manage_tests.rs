@@ -10804,6 +10804,44 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
+    // Phase 1 §4.6 Sub-task B test 5.6 Test 1 (regression lock-in).
+    //
+    // After an evict+ensure_loaded cycle for a file whose on-disk content is
+    // identical to the pre-evict snapshot, `store_view_epoch` must not bump.
+    // Pre-fix: the reload unconditionally bumped the epoch, clearing every
+    // thread-local cache (parsed-eval-program, type-context) and forcing a
+    // cold re-resolution on the follow-up lookup.
+    // Post-fix: the Sub-task B `pre_evict_hash == post_reload_hash` comparison
+    // short-circuits the bump on no-op reload; caches stay warm.
+    let ws = std::sync::Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/App.vue",
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div /></template>",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    host.ensure_loaded("/src/App.vue");
+
+    let pre_epoch = host.current_store_view_epoch();
+    host.evict("/src/App.vue");
+    // evict() bumps the epoch unconditionally (real invalidation).
+    assert!(
+        host.current_store_view_epoch() > pre_epoch,
+        "evict() should bump the epoch"
+    );
+    let post_evict_epoch = host.current_store_view_epoch();
+
+    // Reload with identical content — scheduler sees identical bytes.
+    host.ensure_loaded("/src/App.vue");
+    assert_eq!(
+        host.current_store_view_epoch(),
+        post_evict_epoch,
+        "reload with identical content must NOT bump the epoch (Sub-task B)"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn host_owned_resolved_named_types_serves_cross_request_lookups() {
     // Phase 1 §4.7 test 5.7 Test 2.
     //

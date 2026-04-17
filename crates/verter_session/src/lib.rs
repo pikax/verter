@@ -1286,18 +1286,28 @@ impl VerterHost {
         write_lock(&self.files).remove(canonical_id);
 
         #[cfg(feature = "scheduler")]
-        if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
-            cc.evicted = true;
-            // Clear profile state but preserve deps/aliases for reload diffing
-            cc.content_overrides.clear();
-            cc.style_overrides.clear();
-            cc.compile_slots.clear();
-            cc.latest_diagnostics.clear();
-            cc.cached_tsc_extract = None;
-            cc.raw_template_analysis = None;
-            cc.cached_resolved_meta.clear();
-            cc.cached_meta_payloads.clear();
-            cc.cached_fallthrough = None;
+        {
+            // Capture pre-evict whole_hash from the scheduler so `ensure_loaded`
+            // can detect no-op reloads (identical content) and skip the
+            // redundant `bump_store_view_epoch`. See §4.6 Sub-task B.
+            let pre_evict_hash = self
+                .scheduler
+                .try_get_source(canonical_id)
+                .map(|s| s.whole_hash);
+            if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
+                cc.evicted = true;
+                cc.evicted_whole_hash = pre_evict_hash;
+                // Clear profile state but preserve deps/aliases for reload diffing
+                cc.content_overrides.clear();
+                cc.style_overrides.clear();
+                cc.compile_slots.clear();
+                cc.latest_diagnostics.clear();
+                cc.cached_tsc_extract = None;
+                cc.raw_template_analysis = None;
+                cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
+                cc.cached_fallthrough = None;
+            }
         }
         self.bump_store_view_epoch();
     }
@@ -1333,11 +1343,12 @@ impl VerterHost {
         {
             use verter_scheduler::job::CompletionState;
 
-            let reload_from_workspace = self
+            let (reload_from_workspace, pre_evict_hash) = self
                 .compile_cache
                 .get(canonical_id)
-                .map(|cc| cc.evicted)
-                .unwrap_or(false);
+                .filter(|cc| cc.evicted)
+                .map(|cc| (true, cc.evicted_whole_hash))
+                .unwrap_or((false, None));
 
             if reload_from_workspace {
                 // Evicted files must force the scheduler off any stale committed
@@ -1368,8 +1379,25 @@ impl VerterHost {
             // any existing snapshot's facts. Only re-loads (content reload after an
             // evict) may have changed the file's hash relative to what older views
             // pinned, so only those need to bump the global mutation epoch.
+            //
+            // §4.6 Sub-task B: compare post-reload hash to the pre-evict hash; if
+            // identical, the reload is a content no-op and we can skip the bump
+            // entirely. This preserves the type-context cache across
+            // load→evict→ensure_loaded cycles that don't actually change the file.
+            // `pre_evict_hash == None` (e.g. evict triggered without a prior
+            // scheduler snapshot) falls back to the conservative bump.
             if loaded && reload_from_workspace {
-                self.bump_store_view_epoch();
+                let post_reload_hash = self
+                    .scheduler
+                    .try_get_source(canonical_id)
+                    .map(|s| s.whole_hash);
+                let hash_unchanged = match (pre_evict_hash, post_reload_hash) {
+                    (Some(pre), Some(post)) => pre == post,
+                    _ => false,
+                };
+                if !hash_unchanged {
+                    self.bump_store_view_epoch();
+                }
             }
             loaded
         }

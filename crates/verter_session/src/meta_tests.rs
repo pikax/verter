@@ -395,7 +395,7 @@ fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
         Arc::from(sfc("msg: string")),
     );
 
-    let project = make_workspace_project(ws);
+    let project = make_workspace_project(ws.clone());
     let before_view = project.host().snapshot_view();
     let before_epoch = before_view.mutation_epoch();
 
@@ -421,9 +421,16 @@ fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
         "first-time load must not change compat tokens of existing views"
     );
 
-    // Reloading the same file via evict + ensure_loaded IS a content-change
-    // boundary that must invalidate older views.
+    // Reloading the same file via evict + ensure_loaded with CHANGED content IS
+    // a content-change boundary that must invalidate older views. (Per §4.6
+    // Sub-task B, reload with identical content is a no-op and does NOT bump —
+    // covered by the `ensure_loaded_reload_with_identical_content_does_not_bump_epoch`
+    // regression test in `host_manage_tests.rs`.)
     project.host().evict("/workspace/App.vue");
+    ws.inject_file(
+        "/workspace/App.vue".to_string(),
+        Arc::from(sfc("msg: number")),
+    );
     let post_evict_epoch = project.host().current_store_view_epoch();
     assert!(
         project.ensure_loaded("/workspace/App.vue").unwrap(),
@@ -433,7 +440,7 @@ fn ensure_loaded_first_time_does_not_invalidate_existing_views() {
     assert_ne!(
         post_evict_epoch,
         reload_view.mutation_epoch(),
-        "reload after evict must advance the mutation epoch"
+        "reload after evict with changed content must advance the mutation epoch"
     );
 }
 

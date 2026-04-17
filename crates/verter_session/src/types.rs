@@ -1305,6 +1305,15 @@ pub(crate) struct CompileCacheEntry {
     /// Eviction flag — when true, the file is invisible to host accessors
     /// but deps/aliases are preserved for old-state diffing during reload.
     pub(crate) evicted: bool,
+
+    /// Whole-hash recorded at eviction time, when available. `None` indicates
+    /// the caller did not have the hash in scope (e.g. eviction triggered by
+    /// a delete path that already discarded the snapshot). Read by
+    /// `ensure_loaded` to short-circuit the `bump_store_view_epoch` when an
+    /// evicted file reloads with identical content — preserves the type-context
+    /// cache across no-op reloads. `None` triggers the conservative bump that
+    /// matches pre-fix behavior.
+    pub(crate) evicted_whole_hash: Option<Hash16>,
 }
 
 /// Override-aware file state returned by `effective_file_state()`.
