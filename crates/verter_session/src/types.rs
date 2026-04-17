@@ -1,6 +1,7 @@
 #[cfg(feature = "session_metrics")]
 use std::collections::BTreeMap;
-#[cfg(any(not(feature = "scheduler"), test))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+#[cfg(any(target_arch = "wasm32", test))]
 use std::collections::BTreeSet;
 #[cfg(feature = "session_metrics")]
 use std::collections::HashMap;
@@ -1035,7 +1036,9 @@ pub(crate) struct CompileInput {
 /// Built once during upsert and shared across all `get_analysis()` calls.
 /// These fields are never mutated after construction, so Arc sharing is safe.
 /// On the scheduler path, `AnalysisArcs` in `HostAnalysisData` serves this role.
-#[cfg(any(not(feature = "scheduler"), test))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+// `test` retained so native-test builds that exercise the legacy `files` map still compile.
+#[cfg(any(target_arch = "wasm32", test))]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScriptAnalysisArcs {
@@ -1052,7 +1055,8 @@ pub(crate) struct ScriptAnalysisArcs {
     pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
 }
 
-#[cfg(not(feature = "scheduler"))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+#[cfg(target_arch = "wasm32")]
 impl ScriptAnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
     pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
@@ -1138,7 +1142,9 @@ impl DependencyResolution {
     }
 }
 
-#[cfg(any(not(feature = "scheduler"), test))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+// `test` retained so native-test builds that exercise the legacy `files` map still compile.
+#[cfg(any(target_arch = "wasm32", test))]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
@@ -1227,7 +1233,9 @@ impl FileMeta {
     }
 }
 
-#[cfg(any(not(feature = "scheduler"), test))]
+// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
+// `test` retained so native-test builds that exercise the legacy `files` map still compile.
+#[cfg(any(target_arch = "wasm32", test))]
 impl FileEntry {
     #[allow(dead_code)]
     pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
