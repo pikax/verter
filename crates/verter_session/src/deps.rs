@@ -437,7 +437,7 @@ pub(crate) fn smart_invalidate_dependents_with_owners(
 
 /// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
 /// and dependency metadata from compile_cache. Clears compile_cache slots directly.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 /// Returns the set of owner canonical IDs that were actually invalidated
 /// (compile slots cleared). Callers can use this to evict other caches
@@ -494,7 +494,7 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
 }
 
 /// Build a `DependentView` from scheduler analysis + compile_cache metadata.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn build_dependent_view(
     scheduler: &verter_scheduler::scheduler::Scheduler,
     compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,

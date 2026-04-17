@@ -56,14 +56,14 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
 }
 
 fn clear_legacy_cached_resolved_state(project: &MetaProject, canonical: &str, mode: ResolverMode) {
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
             entry.cached_resolved_meta.remove(&mode);
         }
     }
 
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let mut files = crate::shared::write_lock(&project.host().files);
         if let Some(entry) = files.get_mut(canonical) {

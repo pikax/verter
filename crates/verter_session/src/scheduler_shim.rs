@@ -3,44 +3,44 @@
 //! Implements `WorkspaceAccess` on top of the scheduler's generation-current
 //! snapshots with a disk fallback for arbitrary file reads (configs, .d.ts, etc.).
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use verter_scheduler::scheduler::Scheduler;
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use verter_scheduler::source_loader::SourceLoader;
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use verter_workspace::types::FileKind;
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use verter_workspace::WorkspaceAccess;
 
 /// Workspace shim that serves generation-current content from the scheduler,
 /// falling back to disk for files not loaded into the scheduler.
 ///
 /// This is a temporary migration bridge. Removed in Phase 8.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SchedulerBackedWorkspace {
     pub scheduler: Arc<Scheduler>,
     pub disk_fallback: Arc<dyn SourceLoader>,
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn set_last_read_file_trace_detail(canonical_id: &str, detail: impl Into<String>) {
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         *last.borrow_mut() = Some((canonical_id.to_string(), detail.into()));
     });
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     LAST_READ_FILE_TRACE_DETAIL.with(|last| {
         let mut last = last.borrow_mut();
@@ -53,7 +53,7 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     })
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 impl WorkspaceAccess for SchedulerBackedWorkspace {
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // Check scheduler's generation-current source snapshot

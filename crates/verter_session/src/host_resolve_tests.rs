@@ -3,7 +3,7 @@ use std::sync::Arc;
 use verter_span::Span;
 use verter_workspace::WorkspaceAccess;
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 use crate::{
     BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileKind,
@@ -161,7 +161,7 @@ fn assert_missing_src_compile_error(
         "missing external source span should point at the owning tag"
     );
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let compile_slots_empty = host
             .compile_cache
@@ -173,7 +173,7 @@ fn assert_missing_src_compile_error(
             "failed compile must not leave cached outputs behind"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get(canonical_id).unwrap();
@@ -286,7 +286,7 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
         "macro type dep span should point at the owning import"
     );
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let compile_slots_empty = host
             .compile_cache
@@ -298,7 +298,7 @@ fn missing_macro_type_dependency_produces_compile_error_and_no_outputs() {
             "failed macro type dep compile must not cache outputs"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/src/Comp.vue").unwrap();
@@ -633,7 +633,7 @@ defineProps<{ msg: string }>()
     assert!(api.is_some(), "should produce public API output");
 
     // Verify cache is populated
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -644,7 +644,7 @@ defineProps<{ msg: string }>()
             "cached_tsc_extract should be populated after first get_public_api call"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/Cached.vue").expect("entry exists");
@@ -690,7 +690,7 @@ defineProps<{ a: string }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/Clear.vue");
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -698,7 +698,7 @@ defineProps<{ a: string }>()
             .expect("compile_cache entry exists");
         assert!(cc.cached_tsc_extract.is_some(), "cache should be populated");
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/Clear.vue").expect("entry");
@@ -719,7 +719,7 @@ defineProps<{ b: number }>()
     );
 
     // Cache should be cleared
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -730,7 +730,7 @@ defineProps<{ b: number }>()
             "cached_tsc_extract should be cleared after source change"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/Clear.vue").expect("entry");
@@ -755,7 +755,7 @@ defineProps<{ msg: string }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/TplChange.vue");
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -766,7 +766,7 @@ defineProps<{ msg: string }>()
             "cache should be populated after first get_public_api call"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/TplChange.vue").expect("entry");
@@ -787,7 +787,7 @@ defineProps<{ msg: string }>()
     );
 
     // Cache should be cleared because root_element_tag is template-derived
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -798,7 +798,7 @@ defineProps<{ msg: string }>()
             "cached_tsc_extract should be cleared after template change"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/TplChange.vue").expect("entry");
@@ -865,7 +865,7 @@ defineProps<{ x: T }>()
 
     // Populate cache
     let _api = host.get_public_api("/test/DescChange.vue");
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -876,7 +876,7 @@ defineProps<{ x: T }>()
             "cache should be populated after first get_public_api call"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/DescChange.vue").expect("entry");
@@ -897,7 +897,7 @@ defineProps<{ x: T }>()
     );
 
     // Cache should be cleared because generic_params is descriptor-derived
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -908,7 +908,7 @@ defineProps<{ x: T }>()
             "cached_tsc_extract should be cleared after descriptor change (generic attr)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/test/DescChange.vue").expect("entry");
@@ -1269,7 +1269,7 @@ fn exact_resolution_invalidates_on_dep_change() {
     );
 
     // Compile slots should be cleared
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1280,7 +1280,7 @@ fn exact_resolution_invalidates_on_dep_change() {
             "compile slots should be cleared after dep change"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("/src/Comp.vue").expect("entry exists");
@@ -2249,7 +2249,7 @@ fn frontier_companion_plan_cache_keeps_distinct_routes_separate() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn barrel_cache_hits_increment_barrel_fact_reuse_counter() {
     let host = strict_host();
@@ -2788,7 +2788,7 @@ fn external_type_frontier_layer_trace_details_include_bfs_metadata() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn barrel_scanned_vue_children_store_whole_hash_for_freshness() {
     let host = strict_host();

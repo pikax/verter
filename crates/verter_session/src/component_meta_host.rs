@@ -99,14 +99,7 @@ impl ComponentMetaHost {
         config: crate::types::HostConfig,
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
     ) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
         let host = VerterHost::new(config, workspace);
-        #[cfg(target_arch = "wasm32")]
-        let host = {
-            let host = VerterHost::new(config);
-            host.set_workspace(workspace);
-            host
-        };
         let project = crate::meta::MetaProject::new(host);
         Self {
             inner: Arc::new(ComponentMetaHostInner {

@@ -6532,7 +6532,6 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical, store_view);
         let canonical = normalized_canonical.as_ref();
 
-        #[cfg(feature = "scheduler")]
         {
             if let Some(cc) = self.compile_cache.get(canonical) {
                 if cc.evicted {
@@ -6717,38 +6716,8 @@ impl VerterHost {
             return Some(cached.as_ref().clone());
         }
 
-        #[cfg(feature = "scheduler")]
         {
             let entry = self.compile_cache.get(canonical)?;
-            let cached = entry.cached_resolved_meta.get(&mode)?;
-            let invalid_details = store_view.invalid_fact_details(&cached.fact_versions, 6);
-            if !invalid_details.is_empty() {
-                component_meta_trace_event!(
-                    "try_get_cached_component_meta_invalid",
-                    format!(
-                        "owner={} mode={mode:?} cache=legacy facts={} invalid={} details=[{}]",
-                        canonical,
-                        cached.fact_versions.len(),
-                        invalid_details.len(),
-                        invalid_details.join(" | "),
-                    ),
-                );
-                return None;
-            }
-            self.resolver_runtime().component_meta.insert_arc(
-                cache_key,
-                cached.state.clone(),
-                cached.fact_versions.clone(),
-            );
-            Some(cached.state.as_ref().clone())
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use crate::shared::read_lock;
-
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical)?;
             let cached = entry.cached_resolved_meta.get(&mode)?;
             let invalid_details = store_view.invalid_fact_details(&cached.fact_versions, 6);
             if !invalid_details.is_empty() {
@@ -6811,19 +6780,8 @@ impl VerterHost {
             state,
         };
 
-        #[cfg(feature = "scheduler")]
         {
             if let Some(mut entry) = self.compile_cache.get_mut(canonical) {
-                entry.cached_resolved_meta.insert(mode, cached);
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use crate::shared::write_lock;
-
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(canonical) {
                 entry.cached_resolved_meta.insert(mode, cached);
             }
         }
@@ -6841,21 +6799,8 @@ impl VerterHost {
         kind: crate::types::MetaPayloadKind,
         store_view: &crate::host_request_view::RequestStoreView,
     ) -> Option<Vec<u8>> {
-        #[cfg(feature = "scheduler")]
         {
             let entry = self.compile_cache.get(canonical)?;
-            let cached = entry.cached_meta_payloads.get(&kind)?;
-            if store_view.validates_all(&cached.fact_versions) {
-                return Some(cached.payload.clone());
-            }
-            None
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use crate::shared::read_lock;
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical)?;
             let cached = entry.cached_meta_payloads.get(&kind)?;
             if store_view.validates_all(&cached.fact_versions) {
                 return Some(cached.payload.clone());
@@ -6877,18 +6822,8 @@ impl VerterHost {
             payload,
         };
 
-        #[cfg(feature = "scheduler")]
         {
             if let Some(mut entry) = self.compile_cache.get_mut(canonical) {
-                entry.cached_meta_payloads.insert(kind, cached);
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use crate::shared::write_lock;
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(canonical) {
                 entry.cached_meta_payloads.insert(kind, cached);
             }
         }
@@ -7012,21 +6947,8 @@ impl VerterHost {
             .get_any(canonical_id)
             .and_then(|facts| facts.import_route_hash)
             .or_else(|| {
-                #[cfg(feature = "scheduler")]
                 {
                     self.compile_cache.get(canonical_id).and_then(|entry| {
-                        (!entry.import_routes.is_empty()).then(|| {
-                            crate::resolver_store::hash_import_route_targets(&entry.import_routes)
-                        })
-                    })
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                {
-                    use crate::shared::read_lock;
-
-                    let files = read_lock(&self.files);
-                    files.get(canonical_id).and_then(|entry| {
                         (!entry.import_routes.is_empty()).then(|| {
                             crate::resolver_store::hash_import_route_targets(&entry.import_routes)
                         })

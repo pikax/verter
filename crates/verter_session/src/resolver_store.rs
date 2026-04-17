@@ -51,7 +51,6 @@ impl HostStoreView {
             ..Self::default()
         };
 
-        #[cfg(feature = "scheduler")]
         {
             let mut canonical_ids = host.scheduler.node_ids();
             canonical_ids.extend(host.compile_cache.iter().map(|entry| entry.key().clone()));
@@ -83,21 +82,6 @@ impl HostStoreView {
         }
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-        #[cfg(target_arch = "wasm32")]
-        {
-            let files = read_lock(&host.files);
-            for (canonical_id, entry) in files.iter() {
-                view.whole_hashes
-                    .insert(canonical_id.clone(), entry.whole_hash);
-                for (specifier, resolution) in entry.import_routes.iter() {
-                    view.import_routes.insert(
-                        (canonical_id.clone(), specifier.clone()),
-                        resolution.clone(),
-                    );
-                }
-            }
-            drop(files);
-        }
 
         // Snapshot ModuleFactsDb entries into the store view.
         for (canonical_id, facts) in host.resolver.runtime.module_facts.snapshot_all() {
@@ -162,7 +146,6 @@ impl HostStoreView {
             }
 
             let import_route_hash = {
-                #[cfg(feature = "scheduler")]
                 {
                     host.compile_cache.get(&canonical_id).and_then(|entry| {
                         (!entry.import_routes.is_empty())
@@ -171,14 +154,6 @@ impl HostStoreView {
                 }
 
                 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let files = read_lock(&host.files);
-                    files.get(&canonical_id).and_then(|entry| {
-                        (!entry.import_routes.is_empty())
-                            .then(|| hash_import_route_targets(&entry.import_routes))
-                    })
-                }
             };
 
             self.derived_hashes.insert(

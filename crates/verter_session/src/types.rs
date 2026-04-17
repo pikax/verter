@@ -1,7 +1,7 @@
 #[cfg(feature = "session_metrics")]
 use std::collections::BTreeMap;
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 use std::collections::BTreeSet;
 #[cfg(feature = "session_metrics")]
 use std::collections::HashMap;
@@ -453,7 +453,7 @@ pub struct HostUpdateResult {
 
 impl HostUpdateResult {
     /// Construct a no-op result for superseded upserts (scheduler mode).
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn noop() -> Self {
         Self::no_change(String::new())
     }
@@ -816,15 +816,15 @@ pub enum HostError {
     #[error("compile error")]
     CompileError { diagnostics: DiagnosticsSnapshot },
     /// A scheduler error occurred.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("scheduler error: {0}")]
     Scheduler(#[from] verter_scheduler::job::SchedulerError),
     /// The request was superseded by a newer version of the file.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("request superseded by newer generation")]
     Superseded,
     /// The scheduler was shut down.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("scheduler shut down")]
     Shutdown,
 }
@@ -1038,7 +1038,7 @@ pub(crate) struct CompileInput {
 /// On the scheduler path, `AnalysisArcs` in `HostAnalysisData` serves this role.
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 // `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScriptAnalysisArcs {
@@ -1144,7 +1144,7 @@ impl DependencyResolution {
 
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 // `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
@@ -1235,7 +1235,7 @@ impl FileMeta {
 
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 // `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 impl FileEntry {
     #[allow(dead_code)]
     pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
@@ -1259,7 +1259,7 @@ impl FileEntry {
 ///
 /// **DependencyState**: resolution metadata + invalidation hashes
 /// - `import_routes`, `dependencies`, `resolved_type_hashes`, `aliases`
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 #[allow(dead_code)] // Fields used progressively during Phase 2 migration
 pub(crate) struct CompileCacheEntry {
@@ -1348,7 +1348,7 @@ pub(crate) struct ContentOverrideWithParse {
 ///
 /// When a style preprocessor (e.g. SCSS → CSS) runs, the compiled CSS and its
 /// remapped CSS analysis (with SFC-absolute spans) are stored here per-profile.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Used in Phase 2a: apply_style_overrides
 pub(crate) struct StyleOverrideWithAnalysis {

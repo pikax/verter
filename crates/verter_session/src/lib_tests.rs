@@ -133,7 +133,7 @@ fn analysis_level_essential_runs_script_not_style() {
     let src = "<script setup>\nimport { ref } from 'vue'\nconst n = ref(1)\n</script>\n<template><div>{{n}}</div></template>\n<style scoped>.a { color: red }</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::host_executor::{HostAnalysisData, HostSourceData};
         let source_snap = host
@@ -159,7 +159,7 @@ fn analysis_level_essential_runs_script_not_style() {
             "style analyses should not be populated at AnalysisLevel::Essential"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("Comp.vue").unwrap();
@@ -184,7 +184,7 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
     let src = "<script setup>\nimport { ref } from 'vue'\nconst n = ref(1)\n</script>\n<template><div>{{n}}</div></template>\n<style scoped>.a { color: red }</style>";
     let _ = upsert_vue(&host, "Comp.vue", src);
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::host_executor::{HostAnalysisData, HostSourceData};
         let source_snap = host
@@ -210,7 +210,7 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
             "style analyses should not be populated at AnalysisLevel::None"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let entry = files.get("Comp.vue").unwrap();
@@ -709,7 +709,7 @@ fn custom_resolve_extensions_config() {
         })
         .unwrap();
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -720,7 +720,7 @@ fn custom_resolve_extensions_config() {
             "custom resolve_extensions should still match .ts"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -768,7 +768,7 @@ fn generation_counter_increments_on_upsert() {
     let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
     let _ = upsert_vue(&host, "Comp.vue", src1);
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let gen1 = host
             .compile_cache
@@ -787,7 +787,7 @@ fn generation_counter_increments_on_upsert() {
             .generation;
         assert_eq!(gen2, 2);
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let gen1 = {
             let files = read_lock(&host.files);
@@ -1182,7 +1182,7 @@ fn relative_imports_auto_register_deps() {
     );
 
     // Check that ./types was resolved and added to dependencies
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1194,7 +1194,7 @@ fn relative_imports_auto_register_deps() {
             cc.dependencies
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1290,7 +1290,7 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
         .unwrap();
 
     // Comp.vue should be invalidated because it has a runtime import from this dep
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1301,7 +1301,7 @@ fn set_import_dependencies_subsequent_upsert_invalidates() {
             "compile slots should be cleared when runtime dep changes"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1342,7 +1342,7 @@ fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
 
     host.invalidate_dependents_of("/src/tempUtil.ts");
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1353,7 +1353,7 @@ fn invalidate_dependents_of_works_when_dependency_was_never_loaded() {
             "compile slots should be cleared even when the deleted dependency was never loaded"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1407,7 +1407,7 @@ fn smart_invalidation_no_signatures_full_invalidation() {
         .unwrap();
 
     // Comp.vue should be invalidated (full invalidation since no export signatures)
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1418,7 +1418,7 @@ fn smart_invalidation_no_signatures_full_invalidation() {
             "compile slots should be cleared for Tier 1 fallback"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1476,7 +1476,7 @@ fn smart_invalidation_unchanged_export_no_invalidation() {
 
     // Comp.vue should still have a cache hit (MyType didn't change)
     // Compile slots should NOT be empty — the smart invalidation should have skipped it
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1487,7 +1487,7 @@ fn smart_invalidation_unchanged_export_no_invalidation() {
             "compile slots should not be cleared when only unused exports changed"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1581,7 +1581,7 @@ fn tier3_comment_added_no_invalidation() {
         })
         .unwrap();
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1592,7 +1592,7 @@ fn tier3_comment_added_no_invalidation() {
             "compile slots should NOT be cleared when only comments changed (Tier 3 saves)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1645,7 +1645,7 @@ fn tier3_property_added_invalidates() {
         .unwrap();
 
     // Tier 3: resolved type shape changed → invalidation
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1656,7 +1656,7 @@ fn tier3_property_added_invalidates() {
             "compile slots should be cleared when resolved type shape changed (prop added)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1708,7 +1708,7 @@ fn tier3_property_type_changed_invalidates() {
         })
         .unwrap();
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1719,7 +1719,7 @@ fn tier3_property_type_changed_invalidates() {
             "compile slots should be cleared when prop type changed"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1773,7 +1773,7 @@ fn tier3_stores_resolved_type_hashes() {
 
     // Check that resolved_type_hashes were stored
     let key = ("/src/types.ts".to_string(), "MyType".to_string());
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1784,7 +1784,7 @@ fn tier3_stores_resolved_type_hashes() {
             "resolved_type_hashes should store hash for (dep_id, type_name)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1840,7 +1840,7 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
     // propagate invalidation to the ultimate consumer — only direct dependents
     // of the changed file are invalidated.  App.vue depends on types.ts, not
     // nested.ts, so its compile slots remain populated.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1851,7 +1851,7 @@ fn transitive_workspace_macro_type_dep_change_invalidates_owner() {
             "compile slots should still be populated (transitive dep change does not cascade to indirect dependents)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/App.vue").unwrap();
@@ -1908,7 +1908,7 @@ fn tier3_unrelated_type_change_no_invalidation() {
 
     // MyType unchanged → Tier 2 already skips (export hash matches)
     // Tier 3 not even needed here since Tier 2 already handles it
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1919,7 +1919,7 @@ fn tier3_unrelated_type_change_no_invalidation() {
             "compile slots should NOT be cleared when only unrelated types changed"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -1975,7 +1975,7 @@ fn tier3_whitespace_only_change_no_invalidation() {
         .unwrap();
 
     // Tier 3: resolved type shape is identical → no invalidation
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let cc = host
             .compile_cache
@@ -1986,7 +1986,7 @@ fn tier3_whitespace_only_change_no_invalidation() {
             "compile slots should NOT be cleared when resolved type shape is unchanged (Tier 3)"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = read_lock(&host.files);
         let comp = files.get("/src/Comp.vue").unwrap();
@@ -2581,14 +2581,14 @@ fn close_clears_all_caches() {
     let _ = upsert_vue(&host, "test.vue", "<template><div>hello</div></template>");
 
     // Verify the host has data
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         assert!(
             !host.scheduler.node_ids().is_empty(),
             "host should have files before close"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         assert!(
             !read_lock(&host.files).is_empty(),
@@ -2599,7 +2599,7 @@ fn close_clears_all_caches() {
     // Close and verify everything is cleared
     host.close();
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         assert!(
             host.scheduler.node_ids().is_empty(),
@@ -2610,7 +2610,7 @@ fn close_clears_all_caches() {
             "compile_cache should be empty after close"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         assert!(
             read_lock(&host.files).is_empty(),
@@ -2643,7 +2643,7 @@ fn close_allows_reuse() {
         "test2.vue",
         "<template><span>world</span></template>",
     );
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         assert!(
             host.scheduler.try_get_source("test2.vue").is_some(),
@@ -2654,7 +2654,7 @@ fn close_allows_reuse() {
             "previously closed files should not reappear"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         assert!(
             read_lock(&host.files).contains_key("test2.vue"),
@@ -3457,7 +3457,7 @@ fn smart_invalidation_reads_workspace_reverse_deps() {
 
 // ── Scheduler integration tests ──
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 mod scheduler_tests {
     use super::*;
     use crate::host_executor::HostSourceData;
@@ -3731,7 +3731,7 @@ const count = ref(0)
 // Phase 1 — Structural types: HostSourceData, HostAnalysisData, CompileCacheEntry
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 mod phase1_structural_tests {
     use super::*;
     use crate::host_executor::{AnalysisArcs, HostAnalysisData, HostSourceData};
@@ -3940,7 +3940,7 @@ mod phase1_structural_tests {
 // Phase 2A — Upsert populates compile_cache, scheduler is sole parser
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 mod phase2a_upsert_tests {
     use super::*;
     use crate::host_executor::HostSourceData;

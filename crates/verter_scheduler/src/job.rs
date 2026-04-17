@@ -214,6 +214,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn completion_handle_wait_blocks_until_signal() {
         let (handle, sender) = completion_pair::<String>();
@@ -232,6 +233,7 @@ mod tests {
         t.join().unwrap();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn completion_handle_multiple_waiters() {
         let (handle, sender) = completion_pair::<u32>();

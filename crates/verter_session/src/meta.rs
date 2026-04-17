@@ -252,11 +252,7 @@ impl MetaProject {
         self.check_alive()?;
         let _gate = self.enter_base_context()?;
 
-        #[cfg(not(target_arch = "wasm32"))]
         let loaded = self.host.ensure_loaded(canonical_id);
-
-        #[cfg(target_arch = "wasm32")]
-        let loaded = self.host.get_source(canonical_id).is_some();
 
         if !loaded {
             self.remove_base_file(canonical_id);
@@ -274,11 +270,7 @@ impl MetaProject {
         #[cfg(not(target_arch = "wasm32"))]
         self.host.evict(canonical_id);
 
-        #[cfg(not(target_arch = "wasm32"))]
         let loaded = self.host.ensure_loaded(canonical_id);
-
-        #[cfg(target_arch = "wasm32")]
-        let loaded = self.host.get_source(canonical_id).is_some();
 
         if !loaded {
             self.remove_base_file(canonical_id);

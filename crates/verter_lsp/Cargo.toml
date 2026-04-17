@@ -13,7 +13,7 @@ publish = false
 hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
 
 [dependencies]
-verter_session = { path = "../verter_session", features = ["session_metrics", "scheduler"] }
+verter_session = { path = "../verter_session", features = ["session_metrics"] }
 hotpath = { version = "0.13", optional = true }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_workspace = { path = "../verter_workspace" }

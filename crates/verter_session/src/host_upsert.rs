@@ -27,7 +27,7 @@ use crate::shared::write_lock;
 use crate::types::*;
 #[cfg(target_arch = "wasm32")]
 use crate::upsert::compute_upsert_changes;
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
@@ -49,21 +49,15 @@ impl VerterHost {
             self.semantic_db.lock().invalidate(id);
         }
 
-        #[cfg(feature = "scheduler")]
         {
             self.upsert_via_scheduler(req)
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.upsert_legacy(req)
         }
     }
 
     /// Scheduler-backed upsert: submits to scheduler (sole parser), waits for
     /// Source+Analysis to commit, reads back the result, populates compile_cache
     /// and the compile_cache.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn upsert_via_scheduler(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
@@ -646,7 +640,6 @@ impl VerterHost {
             &new_export_signatures,
         );
 
-        #[cfg(not(target_arch = "wasm32"))]
         {
             self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
             self.ws().notify_upsert(&canonical_id, req.source.clone());
@@ -691,7 +684,6 @@ impl VerterHost {
         // Read raw data needed for CSS analysis + span remapping.
         // On scheduler path: read from scheduler snapshots (raw, unmodified).
         // The override results go into compile_cache per-profile.
-        #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::{HostAnalysisData, HostSourceData};
 
@@ -848,130 +840,6 @@ impl VerterHost {
         }
 
         // Legacy path (WASM)
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = write_lock(&self.files);
-            let entry = files
-                .get_mut(&canonical)
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-
-            let previous_hash = entry
-                .style_overrides
-                .get(&profile_hash)
-                .map(|o| o.hash)
-                .unwrap_or(0);
-            if override_hash == previous_hash {
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = entry.external_requests.clone();
-                return Ok(result);
-            }
-
-            let mut changed_nodes: Vec<VirtualNodeKind> = by_index
-                .keys()
-                .map(|idx| VirtualNodeKind::Style { index: *idx })
-                .collect();
-
-            let source = entry.source.as_ref();
-            let mut style_updates: Vec<(usize, verter_semantic::analysis::StyleBlockAnalysis)> =
-                Vec::new();
-            for (&idx, ov) in &by_index {
-                if idx < entry.style_analyses.len() {
-                    let existing = &entry.style_analyses[idx];
-                    let content_offset = existing.content_offset;
-                    let mut new_analysis = verter_semantic::analysis::build_css_style_analysis(
-                        &ov.code,
-                        verter_semantic::analysis::VueStyleInput::default(),
-                        existing.scoped,
-                        existing.is_module,
-                        existing.module_name.as_deref(),
-                        content_offset,
-                    );
-                    if let (Some(sm_json), Some(ref mut css)) =
-                        (&ov.source_map, &mut new_analysis.css)
-                    {
-                        let content_start = content_offset as usize;
-                        let original_content = if content_start < source.len() {
-                            let rest = &source[content_start..];
-                            if let Some(end) = rest.find("</style") {
-                                &rest[..end]
-                            } else {
-                                rest
-                            }
-                        } else {
-                            ""
-                        };
-                        crate::source_map_remap::remap_css_analysis_spans(
-                            css,
-                            &ov.code,
-                            sm_json,
-                            original_content,
-                            content_offset,
-                        );
-                    }
-                    if let Some(ref css) = new_analysis.css {
-                        css.debug_assert_valid_spans(source.len() as u32);
-                    }
-                    new_analysis.v_binds = existing.v_binds.clone();
-                    new_analysis.special_pseudos = existing.special_pseudos.clone();
-                    style_updates.push((idx, new_analysis));
-                }
-            }
-            if !style_updates.is_empty() {
-                let styles = Arc::make_mut(&mut entry.style_analyses);
-                for (idx, analysis) in style_updates {
-                    styles[idx] = analysis;
-                }
-            }
-            for &idx in by_index.keys() {
-                if idx < entry.meta.style_langs.len() {
-                    if let Some(ref lang) = entry.meta.style_langs[idx] {
-                        if lang != "css" {
-                            entry.meta.style_langs[idx] = Some("css".to_string());
-                        }
-                    }
-                }
-            }
-            entry.style_overrides.insert(
-                profile_hash,
-                StyleOverrideLayer {
-                    hash: override_hash,
-                    by_index,
-                },
-            );
-            entry.compile_slots.remove(&profile_hash);
-            changed_nodes = sorted_nodes(changed_nodes);
-
-            let mut changed_virtual_ids = Vec::new();
-            let mut changed_lsp_ids = Vec::new();
-            for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, &entry.meta);
-                changed_virtual_ids.push(b);
-                changed_lsp_ids.push(l);
-            }
-
-            let result = HostUpdateResult {
-                canonical_id: canonical,
-                changed: true,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: changed_nodes,
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids,
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids,
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: entry.external_requests.clone(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
-                parse_duration_ms: 0.0,
-            };
-            self.bump_store_view_epoch();
-            Ok(result)
-        }
     }
 
     /// Apply preprocessed block overrides for template, script, style, and custom blocks.
@@ -1033,7 +901,6 @@ impl VerterHost {
         if !has_content_overrides {
             // Only style overrides were provided; style overrides already handled above.
             // Read external_requests from scheduler (or files on WASM).
-            #[cfg(feature = "scheduler")]
             {
                 use crate::host_executor::HostSourceData;
                 let snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
@@ -1051,26 +918,12 @@ impl VerterHost {
                 result.changed = true;
                 return Ok(result);
             }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let files = crate::shared::read_lock(&self.files);
-                let entry = files
-                    .get(&canonical)
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    })?;
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = entry.external_requests.clone();
-                result.changed = true;
-                return Ok(result);
-            }
         }
 
         let override_hash =
             content_override_hash(template_override.as_ref(), script_override.as_ref());
 
         // Scheduler path: read raw source+meta from scheduler, store override in compile_cache
-        #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::HostSourceData;
             let source_snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
@@ -1184,91 +1037,6 @@ impl VerterHost {
         }
 
         // Legacy path (WASM)
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = write_lock(&self.files);
-            let entry = files
-                .get_mut(&canonical)
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-
-            let previous_hash = entry
-                .content_overrides
-                .get(&profile_hash)
-                .map(|o| o.layer.hash)
-                .unwrap_or(0);
-
-            if override_hash == previous_hash {
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = entry.external_requests.clone();
-                return Ok(result);
-            }
-
-            let synthetic_source = build_synthetic_source(
-                &entry.source,
-                &entry.meta,
-                template_override.as_ref(),
-                script_override.as_ref(),
-            );
-            let (new_snapshot, new_parsed) =
-                parse_vue_snapshot(&canonical, &synthetic_source, self.config.effective_scope());
-            let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
-            let layer = ContentOverrideLayer {
-                hash: override_hash,
-                template: template_override,
-                script: script_override,
-            };
-            entry.content_overrides.insert(
-                profile_hash,
-                ContentOverrideWithParse {
-                    layer: layer.clone(),
-                    parse: new_snapshot.clone(),
-                    cached_parse: Some(Arc::new(new_parsed)),
-                    source: synthetic_arc,
-                },
-            );
-            entry.compile_slots.remove(&profile_hash);
-
-            let mut changed_nodes = Vec::new();
-            if new_snapshot.meta.has_template {
-                changed_nodes.push(VirtualNodeKind::Main);
-                changed_nodes.push(VirtualNodeKind::Template);
-            }
-            if new_snapshot.meta.has_script {
-                changed_nodes.push(VirtualNodeKind::Script);
-            }
-            changed_nodes = sorted_nodes(changed_nodes);
-
-            let mut changed_virtual_ids = Vec::new();
-            let mut changed_lsp_ids = Vec::new();
-            for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, &new_snapshot.meta);
-                changed_virtual_ids.push(b);
-                changed_lsp_ids.push(l);
-            }
-
-            let result = HostUpdateResult {
-                canonical_id: canonical,
-                changed: true,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: changed_nodes,
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids,
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids,
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: entry.external_requests.clone(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
-                parse_duration_ms: 0.0,
-            };
-            self.bump_store_view_epoch();
-            Ok(result)
-        }
     }
 }
 

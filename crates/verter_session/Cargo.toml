@@ -10,9 +10,8 @@ description = "Top-level session API for Verter — compilation, caching, depend
 publish = false
 
 [features]
-default = ["scheduler"]
+default = []
 session_metrics = []
-scheduler = ["verter_scheduler", "dashmap"]
 # Debug-mode audit: on every `HostNamedTypeCacheAdapter::get` hit, recompute
 # the slow-path resolution and assert structural equality against the cached
 # value. Catches cache-key insufficiencies (a cached entry returned for a
@@ -24,7 +23,7 @@ hotpath = [
   "hotpath/hotpath",
   "verter_compiler/hotpath",
   "verter_semantic/hotpath",
-  "verter_scheduler?/hotpath",
+  "verter_scheduler/hotpath",
   "verter_workspace/hotpath",
 ]
 
@@ -33,6 +32,8 @@ verter_compiler = { path = "../verter_compiler" }
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }
+verter_scheduler = { path = "../verter_scheduler" }
+dashmap = "6"
 hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
@@ -47,11 +48,6 @@ serde_json = { workspace = true }
 sourcemap = "9"
 thiserror = "2"
 parking_lot = "0.12"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dashmap = { version = "6", optional = true }
-verter_scheduler = { path = "../verter_scheduler", optional = true }
-verter_type_runtime = { path = "../verter_type_runtime" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

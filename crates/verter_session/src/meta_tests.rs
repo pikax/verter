@@ -182,7 +182,7 @@ fn cached_resolved_state(
     canonical: &str,
     mode: crate::types::ResolverMode,
 ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         project
             .host()
@@ -196,7 +196,7 @@ fn cached_resolved_state(
             })
     }
 
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = crate::shared::read_lock(&project.host().files);
         files.get(canonical).and_then(|entry| {
@@ -213,14 +213,14 @@ fn clear_legacy_cached_resolved_state(
     canonical: &str,
     mode: crate::types::ResolverMode,
 ) {
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
             entry.cached_resolved_meta.remove(&mode);
         }
     }
 
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let mut files = crate::shared::write_lock(&project.host().files);
         if let Some(entry) = files.get_mut(canonical) {
@@ -229,7 +229,7 @@ fn clear_legacy_cached_resolved_state(
     }
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn cached_fallthrough_state(
     project: &MetaProject,
     canonical: &str,
@@ -246,14 +246,14 @@ fn cached_fallthrough_state(
         })
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn clear_legacy_cached_fallthrough_state(project: &MetaProject, canonical: &str) {
     if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
         entry.cached_fallthrough = None;
     }
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &str) {
     let key = crate::resolver_core::fallthrough_cache_key(
         canonical,
@@ -267,7 +267,7 @@ fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &s
         .remove_node_for_test(&key);
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn clear_runtime_root_follow_node(project: &MetaProject, canonical: &str) {
     let key = crate::resolver_core::fallthrough_resolver::root_follow_key(
         canonical,
@@ -281,7 +281,7 @@ fn clear_runtime_root_follow_node(project: &MetaProject, canonical: &str) {
         .remove_node_for_test(&key);
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 fn cached_fallthrough_entry(
     project: &MetaProject,
     canonical: &str,
@@ -293,7 +293,7 @@ fn cached_fallthrough_entry(
         .and_then(|entry| entry.cached_fallthrough.clone())
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
     let project = make_project();
@@ -552,7 +552,7 @@ fn clear_compile_cache_preserves_module_facts_db() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn current_dependency_fact_versions_include_derived_resolver_facts() {
     let project = make_project();
@@ -615,7 +615,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
     );
 }
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 #[test]
 fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler() {
     let project = make_project();
@@ -1460,7 +1460,7 @@ fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_reuses_resolver_cache_after_legacy_slot_is_cleared() {
     let project = make_project();
@@ -1544,7 +1544,7 @@ import Child from './Child.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
     let project = make_project();
@@ -1606,7 +1606,7 @@ import Child from './Child.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn top_level_fallthrough_lives_in_runtime_not_host_wrapper_cache() {
     let project = make_project();
@@ -1654,7 +1654,7 @@ import Child from './Child.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_recomputes_from_runtime_subnodes_after_top_level_node_clear() {
     let project = make_project();
@@ -1714,7 +1714,7 @@ const attrs = { id: 'hero', title: 'Hello' }
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_reuses_root_follow_after_branch_union_node_clear() {
     let project = make_project();
@@ -5795,7 +5795,7 @@ defineProps<Props>()
     );
 }
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 #[test]
 fn non_scheduler_upsert_reflects_updated_source_in_subsequent_analysis() {
     let project = make_project();
@@ -16866,12 +16866,12 @@ import Child from './Child.vue'
         "div-root child should not expose input-only attrs before the dependency changes"
     );
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         // get_meta does not populate cached_fallthrough; use resolve_fallthrough_surface
         let _ = project.host().resolve_fallthrough_surface("/App.vue");
     }
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     let first_cache = cached_fallthrough_state(&project, "/App.vue")
         .expect("first query should cache fallthrough");
 
@@ -16885,7 +16885,7 @@ import Child from './Child.vue'
         "parent fallthrough surface must refresh when the child root changes"
     );
 
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = project.host().resolve_fallthrough_surface("/App.vue");
         let second_cache = cached_fallthrough_state(&project, "/App.vue")
@@ -16897,7 +16897,7 @@ import Child from './Child.vue'
     }
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn shared_child_fallthrough_reuses_runtime_child_surface_nodes() {
     let project = make_project();
@@ -16961,7 +16961,7 @@ import Child from './Child.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn shared_child_runtime_reuse_survives_host_child_cache_clear() {
     let project = make_project();
@@ -17027,7 +17027,7 @@ import Child from './Child.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn distinct_children_reuse_runtime_intrinsic_surface_nodes() {
     let project = make_project();
@@ -17089,7 +17089,7 @@ import ChildB from './ChildB.vue'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn cached_fallthrough_fact_versions_include_transitive_child_component_meta_dependencies() {
     let project = make_project();

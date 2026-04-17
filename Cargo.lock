@@ -3776,6 +3776,7 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.1",
  "verter_span",
+ "web-time",
 ]
 
 [[package]]
@@ -3823,7 +3824,6 @@ dependencies = [
  "verter_scheduler",
  "verter_semantic",
  "verter_span",
- "verter_type_runtime",
  "verter_workspace",
  "web-time",
  "xxhash-rust",

@@ -3,7 +3,10 @@
 //! The [`JobIndex`] is the sole authority for ordering, aging, dedup, and
 //! admission policy. It is scheduler-owned — accessed only through the driver.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use rustc_hash::FxHashMap;
 

@@ -78,7 +78,6 @@ impl VerterHost {
         let mut diagnostics = Vec::new();
 
         // Collect (parent_id, template_analysis) pairs from the appropriate source.
-        #[cfg(feature = "scheduler")]
         let parent_templates: Vec<(
             String,
             std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
@@ -92,23 +91,6 @@ impl VerterHost {
                     // template analysis if not already cached.
                     let tpl = self.raw_template_analysis_for_file(&id);
                     tpl.map(|t| (id, t))
-                })
-                .collect()
-        };
-
-        #[cfg(target_arch = "wasm32")]
-        let parent_templates: Vec<(
-            String,
-            std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
-        )> = {
-            let files = read_lock(&self.files);
-            files
-                .iter()
-                .filter_map(|(id, entry)| {
-                    entry
-                        .template_analysis
-                        .as_ref()
-                        .map(|t| (id.clone(), std::sync::Arc::clone(t)))
                 })
                 .collect()
         };

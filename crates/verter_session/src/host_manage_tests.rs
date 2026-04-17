@@ -265,7 +265,7 @@ fn exact_dependency(specifier: &str, resolved: &str) -> DependencyResolution {
     }
 }
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 fn mutate_lazy_analysis_source(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
     let entry = files.get_mut("App.vue").expect("App.vue should exist");
@@ -278,7 +278,7 @@ fn mutate_lazy_analysis_source(host: &VerterHost) {
     entry.source = Arc::from(broken);
 }
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 fn clear_cached_parse(host: &VerterHost) {
     let mut files = crate::shared::write_lock(&host.files);
     let entry = files.get_mut("App.vue").expect("App.vue should exist");
@@ -1086,7 +1086,7 @@ fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materialization() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -1123,7 +1123,7 @@ fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materializati
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn prepared_type_decl_in_view_reuses_route_owned_package_shallow_state_without_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -1302,7 +1302,7 @@ defineProps<Props>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolver_store_view_does_not_materialize_tracked_module_facts() {
     let host = strict_host();
@@ -2031,7 +2031,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn store_view_external_type_analysis_keeps_tracked_imported_dependency_off_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -2729,7 +2729,7 @@ import Button from './components'
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_fallthrough_surface_reuses_parent_snapshot_for_child_binding_lookup() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -2886,7 +2886,7 @@ fn raw_template_analysis_extracts_css_var_names() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn override_template_analysis_helper_uses_content_override() {
     let host = make_host();
@@ -3077,7 +3077,7 @@ fn get_analysis_uses_cached_parse_for_lazy_analysis() {
     // so mutating host.files has no effect. The scheduler path reads from
     // HostSourceData.cached_parse directly. We just verify get_analysis()
     // returns correct lazy-recomputed data with AnalysisLevel::None.
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     mutate_lazy_analysis_source(&host);
 
     let analysis = host.get_analysis("App.vue").unwrap();
@@ -3116,7 +3116,7 @@ fn get_analysis_falls_back_when_cached_parse_missing() {
     // On the scheduler path, cached_parse is immutable in HostSourceData
     // and always present for Vue SFCs. The scheduler path handles both
     // cached_parse present and absent cases. We just verify correctness.
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     clear_cached_parse(&host);
 
     let analysis = host.get_analysis("App.vue").unwrap();
@@ -3739,7 +3739,7 @@ fn enriched_imports_do_not_affect_stored_data() {
 
     // Verify stored data is not mutated by checking that the
     // internal stored imports still have None
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::host_executor::HostSourceData;
         let source_snap = host
@@ -3756,7 +3756,7 @@ fn enriched_imports_do_not_affect_stored_data() {
             "stored import should NOT be mutated by get_analysis enrichment"
         );
     }
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     {
         let files = crate::shared::read_lock(&host.files);
         let entry = files.get("/project/Parent.vue").unwrap();
@@ -5626,7 +5626,7 @@ export type Props = {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_external_type_from_loaded_files_skips_leaf_imported_prop_companions() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -5803,7 +5803,7 @@ fn base_eval_env_in_view_prefers_declaration_companion_for_runtime_js_dependenci
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snapshot_materialization(
 ) {
@@ -5866,7 +5866,7 @@ fn resolve_named_type_export_target_seeds_shallow_dependency_state_without_snaps
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_uses_vue_tsx_registry_build() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -5900,7 +5900,7 @@ export type Props = {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn route_and_root_resolution_do_not_fall_back_through_frontier() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -5935,7 +5935,7 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn ensure_module_facts_for_vue_exports_stays_local() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6187,7 +6187,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn get_component_meta_named_barrel_lookup_skips_unrelated_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6266,7 +6266,7 @@ defineProps<IconProps>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn declaration_scoped_solver_applies_omit_to_barrel_imported_types() {
     fn collect_object_property_names(
@@ -6362,7 +6362,7 @@ defineProps<Props>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn declaration_scoped_solver_applies_omit_to_barrel_imported_types_with_store_view() {
     fn collect_object_property_names(
@@ -6487,7 +6487,7 @@ defineProps<Props>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn get_component_meta_reuses_barrel_routes_for_multiple_late_exports() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6575,7 +6575,7 @@ export type TargetEmits = { change: [value: string] }
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn shallow_imported_barrel_state_keeps_reexport_routes_lazy_until_lookup() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6656,7 +6656,7 @@ export type TargetEmits = { change: [value: string] }
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_local_symbols() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6713,7 +6713,7 @@ fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_loca
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_imported_type_root_keeps_local_export_import_edges_lazy() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6760,7 +6760,7 @@ export interface Props {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_hash_only() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6831,7 +6831,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6878,7 +6878,7 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provider_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6914,7 +6914,7 @@ fn direct_imported_type_root_fast_path_reuses_provider_shallow_state_for_provide
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn imported_type_root_fast_path_follows_exported_local_import_without_child_route_hash() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -6988,7 +6988,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7057,7 +7057,7 @@ fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_sh
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn get_component_meta_resolves_transitive_macro_types_without_frontier_prewarm() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7142,7 +7142,7 @@ export interface Base {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_registry_seeding_keeps_barrel_children_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7214,7 +7214,7 @@ export interface LinkProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn store_view_import_routes_do_not_depend_on_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7267,7 +7267,7 @@ fn store_view_import_routes_do_not_depend_on_live_owner_state() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn shallow_imported_export_state_skips_non_reexport_import_resolution() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7314,7 +7314,7 @@ export interface LinkProps extends SharedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn import_route_lookup_reuses_module_facts_without_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7368,7 +7368,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_nested_barrel_alias_skips_later_unrelated_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7440,7 +7440,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_unseeded_barrel_keeps_wildcard_children_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7505,7 +7505,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_unseeded_late_match_skips_earlier_wildcard_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7594,7 +7594,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_imported_type_root_unseeded_late_match_keeps_earlier_vue_siblings_off_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7721,7 +7721,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_imported_type_root_reuses_route_owned_vue_child_across_distinct_symbol_proofs() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7785,7 +7785,7 @@ export interface AccordionEmits {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn get_component_meta_reuses_scheduler_snapshot_when_materializing_owner_module_facts() {
     let host = VerterHost::new_standalone(HostConfig {
@@ -7822,7 +7822,7 @@ const props = defineProps<AccordionRootProps>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_named_type_export_target_prefers_longest_wildcard_prefix_match() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -7871,7 +7871,7 @@ export interface CheckboxGroupProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn current_dependency_fact_versions_in_view_keeps_shallow_tracked_barrel_siblings_off_module_facts()
 {
@@ -8005,7 +8005,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_skips_unrelated_wildcard_siblings_when_root_stem_matches()
 {
@@ -8152,7 +8152,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_keeps_leaf_object_prop_imports_symbolic() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8261,7 +8261,7 @@ export interface IconProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_cached_lookup_tracks_routed_target_dependencies() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8363,7 +8363,7 @@ export interface ButtonProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_avoids_legacy_host_cache_across_requests_for_package_targets(
 ) {
@@ -8517,7 +8517,7 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_skip_imported_declaration_builds() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8613,7 +8613,7 @@ export interface ButtonProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_keeps_active_package_target_off_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8707,7 +8707,7 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_surface_keeps_active_package_target_off_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8808,7 +8808,7 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn required_import_routes_for_exported_whole_route_preserves_member_tail() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8889,7 +8889,7 @@ export interface IconProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_imported_type_root_prefers_matching_wildcard_stem_before_unrelated_earlier_siblings() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -8980,7 +8980,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_imported_type_root_nested_barrel_alias_keeps_unrelated_vue_siblings_off_module_facts() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -9074,7 +9074,7 @@ export interface UnusedProps {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_nested_barrel_alias_resolves_expected_props() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -10820,7 +10820,7 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
     assert_eq!(super::workspace_vfs_source_kind(None), "workspace-vfs");
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn external_type_analysis_memoized_within_one_request() {
     // Phase 1 §4.4 test 5.4.
@@ -10867,7 +10867,7 @@ fn external_type_analysis_memoized_within_one_request() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn request_store_view_extends_across_mid_request_ensure_loaded() {
     // Phase 1 §4.2 test 5.2 foundation.
@@ -10933,7 +10933,7 @@ fn request_store_view_extends_across_mid_request_ensure_loaded() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
     // Phase 1 §4.6 Sub-task B test 5.6 Test 1 (regression lock-in).
@@ -10971,7 +10971,7 @@ fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn host_owned_resolved_named_types_serves_cross_request_lookups() {
     // Phase 1 §4.7 test 5.7 Test 2.
@@ -11024,7 +11024,7 @@ defineProps<SharedProps>()
     );
 }
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn source_type_is_stable_across_callsites_for_same_canonical() {
     // Phase 1 §4.6 Sub-task A — test 5.6 Test name 3.

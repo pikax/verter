@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-verter_session = { path = "../verter_session", version = "0.0.1-beta.1", default-features = false }
+verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_semantic = { path = "../verter_semantic" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }

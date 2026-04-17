@@ -4,17 +4,13 @@
 //! Each stage produces a snapshot with host-specific data that can be downcast
 //! by the host facade.
 
-#[cfg(feature = "scheduler")]
 use std::sync::Arc;
 
-#[cfg(feature = "scheduler")]
 use verter_scheduler::executor::{ExtractedDeps, StageError, StageExecutor};
-#[cfg(feature = "scheduler")]
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, FileKind, SnapshotData, SourceSnapshot,
 };
 
-#[cfg(feature = "scheduler")]
 use crate::types::{HostConfig, ParseSnapshot};
 
 /// Host-specific data stored in a [`SourceSnapshot`].
@@ -23,7 +19,6 @@ use crate::types::{HostConfig, ParseSnapshot};
 /// Also carries the cached parsed SFC (for Vue files), the host-level file kind,
 /// the authoritative `source_type` computed once at parse time, and the measured
 /// parse duration for performance tracking.
-#[cfg(feature = "scheduler")]
 #[derive(Debug)]
 #[allow(dead_code)] // Fields read progressively during Phase 2-3 migration
 pub struct HostSourceData {
@@ -42,7 +37,6 @@ pub struct HostSourceData {
     pub(crate) parse_duration_ms: f64,
 }
 
-#[cfg(feature = "scheduler")]
 impl SnapshotData for HostSourceData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -54,7 +48,6 @@ impl SnapshotData for HostSourceData {
 /// Built once during `execute_analysis()` from the parse results. These fields
 /// are never mutated after construction, so Arc sharing across all `get_analysis()`
 /// calls is safe and avoids repeated cloning.
-#[cfg(feature = "scheduler")]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields read in Phase 2A get_analysis migration
 pub struct AnalysisArcs {
@@ -71,7 +64,6 @@ pub struct AnalysisArcs {
     pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
 }
 
-#[cfg(feature = "scheduler")]
 impl AnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
     pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
@@ -93,7 +85,6 @@ impl AnalysisArcs {
 ///
 /// Contains real script analysis, export signatures, style analyses, and
 /// pre-computed Arc-wrapped analysis fields for cheap sharing.
-#[cfg(feature = "scheduler")]
 #[derive(Debug)]
 #[allow(dead_code)] // arcs field read in Phase 2A get_analysis migration
 pub struct HostAnalysisData {
@@ -103,7 +94,6 @@ pub struct HostAnalysisData {
     pub(crate) arcs: AnalysisArcs,
 }
 
-#[cfg(feature = "scheduler")]
 impl SnapshotData for HostAnalysisData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -115,7 +105,6 @@ impl SnapshotData for HostAnalysisData {
 /// Contains compiled virtual files and diagnostics from a compile slot.
 /// Fields are accessed via `downcast_data::<HostArtifactData>()` which the
 /// compiler's static analysis cannot see through.
-#[cfg(feature = "scheduler")]
 #[derive(Debug)]
 #[allow(dead_code)] // Read via Any::downcast_ref in scheduler_artifact_outputs/diagnostics
 pub struct HostArtifactData {
@@ -124,7 +113,6 @@ pub struct HostArtifactData {
     pub(crate) diagnostics: crate::types::DiagnosticsSnapshot,
 }
 
-#[cfg(feature = "scheduler")]
 impl SnapshotData for HostArtifactData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -136,13 +124,11 @@ impl SnapshotData for HostArtifactData {
 /// For the Source stage, calls `parse_vue_snapshot` or `parse_non_sfc_snapshot`.
 /// Analysis and Artifact stages delegate back to the host facade (the scheduler
 /// provides coordination, the host provides domain logic).
-#[cfg(feature = "scheduler")]
 pub struct HostStageExecutor {
     pub config: HostConfig,
     pub workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
 }
 
-#[cfg(feature = "scheduler")]
 impl HostStageExecutor {
     pub fn new(
         config: HostConfig,
@@ -152,7 +138,6 @@ impl HostStageExecutor {
     }
 }
 
-#[cfg(feature = "scheduler")]
 impl StageExecutor for HostStageExecutor {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn execute_source(

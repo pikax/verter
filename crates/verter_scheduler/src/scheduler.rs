@@ -6,7 +6,10 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -1400,6 +1403,68 @@ impl Scheduler {
                         }
                     } else {
                         iterations = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Block until `handle` resolves, driving the scheduler inline when no
+    /// driver thread can do so (WASM single-threaded, sync mode). On native
+    /// with a driver thread installed this delegates to the condvar-based
+    /// `handle.wait()`; on WASM it loops `drain_inbox` + `dequeue` +
+    /// `execute_stage_inline` until either the handle resolves or the queue
+    /// stably runs out of progress (in which case it returns
+    /// `CompletionState::Failed("scheduler stably empty with handle pending")`).
+    ///
+    /// This is the canonical cross-target wait API — call it instead of
+    /// `handle.wait()` from any code that may run on WASM.
+    pub fn wait_or_drive<T: Clone>(
+        self: &Arc<Self>,
+        handle: &crate::job::CompletionHandle<T>,
+    ) -> crate::job::CompletionState<T> {
+        // Native with driver thread: condvar wait works (driver does the work).
+        // No driver thread (WASM, or sync-test scheduler): drive inline.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.driver_handle.lock().is_some() {
+                return handle.wait();
+            }
+        }
+
+        // Inline drive loop.
+        let mut idle_iterations = 0u32;
+        loop {
+            if let Some(state) = handle.try_get() {
+                return state;
+            }
+            self.drain_inbox();
+            let entry = {
+                let mut job_index = self.job_index.lock();
+                job_index.dequeue()
+            };
+            match entry {
+                Some(entry) => {
+                    self.execute_stage_inline(entry);
+                    idle_iterations = 0;
+                }
+                None => {
+                    if self.inbox.receiver.is_empty() {
+                        idle_iterations += 1;
+                        if idle_iterations > 2 {
+                            // Stably empty queue + handle still pending —
+                            // controlled failure (caller treats this as "load
+                            // failed" rather than blocking forever).
+                            return crate::job::CompletionState::Failed(
+                                crate::job::SchedulerError::StageFailed {
+                                    file_id: String::new(),
+                                    stage: "wait_or_drive".into(),
+                                    message: "scheduler stably empty with handle pending".into(),
+                                },
+                            );
+                        }
+                    } else {
+                        idle_iterations = 0;
                     }
                 }
             }

@@ -56,7 +56,6 @@ pub mod component_meta_host;
 pub mod cross_file;
 mod deps;
 mod hash;
-#[cfg(feature = "scheduler")]
 pub mod host_executor;
 mod host_manage;
 pub mod host_request_view;
@@ -68,7 +67,6 @@ pub mod meta_resolve;
 mod parse;
 pub mod resolver_core;
 mod resolver_store;
-#[cfg(feature = "scheduler")]
 pub mod scheduler_shim;
 mod shared;
 pub(crate) mod source_map_remap;
@@ -210,8 +208,6 @@ pub struct VerterHost {
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
@@ -231,11 +227,11 @@ pub struct VerterHost {
     /// The scheduler coordinates Sourceâ†’Analysisâ†’Artifact progression
     /// with generation tracking, priority queuing, and blocker management.
     /// It is the sole parser â€” upsert() delegates to the scheduler.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
     /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
     /// Scheduler owns raw source + analysis; this cache owns per-profile state.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
@@ -309,7 +305,6 @@ impl VerterHost {
     pub fn new(config: HostConfig, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) -> Self {
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
-        #[cfg(feature = "scheduler")]
         let scheduler = {
             let executor = Arc::new(host_executor::HostStageExecutor::new(
                 config.clone(),
@@ -336,9 +331,9 @@ impl VerterHost {
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
-            #[cfg(feature = "scheduler")]
+            #[cfg(not(target_arch = "wasm32"))]
             scheduler,
-            #[cfg(feature = "scheduler")]
+            #[cfg(not(target_arch = "wasm32"))]
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
@@ -459,13 +454,7 @@ impl VerterHost {
         }
 
         // Extract from analysis snapshot
-        #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
-        #[cfg(target_arch = "wasm32")]
-        let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
-            let files = read_lock(&self.files);
-            files.get(canonical_id).map(|f| f.script_analysis.clone())
-        };
         let surface = analysis.map(|a| verter_semantic::extract::extract_component_surface(&a));
 
         // Cache and return
@@ -505,13 +494,7 @@ impl VerterHost {
         }
 
         // Extract from analysis
-        #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
-        #[cfg(target_arch = "wasm32")]
-        let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
-            let files = read_lock(&self.files);
-            files.get(canonical_id).map(|f| f.script_analysis.clone())
-        };
 
         let bindings = analysis.map(|a| verter_semantic::extract::extract_bindings(&a));
 
@@ -548,15 +531,7 @@ impl VerterHost {
                 cached.value.unwrap_or_default()
             } else {
                 // Extract from analysis
-                #[cfg(feature = "scheduler")]
                 let analysis = self.scheduler_script_analysis(canonical_id);
-                #[cfg(target_arch = "wasm32")]
-                let analysis: Option<
-                    verter_semantic::analysis::ScriptAnalysisSnapshot,
-                > = {
-                    let files = read_lock(&self.files);
-                    files.get(canonical_id).map(|f| f.script_analysis.clone())
-                };
                 let graph = analysis
                     .map(|a| verter_semantic::extract::extract_import_graph(&a))
                     .unwrap_or_default();
@@ -571,16 +546,7 @@ impl VerterHost {
 
         // Extract boundary edges from template analysis
         let boundary_edges = {
-            #[cfg(feature = "scheduler")]
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
-            #[cfg(target_arch = "wasm32")]
-            let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = {
-                let files = read_lock(&self.files);
-                files
-                    .get(canonical_id)
-                    .and_then(|f| f.template_analysis.as_ref())
-                    .map(|t| t.as_ref().clone())
-            };
             template
                 .map(|t| {
                     verter_semantic::extract::extract_boundary_edges(
@@ -806,7 +772,6 @@ impl VerterHost {
         canonical_id: &str,
         profile: Option<u64>,
     ) -> Option<EffectiveFileState> {
-        #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::HostSourceData;
 
@@ -835,32 +800,6 @@ impl VerterHost {
                 whole_hash: hd.parse.whole_hash,
             })
         }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical_id)?;
-
-            if let Some(profile_hash) = profile {
-                if let Some(ovr) = entry.content_overrides.get(&profile_hash) {
-                    return Some(EffectiveFileState {
-                        source: ovr.source.clone(),
-                        meta: ovr.parse.meta.clone(),
-                        script_analysis: ovr.parse.script_analysis.clone(),
-                        cached_parse: ovr.cached_parse.clone(),
-                        whole_hash: ovr.parse.whole_hash,
-                    });
-                }
-            }
-
-            Some(EffectiveFileState {
-                source: entry.source.clone(),
-                meta: entry.meta.clone(),
-                script_analysis: entry.script_analysis.clone(),
-                cached_parse: entry.cached_parse.clone(),
-                whole_hash: entry.whole_hash,
-            })
-        }
     }
 
     /// View-aware variant of [`effective_file_state`]. Gates every successful
@@ -879,7 +818,6 @@ impl VerterHost {
         profile: Option<u64>,
         view: &crate::host_request_view::RequestStoreView,
     ) -> Option<EffectiveFileState> {
-        #[cfg(feature = "scheduler")]
         {
             use crate::host_executor::HostSourceData;
 
@@ -920,36 +858,6 @@ impl VerterHost {
                 whole_hash: hd.parse.whole_hash,
             })
         }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let files = read_lock(&self.files);
-            let entry = files.get(canonical_id)?;
-
-            if !view.accepts_whole_hash(canonical_id, entry.whole_hash) {
-                return None;
-            }
-
-            if let Some(profile_hash) = profile {
-                if let Some(ovr) = entry.content_overrides.get(&profile_hash) {
-                    return Some(EffectiveFileState {
-                        source: ovr.source.clone(),
-                        meta: ovr.parse.meta.clone(),
-                        script_analysis: ovr.parse.script_analysis.clone(),
-                        cached_parse: ovr.cached_parse.clone(),
-                        whole_hash: ovr.parse.whole_hash,
-                    });
-                }
-            }
-
-            Some(EffectiveFileState {
-                source: entry.source.clone(),
-                meta: entry.meta.clone(),
-                script_analysis: entry.script_analysis.clone(),
-                cached_parse: entry.cached_parse.clone(),
-                whole_hash: entry.whole_hash,
-            })
-        }
     }
 
     /// Materialize native-side lifecycle state from the current scheduler snapshot.
@@ -957,7 +865,7 @@ impl VerterHost {
     /// This is the scheduler-backed replacement for the old `files`-map ingress:
     /// it updates `compile_cache` identity/dependency state without re-submitting
     /// source back into the scheduler.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
         use crate::host_executor::HostSourceData;
 
@@ -1009,7 +917,7 @@ impl VerterHost {
     ///
     /// Merges per-index overrides from `StyleOverrideWithAnalysis` with raw
     /// style analyses from the scheduler. Returns `None` if file not in scheduler.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Used by css_var_flow migration (upcoming)
     pub(crate) fn effective_style_analyses(
         &self,
@@ -1048,7 +956,7 @@ impl VerterHost {
     ///
     /// Applies `style_langs` overrides from `StyleOverrideWithAnalysis` to the
     /// raw meta. Returns `None` if file not in scheduler.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn effective_meta(
         &self,
         canonical_id: &str,
@@ -1085,23 +993,11 @@ impl VerterHost {
     /// are flushed. Useful for invalidating stale compile results while keeping
     /// the file set intact.
     pub fn clear_compile_cache(&self) {
-        #[cfg(feature = "scheduler")]
         {
             for mut entry in self.compile_cache.iter_mut() {
                 entry.compile_slots.clear();
                 entry.raw_template_analysis = None;
                 entry.cached_tsc_extract = None;
-                entry.cached_resolved_meta.clear();
-                entry.cached_meta_payloads.clear();
-                entry.cached_fallthrough = None;
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = crate::shared::write_lock(&self.files);
-            for entry in files.values_mut() {
-                entry.compile_slots.clear();
-                entry.template_analysis = None;
                 entry.cached_resolved_meta.clear();
                 entry.cached_meta_payloads.clear();
                 entry.cached_fallthrough = None;
@@ -1129,10 +1025,9 @@ impl VerterHost {
         // Notify the workspace for each tracked file so overlays AND edge store
         // are cleared before scheduler nodes are removed. Use notify_delete (not
         // notify_close) to clear the VFS edge store entries.
-        #[cfg(not(target_arch = "wasm32"))]
         {
             let ws = self.ws();
-            #[cfg(feature = "scheduler")]
+            #[cfg(not(target_arch = "wasm32"))]
             {
                 let ids = self.scheduler.node_ids();
                 for id in &ids {
@@ -1157,7 +1052,6 @@ impl VerterHost {
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
 
-        #[cfg(feature = "scheduler")]
         {
             self.compile_cache.clear();
             self.scheduler.reset();
@@ -1188,17 +1082,8 @@ impl VerterHost {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
-        #[cfg(feature = "scheduler")]
         {
             for mut entry in self.compile_cache.iter_mut() {
-                entry.import_routes.clear();
-                entry.dependencies.clear();
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = crate::shared::write_lock(&self.files);
-            for entry in files.values_mut() {
                 entry.import_routes.clear();
                 entry.dependencies.clear();
             }
@@ -1265,7 +1150,7 @@ impl VerterHost {
     ///
     /// Returns `None` if the file hasn't been upserted or the snapshot is stale.
     /// This is a lock-free ArcSwap read â€” no contention with upsert/compile.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_source(
         &self,
         canonical_id: &str,
@@ -1274,7 +1159,7 @@ impl VerterHost {
     }
 
     /// Get the scheduler's analysis snapshot for a file (scheduler feature only).
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_analysis(
         &self,
         canonical_id: &str,
@@ -1286,7 +1171,7 @@ impl VerterHost {
     ///
     /// This is the lock-free read path â€” returns data from the scheduler's
     /// ArcSwap snapshots without touching the `files` RwLock.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_export_signatures(
         &self,
         canonical_id: &str,
@@ -1297,7 +1182,7 @@ impl VerterHost {
     }
 
     /// Get script analysis from the scheduler's analysis snapshot.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
@@ -1310,7 +1195,7 @@ impl VerterHost {
     /// Get compiled virtual files from the scheduler's artifact snapshot.
     ///
     /// Returns the compile output for a specific profile if available.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
     pub(crate) fn scheduler_artifact_outputs(
         &self,
@@ -1326,7 +1211,7 @@ impl VerterHost {
     }
 
     /// Get artifact diagnostics from the scheduler's artifact snapshot.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
     pub(crate) fn scheduler_artifact_diagnostics(
         &self,
@@ -1341,7 +1226,7 @@ impl VerterHost {
     }
 
     /// Get style analyses from the scheduler's analysis snapshot.
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
@@ -1352,7 +1237,7 @@ impl VerterHost {
     }
 
     /// Get the scheduler instance (scheduler feature only).
-    #[cfg(feature = "scheduler")]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
         &self.scheduler
     }
@@ -1375,7 +1260,6 @@ impl VerterHost {
         #[cfg(target_arch = "wasm32")]
         write_lock(&self.files).remove(canonical_id);
 
-        #[cfg(feature = "scheduler")]
         {
             // Capture pre-evict whole_hash from the scheduler so `ensure_loaded`
             // can detect no-op reloads (identical content) and skip the
@@ -1418,7 +1302,6 @@ impl VerterHost {
         // create an empty compile_cache stub before the file is loaded into
         // the scheduler; in that case we must proceed to submit a load
         // request.
-        #[cfg(feature = "scheduler")]
         {
             if let Some(cc) = self.compile_cache.get(canonical_id) {
                 if !cc.evicted && self.scheduler.try_get_source(canonical_id).is_some() {
@@ -1426,14 +1309,7 @@ impl VerterHost {
                 }
             }
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            if self.get_source(canonical_id).is_some() {
-                return true;
-            }
-        }
 
-        #[cfg(feature = "scheduler")]
         {
             use verter_scheduler::job::CompletionState;
 
@@ -1502,26 +1378,6 @@ impl VerterHost {
             }
             loaded
         }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let Some(source) = self.ws().read_file(canonical_id) else {
-                return false;
-            };
-            let file_kind = if canonical_id.ends_with(".vue") {
-                FileKind::VueSfc
-            } else {
-                FileKind::NonSfc
-            };
-            self.upsert(UpsertRequest {
-                canonical_id: Some(canonical_id.to_string()),
-                input_id: canonical_id.to_string(),
-                source,
-                file_kind,
-                aliases: Vec::new(),
-            })
-            .is_ok()
-        }
     }
 
     /// Resolve an alias to its canonical ID, or normalize the ID if no alias exists.
@@ -1588,7 +1444,6 @@ impl VerterHost {
         // Native path: read reverse deps from workspace (authoritative source),
         // then merge with the legacy reverse_dependencies map for backward
         // compatibility (standalone hosts, tests without exact resolutions).
-        #[cfg(not(target_arch = "wasm32"))]
         {
             let ws = self.ws();
             let mut owners: BTreeSet<String> =
@@ -1635,7 +1490,7 @@ impl VerterHost {
             let dep_is_newly_added =
                 old_export_signatures.is_empty() && !new_export_signatures.is_empty();
 
-            #[cfg(feature = "scheduler")]
+            #[cfg(not(target_arch = "wasm32"))]
             {
                 let ws = self.workspace.read();
                 let cleared = deps::smart_invalidate_dependents_via_scheduler(
@@ -1684,22 +1539,6 @@ impl VerterHost {
         }
 
         // WASM fallback: use legacy reverse_dependencies map.
-        #[cfg(target_arch = "wasm32")]
-        {
-            #[allow(unreachable_code)]
-            {
-                let ws = self.workspace.read();
-                deps::smart_invalidate_dependents(
-                    &self.files,
-                    &self.reverse_dependencies,
-                    Some(ws.as_ref()),
-                    &self.config,
-                    dependency_id,
-                    old_export_signatures,
-                    new_export_signatures,
-                );
-            }
-        }
     }
 }
 
@@ -1708,10 +1547,10 @@ impl VerterHost {
 /// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
 /// so it always reads through the latest workspace, even after
 /// `set_workspace()` swaps it.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 struct WorkspaceSourceLoader(Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>);
 
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.0.read().read_file(canonical_id)
@@ -1800,7 +1639,7 @@ impl VerterHost {
         }
 
         // Insert import_routes into compile_cache if non-empty.
-        #[cfg(feature = "scheduler")]
+        #[cfg(not(target_arch = "wasm32"))]
         if !import_routes.is_empty() {
             self.compile_cache
                 .entry(canonical_id.to_string())

@@ -48,7 +48,7 @@ pub(crate) fn compute_upsert_changes(
 /// Takes the old parse snapshot directly rather than a FileEntry. Used by
 /// the scheduler-backed upsert where old state comes from the scheduler's
 /// committed HostSourceData, not from the files map.
-#[cfg(feature = "scheduler")]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn compute_upsert_changes_from_parse(
     old: Option<&ParseSnapshot>,
     new: &ParseSnapshot,

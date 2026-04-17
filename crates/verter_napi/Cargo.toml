@@ -14,7 +14,6 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 session_metrics = ["verter_session/session_metrics"]
-scheduler = ["verter_session/scheduler", "verter_scheduler"]
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
@@ -27,7 +26,7 @@ verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" 
 verter_semantic = { path = "../verter_semantic" }
 verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
-verter_scheduler = { path = "../verter_scheduler", optional = true }
+verter_scheduler = { path = "../verter_scheduler" }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }
 napi-derive = "2"
 serde_json = { workspace = true }

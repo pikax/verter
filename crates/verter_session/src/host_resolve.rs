@@ -812,25 +812,12 @@ impl VerterHost {
             possible_canonical_ids: vec![resolved_canonical_id.to_string()],
         };
 
-        #[cfg(feature = "scheduler")]
         {
             if let Some(mut entry) = self.compile_cache.get_mut(owner_canonical) {
                 entry
                     .import_routes
                     .insert(import_source.to_string(), resolution.clone());
                 entry.dependencies.insert(resolved_canonical_id.to_string());
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(owner_canonical) {
-                entry
-                    .import_routes
-                    .insert(import_source.to_string(), resolution.clone());
-                entry.dependencies.insert(resolved_canonical_id.to_string());
-                return;
             }
         }
     }
@@ -3114,7 +3101,6 @@ impl VerterHost {
         let parsed = parse_raw_id(raw_id)?;
         let canonical = self.resolve_alias_or_canonical(&parsed.canonical_id);
         let (exists, bundler_id, lsp_id) = {
-            #[cfg(feature = "scheduler")]
             {
                 use crate::host_executor::HostSourceData;
                 let meta = self.scheduler.try_get_source(&canonical).and_then(|s| {
@@ -3124,21 +3110,6 @@ impl VerterHost {
                 match meta {
                     Some(m) => {
                         let (b, l) = render_ids(&canonical, &parsed.node_kind, &m);
-                        (true, b, l)
-                    }
-                    None => {
-                        let default_meta = FileMeta::default();
-                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &default_meta);
-                        (false, b, l)
-                    }
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let files = read_lock(&self.files);
-                match files.get(&canonical) {
-                    Some(f) => {
-                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &f.meta);
                         (true, b, l)
                     }
                     None => {
@@ -3257,7 +3228,6 @@ impl VerterHost {
 
         // Check cache
         {
-            #[cfg(feature = "scheduler")]
             {
                 use crate::host_executor::HostSourceData;
                 let snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
@@ -3285,29 +3255,6 @@ impl VerterHost {
                         {
                             return Ok(());
                         }
-                    }
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let files = read_lock(&self.files);
-                let entry = files
-                    .get(&canonical)
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    })?;
-                if entry.file_kind == FileKind::NonSfc {
-                    return Ok(());
-                }
-                let soh = entry
-                    .style_overrides
-                    .get(&profile_hash)
-                    .map(|o| o.hash)
-                    .unwrap_or(0);
-                if let Some(slot) = entry.compile_slots.get(&profile_hash) {
-                    if slot.semantic_hash == entry.semantic_hash && slot.style_override_hash == soh
-                    {
-                        return Ok(());
                     }
                 }
             }
@@ -3373,11 +3320,9 @@ impl VerterHost {
         }
 
         // Capture scheduler source state at compile START for artifact commit.
-        #[cfg(feature = "scheduler")]
         let sched_snapshot_at_start = self.scheduler.try_get_source(&canonical_id);
 
         let cache_miss = {
-            #[cfg(feature = "scheduler")]
             {
                 use crate::host_executor::{HostAnalysisData, HostSourceData};
 
@@ -3523,103 +3468,6 @@ impl VerterHost {
                     semantic_hash: parse.semantic_hash,
                 }
             }
-
-            #[cfg(target_arch = "wasm32")]
-            {
-                let files = read_lock(&self.files);
-                let entry = files
-                    .get(&canonical_id)
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical_id.clone(),
-                    })?;
-
-                let soh = entry
-                    .style_overrides
-                    .get(&profile_hash)
-                    .map(|o| o.hash)
-                    .unwrap_or(0);
-                let coh = entry
-                    .content_overrides
-                    .get(&profile_hash)
-                    .map(|o| o.layer.hash)
-                    .unwrap_or(0);
-
-                if let Some(slot) = entry.compile_slots.get(&profile_hash) {
-                    if slot.semantic_hash == entry.semantic_hash
-                        && slot.style_override_hash == soh
-                        && slot.content_override_hash == coh
-                    {
-                        #[cfg(feature = "session_metrics")]
-                        self.metrics
-                            .compile_cache_hits
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                        if let Some(found) = slot.outputs.get(&node_kind) {
-                            return Ok(VirtualFileResponse {
-                                id: render_single_id(
-                                    &canonical_id,
-                                    &node_kind,
-                                    &entry.meta,
-                                    raw_was_lsp,
-                                ),
-                                code: found.code.clone(),
-                                source_map: found.source_map.clone(),
-                                lang: found.lang.clone(),
-                                stale: false,
-                                diagnostics: slot.diagnostics.clone(),
-                                meta: found.meta.clone(),
-                            });
-                        }
-                    }
-                }
-
-                let fallback_last_good = entry
-                    .compile_slots
-                    .get(&profile_hash)
-                    .and_then(|slot| slot.last_good_outputs.clone());
-                let efs = self
-                    .effective_file_state(&canonical_id, Some(profile_hash))
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical_id.clone(),
-                    })?;
-
-                CacheMiss {
-                    compile_input: CompileInput {
-                        canonical_id: entry.canonical_id.clone(),
-                        source: efs.source,
-                        meta: efs.meta.clone(),
-                        parse_diagnostics: entry.parse_diagnostics.clone(),
-                        src_blocks: entry.src_blocks.clone(),
-                        external_requests: entry.external_requests.clone(),
-                        style_override_layer: entry.style_overrides.get(&profile_hash).cloned(),
-                        content_override_layer: entry
-                            .content_overrides
-                            .get(&profile_hash)
-                            .map(|o| o.layer.clone()),
-                        macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
-                        script_imports: efs.script_analysis.imports.clone(),
-                        script_macros: efs.script_analysis.macros.clone(),
-                        script_bindings: efs.script_analysis.bindings.clone(),
-                        cached_parse: efs.cached_parse,
-                        style_v_bind_vars: entry
-                            .style_analyses
-                            .iter()
-                            .flat_map(|sa| {
-                                sa.v_binds.iter().map(|vb| {
-                                    vb.expression
-                                        .split('.')
-                                        .next()
-                                        .unwrap_or(&vb.expression)
-                                        .to_string()
-                                })
-                            })
-                            .collect(),
-                    },
-                    fallback_last_good,
-                    meta: efs.meta,
-                    semantic_hash: entry.semantic_hash,
-                }
-            }
         };
 
         let CacheMiss {
@@ -3686,7 +3534,6 @@ impl VerterHost {
 
         // Store compile results.
         // compile_cache is the authority for profile state.
-        #[cfg(feature = "scheduler")]
         {
             if let Some(mut cc) = self.compile_cache.get_mut(&canonical_id) {
                 cc.compile_slots.insert(
@@ -3714,7 +3561,6 @@ impl VerterHost {
         }
 
         // Commit to scheduler artifact snapshot (scheduler path only).
-        #[cfg(feature = "scheduler")]
         {
             // Persist raw template analysis to compile_cache for profileless consumers
             // (e.g. cross_file, get_analysis). Only for non-override compiles.
@@ -3743,39 +3589,6 @@ impl VerterHost {
         }
 
         // Write per-profile state to files (WASM path only).
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(&canonical_id) {
-                let last_good_outputs = if stale {
-                    fallback_last_good.clone()
-                } else {
-                    Some(compiled_outputs.clone())
-                };
-                if compiled_template_analysis.is_some() {
-                    entry.template_analysis = compiled_template_analysis.clone().map(Arc::new);
-                }
-                entry.compile_slots.insert(
-                    profile_hash,
-                    CompileSlot {
-                        semantic_hash: captured_semantic_hash,
-                        style_override_hash,
-                        content_override_hash,
-                        outputs: compiled_outputs.clone(),
-                        diagnostics: diagnostics.clone(),
-                        last_good_outputs,
-                        last_access_tick: last_tick,
-                        tsx: compiled_tsx,
-                        template_analysis: compiled_template_analysis,
-                    },
-                );
-                entry
-                    .latest_diagnostics
-                    .insert(profile_hash, diagnostics.clone());
-                entry.diagnostics_generation += 1;
-                enforce_profile_cap(entry, self.config.max_profiles_per_file.max(1));
-            }
-        }
 
         let found =
             compiled_outputs
@@ -3809,27 +3622,12 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
 
-        #[cfg(feature = "scheduler")]
         {
             let cc = self.compile_cache.get(&canonical)?;
             if cc.evicted {
                 return None;
             }
             let slot = cc.compile_slots.get(&profile_hash)?;
-            let tsx = slot.tsx.as_ref()?;
-            Some(IdeResponse {
-                code: tsx.code.clone(),
-                source_map: tsx.source_map.clone(),
-                is_jsx: tsx.is_jsx,
-                destructured_block: tsx.destructured_block.clone(),
-            })
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let files = read_lock(&self.files);
-            let entry = files.get(&canonical)?;
-            let slot = entry.compile_slots.get(&profile_hash)?;
             let tsx = slot.tsx.as_ref()?;
             Some(IdeResponse {
                 code: tsx.code.clone(),
@@ -3869,14 +3667,13 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = profile.map(compile_profile_hash);
 
-        #[cfg(feature = "scheduler")]
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return None;
             }
         }
 
-        #[cfg(feature = "scheduler")]
         let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
             let efs = self.effective_file_state(&canonical, profile_hash)?;
             let file_kind = self.scheduler.try_get_source(&canonical).and_then(|snap| {
@@ -3905,30 +3702,6 @@ impl VerterHost {
             )
         };
 
-        #[cfg(target_arch = "wasm32")]
-        let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
-            let (file_kind, cached_extract) = {
-                let files = read_lock(&self.files);
-                let entry = files.get(&canonical)?;
-                (entry.file_kind, entry.cached_tsc_extract.clone())
-            };
-            let efs = self.effective_file_state(&canonical, profile_hash)?;
-            let cached_extract = cached_extract.and_then(|(hash, extract)| {
-                if hash == efs.whole_hash {
-                    Some(extract)
-                } else {
-                    None
-                }
-            });
-            (
-                efs.source,
-                file_kind,
-                efs.script_analysis.macro_type_deps.clone(),
-                efs.script_analysis.imports.clone(),
-                cached_extract,
-                efs.whole_hash,
-            )
-        };
         if file_kind != FileKind::VueSfc {
             return None;
         }
@@ -3963,20 +3736,12 @@ impl VerterHost {
             },
         ) {
             let arc = Arc::new(fresh);
-            #[cfg(feature = "scheduler")]
             {
                 if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
                     cc.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
                 }
             }
 
-            #[cfg(target_arch = "wasm32")]
-            {
-                let mut files = write_lock(&self.files);
-                if let Some(entry) = files.get_mut(&canonical) {
-                    entry.cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
-                }
-            }
             arc
         } else {
             // No <script setup> â€” fall through to direct path for empty stub
@@ -4024,19 +3789,10 @@ impl VerterHost {
         profile_hash: u64,
         diagnostics: DiagnosticsSnapshot,
     ) {
-        #[cfg(feature = "scheduler")]
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
             cc.latest_diagnostics.insert(profile_hash, diagnostics);
             cc.diagnostics_generation += 1;
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut files = write_lock(&self.files);
-            if let Some(entry) = files.get_mut(canonical_id) {
-                entry.latest_diagnostics.insert(profile_hash, diagnostics);
-                entry.diagnostics_generation += 1;
-            }
         }
     }
 

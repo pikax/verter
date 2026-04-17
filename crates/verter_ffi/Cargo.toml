@@ -11,10 +11,9 @@ publish = false
 
 [features]
 default = []
-scheduler = ["verter_session/scheduler"]
 
 [dependencies]
-verter_session = { path = "../verter_session", version = "0.0.1-beta.1", default-features = false }
+verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_semantic = { path = "../verter_semantic" }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
