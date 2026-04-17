@@ -308,6 +308,31 @@ impl RequestStoreView {
     }
 }
 
+/// Allow `RequestStoreView` to be passed directly anywhere a `StoreView` is
+/// accepted (e.g. `ModuleFactsDb::get`, route-DB validators). Delegates to
+/// [`RequestStoreView::validates_fact`] — captured view first, extension
+/// store fallback — so mid-request loaded canonicals pass route-DB
+/// validation instead of being rejected as "untracked".
+///
+/// `compat_token` and `checks_archive` forward to the captured view so that
+/// all route-DB singleflight and archive-strictness semantics stay aligned
+/// with the snapshot the request was keyed against.
+impl crate::resolver_core::StoreView for RequestStoreView {
+    fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
+        use crate::resolver_core::StoreView;
+        self.captured.compat_token()
+    }
+
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        self.validates_fact(fact)
+    }
+
+    fn checks_archive(&self) -> bool {
+        use crate::resolver_core::StoreView;
+        self.captured.checks_archive()
+    }
+}
+
 thread_local! {
     /// Current request's view, installed by [`RequestStoreView::install`] at
     /// request entry and restored to its previous value when the returned

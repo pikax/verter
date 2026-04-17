@@ -5393,6 +5393,13 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let store_view = self.resolver_store_view();
+        // §4.2 Install a request-scoped view so mid-request `ensure_loaded`
+        // pushes into the extension store and predicate callers consult the
+        // captured view via the thread-local.
+        let request_view = crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
+            store_view.clone(),
+        ));
+        let _request_guard = request_view.install();
 
         let resolved = self.resolve_component_meta_in_view(
             canonical.as_str(),
@@ -5434,6 +5441,11 @@ impl VerterHost {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let store_view = self.resolver_store_view();
+        // §4.2 Install a request-scoped view for the duration of this query.
+        let request_view = crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
+            store_view.clone(),
+        ));
+        let _request_guard = request_view.install();
 
         let resolved = self.resolve_component_meta_in_view(
             canonical.as_str(),
