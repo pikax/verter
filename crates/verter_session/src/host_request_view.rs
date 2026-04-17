@@ -422,7 +422,6 @@ impl RequestStoreView {
 /// with the snapshot the request was keyed against.
 impl crate::resolver_core::StoreView for RequestStoreView {
     fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-        use crate::resolver_core::StoreView;
         self.captured.compat_token()
     }
 
@@ -431,7 +430,6 @@ impl crate::resolver_core::StoreView for RequestStoreView {
     }
 
     fn checks_archive(&self) -> bool {
-        use crate::resolver_core::StoreView;
         self.captured.checks_archive()
     }
 
@@ -441,7 +439,6 @@ impl crate::resolver_core::StoreView for RequestStoreView {
     /// extension) MUST be rejected for archived entries, otherwise stale
     /// soft-invalidated data leaks past workspace content changes.
     fn validates_archived(&self, fact: &FactVersionRef) -> bool {
-        use crate::resolver_core::StoreView;
         if self.captured.validates_archived(fact) {
             return true;
         }

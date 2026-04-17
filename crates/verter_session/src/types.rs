@@ -984,7 +984,7 @@ pub(crate) struct CompileSlot {
     pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
-    #[cfg_attr(feature = "scheduler", allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) last_access_tick: u64,
     /// Combined TSX output for LSP type checking. Not a virtual file.
     pub(crate) tsx: Option<CachedTsx>,

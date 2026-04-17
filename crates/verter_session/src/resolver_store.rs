@@ -204,6 +204,7 @@ impl HostStoreView {
     }
 
     /// Returns true if ALL fact versions are still valid in this view.
+    #[allow(dead_code)] // Retained for parity with RequestStoreView::validates_all.
     pub(crate) fn validates_all(&self, facts: &[crate::resolver_core::FactVersionRef]) -> bool {
         use crate::resolver_core::StoreView;
         facts.iter().all(|fact| self.validates(fact))

@@ -135,6 +135,7 @@ fn read_analysis_source_result_detail(
     detail
 }
 
+#[cfg(test)]
 fn workspace_vfs_source_kind(detail: Option<String>) -> String {
     match detail {
         Some(detail) if !detail.is_empty() => format!("workspace-vfs {detail}"),
@@ -4207,22 +4208,14 @@ impl VerterHost {
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) {
-        // Ambient-view-first hash chain. Ambient governs inside a real
-        // request; explicit arg is fallback; outside any view, live host.
-        // On a view-miss for an unloaded canonical, ensure_loaded once so
-        // the view's extension store captures the new canonical's hash.
+        // Ambient-view-first hash chain. `current_or_read_whole_hash_in_view`
+        // already does `ensure_loaded` on view-miss inside a request, so the
+        // only remaining fallback is the caller-provided `known_shallow`
+        // hash (avoids a redundant ensure_loaded round-trip when the caller
+        // already has shallow state in hand).
         let whole_hash = self
             .current_or_read_whole_hash_in_view(canonical_id, store_view)
-            .or_else(|| known_shallow.map(|state| state.whole_hash))
-            .or_else(|| {
-                if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
-                    None
-                } else if self.ensure_loaded(canonical_id) {
-                    self.current_or_read_whole_hash_in_view(canonical_id, store_view)
-                } else {
-                    None
-                }
-            });
+            .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
@@ -6692,7 +6685,6 @@ impl VerterHost {
             // blocks are NOT persisted to avoid stale cache when the external
             // dep changes (reverse-dep invalidation only clears compile_slots).
             if src_blocks.is_empty() {
-                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(mut cc) = self.compile_cache.get_mut(canonical) {
                     cc.raw_template_analysis = Some(tpl_arc);
                 }
@@ -7131,9 +7123,6 @@ impl VerterHost {
         }
         results
     }
-
-    /// Build a `FileAnalysisSnapshot` from a `FileEntry` using Arc::clone
-    /// for immutable fields and deep clone for mutable fields (imports, bindings).
 
     /// Build a `FileAnalysisSnapshot` from scheduler snapshots and compile_cache.
     ///
@@ -7870,9 +7859,9 @@ impl VerterHost {
     /// Look up the byte span of an exported name in a target file.
     ///
     /// For `.vue` files: searches `ScriptAnalysisSnapshot.bindings` (script-setup
-    /// auto-exports) â€” spans are SFC-absolute.
-    /// For `.ts`/`.js` files: searches `FileEntry.export_signatures` â€” spans are
-    /// file-absolute.
+    /// auto-exports) — spans are SFC-absolute.
+    /// For `.ts`/`.js` files: searches `CompileCacheEntry.export_signatures` —
+    /// spans are file-absolute.
     ///
     /// Returns `None` if the file doesn't exist or the name isn't exported.
     pub fn get_export_span(

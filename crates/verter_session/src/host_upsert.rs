@@ -81,8 +81,11 @@ impl VerterHost {
                 }),
             });
 
-        // Wait for scheduler to commit Source + Analysis snapshots
-        match handle.wait() {
+        // Wait for scheduler to commit Source + Analysis snapshots.
+        // `wait_or_drive` blocks on the native driver's condvar when a driver
+        // thread is installed; on WASM (single-threaded sync mode) it drives
+        // stages inline until the handle resolves.
+        match self.scheduler.wait_or_drive(&handle) {
             CompletionState::Ready(_) => {}
             CompletionState::Failed(e) => {
                 return Err(HostError::Scheduler(e));
@@ -383,9 +386,6 @@ impl VerterHost {
         let ws = self.ws();
         ws.record_parsed_edges(canonical_id, &parsed_edges);
     }
-
-    /// Legacy upsert: direct parse, no scheduler.
-    /// Used on WASM where threads are unavailable.
 
     /// Apply preprocessor-compiled style overrides for a file+profile.
     ///

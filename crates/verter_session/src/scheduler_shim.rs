@@ -92,7 +92,7 @@ impl WorkspaceAccess for SchedulerBackedWorkspace {
     }
 }
 
-#[cfg(all(test, feature = "scheduler"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use verter_scheduler::scheduler::{Request, SchedulerConfig};

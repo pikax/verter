@@ -46,9 +46,7 @@ pub(crate) fn strip_configured_extension<'a>(
 
 /// Lightweight view of a dependent file's data needed for invalidation.
 ///
-/// On the scheduler path, populated from `HostAnalysisData` + `CompileCacheEntry`.
-/// On the WASM path, populated from `FileEntry`. Avoids passing `&FileEntry` into
-/// invalidation logic, enabling the `files` map to be gated to WASM-only.
+/// Populated from scheduler `HostAnalysisData` + `CompileCacheEntry`.
 pub(crate) struct DependentView {
     pub(crate) canonical_id: String,
     pub(crate) import_routes: rustc_hash::FxHashMap<String, DependencyResolution>,
@@ -202,7 +200,7 @@ fn import_resolves_to_dep_with_resolver_view(
 /// invalidation is skipped even though the export text changed.
 ///
 /// Returns `(should_invalidate, updated_resolved_type_hashes)`. The caller must
-/// write back the updated hashes to the appropriate store (FileEntry or CompileCacheEntry).
+/// write back the updated hashes to `CompileCacheEntry`.
 pub(crate) fn should_invalidate_dependent_view(
     view: &mut DependentView,
     dependency_id: &str,
@@ -328,8 +326,6 @@ pub(crate) fn should_invalidate_dependent_view(
 
     false
 }
-
-/// Legacy wrapper for should_invalidate_dependent_view using FileEntry.
 
 /// Smart invalidation using a pre-computed set of owner canonical IDs.
 ///

@@ -353,8 +353,6 @@ impl VerterHost {
         }
     }
 
-    /// Create a new host (WASM variant, backed by MemoryWorkspace).
-
     /// Create a standalone host with an internal memory workspace.
     ///
     /// For backward compatibility with tests and simple use cases that don't
@@ -366,8 +364,6 @@ impl VerterHost {
         ));
         Self::new(config, workspace)
     }
-
-    /// Create a standalone host (WASM variant).
 
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
@@ -1288,8 +1284,10 @@ impl VerterHost {
                     file_kind: None,
                 });
 
-            // Wait for the scheduler to reach Analysis
-            match handle.wait() {
+            // Wait for the scheduler to reach Analysis. `wait_or_drive` drives
+            // stages inline on WASM (no driver thread); on native it delegates
+            // to `handle.wait()` when the driver thread is installed.
+            match self.scheduler.wait_or_drive(&handle) {
                 CompletionState::Ready(_) => {}
                 _ => return false,
             }
@@ -1441,7 +1439,6 @@ impl VerterHost {
             let dep_is_newly_added =
                 old_export_signatures.is_empty() && !new_export_signatures.is_empty();
 
-            #[cfg(not(target_arch = "wasm32"))]
             {
                 let ws = self.workspace.read();
                 let cleared = deps::smart_invalidate_dependents_via_scheduler(

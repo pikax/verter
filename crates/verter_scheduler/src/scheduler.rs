@@ -1104,24 +1104,6 @@ impl Scheduler {
         }
     }
 
-    /// Dispatch all ready work inline (WASM: no rayon, single-threaded).
-    #[cfg(target_arch = "wasm32")]
-    fn dispatch_ready_work(&self) {
-        loop {
-            let entry = {
-                let mut job_index = self.job_index.lock();
-                job_index.dequeue()
-            };
-
-            let entry = match entry {
-                Some(e) => e,
-                None => break,
-            };
-
-            self.execute_stage_inline(entry);
-        }
-    }
-
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).
     fn execute_stage_inline(&self, entry: QueueEntry) {
         let file_id = &entry.job_key.file_id;
