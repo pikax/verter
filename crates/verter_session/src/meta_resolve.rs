@@ -91,7 +91,7 @@ pub struct CapturedComponentMetaInputs {
 }
 
 impl ComponentMetaRequestHost for VerterHost {
-    type View = crate::resolver_store::HostStoreView;
+    type View = crate::host_request_view::RequestStoreView;
     type Mode = ResolverMode;
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
@@ -105,7 +105,10 @@ impl ComponentMetaRequestHost for VerterHost {
     }
 
     fn snapshot_store_view(&self) -> Self::View {
-        self.resolver_store_view()
+        (*crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
+            self.resolver_store_view(),
+        )))
+        .clone()
     }
 
     fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
@@ -4648,7 +4651,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         mode: ResolverMode,
-        store_view: &HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) -> Option<ResolvedComponentMetaState> {
         self.resolve_component_meta_with_view(canonical_or_alias, mode, Some(store_view))
     }
@@ -4657,7 +4660,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         mode: ResolverMode,
-        store_view: Option<&HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -4792,7 +4795,7 @@ impl VerterHost {
         canonical: &str,
         mode: ResolverMode,
         whole_hash: Hash16,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -4810,7 +4813,7 @@ impl VerterHost {
         canonical: &str,
         mode: ResolverMode,
         captured: &CapturedComponentMetaInputs,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -4827,7 +4830,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -4846,7 +4849,7 @@ impl VerterHost {
         mode: ResolverMode,
         whole_hash: Hash16,
         captured: Option<&CapturedComponentMetaInputs>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
     ) -> Option<ResolvedComponentMetaState> {
@@ -5110,11 +5113,11 @@ impl VerterHost {
         };
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         let store_merge_started = audit_enabled.then(Instant::now);
-        let final_store_view = self.resolver_store_view();
+        let final_store_view = self.owned_or_ambient_request_view();
         parts.fact_versions = self.current_dependency_fact_versions_in_view(
             canonical,
             &parts.tracked_dependencies,
-            Some(&final_store_view),
+            Some(&*final_store_view),
         );
         if let Some(started) = store_merge_started {
             audit_timings.store_merge_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -5177,7 +5180,7 @@ impl VerterHost {
         >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         tracked_dependencies: &mut BTreeSet<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
         fn track_component_meta_dependency(
@@ -6513,7 +6516,7 @@ impl VerterHost {
     pub(crate) fn get_raw_analysis_snapshot_in_view(
         &self,
         canonical: &str,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<FileAnalysisSnapshot> {
         let _trace = component_meta_trace_scope!(
             "get_raw_analysis_snapshot",
@@ -6665,7 +6668,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         mode: ResolverMode,
-        store_view: &crate::resolver_store::HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) -> Option<ResolvedComponentMetaState> {
         let cache_key = resolved_meta_cache_key(canonical, mode);
         if let Some(cached) = self
@@ -6799,7 +6802,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         kind: crate::types::MetaPayloadKind,
-        store_view: &crate::resolver_store::HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) -> Option<Vec<u8>> {
         #[cfg(feature = "scheduler")]
         {
@@ -6867,7 +6870,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Vec<crate::resolver_core::FactVersionRef> {
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
@@ -6901,7 +6904,7 @@ impl VerterHost {
         canonical: &str,
         facts: &mut Vec<crate::resolver_core::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) {
         if let Some(hash) = store_view
             .and_then(|view| view.whole_hash(canonical))
@@ -6946,7 +6949,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         kind: crate::resolver_core::DerivedFactKind,
-        store_view: Option<&crate::resolver_store::HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<Hash16> {
         match kind {
             crate::resolver_core::DerivedFactKind::DirectSource => {
@@ -9873,7 +9876,7 @@ fn resolved_meta_cache_key(
 
 struct HostComponentMetaResolver<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a crate::resolver_store::HostStoreView>,
+    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
     shared_owner_engine: Option<
         std::cell::RefCell<
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'a>,
@@ -10353,15 +10356,10 @@ pub(crate) fn resolve_type_declaration_in_view(
     host: &VerterHost,
     dep_canonical: &str,
     requested_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> ResolvedTypeDeclaration {
-    let owned_view;
-    let current_view = if let Some(view) = store_view {
-        view
-    } else {
-        owned_view = host.resolver_store_view();
-        &owned_view
-    };
+    let owned_view = host.owned_or_ambient_request_view();
+    let current_view = store_view.unwrap_or(&*owned_view);
     let resolver = HostComponentMetaResolver {
         host,
         store_view: Some(current_view),
@@ -10410,7 +10408,7 @@ pub(crate) fn resolve_type_declaration_in_view(
 fn read_full_source(
     host: &VerterHost,
     canonical_source: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<String> {
     host.read_analysis_source_in_view(canonical_source, store_view)
         .map(|source| source.to_string())
@@ -10426,7 +10424,7 @@ fn resolve_jsdoc_block(
     cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     kind: verter_workspace::ResolveRequestKind,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<ResolvedJsdocBlock> {
     if span.start == 0 && span.end == 0 {
         return None;
@@ -10469,7 +10467,7 @@ fn map_jsdoc_tag(
     _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
     _kind: verter_workspace::ResolveRequestKind,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
     tag: verter_semantic::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
@@ -10549,7 +10547,7 @@ fn resolve_jsdoc_tag_type(
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     let parsed = verter_semantic::analysis::type_expr_lower::parse_type_annotation(raw_type);
     let parsed = if parsed.is_unknown() {

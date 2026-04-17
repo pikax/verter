@@ -116,7 +116,7 @@ struct ScopedSolveEntry {
 /// alias across files.
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a HostStoreView>,
+    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     current_prepared_request_root: Option<String>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
@@ -305,7 +305,7 @@ fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn new(
         host: &'a VerterHost,
-        store_view: Option<&'a HostStoreView>,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         owner_solver_host: &'a dyn TypeSolverHost,
     ) -> Self {
         Self {
@@ -340,7 +340,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub fn from_owner_engine(
         host: &'a VerterHost,
-        store_view: Option<&'a HostStoreView>,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         owner_engine: TypeQueryEngine<'a>,
     ) -> Self {
         Self {
@@ -847,7 +847,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.host
     }
 
-    pub(crate) fn store_view(&self) -> Option<&HostStoreView> {
+    pub(crate) fn store_view(&self) -> Option<&crate::host_request_view::RequestStoreView> {
         self.store_view
     }
 
@@ -947,7 +947,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return Some(projected_surface_unwrap_or_clone(surface));
         }
 
-        let owned_view = self.host.resolver_store_view();
+        let owned_view = self.host.owned_or_ambient_request_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -958,12 +958,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
             SessionSolverHost::from_scope_payload(
                 self.host,
-                Some(&owned_view),
+                Some(&*owned_view),
                 scope_canonical_id,
                 scope_payload.clone(),
             )
         } else {
-            SessionSolverHost::new(self.host, Some(&owned_view))
+            SessionSolverHost::new(self.host, Some(&*owned_view))
         };
         self.owner_engine
             .project_surface(subject_id, &solver_host, scope_canonical_id)
@@ -2189,7 +2189,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached.as_member().cloned();
         }
 
-        let owned_view = self.host.resolver_store_view();
+        let owned_view = self.host.owned_or_ambient_request_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -2200,12 +2200,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
             SessionSolverHost::from_scope_payload(
                 self.host,
-                Some(&owned_view),
+                Some(&*owned_view),
                 scope_canonical_id,
                 scope_payload.clone(),
             )
         } else {
-            SessionSolverHost::new(self.host, Some(&owned_view))
+            SessionSolverHost::new(self.host, Some(&*owned_view))
         };
         self.owner_engine
             .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
@@ -2286,7 +2286,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return cached.as_keyspace().cloned();
         }
 
-        let owned_view = self.host.resolver_store_view();
+        let owned_view = self.host.owned_or_ambient_request_view();
         let subject_key = SubjectKey::Decl {
             canonical_id: scope_canonical_id.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -2297,12 +2297,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
             SessionSolverHost::from_scope_payload(
                 self.host,
-                Some(&owned_view),
+                Some(&*owned_view),
                 scope_canonical_id,
                 scope_payload.clone(),
             )
         } else {
-            SessionSolverHost::new(self.host, Some(&owned_view))
+            SessionSolverHost::new(self.host, Some(&*owned_view))
         };
         self.owner_engine
             .project_keyspace(subject_id, &solver_host, scope_canonical_id)
@@ -2635,7 +2635,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
         projected_expr: &TypeExpr,
-        store_view: &HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use crate::resolver_core::type_surface_db::{
             TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
@@ -2675,7 +2675,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         members: &[String],
         projected_expr: &TypeExpr,
-        store_view: &HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use std::collections::BTreeSet;
         use verter_semantic::analysis::type_expr::ObjectMember;
@@ -2722,7 +2722,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         root_symbol: &str,
         projected_member: &ProjectedMember,
-        store_view: &HostStoreView,
+        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use crate::resolver_core::type_surface_db::{
             TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
@@ -3879,7 +3879,7 @@ fn local_type_symbol_metadata_for_known_source(
     host: &VerterHost,
     canonical_source: &str,
     resolved_name: &str,
-    store_view: Option<&HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<ResolvedLocalTypeSymbolMetadata> {
     let analysis = host.external_type_analysis_in_view(canonical_source, store_view)?;
     let symbol = analysis.local_type_symbol(resolved_name)?;
@@ -3902,7 +3902,7 @@ fn local_type_symbol_metadata_for_known_source(
 
 struct DirectPreparedDeclarationResolver<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a HostStoreView>,
+    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
 }
 
 impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
@@ -5052,7 +5052,7 @@ fn resolve_imported_registry_symbol_with_budget<F>(
     host: &VerterHost,
     canonical_id: &str,
     exported_name: &str,
-    store_view: Option<&HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
     mut allow_route: F,
 ) -> Option<ResolvedImportedRegistrySymbol>
 where
@@ -5616,9 +5616,9 @@ export interface Wrapper extends PackageProps {}
         ]);
         assert!(host.ensure_loaded("/workspace/src/Child.vue"));
 
-        let view = host.resolver_store_view();
-        let solver_host = SessionSolverHost::new(&host, Some(&view));
-        let mut engine = ComponentMetaQueryEngine::new(&host, Some(&view), &solver_host);
+        let view = host.owned_or_ambient_request_view();
+        let solver_host = SessionSolverHost::new(&host, Some(&*view));
+        let mut engine = ComponentMetaQueryEngine::new(&host, Some(&*view), &solver_host);
 
         let shape = engine
             .project_prepared_type_surface_shape("/workspace/src/Child.vue", "Wrapper")
@@ -5904,7 +5904,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
             ],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -5975,7 +5975,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -6057,7 +6057,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -6127,7 +6127,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
 
         let mut first_query =
@@ -6151,7 +6151,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &store_view)
+                    .get(&stable_surface_key, &*store_view)
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
@@ -6222,7 +6222,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -6292,7 +6292,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -6355,7 +6355,7 @@ export type IdentityProps<T> = RootProps<T>
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -6455,7 +6455,7 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
         assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
         assert!(host.ensure_loaded("/src/InputMenu.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
 
         let mut first_query =
@@ -6490,7 +6490,7 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_member_key, &store_view)
+                    .get(&stable_member_key, &*store_view)
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Member(_))
             ),
@@ -6509,7 +6509,7 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&dependent_member_key, &store_view)
+                .get(&dependent_member_key, &*store_view)
                 .is_none(),
             "generic-dependent members must stay out of the shared cache because their projected meaning depends on the caller substitutions",
         );
@@ -6622,7 +6622,7 @@ export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 
         assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
         assert!(host.ensure_loaded("/src/ColorModeSelectCopy.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
 
         let mut first_query =
@@ -6654,7 +6654,7 @@ export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &store_view)
+                    .get(&stable_surface_key, &*store_view)
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
@@ -6752,7 +6752,7 @@ export interface BProps extends SharedProps {}
         assert!(host.ensure_loaded("/src/A.vue"));
         assert!(host.ensure_loaded("/src/B.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
 
         let mut first_query =
@@ -6774,7 +6774,7 @@ export interface BProps extends SharedProps {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&stable_surface_key, &store_view)
+                .get(&stable_surface_key, &*store_view)
                 .is_none(),
             "non-generic imported whole surfaces should stay request-local instead of prepublishing root-cache entries from nested projection",
         );
@@ -6884,7 +6884,7 @@ export interface BProps extends SharedProps {}
             }],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
 
         let mut first_query =
@@ -6907,7 +6907,7 @@ export interface BProps extends SharedProps {}
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &store_view)
+                    .get(&stable_surface_key, &*store_view)
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
@@ -6984,7 +6984,7 @@ export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query = ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
 
@@ -7029,7 +7029,7 @@ export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&key, &store_view)
+                .get(&key, &*store_view)
                 .is_none(),
             "same-file generic members should stay request-local instead of publishing into the shared type-surface DB",
         );
@@ -7072,7 +7072,7 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         );
         assert!(host.ensure_loaded("/src/base.ts"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7138,7 +7138,7 @@ export interface LinkProps extends NuxtLinkProps {
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7221,7 +7221,7 @@ export interface LinkProps extends NuxtLinkProps {
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7325,7 +7325,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7456,7 +7456,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7592,7 +7592,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
                 },
             ],
         );
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7751,7 +7751,7 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
             ],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7881,7 +7881,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             ],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -7993,7 +7993,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             ],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -8140,7 +8140,7 @@ export type Concrete = Wrapper<string>
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -8561,7 +8561,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
             ],
         );
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
@@ -8840,7 +8840,7 @@ const props = defineProps<AppProps>()
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.resolver_store_view();
+        let store_view = host.owned_or_ambient_request_view();
         let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
         let mut query_engine =
             ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);

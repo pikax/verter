@@ -187,7 +187,7 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 pub fn resolved_macro_to_expansion_via_solver(
     macro_meta: &ResolvedMacroMeta,
     host: &crate::VerterHost,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> (
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,

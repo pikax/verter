@@ -149,19 +149,19 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -197,7 +197,7 @@ defineProps<Props>()
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
 
@@ -208,7 +208,7 @@ defineProps<Props>()
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
 
@@ -248,11 +248,11 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let owner_engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
@@ -260,7 +260,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
     );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
     let raw_body = query_engine
@@ -326,19 +326,19 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -361,7 +361,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
 
@@ -372,7 +372,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
 
@@ -2092,14 +2092,14 @@ export interface Props { a: string }
 
     project.host().provenance().reset();
     let mut tracked_deps = std::collections::BTreeSet::new();
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().owned_or_ambient_request_view();
 
     let resolved = resolve_jsdoc_tag_type(
         project.host(),
         "/types.ts",
         "DocType",
         &mut tracked_deps,
-        Some(&store_view),
+        Some(&*store_view),
     )
     .expect("typed JSDoc payload should resolve through cached imported lookup");
 
@@ -3121,15 +3121,15 @@ defineProps<DashboardSidebarCollapseProps>()
         )
         .unwrap();
 
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().owned_or_ambient_request_view();
     let owner_solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
         project.host(),
-        Some(&store_view),
+        Some(&*store_view),
         "/components/Button.vue",
     );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         project.host(),
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let button_projected = query_engine
@@ -4730,16 +4730,16 @@ defineProps<SharedType>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -4792,16 +4792,16 @@ defineProps<{ a: FooA; b: FooB }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -4851,16 +4851,16 @@ defineProps<SharedType>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -4894,19 +4894,19 @@ defineProps<Local>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let resolver_host = super::HostComponentMetaResolver {
         host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -4974,11 +4974,11 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -5470,11 +5470,11 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -5521,16 +5521,16 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
@@ -5584,16 +5584,16 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
@@ -5733,16 +5733,16 @@ defineProps<Props>()
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -5944,16 +5944,16 @@ defineModel<boolean>('open')
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -6040,19 +6040,19 @@ defineSlots<Slots<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -6075,7 +6075,7 @@ defineSlots<Slots<T>>()
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
     let solves_before = query_engine.solve_count();
@@ -6087,7 +6087,7 @@ defineSlots<Slots<T>>()
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
 
@@ -6173,7 +6173,7 @@ defineSlots<Slots<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -6183,11 +6183,15 @@ defineSlots<Slots<T>>()
             "/src/App.vue",
             super::ResolverMode::Expanded,
             whole_hash,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            Some(&*store_view),
+        )
         .expect("fallthrough-expanded state should resolve");
 
     assert!(
@@ -6253,7 +6257,7 @@ defineExpose({ exposed })
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -6263,11 +6267,15 @@ defineExpose({ exposed })
             "/src/App.vue",
             super::ResolverMode::Expanded,
             whole_hash,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            Some(&*store_view),
+        )
         .expect("fallthrough-expanded state should resolve");
 
     assert!(
@@ -6387,7 +6395,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let whole_hash = store_view
         .whole_hash("/src/App.vue")
         .expect("whole hash should exist for the owner");
@@ -6397,11 +6405,15 @@ defineEmits<Emits>()
             "/src/App.vue",
             super::ResolverMode::Expanded,
             whole_hash,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("full expanded state should resolve");
     let fallthrough = host
-        .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash, Some(&store_view))
+        .compute_component_meta_state_for_fallthrough(
+            "/src/App.vue",
+            whole_hash,
+            Some(&*store_view),
+        )
         .expect("fallthrough-expanded state should resolve");
 
     let full_props = full
@@ -6478,7 +6490,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let whole_hash = store_view
         .whole_hash("/src/Child.vue")
         .expect("whole hash should exist for the owner");
@@ -6489,7 +6501,7 @@ defineEmits<Emits>()
         .compute_component_meta_state_for_fallthrough(
             "/src/Child.vue",
             whole_hash,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("fallthrough-expanded state should resolve");
 
@@ -6575,7 +6587,7 @@ defineEmits<Emits>()
             possible_canonical_ids: Vec::new(),
         }],
     );
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let whole_hash = store_view
         .whole_hash("/src/Child.vue")
         .expect("whole hash should exist for the owner");
@@ -6586,7 +6598,7 @@ defineEmits<Emits>()
         .compute_component_meta_state_for_fallthrough(
             "/src/Child.vue",
             whole_hash,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("fallthrough-expanded state should resolve");
 
@@ -6740,16 +6752,16 @@ defineEmits<Emits>()
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -6855,16 +6867,16 @@ defineEmits<Emits>()
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -6971,16 +6983,16 @@ defineEmits<Emits>()
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -7097,16 +7109,16 @@ defineModel<string>('searchTerm')
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -7274,16 +7286,16 @@ defineEmits<Emits>()
     };
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -7407,16 +7419,16 @@ defineSlots<Slots>()
         verter_semantic::analysis::type_expand::ExpandedComponentTypes::default();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -7603,21 +7615,21 @@ withDefaults(defineProps<Props>(), {
         "resolved macro surface should already contain the projected defineProps members, got {resolved_prop_names:?}"
     );
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let facts = host
-        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .ensure_module_facts_in_view("/src/App.vue", Some(&*store_view))
         .expect("app facts should be present");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
@@ -7682,16 +7694,16 @@ defineProps<Props<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
@@ -7799,16 +7811,16 @@ defineProps<Props<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
@@ -7911,16 +7923,16 @@ defineProps<ColorModeSelectProps>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered =
@@ -8010,16 +8022,16 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
@@ -8091,16 +8103,16 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         ),
     ]);
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             &host,
-            Some(&store_view),
+            Some(&*store_view),
             &component,
         );
     let mut direct_query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         &host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let select_menu_component = format!("{repo_root}/src/runtime/components/SelectMenu.vue");
@@ -8128,7 +8140,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         .resolve_named_type_export_target_in_view(
             &combobox_root_decl.canonical_source,
             &combobox_root_decl.resolved_name,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .unwrap_or((
             combobox_root_decl.canonical_source.clone(),
@@ -8176,7 +8188,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         &host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered =
@@ -8232,19 +8244,19 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         ),
     ]);
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .get_raw_analysis_snapshot_in_view(&component, Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             &host,
-            Some(&store_view),
+            Some(&*store_view),
             &component,
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host: &host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -8286,7 +8298,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         &host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
     let prepared_overlay_surface =
@@ -8319,11 +8331,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
     let facts = host
-        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .ensure_module_facts_in_view(&component, Some(&*store_view))
         .expect("component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -8386,19 +8398,19 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         })
         .expect("overlay-style upsert should succeed");
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .get_raw_analysis_snapshot_in_view(&component, Some(&*store_view))
         .expect("overlay-backed raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             &host,
-            Some(&store_view),
+            Some(&*store_view),
             &component,
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host: &host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -8420,7 +8432,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         &host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
     host.append_component_meta_registry_entries(
@@ -8430,7 +8442,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
     let prepared_overlay_shape = query_engine
@@ -8465,7 +8477,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         "overlay-backed direct macro object shape should stay solve-free after registry append",
     );
     let facts = host
-        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .ensure_module_facts_in_view(&component, Some(&*store_view))
         .expect("overlay-backed component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -8518,19 +8530,19 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         ),
     ]);
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view(&component, Some(&store_view))
+        .get_raw_analysis_snapshot_in_view(&component, Some(&*store_view))
         .expect("raw snapshot should exist");
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             &host,
-            Some(&store_view),
+            Some(&*store_view),
             &component,
         );
     let mut resolver_host = super::HostComponentMetaResolver {
         host: &host,
-        store_view: Some(&store_view),
+        store_view: Some(&*store_view),
         shared_owner_engine: Some(std::cell::RefCell::new(
             verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
                 &owner_solver_host,
@@ -8552,7 +8564,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         .expect("shared owner engine should still exist after part resolution");
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
         &host,
-        Some(&store_view),
+        Some(&*store_view),
         owner_engine,
     );
     host.append_component_meta_registry_entries(
@@ -8562,7 +8574,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         &mut parts.resolved_type_registry,
         &mut parts.resolved_type_registry_meta,
         &mut parts.tracked_dependencies,
-        Some(&store_view),
+        Some(&*store_view),
         &mut query_engine,
     );
     let registry_root = parts
@@ -8584,7 +8596,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         "the real ColorModeSelect local seed is an empty shell; if this changes, tighten the registry shortcut instead of silently trusting every object seed",
     );
     let facts = host
-        .ensure_module_facts_in_view(&component, Some(&store_view))
+        .ensure_module_facts_in_view(&component, Some(&*store_view))
         .expect("component facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
@@ -8599,7 +8611,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let shared_surface_warmed_before = matches!(
         host.resolver_runtime()
             .type_surfaces
-            .get(&shared_surface_key, &store_view)
+            .get(&shared_surface_key, &*store_view)
             .as_deref(),
         Some(crate::resolver_core::TypeSurfaceOpResult::Surface(_))
     );
@@ -8669,16 +8681,16 @@ defineProps<Props<T>>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
@@ -8728,16 +8740,16 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
@@ -8790,11 +8802,11 @@ defineProps<{ first: Inner; second: Inner }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
@@ -8878,11 +8890,11 @@ defineProps<{ ui?: Button['ui'] }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
@@ -8956,11 +8968,11 @@ export type Button = ComponentConfig<typeof theme>
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
@@ -9006,7 +9018,7 @@ export type Button = ComponentConfig<typeof theme>
         matches!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&cache_key, &store_view)
+                .get(&cache_key, &*store_view)
                 .as_deref(),
             Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
                 verter_semantic::analysis::type_expr::TypeExpr::Object(_)
@@ -9028,7 +9040,7 @@ export type Button = ComponentConfig<typeof theme>
         matches!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&member_key, &store_view)
+                .get(&member_key, &*store_view)
                 .as_deref(),
             Some(crate::resolver_core::TypeSurfaceOpResult::Member(_))
         ),
@@ -9131,24 +9143,24 @@ defineProps<TooltipProps>()
     );
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("App snapshot should exist");
     let facts = host
-        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .ensure_module_facts_in_view("/src/App.vue", Some(&*store_view))
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let kbds_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
@@ -9208,7 +9220,7 @@ defineProps<TooltipProps>()
     assert!(
         host.resolver_runtime()
             .type_surfaces
-            .get(&routed_key, &store_view)
+            .get(&routed_key, &*store_view)
             .is_none(),
         "symbolic imported union fields should skip defineProps member-route rescue instead of warming a routed surface for kbds",
     );
@@ -9270,24 +9282,24 @@ defineProps<Props>()
     );
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("App snapshot should exist");
     let facts = host
-        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .ensure_module_facts_in_view("/src/App.vue", Some(&*store_view))
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
@@ -9370,7 +9382,7 @@ defineProps<Props>()
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&routed_key, &store_view)
+                .get(&routed_key, &*store_view)
                 .is_none(),
             "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name}",
         );
@@ -9444,24 +9456,24 @@ defineProps<Props>()
     );
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let snapshot = host
-        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&store_view))
+        .get_raw_analysis_snapshot_in_view("/src/App.vue", Some(&*store_view))
         .expect("App snapshot should exist");
     let facts = host
-        .ensure_module_facts_in_view("/src/App.vue", Some(&store_view))
+        .ensure_module_facts_in_view("/src/App.vue", Some(&*store_view))
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let owner_solver_host =
         crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
             host,
-            Some(&store_view),
+            Some(&*store_view),
             "/src/App.vue",
         );
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
@@ -9544,7 +9556,7 @@ defineProps<Props>()
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&routed_key, &store_view)
+                .get(&routed_key, &*store_view)
                 .is_none(),
             "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name} even when field raw_type is missing",
         );
@@ -9576,11 +9588,11 @@ defineProps<{ first: Inner; second: Inner }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
@@ -9643,11 +9655,11 @@ export interface LinkProps extends NuxtLinkProps {
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
     let route =
@@ -9691,7 +9703,7 @@ export interface LinkProps extends NuxtLinkProps {
         matches!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&routed_key, &store_view)
+                .get(&routed_key, &*store_view)
                 .as_deref(),
             Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
                 verter_semantic::analysis::type_expr::TypeExpr::Object(_)
@@ -9714,7 +9726,7 @@ export interface LinkProps extends NuxtLinkProps {
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&member_key, &store_view)
+                    .get(&member_key, &*store_view)
                     .as_deref(),
                 Some(crate::resolver_core::TypeSurfaceOpResult::Member(_))
             ),
@@ -9741,11 +9753,11 @@ defineProps<{ x: string }>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&store_view));
+    let store_view = host.owned_or_ambient_request_view();
+    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host, Some(&*store_view));
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(
         host,
-        Some(&store_view),
+        Some(&*store_view),
         &owner_solver_host,
     );
 
@@ -9791,15 +9803,15 @@ defineProps<Props>()
         .unwrap();
 
     let host = project.host();
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
 
     assert!(
-        host.local_type_declaration_id_in_view("/src/App.vue", "Props", Some(&store_view))
+        host.local_type_declaration_id_in_view("/src/App.vue", "Props", Some(&*store_view))
             .is_none(),
         "imported names should not be treated as local declarations when module facts already expose the import target",
     );
     assert!(
-        host.local_type_declaration_id_in_view("/src/App.vue", "Local", Some(&store_view))
+        host.local_type_declaration_id_in_view("/src/App.vue", "Local", Some(&*store_view))
             .is_some(),
         "owner-local declarations should still resolve through the cached eval env",
     );

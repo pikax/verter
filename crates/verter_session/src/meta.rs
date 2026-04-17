@@ -1005,7 +1005,7 @@ impl MetaSession {
     fn with_overlay_target_context_view<T>(
         &self,
         canonical_or_alias: &str,
-        f: impl FnOnce(&VerterHost, &crate::resolver_store::HostStoreView) -> T,
+        f: impl FnOnce(&VerterHost, &crate::host_request_view::RequestStoreView) -> T,
     ) -> Result<T, MetaError> {
         let mut gate = self
             .project
@@ -1036,7 +1036,6 @@ impl MetaSession {
             }
         }
 
-        let store_view = self.project.host.resolver_store_view();
         // §4.2 RequestStoreView install: every meta request runs under a
         // captured view + request-private extension store. The thread-local
         // `CURRENT_REQUEST_VIEW` is populated for the duration of `f` so
@@ -1044,11 +1043,9 @@ impl MetaSession {
         // (via `VerterHost::record_current_request_extension_for`), and
         // `is_evalable` / `external_inputs_memo` consult the view instead of
         // live host state.
-        let request_view = crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
-            store_view.clone(),
-        ));
+        let request_view = self.project.host.build_request_store_view();
         let _request_guard = request_view.install();
-        let result = f(&self.project.host, &store_view);
+        let result = f(&self.project.host, &*request_view);
         Ok(result)
     }
 }

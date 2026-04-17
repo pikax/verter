@@ -59,7 +59,7 @@ mod hash;
 #[cfg(feature = "scheduler")]
 pub mod host_executor;
 mod host_manage;
-mod host_request_view;
+pub mod host_request_view;
 mod host_resolve;
 mod host_upsert;
 mod id;

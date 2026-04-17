@@ -70,16 +70,17 @@ pub(crate) struct RequestExtension {
 /// store. Held via `Arc` so the thread-local [`CURRENT_REQUEST_VIEW`] can hold
 /// a `Weak` without extending the lifetime of the view.
 ///
-/// Several fields (`derived_hashes`, `import_routes` on `RequestExtension`,
-/// `captured` on `RequestStoreView`) are read by `VerterHost` methods that
-/// are not yet signature-rewritten to take `&RequestStoreView` — Commit I
-/// lands the full signature rewrite. Marked `#[allow(dead_code)]` pending
-/// that refactor.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct RequestStoreView {
+/// `#[derive(Clone)]` because `ComponentMetaRequestHost::View` and
+/// `FallthroughRequestHost::View` require `StoreView + Clone`. The internal
+/// `extensions` / `external_inputs_memo` are `Arc<RwLock<...>>`-wrapped so
+/// cloning shares state cheaply — clones of a `RequestStoreView` see the
+/// same request extension + memo, which matches the request-scoped
+/// semantics (a fixed view passed through `with_fixed_view()` is the same
+/// request's view).
+#[derive(Debug, Clone)]
+pub struct RequestStoreView {
     pub(crate) captured: Arc<HostStoreView>,
-    extensions: RwLock<FxHashMap<String, RequestExtension>>,
+    extensions: Arc<RwLock<FxHashMap<String, RequestExtension>>>,
     /// Per-request memo over host-scoped analysis results. Keyed by
     /// `(canonical_id, whole_hash)` — the content identity of the analysis.
     ///
@@ -91,8 +92,9 @@ pub(crate) struct RequestStoreView {
     /// `Arc::clone`s that the raw fetch costs. The underlying host-scoped
     /// analysis cache remains the single source of truth for the
     /// `Arc<AnalyzedExternalTypeSource>` data.
-    external_inputs_memo:
+    external_inputs_memo: Arc<
         RwLock<FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>>,
+    >,
 }
 
 /// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
@@ -125,8 +127,8 @@ impl RequestStoreView {
     pub(crate) fn new(captured: Arc<HostStoreView>) -> Arc<Self> {
         Arc::new(Self {
             captured,
-            extensions: RwLock::new(FxHashMap::default()),
-            external_inputs_memo: RwLock::new(FxHashMap::default()),
+            extensions: Arc::new(RwLock::new(FxHashMap::default())),
+            external_inputs_memo: Arc::new(RwLock::new(FxHashMap::default())),
         })
     }
 
@@ -306,6 +308,57 @@ impl RequestStoreView {
     pub(crate) fn extension_count(&self) -> usize {
         self.extensions.read().len()
     }
+
+    /// Forward to the captured view. Used by route DB + `_in_view` callers that
+    /// previously took a `&HostStoreView` directly.
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.captured.mutation_epoch()
+    }
+
+    /// Check whether `canonical_id` is tracked by the captured view OR the
+    /// extension store. Mirrors `HostStoreView::tracks_whole_hash` with
+    /// extension-aware fallback.
+    pub(crate) fn tracks_whole_hash(&self, canonical_id: &str) -> bool {
+        if self.captured.tracks_whole_hash(canonical_id) {
+            return true;
+        }
+        self.extensions.read().contains_key(canonical_id)
+    }
+
+    /// Accept `hash` for `canonical_id` when either the captured view tracks
+    /// that `(canonical, hash)` pair or the extension store does. The
+    /// captured view returns `true` for untracked canonicals (permissive
+    /// semantics on `HostStoreView::accepts_whole_hash`); if it returns
+    /// `false` the hash genuinely mismatched a tracked entry, and the
+    /// extension store only overrides that verdict on an exact match.
+    pub(crate) fn accepts_whole_hash(&self, canonical_id: &str, hash: Hash16) -> bool {
+        if self.captured.accepts_whole_hash(canonical_id, hash) {
+            return true;
+        }
+        // Captured view REJECTED (tracked canonical with mismatched hash).
+        // Only an exact extension-store match can override.
+        self.extensions
+            .read()
+            .get(canonical_id)
+            .is_some_and(|ext| ext.whole_hash == hash)
+    }
+
+    /// Diagnostic helper: delegates to `HostStoreView::invalid_fact_details`
+    /// on the captured view. Extension-store mismatches are unlikely in
+    /// practice (the extension is additive); the captured-view path surfaces
+    /// the same class of violations symmetrically.
+    pub(crate) fn invalid_fact_details(
+        &self,
+        facts: &[crate::resolver_core::FactVersionRef],
+        limit: usize,
+    ) -> Vec<String> {
+        self.captured.invalid_fact_details(facts, limit)
+    }
+
+    /// Delegates to the captured `HostStoreView::validates_all`.
+    pub(crate) fn validates_all(&self, facts: &[crate::resolver_core::FactVersionRef]) -> bool {
+        facts.iter().all(|fact| self.validates_fact(fact))
+    }
 }
 
 /// Allow `RequestStoreView` to be passed directly anywhere a `StoreView` is
@@ -330,6 +383,47 @@ impl crate::resolver_core::StoreView for RequestStoreView {
     fn checks_archive(&self) -> bool {
         use crate::resolver_core::StoreView;
         self.captured.checks_archive()
+    }
+
+    /// Strict archived validation — mirror `HostStoreView::validates_archived`
+    /// with extension-store fallback. Critical for the no-stale-archive
+    /// contract: untracked canonicals (no fact in either captured view or
+    /// extension) MUST be rejected for archived entries, otherwise stale
+    /// soft-invalidated data leaks past workspace content changes.
+    fn validates_archived(&self, fact: &FactVersionRef) -> bool {
+        use crate::resolver_core::StoreView;
+        if self.captured.validates_archived(fact) {
+            return true;
+        }
+        // Extension store strict mirror.
+        let extensions = self.extensions.read();
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => extensions
+                .get(canonical_id)
+                .is_some_and(|ext| &ext.whole_hash == hash),
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => match kind {
+                crate::resolver_core::DerivedFactKind::DirectSource => extensions
+                    .get(canonical_id)
+                    .is_some_and(|ext| &ext.whole_hash == hash),
+                _ => extensions
+                    .get(canonical_id)
+                    .and_then(|ext| ext.derived_hashes.get(kind))
+                    .is_some_and(|current| current == hash),
+            },
+        }
+    }
+
+    fn tracks_file(&self, canonical_id: &str) -> bool {
+        // Only the CAPTURED view counts as "tracked" for validation-fact
+        // inclusion. Extension-store entries are additive / request-private
+        // and tracking them here would add ImportRoute facts whose hash the
+        // captured cache doesn't know about — causing false misses on the
+        // host-scoped component_meta cache.
+        self.captured.tracks_file(canonical_id)
     }
 }
 

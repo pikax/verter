@@ -129,7 +129,7 @@ pub(crate) fn owner_component_meta_registry_import_root(
     host: &VerterHost,
     snapshot: &FileAnalysisSnapshot,
     local_name: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<(String, String)> {
     snapshot.imports.iter().find_map(|import| {
         let canonical_id = import.resolved_canonical_id.as_ref()?;
@@ -1521,7 +1521,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -1846,7 +1846,7 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
 pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     host: &VerterHost,
     owner_canonical: &str,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,

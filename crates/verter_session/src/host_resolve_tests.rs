@@ -1976,7 +1976,7 @@ export interface Props {
         }],
     );
 
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -1990,7 +1990,7 @@ export interface Props {
             "PublicProps",
             &mut requested_routes,
             &mut companion_plans,
-            Some(&view),
+            Some(&*view),
         )
         .expect("frontier closure should complete");
     assert_eq!(
@@ -2008,7 +2008,7 @@ export interface Props {
 
     let adapter = super::HostFrontierAdapter {
         host: &host,
-        store_view: Some(&view),
+        store_view: Some(&*view),
         materialize_symbols: false,
         route_exports_only: true,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -2017,7 +2017,7 @@ export interface Props {
     let seeds = host.collect_frontier_companion_seeds_in_view(
         &frontier,
         &adapter,
-        Some(&view),
+        Some(&*view),
         &mut inspected_symbols,
         &mut requested_routes,
         &mut companion_plans,
@@ -2135,7 +2135,7 @@ export interface Props {
         }],
     );
 
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -2149,7 +2149,7 @@ export interface Props {
             "PublicProps",
             &mut requested_routes,
             &mut companion_plans,
-            Some(&view),
+            Some(&*view),
         )
         .expect("frontier closure should complete");
 
@@ -2464,7 +2464,7 @@ defineProps<Props>()
         }],
     );
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
 
     host.set_import_dependencies(
         "/src/types.ts",
@@ -2493,7 +2493,7 @@ defineProps<Props>()
             true,
             None,
             0,
-            Some(&store_view),
+            Some(&*store_view),
         )
         .expect("resolution should complete")
         .expect("captured view should still resolve the original Props route");
@@ -3009,7 +3009,7 @@ defineProps<ButtonProps>()
 <template><div /></template>"#,
     );
 
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -3029,7 +3029,7 @@ defineProps<ButtonProps>()
             true,
             None,
             0,
-            Some(&view),
+            Some(&*view),
         )
         .expect("LinkProps resolution should complete")
         .expect("LinkProps should resolve through the cyclic barrel");
@@ -3064,7 +3064,7 @@ defineProps<ButtonProps>()
             true,
             None,
             0,
-            Some(&view),
+            Some(&*view),
         )
         .expect("UseComponentIconsProps resolution should complete")
         .expect("UseComponentIconsProps should resolve through the cyclic barrel");
@@ -3738,11 +3738,11 @@ fn shallow_type_import_route_finds_loaded_overlay_relative_targets() {
         "export interface ComponentConfig { label: string }",
     );
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let result = host.resolve_type_dependency_canonical_shallow_in_view(
         "/src/Button.vue",
         "./tv",
-        Some(&store_view),
+        Some(&*store_view),
     );
 
     assert_eq!(
@@ -3897,11 +3897,11 @@ defineProps<FancyProps>()
         }],
     );
 
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let resolved = host.resolve_type_dependency_canonical_in_view(
         "/workspace/src/App.vue",
         "fancy",
-        Some(&view),
+        Some(&*view),
     );
 
     assert_eq!(
@@ -3979,15 +3979,18 @@ defineProps<FancyProps>()
         }],
     );
 
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let _ = host
-        .ensure_module_facts_in_view("/workspace/node_modules/fancy/dist/index.d.ts", Some(&view))
+        .ensure_module_facts_in_view(
+            "/workspace/node_modules/fancy/dist/index.d.ts",
+            Some(&*view),
+        )
         .expect("package declaration entrypoint should materialize module facts");
 
     let resolved = host.resolve_type_dependency_canonical_in_view(
         "/workspace/node_modules/fancy/dist/index.d.ts",
         "./inner.js",
-        Some(&view),
+        Some(&*view),
     );
 
     assert_eq!(

@@ -1042,7 +1042,7 @@ defineProps<Props>()
     assert!(live_result.is_some(), "live path should resolve Props");
 
     // Resolve via the store-view/graph path
-    let view = host.resolver_store_view();
+    let view = host.owned_or_ambient_request_view();
     let mut tracked = BTreeSet::new();
     let mut resolution = BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
@@ -1061,7 +1061,7 @@ defineProps<Props>()
             true,
             None,
             0,
-            Some(&view),
+            Some(&*view),
         )
         .expect("graph path should not error");
     assert!(graph_result.is_some(), "graph path should resolve Props");

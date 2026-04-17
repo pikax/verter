@@ -52,7 +52,7 @@ impl DeclarationScopePayload {
 /// 3. Host-owned prepared decl caches for cross-file lookups
 pub struct SessionSolverHost<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a HostStoreView>,
+    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
     /// Canonical file scope for declaration-scoped solving.
     scope_canonical_id: Option<String>,
     /// Shared declaration-scope payload derived from the host-owned prepared bundle.
@@ -60,7 +60,10 @@ pub struct SessionSolverHost<'a> {
 }
 
 impl<'a> SessionSolverHost<'a> {
-    pub fn new(host: &'a VerterHost, store_view: Option<&'a HostStoreView>) -> Self {
+    pub fn new(
+        host: &'a VerterHost,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
+    ) -> Self {
         Self {
             host,
             store_view,
@@ -77,7 +80,7 @@ impl<'a> SessionSolverHost<'a> {
     /// declaration-scope bundle materialization and reuse.
     pub fn with_declaration_scope(
         host: &'a VerterHost,
-        store_view: Option<&'a HostStoreView>,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         declaration_canonical_id: &str,
     ) -> Self {
         if let Some(bundle) =
@@ -98,7 +101,7 @@ impl<'a> SessionSolverHost<'a> {
     /// a repeated bundle lookup when the caller already has the bundle cached.
     pub fn from_bundle(
         host: &'a VerterHost,
-        store_view: Option<&'a HostStoreView>,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         declaration_canonical_id: &str,
         bundle: &crate::resolver_core::prepared_decl::PreparedDeclBundle,
     ) -> Self {
@@ -112,7 +115,7 @@ impl<'a> SessionSolverHost<'a> {
 
     pub(crate) fn from_scope_payload(
         host: &'a VerterHost,
-        store_view: Option<&'a HostStoreView>,
+        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         declaration_canonical_id: &str,
         scope_payload: Arc<DeclarationScopePayload>,
     ) -> Self {

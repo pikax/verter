@@ -690,11 +690,11 @@ defineProps<{ ui: typeof theme }>()
         )
         .expect("upsert should succeed");
 
-    let view = project.host().resolver_store_view();
+    let view = project.host().owned_or_ambient_request_view();
     let facts = project.host().current_dependency_fact_versions_in_view(
         "/Comp.vue",
         &std::collections::BTreeSet::new(),
-        Some(&view),
+        Some(&*view),
     );
 
     assert!(
@@ -1648,7 +1648,7 @@ import Child from './Child.vue'
             .host()
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&key, &project.host().resolver_store_view())
+            .get_cached_node(&key, &*project.host().owned_or_ambient_request_view())
             .is_some(),
         "top-level fallthrough should live only in runtime nodes once runtime owns top-level authority"
     );
@@ -1898,11 +1898,11 @@ defineProps<{
         )
         .unwrap();
 
-    let view = project.host().resolver_store_view();
+    let view = project.host().owned_or_ambient_request_view();
     assert_eq!(
         project
             .host()
-            .resolve_type_dependency_canonical_in_view("/Comp.vue", "./theme", Some(&view))
+            .resolve_type_dependency_canonical_in_view("/Comp.vue", "./theme", Some(&*view))
             .as_deref(),
         Some("/theme.ts"),
         "fresh store views should reopen missing import routes after the dependency appears",
@@ -12116,10 +12116,10 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
         .expect("component meta resolution should warm the prepared-decl route");
 
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().owned_or_ambient_request_view();
     let component_config = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "ComponentConfig", Some(&store_view))
+        .prepared_type_decl_in_view("/src/types.ts", "ComponentConfig", Some(&*store_view))
         .expect("ComponentConfig should have a prepared declaration");
     assert_eq!(
         component_config
@@ -12132,7 +12132,7 @@ defineSlots<ButtonSlots>()
 
     let theme = project
         .host()
-        .prepared_value_decl_in_view("/src/theme.ts", "theme", Some(&store_view))
+        .prepared_value_decl_in_view("/src/theme.ts", "theme", Some(&*store_view))
         .expect("theme should have a prepared value declaration");
     assert!(
         theme.type_annotation.is_some() || theme.object_shape.is_some(),
@@ -13936,10 +13936,10 @@ defineProps<{
         }],
     );
 
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().owned_or_ambient_request_view();
     let prepared = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&store_view))
+        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&*store_view))
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
         matches!(
@@ -14035,10 +14035,10 @@ defineProps<{
         }],
     );
 
-    let store_view = project.host().resolver_store_view();
+    let store_view = project.host().owned_or_ambient_request_view();
     let prepared = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&store_view))
+        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&*store_view))
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
         matches!(
@@ -14104,7 +14104,7 @@ defineProps<{
             .host()
             .resolver_runtime()
             .type_surfaces
-            .get(&surface_key, &store_view)
+            .get(&surface_key, &*store_view)
             .is_none(),
         "registry append should keep imported non-object package unions symbolic instead of projecting a whole surface"
     );

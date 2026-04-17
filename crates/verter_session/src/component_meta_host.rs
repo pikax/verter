@@ -544,7 +544,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
-    store_view: Option<&crate::resolver_store::HostStoreView>,
+    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
@@ -1224,7 +1224,7 @@ import Link from './Link.vue'
         )
         .unwrap();
 
-        let store_view = host.host().resolver_store_view();
+        let store_view = host.host().owned_or_ambient_request_view();
         let resolved = host
             .host()
             .resolve_component_meta_in_view(
@@ -1243,7 +1243,7 @@ import Link from './Link.vue'
             &resolved,
             resolved.evaluated_types.as_ref(),
             true,
-            Some(&store_view),
+            Some(&*store_view),
         );
 
         assert!(

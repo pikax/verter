@@ -426,10 +426,13 @@ impl crate::resolver_core::StoreView for HostStoreView {
 }
 
 impl crate::resolver_core::ResolverStore for VerterHost {
-    type View = HostStoreView;
+    type View = crate::host_request_view::RequestStoreView;
 
     fn snapshot_view(&self) -> Self::View {
-        self.resolver_store_view()
+        (*crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
+            self.resolver_store_view(),
+        )))
+        .clone()
     }
 }
 
@@ -440,7 +443,7 @@ impl VerterHost {
 
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
-        store_view: Option<&HostStoreView>,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> crate::component_meta_audit::RustStoreAudit {
         let module_facts_entries = self.resolver.runtime.module_facts.len() as u32;
         let module_facts_bytes = self

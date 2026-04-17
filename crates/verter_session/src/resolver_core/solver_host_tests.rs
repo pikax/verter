@@ -436,9 +436,9 @@ export type UsesGlobals<T> =
         "utils fixture should load into the host",
     );
 
-    let store_view = host.resolver_store_view();
+    let store_view = host.owned_or_ambient_request_view();
     let bundle = host
-        .prepared_decl_bundle_in_view("/workspace/src/utils.ts", Some(&store_view))
+        .prepared_decl_bundle_in_view("/workspace/src/utils.ts", Some(&*store_view))
         .expect("warming the prepared bundle should succeed");
     assert!(
         bundle.prepared_type_decls.contains_key("UsesGlobals"),
@@ -451,7 +451,7 @@ export type UsesGlobals<T> =
         .evict("/workspace/src/utils.ts");
     ws.reset_reads();
 
-    let solver_host = SessionSolverHost::new(&host, Some(&store_view));
+    let solver_host = SessionSolverHost::new(&host, Some(&*store_view));
     for builtin in [
         "Date", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Error",
     ] {
