@@ -396,14 +396,15 @@ pub(crate) struct ExternalTypeAnalysisCacheEntry {
     analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
 }
 
-#[derive(Clone)]
-struct ExternalTypeResolutionInputs {
-    raw_source: Arc<str>,
-    cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    whole_hash: Hash16,
-    eval_source: Arc<str>,
-    analysis: Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
-    analysis_cache_hit: bool,
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalTypeResolutionInputs {
+    pub(crate) raw_source: Arc<str>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) whole_hash: Hash16,
+    pub(crate) eval_source: Arc<str>,
+    pub(crate) analysis:
+        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
+    pub(crate) analysis_cache_hit: bool,
 }
 
 thread_local! {
@@ -2174,20 +2175,43 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
+        // §4.4 Request-scoped lookup memo. When a request view is installed
+        // AND we can cheaply read the current whole_hash for this canonical,
+        // short-circuit on memo hit. This avoids the per-call canonical
+        // normalization (already done above), module_facts lock acquire, and
+        // multiple Arc::clones that the raw fetch path pays on every
+        // invocation.
+        let request_view = crate::host_request_view::current_request_view();
+        if let Some(view) = request_view.as_ref() {
+            if let Some(current_hash) = view.whole_hash(canonical_id) {
+                if let Some(memoized) = view.external_inputs_memo_get(canonical_id, current_hash) {
+                    return Some((*memoized).clone());
+                }
+            }
+        }
+
         let cached_facts = if let Some(view) = store_view {
             self.resolver.runtime.module_facts.get(canonical_id, view)
         } else {
             self.resolver.runtime.module_facts.get_any(canonical_id)
         };
         if let Some(facts) = cached_facts {
-            return Some(ExternalTypeResolutionInputs {
+            let inputs = ExternalTypeResolutionInputs {
                 raw_source: Arc::clone(&facts.raw_source),
                 cached_parse: facts.cached_parse.clone(),
                 whole_hash: facts.whole_hash,
                 eval_source: Arc::clone(&facts.eval_source),
                 analysis: Arc::clone(&facts.external_type_analysis),
                 analysis_cache_hit: true,
-            });
+            };
+            if let Some(view) = request_view.as_ref() {
+                view.record_external_inputs(
+                    canonical_id,
+                    inputs.whole_hash,
+                    Arc::new(inputs.clone()),
+                );
+            }
+            return Some(inputs);
         }
 
         let (raw_source, cached_parse, whole_hash) =
@@ -2199,14 +2223,22 @@ impl VerterHost {
             self.resolver.runtime.module_facts.get_any(canonical_id)
         };
         if let Some(facts) = refreshed_facts {
-            return Some(ExternalTypeResolutionInputs {
+            let inputs = ExternalTypeResolutionInputs {
                 raw_source: Arc::clone(&facts.raw_source),
                 cached_parse: facts.cached_parse.clone(),
                 whole_hash: facts.whole_hash,
                 eval_source: Arc::clone(&facts.eval_source),
                 analysis: Arc::clone(&facts.external_type_analysis),
                 analysis_cache_hit: true,
-            });
+            };
+            if let Some(view) = request_view.as_ref() {
+                view.record_external_inputs(
+                    canonical_id,
+                    inputs.whole_hash,
+                    Arc::new(inputs.clone()),
+                );
+            }
+            return Some(inputs);
         }
 
         let eval_source = Arc::<str>::from(Self::build_eval_script_source(
@@ -2220,14 +2252,18 @@ impl VerterHost {
             cached_parse.as_deref(),
             &eval_source,
         );
-        Some(ExternalTypeResolutionInputs {
+        let inputs = ExternalTypeResolutionInputs {
             raw_source,
             cached_parse,
             whole_hash,
             eval_source,
             analysis,
             analysis_cache_hit,
-        })
+        };
+        if let Some(view) = request_view.as_ref() {
+            view.record_external_inputs(canonical_id, inputs.whole_hash, Arc::new(inputs.clone()));
+        }
+        Some(inputs)
     }
 
     /// Resolve a named type from an imported dependency and project its macro

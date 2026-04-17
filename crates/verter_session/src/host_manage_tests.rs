@@ -10804,6 +10804,53 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn external_type_analysis_memoized_within_one_request() {
+    // Phase 1 §4.4 test 5.4.
+    //
+    // Within one request, the second call to `external_type_resolution_inputs_in_view`
+    // for the same canonical hits the request-scoped memo (no module_facts
+    // re-lookup, no Arc re-allocation). Pre-G: no memo → every call re-fetches.
+    // Post-G: `RequestStoreView::external_inputs_memo` serves repeats.
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/src/types.ts",
+        "export interface Props { label?: string; count?: number }\n",
+    );
+
+    let view = host.build_request_store_view();
+    let _guard = view.install();
+
+    // Prime the memo.
+    let _first = host.resolve_external_type_from_module_facts_in_view(
+        "/src/types.ts",
+        "Props",
+        &rustc_hash::FxHashMap::default(),
+        None,
+    );
+    let first_memo_len = view.external_inputs_memo_len();
+    assert!(
+        first_memo_len >= 1,
+        "first external-type resolution should populate the request memo (got {first_memo_len})"
+    );
+
+    // Second call for the same canonical should reuse the memo without adding
+    // new entries (same `(canonical_id, whole_hash)` key).
+    let _second = host.resolve_external_type_from_module_facts_in_view(
+        "/src/types.ts",
+        "Props",
+        &rustc_hash::FxHashMap::default(),
+        None,
+    );
+    assert_eq!(
+        view.external_inputs_memo_len(),
+        first_memo_len,
+        "second resolution should hit the memo; memo size must stay stable"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn request_store_view_extends_across_mid_request_ensure_loaded() {
     // Phase 1 §4.2 test 5.2 foundation.
     //

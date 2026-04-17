@@ -73,6 +73,18 @@ pub(crate) struct RequestExtension {
 pub(crate) struct RequestStoreView {
     pub(crate) captured: Arc<HostStoreView>,
     extensions: RwLock<FxHashMap<String, RequestExtension>>,
+    /// Per-request memo over host-scoped analysis results. Keyed by
+    /// `(canonical_id, whole_hash)` — the content identity of the analysis.
+    ///
+    /// This is a lookup memo over the host cache (`external_type_analysis_cache`
+    /// + `module_facts`), NOT a parallel hydration path — it caches the result
+    /// of *fetching from the host cache* so repeat callers within one request
+    /// don't re-pay canonical normalization, the `module_facts` lock acquire,
+    /// and the multiple `Arc::clone`s that the raw fetch costs. The underlying
+    /// host-scoped analysis cache remains the single source of truth for the
+    /// `Arc<AnalyzedExternalTypeSource>` data.
+    external_inputs_memo:
+        RwLock<FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>>,
 }
 
 /// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
@@ -95,7 +107,42 @@ impl RequestStoreView {
         Arc::new(Self {
             captured,
             extensions: RwLock::new(FxHashMap::default()),
+            external_inputs_memo: RwLock::new(FxHashMap::default()),
         })
+    }
+
+    /// Look up a previously-memoized `ExternalTypeResolutionInputs` for
+    /// `(canonical_id, whole_hash)`. Returns `None` when no memo entry exists
+    /// for the exact content version — callers materialize and
+    /// [`record_external_inputs`] on miss.
+    pub(crate) fn external_inputs_memo_get(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+    ) -> Option<Arc<crate::host_manage::ExternalTypeResolutionInputs>> {
+        self.external_inputs_memo
+            .read()
+            .get(&(canonical_id.to_string(), whole_hash))
+            .cloned()
+    }
+
+    /// Store the materialized inputs keyed by `(canonical_id, whole_hash)`.
+    /// Subsequent callers within this request short-circuit via
+    /// [`external_inputs_memo_get`].
+    pub(crate) fn record_external_inputs(
+        &self,
+        canonical_id: impl Into<String>,
+        whole_hash: Hash16,
+        inputs: Arc<crate::host_manage::ExternalTypeResolutionInputs>,
+    ) {
+        self.external_inputs_memo
+            .write()
+            .insert((canonical_id.into(), whole_hash), inputs);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn external_inputs_memo_len(&self) -> usize {
+        self.external_inputs_memo.read().len()
     }
 
     /// Return the `whole_hash` for `canonical`, consulting the captured view
