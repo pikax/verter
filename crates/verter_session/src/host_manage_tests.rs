@@ -10804,6 +10804,72 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn request_store_view_extends_across_mid_request_ensure_loaded() {
+    // Phase 1 §4.2 test 5.2 foundation.
+    //
+    // A RequestStoreView captured at request entry must remain authoritative
+    // across a mid-request `ensure_loaded` for a previously-untracked canonical.
+    // Pre-E: the view's `whole_hashes` map does not include the new canonical,
+    // so route-DB validation rejects any fact that references it.
+    // Post-E: the `ensure_loaded` hook pushes the new canonical's facts into
+    // the request view's extension store, and `validates_fact` accepts them.
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/src/App.vue",
+        "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div /></template>",
+    );
+    // /src/sidecar.ts is NOT injected into the host before the request view
+    // snapshots, so the captured view does not track it.
+    ws.inject_file(
+        "/src/sidecar.ts",
+        "export interface Sidecar { label?: string }",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    host.ensure_loaded("/src/App.vue");
+
+    // Capture the view BEFORE /src/sidecar.ts is loaded.
+    let request_view = host.build_request_store_view();
+    let _guard = request_view.install();
+
+    // Pre-ensure_loaded: sidecar.ts is not known to the captured view.
+    assert!(
+        !request_view.is_evalable("/src/sidecar.ts"),
+        "sidecar.ts should NOT be tracked before ensure_loaded"
+    );
+    assert_eq!(
+        request_view.extension_count(),
+        0,
+        "extension store should start empty"
+    );
+
+    // Trigger a mid-request ensure_loaded.
+    assert!(
+        host.ensure_loaded("/src/sidecar.ts"),
+        "ensure_loaded should succeed for an on-disk file"
+    );
+
+    // Post-ensure_loaded: the extension store now carries sidecar.ts.
+    assert!(
+        request_view.is_evalable("/src/sidecar.ts"),
+        "sidecar.ts must be tracked via the request view's extension store after ensure_loaded"
+    );
+    assert!(
+        request_view.extension_count() >= 1,
+        "extension store should carry at least one entry after mid-request ensure_loaded"
+    );
+
+    // The captured HostStoreView stays stable — the extension is request-private.
+    assert!(
+        request_view
+            .captured
+            .whole_hash("/src/sidecar.ts")
+            .is_none(),
+        "captured HostStoreView must remain the pre-ensure_loaded snapshot"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn ensure_loaded_reload_with_identical_content_does_not_bump_epoch() {
     // Phase 1 §4.6 Sub-task B test 5.6 Test 1 (regression lock-in).
     //

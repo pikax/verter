@@ -1,0 +1,275 @@
+//! Request-scoped store view wrapper — one captured snapshot per `getComponentMeta`
+//! (or sister) request, plus an extension store for canonicals loaded mid-request
+//! via `ensure_loaded`.
+//!
+//! # Why
+//!
+//! The route DB's `ValidatedFactCache::get_if_valid` validates *every* recorded
+//! fact against a `StoreView`. When two `owned_view` snapshots taken mid-request
+//! see different `derived_hashes` (e.g. an intervening `ensure_loaded` bumped the
+//! epoch — pre-Phase-1 D it did so unconditionally; post-Phase-1 D it does so
+//! only on real content changes), the second view rejects the first view's
+//! cached entry and the resolver runs again.
+//!
+//! `RequestStoreView` fixes that by holding one captured snapshot plus an
+//! **additive-only** extension map keyed by canonical. Canonicals loaded
+//! mid-request integrate into the extension store via the
+//! [`CURRENT_REQUEST_VIEW`] thread-local, which is pushed at request entry by
+//! [`RequestViewGuard`].
+//!
+//! # Architectural rules (from `phase1-cache-cluster-plan.md` §2.2)
+//!
+//! - The captured view + extension store form the single authority for
+//!   `whole_hash` / `derived_hash` / `import_route` / `is_evalable` lookups
+//!   within one request.
+//! - Resolvers must not reach past the view (no live `host.scheduler.try_get_source`,
+//!   `module_facts.get_any`, or `host.get_whole_hash` probes) during a request.
+//! - The extension store is **additive-only** per canonical: entries never mutate
+//!   once written; deletion only happens at request end when the `RequestStoreView`
+//!   is dropped.
+//!
+//! # Scope in this commit (E)
+//!
+//! This commit lands:
+//! - `RequestStoreView` struct + `RequestViewGuard` RAII.
+//! - Thread-local `CURRENT_REQUEST_VIEW` with `install` / drop-restore.
+//! - Helper methods: `whole_hash`, `derived_hash`, `import_route`, `is_evalable`,
+//!   `record_extension`, `touched`.
+//! - [`crate::VerterHost::build_request_store_view`] constructor.
+//! - [`ensure_loaded`](crate::VerterHost::ensure_loaded) integration: after
+//!   reintegration, the current request view's extension store is updated.
+//!
+//! The full signature rewrite of every `*_in_view(... Option<&HostStoreView>)`
+//! to `view: &RequestStoreView` is deferred to Commit I (legacy cleanup).
+//! Meanwhile callers continue to pass `Option<&HostStoreView>` — they receive
+//! the captured view, and the route DB's `validates` consults the thread-local
+//! extension store when a fact references a canonical outside the captured view.
+
+use std::cell::RefCell;
+use std::sync::{Arc, Weak};
+
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
+
+use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+use crate::resolver_store::HostStoreView;
+use crate::types::{DependencyResolution, Hash16};
+
+/// Per-canonical extension recorded during a request. Contains enough of
+/// `HostStoreView`'s per-canonical shape (whole_hash + derived hashes +
+/// import_routes) that route-DB `validates` can accept facts referring to
+/// canonicals loaded AFTER the view was snapshotted.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RequestExtension {
+    pub(crate) whole_hash: Hash16,
+    pub(crate) derived_hashes: FxHashMap<DerivedFactKind, Hash16>,
+    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
+}
+
+/// Request-scoped view: one captured `HostStoreView` plus an additive extension
+/// store. Held via `Arc` so the thread-local [`CURRENT_REQUEST_VIEW`] can hold
+/// a `Weak` without extending the lifetime of the view.
+#[derive(Debug)]
+pub(crate) struct RequestStoreView {
+    pub(crate) captured: Arc<HostStoreView>,
+    extensions: RwLock<FxHashMap<String, RequestExtension>>,
+}
+
+/// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
+/// view-coherence invariant assertion (§2.2 item 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TouchOutcome {
+    /// Canonical is in the captured view's `whole_hashes`.
+    Tracked,
+    /// Canonical was loaded mid-request via `ensure_loaded` and lives in the
+    /// extension store.
+    Extended,
+    /// Canonical is unknown to both the captured view and the extension store.
+    /// In debug builds this panics (§2.2 item 9); in release it emits a
+    /// `request_view_untouched_canonical` trace event.
+    Untracked,
+}
+
+impl RequestStoreView {
+    pub(crate) fn new(captured: Arc<HostStoreView>) -> Arc<Self> {
+        Arc::new(Self {
+            captured,
+            extensions: RwLock::new(FxHashMap::default()),
+        })
+    }
+
+    /// Return the `whole_hash` for `canonical`, consulting the captured view
+    /// first, then the extension store. `None` for unknown canonicals.
+    pub(crate) fn whole_hash(&self, canonical: &str) -> Option<Hash16> {
+        if let Some(hash) = self.captured.whole_hash(canonical) {
+            return Some(hash);
+        }
+        self.extensions
+            .read()
+            .get(canonical)
+            .map(|ext| ext.whole_hash)
+    }
+
+    /// Cheap feasibility predicate — `true` iff the request view (captured or
+    /// extension) tracks the canonical. Used by the §4.3 predicate sites that
+    /// today invoke `current_eval_state_in_view(&candidate, None).is_some()`.
+    pub(crate) fn is_evalable(&self, canonical: &str) -> bool {
+        self.whole_hash(canonical).is_some()
+    }
+
+    /// Lookup a derived fact hash. Checks the captured view, then the extension
+    /// store. `None` for unknown `(canonical, kind)` pairs.
+    pub(crate) fn derived_hash(&self, canonical: &str, kind: DerivedFactKind) -> Option<Hash16> {
+        if let Some(hash) = self.captured.derived_hash(canonical, kind) {
+            return Some(hash);
+        }
+        self.extensions
+            .read()
+            .get(canonical)
+            .and_then(|ext| ext.derived_hashes.get(&kind).copied())
+    }
+
+    /// Lookup an import-route resolution for the given canonical + specifier.
+    pub(crate) fn import_route(
+        &self,
+        canonical: &str,
+        specifier: &str,
+    ) -> Option<DependencyResolution> {
+        if let Some(route) = self.captured.import_route(canonical, specifier) {
+            return Some(route);
+        }
+        self.extensions
+            .read()
+            .get(canonical)
+            .and_then(|ext| ext.import_routes.get(specifier).cloned())
+    }
+
+    /// Classify whether `canonical` is known to this view. Intended for the
+    /// debug-mode invariant assertion at every resolver entry — on
+    /// `Untracked`, `cfg(debug_assertions)` panics, release emits a trace
+    /// event. Callers that legitimately need to load a canonical must call
+    /// [`crate::VerterHost::ensure_loaded`] first (which records the canonical
+    /// into the extension store via the [`CURRENT_REQUEST_VIEW`] hook) or
+    /// fail closed.
+    pub(crate) fn touched(&self, canonical: &str) -> TouchOutcome {
+        if self.captured.whole_hash(canonical).is_some() {
+            return TouchOutcome::Tracked;
+        }
+        if self.extensions.read().contains_key(canonical) {
+            return TouchOutcome::Extended;
+        }
+        TouchOutcome::Untracked
+    }
+
+    /// Record a canonical loaded mid-request into the extension store.
+    /// Idempotent: overwrites any existing entry under the same canonical
+    /// (second write should match first write since the canonical's facts
+    /// don't change within a single request — see §2.2 additive-only rule).
+    pub(crate) fn record_extension(
+        &self,
+        canonical: impl Into<String>,
+        whole_hash: Hash16,
+        derived_hashes: FxHashMap<DerivedFactKind, Hash16>,
+        import_routes: FxHashMap<String, DependencyResolution>,
+    ) {
+        self.extensions.write().insert(
+            canonical.into(),
+            RequestExtension {
+                whole_hash,
+                derived_hashes,
+                import_routes,
+            },
+        );
+    }
+
+    /// Check if a route DB fact is valid against the captured view OR the
+    /// extension store. Mirrors `HostStoreView::validates` but adds the
+    /// extension fallback for canonicals loaded mid-request.
+    pub(crate) fn validates_fact(&self, fact: &FactVersionRef) -> bool {
+        if self.captured_validates(fact) {
+            return true;
+        }
+        self.extension_validates(fact)
+    }
+
+    fn captured_validates(&self, fact: &FactVersionRef) -> bool {
+        use crate::resolver_core::StoreView;
+        // Rely on the existing HostStoreView impl. Returns `true` on untracked
+        // canonicals for whole_hash + DirectSource (permissive fallback).
+        // Rejects untracked Route/ImportRoute — that's the gap the extension
+        // store closes.
+        self.captured.validates(fact)
+    }
+
+    fn extension_validates(&self, fact: &FactVersionRef) -> bool {
+        let extensions = self.extensions.read();
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, hash } => extensions
+                .get(canonical_id)
+                .map(|ext| &ext.whole_hash == hash)
+                .unwrap_or(false),
+            FactVersionRef::DerivedFactHash {
+                canonical_id,
+                kind,
+                hash,
+            } => match kind {
+                DerivedFactKind::DirectSource => extensions
+                    .get(canonical_id)
+                    .map(|ext| &ext.whole_hash == hash)
+                    .unwrap_or(false),
+                _ => extensions
+                    .get(canonical_id)
+                    .and_then(|ext| ext.derived_hashes.get(kind))
+                    .map(|current| current == hash)
+                    .unwrap_or(false),
+            },
+        }
+    }
+
+    /// Install this view as the current request's thread-local handle.
+    /// The returned [`RequestViewGuard`] restores the previous value on drop.
+    pub(crate) fn install(self: &Arc<Self>) -> RequestViewGuard {
+        let prev = CURRENT_REQUEST_VIEW.with(|cell| cell.borrow().clone());
+        CURRENT_REQUEST_VIEW.with(|cell| {
+            *cell.borrow_mut() = Some(Arc::downgrade(self));
+        });
+        RequestViewGuard { _prev: prev }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn extension_count(&self) -> usize {
+        self.extensions.read().len()
+    }
+}
+
+thread_local! {
+    /// Current request's view, installed by [`RequestStoreView::install`] at
+    /// request entry and restored to its previous value when the returned
+    /// [`RequestViewGuard`] drops.
+    ///
+    /// Held as `Weak<RequestStoreView>` so the thread-local doesn't extend the
+    /// view's lifetime past the request.
+    pub(crate) static CURRENT_REQUEST_VIEW: RefCell<Option<Weak<RequestStoreView>>> =
+        const { RefCell::new(None) };
+}
+
+/// RAII guard returned by [`RequestStoreView::install`]. Restores the previous
+/// thread-local value on drop so nested requests compose safely.
+#[derive(Debug)]
+pub(crate) struct RequestViewGuard {
+    _prev: Option<Weak<RequestStoreView>>,
+}
+
+impl Drop for RequestViewGuard {
+    fn drop(&mut self) {
+        CURRENT_REQUEST_VIEW.with(|cell| {
+            *cell.borrow_mut() = self._prev.clone();
+        });
+    }
+}
+
+/// Upgrade the thread-local request view, if one is installed. Returns `None`
+/// when the caller is outside any request (top-level loads, background work).
+pub(crate) fn current_request_view() -> Option<Arc<RequestStoreView>> {
+    CURRENT_REQUEST_VIEW.with(|cell| cell.borrow().as_ref().and_then(Weak::upgrade))
+}

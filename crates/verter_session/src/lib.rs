@@ -59,6 +59,7 @@ mod hash;
 #[cfg(feature = "scheduler")]
 pub mod host_executor;
 mod host_manage;
+mod host_request_view;
 mod host_resolve;
 mod host_upsert;
 mod id;
@@ -1398,6 +1399,13 @@ impl VerterHost {
                 if !hash_unchanged {
                     self.bump_store_view_epoch();
                 }
+            }
+            // §4.2 RequestStoreView hook: if a request is currently installed
+            // on this thread, record the just-loaded canonical into its
+            // extension store so route-DB `validates` accepts facts that
+            // reference this file.
+            if loaded {
+                self.record_current_request_extension_for(canonical_id);
             }
             loaded
         }

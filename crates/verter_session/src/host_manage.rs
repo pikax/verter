@@ -7104,6 +7104,67 @@ impl VerterHost {
         self.host_owned_resolved_named_types.len()
     }
 
+    /// Construct a request-scoped view at request entry. Wraps a freshly
+    /// captured [`crate::resolver_store::HostStoreView`] plus an additive
+    /// extension store that tracks canonicals loaded mid-request.
+    ///
+    /// Call at the top of `getComponentMeta` (and sister request entry points)
+    /// and immediately `install()` the returned view so the
+    /// `CURRENT_REQUEST_VIEW` thread-local points at it for the lifetime of
+    /// the request's RAII guard.
+    pub(crate) fn build_request_store_view(
+        &self,
+    ) -> std::sync::Arc<crate::host_request_view::RequestStoreView> {
+        let captured = std::sync::Arc::new(self.resolver_store_view());
+        crate::host_request_view::RequestStoreView::new(captured)
+    }
+
+    /// Record `canonical` into the current request's extension store, if a
+    /// request view is installed on this thread. Called by `ensure_loaded`
+    /// after a successful reintegration so mid-request loads are visible to
+    /// the captured view's route-DB validation path.
+    ///
+    /// Outside of any request (top-level loads, background watchers) this is
+    /// a no-op.
+    ///
+    /// Reads `whole_hash` directly from the scheduler's just-committed source
+    /// snapshot; `import_routes` from `compile_cache`. `module_facts` may not
+    /// yet be populated (it's lazily materialized by `ensure_module_facts_in_view`),
+    /// so derived hashes come from module_facts when available and stay empty
+    /// otherwise — the extension still carries enough signal for
+    /// `FileWholeHash` / `DirectSource` fact validation.
+    #[cfg(feature = "scheduler")]
+    pub(crate) fn record_current_request_extension_for(&self, canonical: &str) {
+        let Some(view) = crate::host_request_view::current_request_view() else {
+            return;
+        };
+        let Some(whole_hash) = self
+            .scheduler
+            .try_get_source(canonical)
+            .map(|s| s.whole_hash)
+        else {
+            return;
+        };
+        let mut derived = rustc_hash::FxHashMap::default();
+        if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical) {
+            if facts.shallow_state.has_resolvable_surface() {
+                derived.insert(
+                    crate::resolver_core::DerivedFactKind::Route,
+                    crate::resolver_store::hash_route_surface(&facts.shallow_state),
+                );
+            }
+            if let Some(hash) = facts.import_route_hash {
+                derived.insert(crate::resolver_core::DerivedFactKind::ImportRoute, hash);
+            }
+        }
+        let import_routes = self
+            .compile_cache
+            .get(canonical)
+            .map(|entry| entry.import_routes.clone())
+            .unwrap_or_default();
+        view.record_extension(canonical.to_string(), whole_hash, derived, import_routes);
+    }
+
     /// Returns the semantic hash for a file by canonical ID or alias.
     ///
     /// The semantic hash changes when the file's semantically significant content
