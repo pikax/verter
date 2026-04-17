@@ -189,6 +189,9 @@ pub fn project_macro_surfaces_from_source_type_name(
     macro_kind: AnalyzedMacroKind,
     type_name: &str,
 ) -> Option<ProjectedMacroSurfaces> {
+    #[cfg(test)]
+    project_macro_surfaces_from_source_call_count_inc();
+
     let source = source.trim();
     if source.is_empty() {
         return None;
@@ -197,6 +200,36 @@ pub fn project_macro_surfaces_from_source_type_name(
     let alloc = Allocator::new();
     let resolved = resolve_external_type(type_name, source, &alloc)?;
     Some(project_macro_surfaces(Some(source), macro_kind, &resolved))
+}
+
+// Test-only per-thread counter for `project_macro_surfaces_from_source_type_name`.
+//
+// That function creates a fresh oxc `Allocator` and reparses the dependency
+// source on every call, bypassing the host-owned parsed-program cache. Tests
+// use this counter to assert cache-owned recovery paths (e.g. the JSDoc
+// enrichment path) do not fall back to this raw-source reparse.
+//
+// Thread-local so parallel tests do not race on a shared counter.
+#[cfg(test)]
+thread_local! {
+    static PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn project_macro_surfaces_from_source_call_count_inc() {
+    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT
+        .with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+pub(crate) fn project_macro_surfaces_from_source_call_count() -> usize {
+    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_project_macro_surfaces_from_source_call_count() {
+    PROJECT_MACRO_SURFACES_FROM_SOURCE_CALL_COUNT.with(|count| count.set(0));
 }
 
 /// When a type is not locally defined in a source file (e.g., barrel re-export),

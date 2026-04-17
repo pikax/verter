@@ -2147,6 +2147,75 @@ impl VerterHost {
         })
     }
 
+    /// Resolve a named type from an imported dependency and project its macro
+    /// surfaces, reusing the host-cached parsed program and external type
+    /// analysis so this path never parses raw source again.
+    ///
+    /// This is the cached counterpart to
+    /// `project_macro_surfaces_from_source_type_name`, which allocates a fresh
+    /// arena and reparses the source on every call. Enrichment/lookup paths
+    /// (for example JSDoc collection for imported props) should use this
+    /// method so imported-file parses stay single-shot per content hash.
+    pub(crate) fn project_imported_macro_surfaces_in_view(
+        &self,
+        dep_canonical: &str,
+        exported_name: &str,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        store_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
+        let inputs = self.external_type_resolution_inputs_in_view(dep_canonical, store_view)?;
+        let source_type = Self::imported_eval_source_type(
+            dep_canonical,
+            inputs.raw_source.as_ref(),
+            inputs.cached_parse.as_deref(),
+        );
+        let cache_key = ParsedEvalProgramCacheKey {
+            host_instance_id: self.instance_id,
+            canonical_id: dep_canonical.to_string(),
+            source_type,
+        };
+        HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let entry = match cache.get(&cache_key) {
+                Some(entry) if entry.whole_hash == inputs.whole_hash => entry.clone(),
+                _ => {
+                    let parsed = crate::ParsedEvalProgram::parse(
+                        Arc::clone(&inputs.eval_source),
+                        source_type,
+                    );
+                    let parse_failed = parsed.is_none();
+                    let program = Rc::new(
+                        parsed.unwrap_or_else(|| crate::ParsedEvalProgram::empty(source_type)),
+                    );
+                    let entry = ParsedEvalProgramCacheEntry {
+                        whole_hash: inputs.whole_hash,
+                        parse_failed,
+                        program,
+                    };
+                    cache.insert(cache_key.clone(), entry.clone());
+                    entry
+                }
+            };
+            if entry.parse_failed {
+                return None;
+            }
+            let program = entry.program.borrow_dependent();
+            let source_bytes = inputs.eval_source.as_bytes();
+            let resolved = verter_compiler::utils::oxc::vue::resolve_type::resolve_external_type_in_program_with_analyzed_symbol_companion(
+                exported_name,
+                program,
+                source_bytes,
+                inputs.analysis.as_ref(),
+                &rustc_hash::FxHashMap::default(),
+            )?;
+            Some(crate::resolver_core::surface_projector::project_macro_surfaces(
+                Some(inputs.eval_source.as_ref()),
+                macro_kind,
+                &resolved,
+            ))
+        })
+    }
+
     pub(crate) fn clear_thread_local_parsed_eval_program_cache(&self) {
         let host_instance_id = self.instance_id;
         HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
@@ -9939,9 +10008,10 @@ fn resolve_relative_type_specifier(
     None
 }
 
-/// Load source for `dep_canonical`, resolve `exported_name` as DefineProps,
-/// and collect any JSDoc descriptions/tags into `jsdoc_by_name`.
-/// Returns true if the type was found and projected successfully.
+/// Resolve `exported_name` from `dep_canonical` as DefineProps and collect
+/// JSDoc descriptions/tags into `jsdoc_by_name`. Uses the host-cached parsed
+/// program and host-cached external type analysis — never reparses raw
+/// source. Returns true if the type was found and projected successfully.
 fn try_project_jsdoc_descriptions(
     host: &VerterHost,
     dep_canonical: &str,
@@ -9957,20 +10027,12 @@ fn try_project_jsdoc_descriptions(
 ) -> bool {
     use verter_semantic::analysis::AnalyzedMacroKind;
 
-    let Some((raw_source, cached_parse, _)) =
-        host.current_eval_state_in_view(dep_canonical, store_view)
-    else {
-        return false;
-    };
-    let projection_source =
-        VerterHost::build_eval_script_source(&raw_source, cached_parse.as_deref());
-    let Some(projected) =
-        crate::resolver_core::surface_projector::project_macro_surfaces_from_source_type_name(
-            projection_source.as_ref(),
-            AnalyzedMacroKind::DefineProps,
-            exported_name,
-        )
-    else {
+    let Some(projected) = host.project_imported_macro_surfaces_in_view(
+        dep_canonical,
+        exported_name,
+        AnalyzedMacroKind::DefineProps,
+        store_view,
+    ) else {
         return false;
     };
     for prop in projected.props {

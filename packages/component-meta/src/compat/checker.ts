@@ -2697,14 +2697,6 @@ export class ComponentMetaChecker {
   private static readonly MAX_GLOBAL_TS_TYPE_SCHEMA_CACHE_SIZE = 512;
   private expandedTypeSchemaCache = new Map<string, PropertyMetaSchema>();
   private globalTsTypeSchemaCache = new Map<string, PropertyMetaSchema>();
-  private globalTsTypeProgram:
-    | {
-        ts: any;
-        checker: any;
-        sourceFile: any;
-        fileName: string;
-      }
-    | undefined;
 
   constructor(
     adapter: VerterHostAdapter,
@@ -3216,66 +3208,6 @@ export class ComponentMetaChecker {
       type: normalizedTypeText,
       schema: properties,
     };
-  }
-
-  private getGlobalTsTypeProgram():
-    | {
-        ts: any;
-        checker: any;
-        sourceFile: any;
-      }
-    | undefined {
-    const ts = loadTypeScript();
-    if (!ts) {
-      return undefined;
-    }
-
-    if (this.globalTsTypeProgram) {
-      return this.globalTsTypeProgram;
-    }
-
-    const fileName = runtimeResolvePath(this.projectRoot, "__verter_global_type_probe__.ts");
-    const sourceText = "export {};\n";
-    const compilerOptions = {
-      target: ts.ScriptTarget.ESNext,
-      module: ts.ModuleKind.ESNext,
-      skipLibCheck: true,
-      lib: ["lib.esnext.d.ts", "lib.dom.d.ts", "lib.dom.iterable.d.ts"],
-    };
-    const host = ts.createCompilerHost(compilerOptions, true);
-    const originalGetSourceFile = host.getSourceFile.bind(host);
-    host.getSourceFile = (
-      path: string,
-      languageVersion: any,
-      onError?: any,
-      shouldCreateNewSourceFile?: any,
-    ) => {
-      if (runtimeNormalizePath(path) === runtimeNormalizePath(fileName)) {
-        return ts.createSourceFile(path, sourceText, languageVersion, true, ts.ScriptKind.TS);
-      }
-      return originalGetSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile);
-    };
-    host.readFile = (path: string) =>
-      runtimeNormalizePath(path) === runtimeNormalizePath(fileName)
-        ? sourceText
-        : ts.sys.readFile(path);
-    host.fileExists = (path: string) =>
-      runtimeNormalizePath(path) === runtimeNormalizePath(fileName) || ts.sys.fileExists(path);
-
-    const program = ts.createProgram([fileName], compilerOptions, host);
-    const checker = program.getTypeChecker();
-    const sourceFile = program.getSourceFile(fileName);
-    if (!sourceFile) {
-      return undefined;
-    }
-
-    this.globalTsTypeProgram = {
-      ts,
-      checker,
-      sourceFile,
-      fileName,
-    };
-    return this.globalTsTypeProgram;
   }
 
   private buildGlobalTypeSchemaFromTs(

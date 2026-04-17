@@ -14856,6 +14856,101 @@ const props = defineProps<ButtonProps>()
     );
 }
 
+/// The JSDoc enrichment path for imported props must go through the
+/// host-cached parsed program + cached external type analysis. It must not
+/// fall back to `project_macro_surfaces_from_source_type_name`, which
+/// allocates a fresh oxc arena and reparses the dependency source from raw
+/// text — that violates the shallow / cache-owned recovery rule.
+///
+/// This scenario triggers the JSDoc-enrichment fallback (not the main
+/// resolver path) by extending imported types through `Omit<>`, which leaves
+/// descriptions blank after the main resolver and forces
+/// `fill_missing_component_meta_prop_descriptions_from_imported_roots` to
+/// run.
+#[test]
+fn imported_jsdoc_enrichment_uses_cached_parse_and_does_not_reparse_source() {
+    use crate::resolver_core::surface_projector::{
+        project_macro_surfaces_from_source_call_count,
+        reset_project_macro_surfaces_from_source_call_count,
+    };
+
+    reset_project_macro_surfaces_from_source_call_count();
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"
+interface NuxtLinkProps {
+  to?: string
+}
+
+interface ButtonHTMLAttributes {
+  type?: 'button' | 'submit'
+}
+
+export interface LinkProps extends NuxtLinkProps, /** @vue-ignore */ Omit<ButtonHTMLAttributes, 'type'> {
+  /** Force the link to be active independent of the current route. */
+  active?: boolean
+  /** Class to apply when the link is active */
+  activeClass?: string
+}
+
+export interface ButtonProps extends Omit<LinkProps, 'to'> {
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Button.vue",
+            r#"<script setup lang="ts">
+import type { ButtonProps } from './types'
+defineProps<ButtonProps>()
+</script>
+<template><button /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/src/Button.vue")
+        .expect("should return component meta");
+
+    // Behavior guard: JSDoc must still propagate across the imported Omit<>.
+    let active = meta
+        .props
+        .iter()
+        .find(|p| p.name == "active")
+        .expect("active prop should be preserved through imported Omit");
+    assert_eq!(
+        active.description.as_deref(),
+        Some("Force the link to be active independent of the current route."),
+        "active JSDoc should propagate through imported Omit"
+    );
+    let active_class = meta
+        .props
+        .iter()
+        .find(|p| p.name == "activeClass")
+        .expect("activeClass prop should be preserved through imported Omit");
+    assert_eq!(
+        active_class.description.as_deref(),
+        Some("Class to apply when the link is active"),
+        "activeClass JSDoc should propagate through imported Omit"
+    );
+
+    // Architectural guard: the enrichment path must not fall through to the
+    // raw-source reparse. This is the primary assertion — if the cached
+    // parsed program path is bypassed, the counter will be > 0.
+    assert_eq!(
+        project_macro_surfaces_from_source_call_count(),
+        0,
+        "JSDoc enrichment must use the host-cached parsed program, not the \
+         raw-source reparse path",
+    );
+}
+
 // ===========================================================================
 // Phase 3: Fallthrough inheritance resolver
 // ===========================================================================
