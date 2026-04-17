@@ -209,7 +209,7 @@ pub struct VerterHost {
     /// Wrapped in Arc<RwLock> so the scheduler's SourceLoader can share the same
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     pub(crate) files: Shared<FxHashMap<String, FileEntry>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
@@ -326,7 +326,7 @@ impl VerterHost {
             instance_id: next_host_instance_id(),
             config,
             workspace: workspace_lock,
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
@@ -460,7 +460,7 @@ impl VerterHost {
         // Extract from analysis snapshot
         #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = read_lock(&self.files);
             files.get(canonical_id).map(|f| f.script_analysis.clone())
@@ -506,7 +506,7 @@ impl VerterHost {
         // Extract from analysis
         #[cfg(feature = "scheduler")]
         let analysis = self.scheduler_script_analysis(canonical_id);
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot> = {
             let files = read_lock(&self.files);
             files.get(canonical_id).map(|f| f.script_analysis.clone())
@@ -549,7 +549,7 @@ impl VerterHost {
                 // Extract from analysis
                 #[cfg(feature = "scheduler")]
                 let analysis = self.scheduler_script_analysis(canonical_id);
-                #[cfg(not(feature = "scheduler"))]
+                #[cfg(target_arch = "wasm32")]
                 let analysis: Option<
                     verter_semantic::analysis::ScriptAnalysisSnapshot,
                 > = {
@@ -572,7 +572,7 @@ impl VerterHost {
         let boundary_edges = {
             #[cfg(feature = "scheduler")]
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = {
                 let files = read_lock(&self.files);
                 files
@@ -835,7 +835,7 @@ impl VerterHost {
             })
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let entry = files.get(canonical_id)?;
@@ -1006,7 +1006,7 @@ impl VerterHost {
                 entry.cached_fallthrough = None;
             }
         }
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = crate::shared::write_lock(&self.files);
             for entry in files.values_mut() {
@@ -1052,7 +1052,7 @@ impl VerterHost {
                     self.scheduler.close_file(id);
                 }
             }
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = read_lock(&self.files);
                 for canonical_id in files.keys() {
@@ -1061,7 +1061,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         write_lock(&self.files).clear();
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
@@ -1105,7 +1105,7 @@ impl VerterHost {
                 entry.dependencies.clear();
             }
         }
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = crate::shared::write_lock(&self.files);
             for entry in files.values_mut() {
@@ -1282,7 +1282,7 @@ impl VerterHost {
         self.ws().notify_close(canonical_id);
         self.semantic_db.lock().invalidate(canonical_id);
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         write_lock(&self.files).remove(canonical_id);
 
         #[cfg(feature = "scheduler")]
@@ -1322,7 +1322,7 @@ impl VerterHost {
                 }
             }
         }
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             if self.get_source(canonical_id).is_some() {
                 return true;
@@ -1374,7 +1374,7 @@ impl VerterHost {
             loaded
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let Some(source) = self.ws().read_file(canonical_id) else {
                 return false;
@@ -1532,7 +1532,7 @@ impl VerterHost {
                 }
             }
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let ws = self.workspace.read();
                 let cleared = deps::smart_invalidate_dependents_with_owners(
@@ -1555,7 +1555,7 @@ impl VerterHost {
         }
 
         // WASM fallback: use legacy reverse_dependencies map.
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             #[allow(unreachable_code)]
             {

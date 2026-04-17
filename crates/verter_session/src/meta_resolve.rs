@@ -6681,7 +6681,7 @@ impl VerterHost {
             Some(cached.state.as_ref().clone())
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use crate::shared::read_lock;
 
@@ -6756,7 +6756,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use crate::shared::write_lock;
 
@@ -6789,7 +6789,7 @@ impl VerterHost {
             None
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use crate::shared::read_lock;
             let files = read_lock(&self.files);
@@ -6822,7 +6822,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             use crate::shared::write_lock;
             let mut files = write_lock(&self.files);
@@ -6962,7 +6962,7 @@ impl VerterHost {
                     })
                 }
 
-                #[cfg(not(feature = "scheduler"))]
+                #[cfg(target_arch = "wasm32")]
                 {
                     use crate::shared::read_lock;
 

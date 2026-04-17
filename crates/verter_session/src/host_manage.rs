@@ -1835,7 +1835,7 @@ impl VerterHost {
                 }
             }
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 if let Some(source) = self.get_source(canonical_id) {
                     let whole_hash = crate::hash::hash_16(source.as_bytes());
@@ -1946,7 +1946,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             if let Some(source) = self.get_source(canonical_id) {
                 let whole_hash = crate::hash::hash_16(source.as_bytes());
@@ -3785,7 +3785,7 @@ impl VerterHost {
                 (raw_source, cached_parse, whole_hash, snapshot)
             };
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let (raw_source, cached_parse, whole_hash, snapshot) = {
                 let raw_source = self.read_analysis_source(canonical_id)?;
                 let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
@@ -3828,7 +3828,7 @@ impl VerterHost {
                     }
                 }
             }
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = read_lock(&self.files);
                 if let Some(entry) = files.get(canonical_id) {
@@ -4232,7 +4232,7 @@ impl VerterHost {
             cc.import_routes.get(import_source).cloned()
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let Some(entry) = files.get(canonical_id) else {
@@ -6336,7 +6336,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let _ = (canonical_id, resolution);
         }
@@ -6372,7 +6372,7 @@ impl VerterHost {
                 .collect()
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let Some(entry) = files.get(canonical_id) else {
@@ -6425,7 +6425,7 @@ impl VerterHost {
             old_deps
         };
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let old_deps = {
             let mut files = write_lock(&self.files);
             let Some(entry) = files.get_mut(canonical_id) else {
@@ -6460,7 +6460,7 @@ impl VerterHost {
                 .map(|s| s.source.clone())
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             files.get(&canonical).map(|entry| entry.source.clone())
@@ -6619,7 +6619,7 @@ impl VerterHost {
             }
         };
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let (source, cached_parse, src_blocks, external_requests) = {
             let files = read_lock(&self.files);
             if let Some(entry) = files.get(canonical) {
@@ -6796,7 +6796,7 @@ impl VerterHost {
                     cc.raw_template_analysis = Some(tpl_arc);
                 }
 
-                #[cfg(not(feature = "scheduler"))]
+                #[cfg(target_arch = "wasm32")]
                 {
                     let mut files = write_lock(&self.files);
                     if let Some(entry) = files.get_mut(canonical) {
@@ -6950,7 +6950,7 @@ impl VerterHost {
             ))
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let Some(entry) = files.get(canonical) else {
@@ -7064,7 +7064,7 @@ impl VerterHost {
                 .map(|facts| facts.whole_hash)
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let whole_hash = files.get(canonical).map(|entry| entry.whole_hash);
@@ -7124,7 +7124,7 @@ impl VerterHost {
             Some(hd.parse.semantic_hash)
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             files.get(&canonical).map(|entry| entry.semantic_hash)
@@ -7169,7 +7169,7 @@ impl VerterHost {
             })
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
@@ -7211,7 +7211,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             for &id in canonical_ids {
@@ -7253,7 +7253,7 @@ impl VerterHost {
             results
         };
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let mut results = {
             let files = read_lock(&self.files);
             let mut results = Vec::with_capacity(files.len());
@@ -7273,7 +7273,7 @@ impl VerterHost {
 
     /// Build a `FileAnalysisSnapshot` from a `FileEntry` using Arc::clone
     /// for immutable fields and deep clone for mutable fields (imports, bindings).
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn build_snapshot_from_entry(entry: &crate::FileEntry) -> FileAnalysisSnapshot {
         FileAnalysisSnapshot {
             imports: entry.script_analysis.imports.clone(),
@@ -7477,7 +7477,7 @@ impl VerterHost {
                     })
             });
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let composable_info = {
                 let files = read_lock(&self.files);
                 files.get(canonical_id).and_then(|entry| {
@@ -7529,7 +7529,7 @@ impl VerterHost {
             cc.latest_diagnostics.get(&profile_hash).cloned()
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
@@ -7552,7 +7552,7 @@ impl VerterHost {
             Some(cc.diagnostics_generation)
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             files.get(&canonical).map(|e| e.diagnostics_generation)
@@ -7569,7 +7569,7 @@ impl VerterHost {
             cc.diagnostics_generation += 1;
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
@@ -7589,7 +7589,7 @@ impl VerterHost {
             cc.cached_meta_payloads.clear();
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
@@ -7675,7 +7675,7 @@ impl VerterHost {
             })
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let removed = {
                 let mut files = write_lock(&self.files);
@@ -7748,7 +7748,7 @@ impl VerterHost {
             Vec::new()
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             files
@@ -7886,7 +7886,7 @@ impl VerterHost {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>()
         };
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let old_transitive_deps = {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical) {
@@ -7940,7 +7940,7 @@ impl VerterHost {
                 .collect()
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             files
@@ -7973,7 +7973,7 @@ impl VerterHost {
             snapshot.template
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut snapshot = {
                 let files = read_lock(&self.files);
@@ -8026,7 +8026,7 @@ impl VerterHost {
     ) -> verter_semantic::analysis::CssVarFlow {
         #[cfg(feature = "scheduler")]
         let profile_hash = profile.map(compile_profile_hash);
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let _ = profile;
 
         #[cfg(feature = "scheduler")]
@@ -8037,7 +8037,7 @@ impl VerterHost {
             .filter(|id| self.compile_cache.get(id).is_none_or(|cc| !cc.evicted))
             .collect();
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let canonical_ids: Vec<String> = {
             let files = read_lock(&self.files);
             files.keys().cloned().collect()
@@ -8056,7 +8056,7 @@ impl VerterHost {
             let style_analyses = self
                 .effective_style_analyses(&canonical_id, profile_hash)
                 .unwrap_or_default();
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let style_analyses = {
                 let files = read_lock(&self.files);
                 files
@@ -8102,7 +8102,7 @@ impl VerterHost {
             } else {
                 self.raw_template_analysis_for_file(&canonical_id)
             };
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let template_analysis = self.raw_template_analysis_for_file(&canonical_id);
 
             if let Some(ref tmpl) = template_analysis {
@@ -8122,7 +8122,7 @@ impl VerterHost {
                         .any(|m| m.var_name == var_name)
                 })
                 .unwrap_or(false);
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             let script_has_manipulation = {
                 let files = read_lock(&self.files);
                 files
@@ -8243,7 +8243,7 @@ impl VerterHost {
             )
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;

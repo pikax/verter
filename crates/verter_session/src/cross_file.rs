@@ -96,7 +96,7 @@ impl VerterHost {
                 .collect()
         };
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let parent_templates: Vec<(
             String,
             std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,

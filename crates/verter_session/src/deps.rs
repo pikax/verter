@@ -5,15 +5,15 @@
 //! and the tiered invalidation decision (`should_invalidate_dependent`).
 
 use std::collections::BTreeSet;
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 
 use verter_semantic::analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 use crate::id;
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::shared::write_lock;
 use crate::types::*;
 use crate::upsert::compute_changed_exports;
@@ -66,7 +66,7 @@ pub(crate) struct DependentView {
 }
 
 impl DependentView {
-    #[cfg(any(not(feature = "scheduler"), test))]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn from_file_entry(entry: &FileEntry) -> Self {
         Self {
             canonical_id: entry.canonical_id.clone(),
@@ -170,7 +170,7 @@ fn import_resolves_to_dep_with_resolver_data(
 
 /// Check if an import source from `file` resolves to `dependency_id`.
 /// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
-#[cfg(any(not(feature = "scheduler"), test))]
+#[cfg(any(target_arch = "wasm32", test))]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn import_resolves_to_dep(
     file: &FileEntry,
@@ -203,7 +203,7 @@ fn import_resolves_to_dep_with_resolver_view(
 
 /// Like [`import_resolves_to_dep`], but also consults the workspace resolver
 /// for aliased specifiers that heuristic matching cannot handle.
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn import_resolves_to_dep_with_resolver(
     file: &mut FileEntry,
@@ -361,7 +361,7 @@ pub(crate) fn should_invalidate_dependent_view(
 }
 
 /// Legacy wrapper for should_invalidate_dependent_view using FileEntry.
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn should_invalidate_dependent(
     file: &mut FileEntry,
     dependency_id: &str,
@@ -393,7 +393,7 @@ pub(crate) fn should_invalidate_dependent(
 /// Used by the native (non-WASM) path where reverse deps are read from the
 /// workspace's authoritative EdgeStore instead of the host's legacy
 /// `reverse_dependencies` map.
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn smart_invalidate_dependents_with_owners(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
@@ -542,7 +542,7 @@ fn build_dependent_view(
 /// - Tier 1: No export signatures → full invalidation
 /// - Tier 2: Export-level hashing → invalidate only if macro-consumed exports changed
 /// - Tier 3: Cross-file type resolution → invalidate only if resolved type shape changed
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn smart_invalidate_dependents(
     files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
     reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,

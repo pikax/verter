@@ -28,13 +28,13 @@ use std::time::Instant;
 #[cfg(feature = "session_metrics")]
 use web_time::Instant;
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
 use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
 use crate::id::{parse_raw_id, render_ids, render_single_id};
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
@@ -822,7 +822,7 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(owner_canonical) {
@@ -3136,7 +3136,7 @@ impl VerterHost {
                     }
                 }
             }
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = read_lock(&self.files);
                 match files.get(&canonical) {
@@ -3291,7 +3291,7 @@ impl VerterHost {
                     }
                 }
             }
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = read_lock(&self.files);
                 let entry = files
@@ -3527,7 +3527,7 @@ impl VerterHost {
                 }
             }
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = read_lock(&self.files);
                 let entry = files
@@ -3746,7 +3746,7 @@ impl VerterHost {
         }
 
         // Write per-profile state to files (WASM path only).
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(&canonical_id) {
@@ -3828,7 +3828,7 @@ impl VerterHost {
             })
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let files = read_lock(&self.files);
             let entry = files.get(&canonical)?;
@@ -3908,7 +3908,7 @@ impl VerterHost {
             )
         };
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         let (source, file_kind, macro_type_deps, script_imports, cached_extract, whole_hash) = {
             let (file_kind, cached_extract) = {
                 let files = read_lock(&self.files);
@@ -3973,7 +3973,7 @@ impl VerterHost {
                 }
             }
 
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
@@ -4033,7 +4033,7 @@ impl VerterHost {
             cc.diagnostics_generation += 1;
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             if let Some(entry) = files.get_mut(canonical_id) {
