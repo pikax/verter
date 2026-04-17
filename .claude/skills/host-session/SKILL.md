@@ -226,9 +226,23 @@ Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `ups
 
 ### Authority Chain (Final State)
 
-1. **Scheduler** = sole parser, raw source + analysis authority (`HostSourceData`, `HostAnalysisData`)
-2. **compile_cache** (`DashMap`) = profile state authority (compile_slots, overrides, diagnostics, deps, resolved_type_hashes)
-3. **files** (`Shared<FxHashMap>`) = WASM-only primary store. Not used on native (scheduler) path.
+1. **Scheduler** = sole parser, raw source + analysis authority (`HostSourceData`, `HostAnalysisData`). `HostSourceData::source_type` is the authoritative `oxc_span::SourceType` for downstream cache-key sites -- computed once at `execute_source` time with full access to the parsed SFC. Cache-key callers read via `VerterHost::authoritative_source_type_for(canonical)` or the higher-level `imported_eval_source_type_for(...)` helper.
+2. **compile_cache** (`DashMap`) = profile state authority (compile_slots, overrides, diagnostics, deps, resolved_type_hashes). `CompileCacheEntry.evicted_whole_hash: Option<Hash16>` carries the pre-evict hash; `ensure_loaded` compares it to the post-reload hash and skips `bump_store_view_epoch` on no-op reloads so thread-local caches stay warm.
+3. **files** (`Shared<FxHashMap>`) = WASM-only primary store. Not used on native (scheduler) path. Gated `#[cfg(target_arch = "wasm32")]` / `#[cfg(any(target_arch = "wasm32", test))]` after the Phase 1 cleanup.
+
+### Request-Scoped View Contract
+
+`RequestStoreView` (`crates/verter_session/src/host_request_view.rs`) is the single per-request view captured at request entry. It wraps the host-owned `HostStoreView` snapshot plus a request-private `RequestExtension` map covering `whole_hash`, derived hashes (`Route`, `ImportRoute`), and `import_route` resolutions for canonicals discovered mid-request via `ensure_loaded`.
+
+Key rules:
+
+- Resolvers inside a request consult the request view for all "what does the host know about this canonical?" lookups. Live `host.scheduler.try_get_source(...)`, `module_facts.get_any(...)`, `host.get_whole_hash(...)` probes inside resolver paths are considered view-bypass.
+- `RequestStoreView::is_evalable(canonical)` is the canonical shallow-probe API for feasibility checks. `VerterHost::is_evalable(canonical)` reads from the current request view via the thread-local `CURRENT_REQUEST_VIEW`, falling back to the cheap `get_whole_hash` check outside of any request.
+- Mid-request `ensure_loaded` integration uses the thread-local `CURRENT_REQUEST_VIEW` guard to record extensions via `VerterHost::record_current_request_extension_for`; top-level callers see no plumbing change.
+- The request-scoped `external_inputs_memo` on `RequestStoreView` caches the *result of fetching from* `external_type_analysis_cache` / `module_facts`, keyed by `(canonical_id, whole_hash)`. It is a lookup memo, NOT a parallel parser path -- the host-scoped cache remains the single source of truth for `Arc<AnalyzedExternalTypeSource>`.
+- View staleness during long-running requests (Editor menus, multi-second queries) is bounded -- the captured view does not see post-snapshot upserts; the next request snapshots fresh.
+
+**Phase 1 scope carried forward to follow-up work**: the full signature rewrite of every `pub(crate) fn *_in_view(..., store_view: Option<&HostStoreView>)` to `view: &RequestStoreView` is a mechanical but wide-blast-radius change (~128 sites). Until it lands, callers keep the `Option<&HostStoreView>` signature and reach the extension store via the thread-local; the trace-gate budgets (Accordion `resolve_imported_type_root ≤ 2`, `cached_type_resolution_context_hit ≥ 80 %`) only tighten once signatures thread `&RequestStoreView` directly.
 
 ### Key Files
 
