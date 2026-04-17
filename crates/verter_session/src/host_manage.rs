@@ -58,7 +58,7 @@ pub(crate) fn resolve_relative_specifier_to_canonical(
             .unwrap_or("");
         let resolved = resolve_relative_path(base_dir, specifier);
         // Try exact path first
-        if host.current_eval_state_in_view(&resolved, None).is_some() {
+        if host.is_evalable(&resolved) {
             return resolved;
         }
         // Strip .js/.jsx/.mjs/.cjs extension and try TS declaration companions
@@ -70,7 +70,7 @@ pub(crate) fn resolve_relative_specifier_to_canonical(
         if let Some(stem) = stem {
             for ext in &[".d.ts", ".d.cts", ".d.mts", ".ts", ".tsx"] {
                 let candidate = format!("{stem}{ext}");
-                if host.current_eval_state_in_view(&candidate, None).is_some() {
+                if host.is_evalable(&candidate) {
                     return candidate;
                 }
             }
@@ -78,14 +78,14 @@ pub(crate) fn resolve_relative_specifier_to_canonical(
         // Try appending extensions
         for ext in &[".ts", ".d.ts", ".tsx", ".js", ".vue"] {
             let candidate = format!("{resolved}{ext}");
-            if host.current_eval_state_in_view(&candidate, None).is_some() {
+            if host.is_evalable(&candidate) {
                 return candidate;
             }
         }
         // Try /index variants
         for ext in &["/index.ts", "/index.d.ts", "/index.js"] {
             let candidate = format!("{resolved}{ext}");
-            if host.current_eval_state_in_view(&candidate, None).is_some() {
+            if host.is_evalable(&candidate) {
                 return candidate;
             }
         }
@@ -7104,6 +7104,25 @@ impl VerterHost {
         self.host_owned_resolved_named_types.len()
     }
 
+    /// Cheap view-backed feasibility predicate for candidate-path probing.
+    ///
+    /// Replaces the pattern `current_eval_state_in_view(&candidate, None).is_some()`
+    /// — which materialized raw source + parse + eval state to answer the
+    /// predicate — with a lookup against the current request view (captured
+    /// `HostStoreView` + extension store). Outside of a request, falls back to
+    /// `get_whole_hash` which is itself a cheap `compile_cache` + `module_facts`
+    /// lookup (no parse, no disk read).
+    ///
+    /// Per §4.3 Sub-task B this is the canonical shallow-probe API. Candidate
+    /// paths that are not already loaded return `false`; probing does not
+    /// implicitly trigger loading.
+    pub(crate) fn is_evalable(&self, canonical: &str) -> bool {
+        if let Some(view) = crate::host_request_view::current_request_view() {
+            return view.is_evalable(canonical);
+        }
+        self.get_whole_hash(canonical).is_some()
+    }
+
     /// Construct a request-scoped view at request entry. Wraps a freshly
     /// captured [`crate::resolver_store::HostStoreView`] plus an additive
     /// extension store that tracks canonicals loaded mid-request.
@@ -10050,7 +10069,7 @@ fn collect_jsdoc_descriptions_from_root(
                     resolve_relative_type_specifier(
                         current_canonical.as_str(),
                         import_specifier.as_str(),
-                        |path| host.current_eval_state_in_view(path, store_view).is_some(),
+                        |path| host.is_evalable(path),
                     )
                 });
             let Some(next_canonical) = next_canonical else {
@@ -10125,7 +10144,7 @@ fn follow_heritage_type_imports(
                 resolve_relative_type_specifier(
                     defining_canonical,
                     import_specifier.as_str(),
-                    |path| host.current_eval_state_in_view(path, store_view).is_some(),
+                    |path| host.is_evalable(path),
                 )
             });
         let Some(next_canonical) = next_canonical else {
