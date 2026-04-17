@@ -340,9 +340,13 @@ pub(crate) struct ExternalTypeAnalysisCacheKey {
 /// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
 /// plus `(canonical_id, whole_hash)` scoping so stored entries stay consistent
 /// with the owning file's content generation.
+///
+/// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
+/// construction is a refcount bump instead of a `String` heap allocation
+/// (§7.3 b Phase 2 read-path allocation mitigation).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct HostResolvedNamedTypeKey {
-    pub(crate) canonical_id: String,
+    pub(crate) canonical_id: Arc<str>,
     pub(crate) whole_hash: Hash16,
     pub(crate) inner:
         verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
@@ -363,7 +367,9 @@ struct HostNamedTypeCacheAdapter {
             std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         >,
     >,
-    canonical_id: String,
+    /// Shared `Arc<str>` so adapter clones (one per child type context from
+    /// `instantiate_type_params_ctx`) don't each allocate a fresh `String`.
+    canonical_id: Arc<str>,
     whole_hash: Hash16,
 }
 
@@ -375,8 +381,12 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
         key: &verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
     ) -> Option<std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>>
     {
+        // `canonical_id` is `Arc<str>` — clone is a refcount bump, no alloc.
+        // `inner` still clones `Box<[u8]>` for `name` (cache-key shape
+        // inherited from parser crate); future follow-up can lift that to
+        // `Arc<[u8]>` symmetrically.
         let host_key = HostResolvedNamedTypeKey {
-            canonical_id: self.canonical_id.clone(),
+            canonical_id: Arc::clone(&self.canonical_id),
             whole_hash: self.whole_hash,
             inner: key.clone(),
         };
@@ -391,7 +401,7 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
         value: std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
     ) {
         let host_key = HostResolvedNamedTypeKey {
-            canonical_id: self.canonical_id.clone(),
+            canonical_id: Arc::clone(&self.canonical_id),
             whole_hash: self.whole_hash,
             inner: key,
         };
@@ -2099,7 +2109,7 @@ impl VerterHost {
                     + Sync,
             > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
                 cache: std::sync::Arc::clone(&self.host_owned_resolved_named_types),
-                canonical_id: canonical_id.to_string(),
+                canonical_id: Arc::<str>::from(canonical_id),
                 whole_hash,
             });
             let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
@@ -4968,16 +4978,84 @@ impl VerterHost {
         Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         Hash16,
     )> {
+        if canonical_id.is_empty() {
+            return None;
+        }
+
+        let normalized_canonical_id =
+            self.normalized_analysis_canonical_in_view(canonical_id, store_view);
+        let memo_canonical = normalized_canonical_id.as_ref().to_string();
+
+        // Request-scoped memo: the `(raw_source, cached_parse, whole_hash)`
+        // tuple returned by the slow path is stable for the lifetime of one
+        // request. Re-probes for the same canonical within that window
+        // (SFC self-walk being the worst case — 128× on nuxt-ui Accordion)
+        // collapse onto a single host-cache trip.
+        //
+        // Memoization is gated on either (a) no explicit store_view at all, or
+        // (b) the caller-supplied store_view matching the current ambient
+        // request view. Callers that pass an *explicit* different view (e.g.
+        // stale-view rejection tests that construct a captured view, upsert
+        // new content, and re-probe) must go through the slow path so the
+        // view's per-request validation can still reject changed sources.
+        let ambient_view = crate::host_request_view::current_request_view();
+        let memo_view: Option<&crate::host_request_view::RequestStoreView> = match store_view {
+            None => ambient_view.as_deref(),
+            Some(explicit) => {
+                let ambient_ptr = ambient_view
+                    .as_ref()
+                    .map(|arc| std::sync::Arc::as_ptr(arc) as usize);
+                let explicit_ptr = explicit as *const _ as usize;
+                if ambient_ptr == Some(explicit_ptr) {
+                    Some(explicit)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(view) = memo_view {
+            if let Some(memoized) = view.eval_state_memo_get(memo_canonical.as_str()) {
+                return memoized
+                    .map(|entry| (entry.raw_source, entry.cached_parse, entry.whole_hash));
+            }
+        }
+
+        let result = self.current_eval_state_in_view_uncached(
+            memo_canonical.as_str(),
+            store_view,
+            &normalized_canonical_id,
+        );
+        if let Some(view) = memo_view {
+            let entry = result
+                .as_ref()
+                .map(|(raw_source, cached_parse, whole_hash)| {
+                    crate::host_request_view::EvalStateMemoEntry {
+                        raw_source: Arc::clone(raw_source),
+                        cached_parse: cached_parse.clone(),
+                        whole_hash: *whole_hash,
+                    }
+                });
+            view.record_eval_state(memo_canonical, entry);
+        }
+        result
+    }
+
+    fn current_eval_state_in_view_uncached(
+        &self,
+        canonical_id: &str,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
+        normalized_canonical_id: &std::borrow::Cow<'_, str>,
+    ) -> Option<(
+        Arc<str>,
+        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+        Hash16,
+    )> {
         let _trace = component_meta_trace_scope!(
             "current_eval_state",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
-        if canonical_id.is_empty() {
-            return None;
-        }
-        let normalized_canonical_id =
-            self.normalized_analysis_canonical_in_view(canonical_id, store_view);
-        let canonical_id = normalized_canonical_id.as_ref();
+        let _ = normalized_canonical_id;
 
         // ModuleFactsDb fast path — request-view aware.
         let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);

@@ -95,6 +95,27 @@ pub struct RequestStoreView {
     external_inputs_memo: Arc<
         RwLock<FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>>,
     >,
+    /// Per-request memo for `current_eval_state_in_view` results. Keyed by
+    /// canonical only — the raw source + parse + whole_hash tuple returned
+    /// from the host is stable for the lifetime of a request, so a single
+    /// entry per canonical is safe.
+    ///
+    /// Reduces the per-query redundancy observed on SFC self-walks (nuxt-ui
+    /// Accordion: 128 probes of its own `current_eval_state`; expected once
+    /// per unique canonical per query). The memo is consulted at function
+    /// entry and populated on first miss — subsequent probes return the
+    /// cached tuple with only a request-view lock + hashmap lookup.
+    eval_state_memo: Arc<RwLock<FxHashMap<String, Option<EvalStateMemoEntry>>>>,
+}
+
+/// Cached value of `VerterHost::current_eval_state_in_view` shared via the
+/// request view's per-canonical memo. Carries the exact tuple returned by
+/// the slow path so memo hits are observationally identical to a fresh call.
+#[derive(Debug, Clone)]
+pub(crate) struct EvalStateMemoEntry {
+    pub(crate) raw_source: Arc<str>,
+    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    pub(crate) whole_hash: Hash16,
 }
 
 /// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
@@ -129,7 +150,36 @@ impl RequestStoreView {
             captured,
             extensions: Arc::new(RwLock::new(FxHashMap::default())),
             external_inputs_memo: Arc::new(RwLock::new(FxHashMap::default())),
+            eval_state_memo: Arc::new(RwLock::new(FxHashMap::default())),
         })
+    }
+
+    /// Look up a memoized `current_eval_state_in_view` tuple for
+    /// `canonical_id`. Returns `Some(Some(entry))` for a previously-resolved
+    /// successful lookup, `Some(None)` for a memoized missing file, and
+    /// `None` when the canonical has not been probed yet this request.
+    ///
+    /// The two-level `Option` distinguishes "never seen" from "seen and
+    /// returned None" so callers can negative-cache missing files within
+    /// one request without re-walking the slow path.
+    pub(crate) fn eval_state_memo_get(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Option<EvalStateMemoEntry>> {
+        self.eval_state_memo.read().get(canonical_id).cloned()
+    }
+
+    /// Record the outcome of a `current_eval_state_in_view` call. Safe to
+    /// call with `None` — negative caching avoids redundant fallback walks
+    /// for files the host cannot resolve within a single request.
+    pub(crate) fn record_eval_state(
+        &self,
+        canonical_id: impl Into<String>,
+        entry: Option<EvalStateMemoEntry>,
+    ) {
+        self.eval_state_memo
+            .write()
+            .insert(canonical_id.into(), entry);
     }
 
     /// Look up a previously-memoized `ExternalTypeResolutionInputs` for
