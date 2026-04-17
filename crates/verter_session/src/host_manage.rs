@@ -303,6 +303,12 @@ struct ParsedEvalProgramCacheKey {
     host_instance_id: u64,
     canonical_id: String,
     source_type: oxc_span::SourceType,
+    /// §4.6 Sub-task C: `whole_hash` in the key partitions entries by content
+    /// version so a cross-generation request can't collide with a different
+    /// version's stored entry. The post-lookup `entry.whole_hash == whole_hash`
+    /// check becomes redundant (enforced at key level) but is kept as a
+    /// defense-in-depth assertion.
+    whole_hash: Hash16,
 }
 
 #[derive(Clone)]
@@ -322,6 +328,9 @@ struct ParsedTypeResolutionContextCacheEntry {
 pub(crate) struct ExternalTypeAnalysisCacheKey {
     canonical_id: String,
     source_type: oxc_span::SourceType,
+    /// §4.6 Sub-task C: content-version partitioning — same rationale as on
+    /// `ParsedEvalProgramCacheKey`.
+    whole_hash: Hash16,
 }
 
 /// Host-owned cache key for fully-resolved named local symbols.
@@ -2000,6 +2009,7 @@ impl VerterHost {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
             source_type,
+            whole_hash,
         };
         HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -2052,6 +2062,7 @@ impl VerterHost {
             host_instance_id: self.instance_id,
             canonical_id: canonical_id.to_string(),
             source_type,
+            whole_hash,
         };
         HOST_PARSED_TYPE_CONTEXT_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -2136,6 +2147,7 @@ impl VerterHost {
         let cache_key = ExternalTypeAnalysisCacheKey {
             canonical_id: canonical_id.to_string(),
             source_type: self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
+            whole_hash,
         };
         {
             let cache = self.external_type_analysis_cache.lock();
@@ -2284,6 +2296,7 @@ impl VerterHost {
             host_instance_id: self.instance_id,
             canonical_id: dep_canonical.to_string(),
             source_type,
+            whole_hash: inputs.whole_hash,
         };
         HOST_PARSED_EVAL_PROGRAM_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
