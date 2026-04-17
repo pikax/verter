@@ -21,7 +21,8 @@ use crate::types::{HostConfig, ParseSnapshot};
 ///
 /// Wraps a `ParseSnapshot` — the result of SFC tokenization, hashing, and analysis.
 /// Also carries the cached parsed SFC (for Vue files), the host-level file kind,
-/// and the measured parse duration for performance tracking.
+/// the authoritative `source_type` computed once at parse time, and the measured
+/// parse duration for performance tracking.
 #[cfg(feature = "scheduler")]
 #[derive(Debug)]
 #[allow(dead_code)] // Fields read progressively during Phase 2-3 migration
@@ -32,6 +33,11 @@ pub struct HostSourceData {
     pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
     /// Discriminates Vue SFC vs non-SFC (host-level enum, not scheduler's).
     pub(crate) file_kind: crate::types::FileKind,
+    /// Authoritative `SourceType` for downstream type-resolution cache keys,
+    /// computed once during `execute_source` with full access to the parsed
+    /// SFC. Readers must prefer this value over recomputing from raw source +
+    /// `cached_parse` (which is unstable when `cached_parse` is dropped).
+    pub(crate) source_type: oxc_span::SourceType,
     /// Wall-clock parse duration in milliseconds.
     pub(crate) parse_duration_ms: f64,
 }
@@ -171,6 +177,8 @@ impl StageExecutor for HostStageExecutor {
                 self.config.effective_scope(),
             );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
+            let source_type =
+                imported_eval_source_type(canonical_id, content.as_ref(), Some(&parsed_sfc));
             Ok(SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
@@ -180,12 +188,14 @@ impl StageExecutor for HostStageExecutor {
                     parse: parse_snapshot,
                     cached_parse: Some(Arc::new(parsed_sfc)),
                     file_kind: host_file_kind,
+                    source_type,
                     parse_duration_ms,
                 }),
             })
         } else {
             let parse_snapshot = crate::parse::parse_non_sfc_snapshot(canonical_id, &content);
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
+            let source_type = imported_eval_source_type(canonical_id, content.as_ref(), None);
             Ok(SourceSnapshot {
                 source: content,
                 whole_hash: parse_snapshot.whole_hash,
@@ -195,6 +205,7 @@ impl StageExecutor for HostStageExecutor {
                     parse: parse_snapshot,
                     cached_parse: None,
                     file_kind: host_file_kind,
+                    source_type,
                     parse_duration_ms,
                 }),
             })
@@ -291,3 +302,17 @@ impl StageExecutor for HostStageExecutor {
         })
     }
 }
+
+/// Re-export of the pure source-type helper owned by [`crate::parse`].
+///
+/// Owner of the single source-type computation: on native the scheduler calls
+/// this once at [`HostStageExecutor::execute_source`] time and stores the result
+/// on [`HostSourceData::source_type`]. Downstream cache-key callers must prefer
+/// the scheduler-stored value (via [`crate::VerterHost::authoritative_source_type_for`])
+/// over recomputing — recomputation with `cached_parse: None` produces a
+/// different `SourceType` than with `Some(parsed)` for the same `.vue` file
+/// whose `<script>` block uses `lang="tsx"` / `lang="jsx"` / `lang="js"`.
+///
+/// The underlying function lives in [`crate::parse::imported_eval_source_type`]
+/// so WASM-only fall-back paths can reach it without the scheduler feature.
+pub(crate) use crate::parse::imported_eval_source_type;

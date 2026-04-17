@@ -118,6 +118,28 @@ pub(crate) fn non_sfc_source_type(canonical_id: &str) -> SourceType {
     }
 }
 
+/// Pure source-type computation for an imported eval target.
+///
+/// Single source of truth; the scheduler caches its result on
+/// [`crate::host_executor::HostSourceData::source_type`] so cache-key callers
+/// can read the authoritative value via
+/// [`crate::VerterHost::authoritative_source_type_for`] instead of recomputing
+/// from `(canonical_id, raw_source, cached_parse)` — a pair that is unstable
+/// when `cached_parse` is dropped mid-resolution.
+pub(crate) fn imported_eval_source_type(
+    canonical_id: &str,
+    raw_source: &str,
+    cached_parse: Option<&ParsedSfc>,
+) -> SourceType {
+    if canonical_id.ends_with(".vue") {
+        cached_parse
+            .map(|parsed| sfc_script_source_type(parsed, raw_source))
+            .unwrap_or_else(SourceType::ts)
+    } else {
+        non_sfc_source_type(canonical_id)
+    }
+}
+
 pub(crate) fn build_vue_snapshot_from_parsed(
     canonical_id: &str,
     source: &str,

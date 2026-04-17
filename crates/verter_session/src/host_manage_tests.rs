@@ -10801,3 +10801,47 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
     );
     assert_eq!(super::workspace_vfs_source_kind(None), "workspace-vfs");
 }
+
+#[cfg(feature = "scheduler")]
+#[test]
+fn source_type_is_stable_across_callsites_for_same_canonical() {
+    // Phase 1 §4.6 Sub-task A — test 5.6 Test name 3.
+    //
+    // Pre-fix: `imported_eval_source_type(canonical, raw_source, cached_parse)` returns
+    // `SourceType::ts()` when `cached_parse: None`, but `sfc_script_source_type(parsed, raw_source)`
+    // when `cached_parse: Some(parsed)`. For a `lang="tsx"` SFC, those diverge — different cache
+    // slots for the same `(canonical, whole_hash)`.
+    //
+    // Post-fix: the scheduler computes `source_type` once at `execute_source` time with full
+    // access to the parsed SFC, stores it on `HostSourceData::source_type`, and every downstream
+    // cache-key site reads the authoritative value.
+    let host = make_host();
+    let tsx_vue = r#"<script lang="tsx">
+const Button = () => <button />
+export type Props = { render: typeof Button }
+</script>
+<template><div /></template>"#;
+    upsert_vue(&host, "/src/Foo.vue", tsx_vue);
+
+    use crate::host_executor::HostSourceData;
+    let source_snap = host
+        .scheduler
+        .try_get_source("/src/Foo.vue")
+        .expect("scheduler should have Foo.vue");
+    let hd = source_snap
+        .downcast_data::<HostSourceData>()
+        .expect("source data should be HostSourceData");
+
+    // HostSourceData carries the authoritative source_type — computed once at parse time
+    // using the full parsed SFC, not reconstructed from raw_source + optional cached_parse.
+    assert!(
+        hd.source_type.is_jsx(),
+        "HostSourceData.source_type should be tsx (JSX-bearing) for lang=tsx SFC, got {:?}",
+        hd.source_type,
+    );
+    assert!(
+        hd.source_type.is_typescript(),
+        "HostSourceData.source_type should be TypeScript for lang=tsx SFC, got {:?}",
+        hd.source_type,
+    );
+}

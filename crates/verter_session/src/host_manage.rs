@@ -1628,18 +1628,25 @@ impl VerterHost {
             .unwrap_or_else(|| source.to_string())
     }
 
-    fn imported_eval_source_type(
+    /// Resolve the authoritative `source_type` for cache-key purposes.
+    ///
+    /// Prefers the scheduler-stored [`crate::host_executor::HostSourceData::source_type`]
+    /// (set once at `execute_source` time). Falls back to a pure recomputation for
+    /// canonicals the scheduler has not yet processed — WASM path, first-time routing,
+    /// or snapshot construction for files the scheduler does not own.
+    fn imported_eval_source_type_for(
+        &self,
         canonical_id: &str,
         raw_source: &str,
         cached_parse: Option<&verter_compiler::parser::types::ParsedSfc>,
     ) -> oxc_span::SourceType {
-        if canonical_id.ends_with(".vue") {
-            cached_parse
-                .map(|parsed| crate::parse::sfc_script_source_type(parsed, raw_source))
-                .unwrap_or_else(oxc_span::SourceType::ts)
-        } else {
-            crate::parse::non_sfc_source_type(canonical_id)
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(st) = self.authoritative_source_type_for(canonical_id) {
+                return st;
+            }
         }
+        crate::parse::imported_eval_source_type(canonical_id, raw_source, cached_parse)
     }
 
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
@@ -2051,7 +2058,7 @@ impl VerterHost {
     ) {
         let cache_key = ExternalTypeAnalysisCacheKey {
             canonical_id: canonical_id.to_string(),
-            source_type: Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
+            source_type: self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
         };
         {
             let cache = self.external_type_analysis_cache.lock();
@@ -2164,7 +2171,7 @@ impl VerterHost {
         store_view: Option<&crate::resolver_store::HostStoreView>,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
         let inputs = self.external_type_resolution_inputs_in_view(dep_canonical, store_view)?;
-        let source_type = Self::imported_eval_source_type(
+        let source_type = self.imported_eval_source_type_for(
             dep_canonical,
             inputs.raw_source.as_ref(),
             inputs.cached_parse.as_deref(),
@@ -2247,7 +2254,7 @@ impl VerterHost {
             canonical_id,
             whole_hash,
             eval_source,
-            Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
+            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
         );
         if parsed_eval_program.parse_failed {
             return Arc::new(
@@ -2277,7 +2284,7 @@ impl VerterHost {
             canonical_id,
             whole_hash,
             eval_source,
-            Self::imported_eval_source_type(canonical_id, raw_source, cached_parse),
+            self.imported_eval_source_type_for(canonical_id, raw_source, cached_parse),
         );
         if parsed_eval_program.parse_failed {
             let mut env = verter_semantic::analysis::type_eval_build::parse_and_build_env(
@@ -3977,7 +3984,7 @@ impl VerterHost {
         let normalized_canonical_id =
             self.normalized_analysis_canonical_in_view(dep_canonical, store_view);
         let canonical_id_for_source_type = normalized_canonical_id.as_ref();
-        let source_type = Self::imported_eval_source_type(
+        let source_type = self.imported_eval_source_type_for(
             canonical_id_for_source_type,
             inputs.raw_source.as_ref(),
             inputs.cached_parse.as_deref(),
@@ -4793,7 +4800,7 @@ impl VerterHost {
         }
 
         let eval_source = Arc::<str>::from(Self::build_eval_script_source(source.as_ref(), None));
-        let source_type = Self::imported_eval_source_type(canonical, source.as_ref(), None);
+        let source_type = self.imported_eval_source_type_for(canonical, source.as_ref(), None);
         let parsed_eval_program =
             self.cached_parsed_eval_program_entry(canonical, whole_hash, &eval_source, source_type);
         if parsed_eval_program.parse_failed {
@@ -6987,6 +6994,25 @@ impl VerterHost {
                     .map(|facts| facts.whole_hash)
             })
         }
+    }
+
+    /// Return the scheduler's authoritative [`oxc_span::SourceType`] for a loaded
+    /// canonical file, or `None` if the canonical has not been processed by the
+    /// scheduler (WASM / unloaded / pre-parse routing).
+    ///
+    /// Used by cache-key sites that need a stable `source_type` for the same
+    /// `(canonical_id, whole_hash)` pair regardless of whether the caller
+    /// currently holds the parsed SFC. See [`crate::host_executor::imported_eval_source_type`]
+    /// for the pure function the scheduler invokes once at parse time.
+    #[cfg(feature = "scheduler")]
+    pub(crate) fn authoritative_source_type_for(
+        &self,
+        canonical: &str,
+    ) -> Option<oxc_span::SourceType> {
+        use crate::host_executor::HostSourceData;
+        let snap = self.scheduler.try_get_source(canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
+        Some(hd.source_type)
     }
 
     /// Returns the semantic hash for a file by canonical ID or alias.
