@@ -69,6 +69,13 @@ pub(crate) struct RequestExtension {
 /// Request-scoped view: one captured `HostStoreView` plus an additive extension
 /// store. Held via `Arc` so the thread-local [`CURRENT_REQUEST_VIEW`] can hold
 /// a `Weak` without extending the lifetime of the view.
+///
+/// Several fields (`derived_hashes`, `import_routes` on `RequestExtension`,
+/// `captured` on `RequestStoreView`) are read by `VerterHost` methods that
+/// are not yet signature-rewritten to take `&RequestStoreView` — Commit I
+/// lands the full signature rewrite. Marked `#[allow(dead_code)]` pending
+/// that refactor.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct RequestStoreView {
     pub(crate) captured: Arc<HostStoreView>,
@@ -76,12 +83,13 @@ pub(crate) struct RequestStoreView {
     /// Per-request memo over host-scoped analysis results. Keyed by
     /// `(canonical_id, whole_hash)` — the content identity of the analysis.
     ///
-    /// This is a lookup memo over the host cache (`external_type_analysis_cache`
-    /// + `module_facts`), NOT a parallel hydration path — it caches the result
-    /// of *fetching from the host cache* so repeat callers within one request
-    /// don't re-pay canonical normalization, the `module_facts` lock acquire,
-    /// and the multiple `Arc::clone`s that the raw fetch costs. The underlying
-    /// host-scoped analysis cache remains the single source of truth for the
+    /// This is a lookup memo over the host cache
+    /// (`external_type_analysis_cache` and `module_facts`), NOT a parallel
+    /// hydration path. It caches the result of *fetching from the host cache*
+    /// so repeat callers within one request don't re-pay canonical
+    /// normalization, the `module_facts` lock acquire, and the multiple
+    /// `Arc::clone`s that the raw fetch costs. The underlying host-scoped
+    /// analysis cache remains the single source of truth for the
     /// `Arc<AnalyzedExternalTypeSource>` data.
     external_inputs_memo:
         RwLock<FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>>,
@@ -89,6 +97,11 @@ pub(crate) struct RequestStoreView {
 
 /// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
 /// view-coherence invariant assertion (§2.2 item 9).
+///
+/// Currently only `Tracked` / `Extended` / `Untracked` are distinguished — the
+/// release-mode trace event emission and debug-mode panic wiring land with
+/// the signature rewrite in Commit I.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TouchOutcome {
     /// Canonical is in the captured view's `whole_hashes`.
@@ -102,6 +115,12 @@ pub(crate) enum TouchOutcome {
     Untracked,
 }
 
+// Helper methods on RequestStoreView. `#[allow(dead_code)]` on the whole block
+// because the signature rewrite (Commit I) is where the `_in_view` callers
+// start consuming these helpers. Before I: `is_evalable` is reached via
+// `VerterHost::is_evalable`; `install` is called from tests + will be called
+// from top-level `getComponentMeta` entry after I.
+#[allow(dead_code)]
 impl RequestStoreView {
     pub(crate) fn new(captured: Arc<HostStoreView>) -> Arc<Self> {
         Arc::new(Self {
@@ -302,6 +321,7 @@ thread_local! {
 
 /// RAII guard returned by [`RequestStoreView::install`]. Restores the previous
 /// thread-local value on drop so nested requests compose safely.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct RequestViewGuard {
     _prev: Option<Weak<RequestStoreView>>,

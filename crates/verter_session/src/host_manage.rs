@@ -7167,6 +7167,7 @@ impl VerterHost {
     /// and immediately `install()` the returned view so the
     /// `CURRENT_REQUEST_VIEW` thread-local points at it for the lifetime of
     /// the request's RAII guard.
+    #[allow(dead_code)] // Called by tests today; top-level request entry rewrite lands in Commit I.
     pub(crate) fn build_request_store_view(
         &self,
     ) -> std::sync::Arc<crate::host_request_view::RequestStoreView> {
