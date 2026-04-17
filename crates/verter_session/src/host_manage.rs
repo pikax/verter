@@ -6872,7 +6872,6 @@ impl VerterHost {
     /// `(canonical_id, whole_hash)` pair regardless of whether the caller
     /// currently holds the parsed SFC. See [`crate::host_executor::imported_eval_source_type`]
     /// for the pure function the scheduler invokes once at parse time.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn authoritative_source_type_for(
         &self,
         canonical: &str,
@@ -6981,7 +6980,6 @@ impl VerterHost {
     /// so derived hashes come from module_facts when available and stay empty
     /// otherwise — the extension still carries enough signal for
     /// `FileWholeHash` / `DirectSource` fact validation.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn record_current_request_extension_for(&self, canonical: &str) {
         let Some(view) = crate::host_request_view::current_request_view() else {
             return;
@@ -7136,38 +7134,12 @@ impl VerterHost {
 
     /// Build a `FileAnalysisSnapshot` from a `FileEntry` using Arc::clone
     /// for immutable fields and deep clone for mutable fields (imports, bindings).
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn build_snapshot_from_entry(entry: &crate::FileEntry) -> FileAnalysisSnapshot {
-        FileAnalysisSnapshot {
-            imports: entry.script_analysis.imports.clone(),
-            bindings: entry.script_analysis.bindings.clone(),
-            // Arc::clone â€” cheap pointer bump, no deep copy
-            module_references: Arc::clone(&entry.arc_script_cache.module_references),
-            macros: Arc::clone(&entry.arc_script_cache.macros),
-            macro_type_deps: Arc::clone(&entry.arc_script_cache.macro_type_deps),
-            script_flags: entry.script_analysis.flags.bits(),
-            styles: Arc::clone(&entry.style_analyses),
-            template: entry.template_analysis.clone(),
-            vue_api_calls: Arc::clone(&entry.arc_script_cache.vue_api_calls),
-            dom_query_calls: Arc::clone(&entry.arc_script_cache.dom_query_calls),
-            css_var_manipulations: Arc::clone(&entry.arc_script_cache.css_var_manipulations),
-            script_binding_occurrences: Arc::clone(
-                &entry.arc_script_cache.script_binding_occurrences,
-            ),
-            export_signatures: Arc::new(entry.export_signatures.clone()),
-            options_api: entry.script_analysis.options_api.clone(),
-            store_usages: Arc::clone(&entry.arc_script_cache.store_usages),
-            store_definitions: Arc::clone(&entry.arc_script_cache.store_definitions),
-            is_typescript: entry.script_analysis.is_typescript,
-        }
-    }
 
     /// Build a `FileAnalysisSnapshot` from scheduler snapshots and compile_cache.
     ///
     /// Reads `HostAnalysisData` for script analysis, export signatures, styles,
     /// and pre-computed `AnalysisArcs`. Template analysis comes from compile_cache
     /// (raw_template_analysis). Uses Arc::clone for all immutable fields.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn build_snapshot_from_scheduler(
         &self,
         canonical: &str,
@@ -7420,7 +7392,6 @@ impl VerterHost {
     pub fn bump_diagnostics_generation(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.diagnostics_generation += 1;
         }
@@ -7430,7 +7401,6 @@ impl VerterHost {
     pub fn invalidate_compile_slots(&self, canonical_or_alias: &str) {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(mut cc) = self.compile_cache.get_mut(&canonical) {
             cc.compile_slots.clear();
             cc.cached_resolved_meta.clear();
@@ -7719,7 +7689,6 @@ impl VerterHost {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn compute_override_template_analysis(
         &self,
         canonical: &str,
@@ -8026,7 +7995,6 @@ impl VerterHost {
                 binding_name,
             );
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return None;
@@ -8046,7 +8014,6 @@ impl VerterHost {
     /// (e.g., bare specifiers like `vue` or unregistered files).
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
         let canonical_parent = self.resolve_alias_or_canonical(parent_canonical_id);
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical_parent) {
             if cc.evicted {
                 return None;
@@ -8078,7 +8045,6 @@ impl VerterHost {
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return None;
@@ -8125,7 +8091,6 @@ impl VerterHost {
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Vec<ResolvedExport> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return Vec::new();

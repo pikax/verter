@@ -28,14 +28,10 @@ use std::time::Instant;
 #[cfg(feature = "session_metrics")]
 use web_time::Instant;
 
-#[cfg(target_arch = "wasm32")]
-use crate::cache::enforce_profile_cap;
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
 use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
 use crate::id::{parse_raw_id, render_ids, render_single_id};
-#[cfg(target_arch = "wasm32")]
-use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
@@ -3211,7 +3207,6 @@ impl VerterHost {
             }
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         for blocker_id in blocker_ids {
             let _ = self.ensure_loaded(&blocker_id);
         }
@@ -3667,7 +3662,6 @@ impl VerterHost {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = profile.map(compile_profile_hash);
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(cc) = self.compile_cache.get(&canonical) {
             if cc.evicted {
                 return None;
@@ -3789,7 +3783,6 @@ impl VerterHost {
         profile_hash: u64,
         diagnostics: DiagnosticsSnapshot,
     ) {
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(mut cc) = self.compile_cache.get_mut(canonical_id) {
             cc.latest_diagnostics.insert(profile_hash, diagnostics);
             cc.diagnostics_generation += 1;

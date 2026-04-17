@@ -227,11 +227,9 @@ pub struct VerterHost {
     /// The scheduler coordinates Sourceâ†’Analysisâ†’Artifact progression
     /// with generation tracking, priority queuing, and blocker management.
     /// It is the sole parser â€” upsert() delegates to the scheduler.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
     /// Per-file compile cache: overrides, compile slots, diagnostics, deps.
     /// Scheduler owns raw source + analysis; this cache owns per-profile state.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) compile_cache: dashmap::DashMap<String, CompileCacheEntry>,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
@@ -301,7 +299,6 @@ impl VerterHost {
     ///
     /// The workspace provides file reads, import resolution, and edge recording
     /// through the [`WorkspaceAccess`](verter_workspace::WorkspaceAccess) trait.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(config: HostConfig, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) -> Self {
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
@@ -311,19 +308,30 @@ impl VerterHost {
                 Arc::clone(&workspace_lock),
             ));
             let loader = Arc::new(WorkspaceSourceLoader(Arc::clone(&workspace_lock)));
-            verter_scheduler::scheduler::Scheduler::with_executor(
-                verter_scheduler::scheduler::SchedulerConfig::default(),
-                loader,
-                executor,
-            )
+            // Native spawns a driver thread; WASM uses sync mode
+            // (wait_or_drive on the host drives stages inline).
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                verter_scheduler::scheduler::Scheduler::with_executor(
+                    verter_scheduler::scheduler::SchedulerConfig::default(),
+                    loader,
+                    executor,
+                )
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
+                    verter_scheduler::scheduler::SchedulerConfig::default(),
+                    loader,
+                    executor,
+                )
+            }
         };
 
         Self {
             instance_id: next_host_instance_id(),
             config,
             workspace: workspace_lock,
-            #[cfg(target_arch = "wasm32")]
-            files: default_shared(FxHashMap::default()),
             alias_to_canonical: default_shared(FxHashMap::default()),
             reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
@@ -331,9 +339,7 @@ impl VerterHost {
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
-            #[cfg(not(target_arch = "wasm32"))]
             scheduler,
-            #[cfg(not(target_arch = "wasm32"))]
             compile_cache: dashmap::DashMap::new(),
             provenance: Arc::new(MetaProvenance::default()),
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
@@ -348,41 +354,12 @@ impl VerterHost {
     }
 
     /// Create a new host (WASM variant, backed by MemoryWorkspace).
-    #[cfg(target_arch = "wasm32")]
-    pub fn new(config: HostConfig) -> Self {
-        let ws: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
-            verter_workspace::MemoryWorkspace::new(verter_workspace::MemoryOptions::default()),
-        );
-        Self {
-            instance_id: next_host_instance_id(),
-            config,
-            workspace: Arc::new(parking_lot::RwLock::new(ws)),
-            files: default_shared(FxHashMap::default()),
-            alias_to_canonical: default_shared(FxHashMap::default()),
-            reverse_dependencies: default_shared(FxHashMap::default()),
-            tick: std::sync::atomic::AtomicU64::new(1),
-            store_view_epoch: std::sync::atomic::AtomicU64::new(1),
-            last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
-            #[cfg(feature = "session_metrics")]
-            metrics: HostMetrics::default(),
-            provenance: Arc::new(MetaProvenance::default()),
-            resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            resolver: HostResolverState::new(),
-            eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
-            query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
-            external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            host_owned_resolved_named_types: std::sync::Arc::new(dashmap::DashMap::new()),
-        }
-    }
 
     /// Create a standalone host with an internal memory workspace.
     ///
     /// For backward compatibility with tests and simple use cases that don't
     /// need an external workspace. Creates a [`MemoryWorkspace`](verter_workspace::MemoryWorkspace)
     /// internally.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_standalone(config: HostConfig) -> Self {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
@@ -391,10 +368,6 @@ impl VerterHost {
     }
 
     /// Create a standalone host (WASM variant).
-    #[cfg(target_arch = "wasm32")]
-    pub fn new_standalone(config: HostConfig) -> Self {
-        Self::new(config)
-    }
 
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
@@ -865,7 +838,6 @@ impl VerterHost {
     /// This is the scheduler-backed replacement for the old `files`-map ingress:
     /// it updates `compile_cache` identity/dependency state without re-submitting
     /// source back into the scheduler.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
         use crate::host_executor::HostSourceData;
 
@@ -917,7 +889,6 @@ impl VerterHost {
     ///
     /// Merges per-index overrides from `StyleOverrideWithAnalysis` with raw
     /// style analyses from the scheduler. Returns `None` if file not in scheduler.
-    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Used by css_var_flow migration (upcoming)
     pub(crate) fn effective_style_analyses(
         &self,
@@ -956,7 +927,6 @@ impl VerterHost {
     ///
     /// Applies `style_langs` overrides from `StyleOverrideWithAnalysis` to the
     /// raw meta. Returns `None` if file not in scheduler.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn effective_meta(
         &self,
         canonical_id: &str,
@@ -1037,25 +1007,19 @@ impl VerterHost {
                     self.scheduler.close_file(id);
                 }
             }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let files = read_lock(&self.files);
-                for canonical_id in files.keys() {
-                    ws.notify_close(canonical_id);
-                }
-            }
         }
 
-        #[cfg(target_arch = "wasm32")]
-        write_lock(&self.files).clear();
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
 
         {
             self.compile_cache.clear();
-            self.scheduler.reset();
-            self.scheduler.restart_driver();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.scheduler.reset();
+                self.scheduler.restart_driver();
+            }
         }
         self.resolved_type_cache.lock().clear();
         self.resolver.reset_all();
@@ -1150,7 +1114,6 @@ impl VerterHost {
     ///
     /// Returns `None` if the file hasn't been upserted or the snapshot is stale.
     /// This is a lock-free ArcSwap read â€” no contention with upsert/compile.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_source(
         &self,
         canonical_id: &str,
@@ -1159,7 +1122,6 @@ impl VerterHost {
     }
 
     /// Get the scheduler's analysis snapshot for a file (scheduler feature only).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_analysis(
         &self,
         canonical_id: &str,
@@ -1171,7 +1133,6 @@ impl VerterHost {
     ///
     /// This is the lock-free read path â€” returns data from the scheduler's
     /// ArcSwap snapshots without touching the `files` RwLock.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_export_signatures(
         &self,
         canonical_id: &str,
@@ -1182,7 +1143,6 @@ impl VerterHost {
     }
 
     /// Get script analysis from the scheduler's analysis snapshot.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
@@ -1195,7 +1155,6 @@ impl VerterHost {
     /// Get compiled virtual files from the scheduler's artifact snapshot.
     ///
     /// Returns the compile output for a specific profile if available.
-    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
     pub(crate) fn scheduler_artifact_outputs(
         &self,
@@ -1211,7 +1170,6 @@ impl VerterHost {
     }
 
     /// Get artifact diagnostics from the scheduler's artifact snapshot.
-    #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)] // Tested via scheduler_tests; LSP will call once migrated
     pub(crate) fn scheduler_artifact_diagnostics(
         &self,
@@ -1226,7 +1184,6 @@ impl VerterHost {
     }
 
     /// Get style analyses from the scheduler's analysis snapshot.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
@@ -1237,7 +1194,6 @@ impl VerterHost {
     }
 
     /// Get the scheduler instance (scheduler feature only).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
         &self.scheduler
     }
@@ -1252,13 +1208,9 @@ impl VerterHost {
     /// (compile_slots, overrides, diagnostics) but preserves deps/aliases for
     /// old-state diffing during reload. The eviction gate makes the file
     /// invisible to host accessors until `ensure_loaded()` re-integrates.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
         self.semantic_db.lock().invalidate(canonical_id);
-
-        #[cfg(target_arch = "wasm32")]
-        write_lock(&self.files).remove(canonical_id);
 
         {
             // Capture pre-evict whole_hash from the scheduler so `ensure_loaded`
@@ -1293,7 +1245,6 @@ impl VerterHost {
     /// workspace-backed SourceLoader), waits for Analysis to commit, then
     /// materializes native-side lifecycle state from the committed scheduler
     /// snapshots without re-submitting the source.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
         let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical_id, None);
         let canonical_id = normalized_canonical.as_ref();
@@ -1515,30 +1466,7 @@ impl VerterHost {
                     self.resolver.runtime.invalidate_canonical(owner);
                 }
             }
-
-            #[cfg(target_arch = "wasm32")]
-            {
-                let ws = self.workspace.read();
-                let cleared = deps::smart_invalidate_dependents_with_owners(
-                    &self.files,
-                    owners.clone(),
-                    Some(ws.as_ref()),
-                    &self.config,
-                    dependency_id,
-                    old_export_signatures,
-                    new_export_signatures,
-                );
-                let evict_targets = if cleared.is_empty() { owners } else { cleared };
-                if !evict_targets.is_empty() {
-                    self.eval_env_cache.lock().clear();
-                }
-                for owner in evict_targets {
-                    self.resolver.runtime.invalidate_canonical(&owner);
-                }
-            }
         }
-
-        // WASM fallback: use legacy reverse_dependencies map.
     }
 }
 
@@ -1547,10 +1475,8 @@ impl VerterHost {
 /// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
 /// so it always reads through the latest workspace, even after
 /// `set_workspace()` swaps it.
-#[cfg(not(target_arch = "wasm32"))]
 struct WorkspaceSourceLoader(Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.0.read().read_file(canonical_id)
@@ -1639,7 +1565,6 @@ impl VerterHost {
         }
 
         // Insert import_routes into compile_cache if non-empty.
-        #[cfg(not(target_arch = "wasm32"))]
         if !import_routes.is_empty() {
             self.compile_cache
                 .entry(canonical_id.to_string())

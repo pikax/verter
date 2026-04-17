@@ -5,8 +5,6 @@ use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-#[cfg(target_arch = "wasm32")]
-use crate::shared::read_lock;
 
 const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 

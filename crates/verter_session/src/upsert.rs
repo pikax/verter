@@ -21,7 +21,7 @@ pub(crate) struct UpsertChangeResult {
 /// Compare old file entry state against a new parse snapshot to determine what changed.
 /// Consolidates all change detection logic into a single function.
 /// Used by the legacy (non-scheduler) upsert path, WASM, and unit tests.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 pub(crate) fn compute_upsert_changes(
     old_entry: Option<&FileEntry>,
     new: &ParseSnapshot,
@@ -48,7 +48,6 @@ pub(crate) fn compute_upsert_changes(
 /// Takes the old parse snapshot directly rather than a FileEntry. Used by
 /// the scheduler-backed upsert where old state comes from the scheduler's
 /// committed HostSourceData, not from the files map.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn compute_upsert_changes_from_parse(
     old: Option<&ParseSnapshot>,
     new: &ParseSnapshot,

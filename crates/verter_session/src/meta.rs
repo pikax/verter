@@ -267,7 +267,6 @@ impl MetaProject {
         self.check_alive()?;
         let _gate = self.enter_base_context()?;
 
-        #[cfg(not(target_arch = "wasm32"))]
         self.host.evict(canonical_id);
 
         let loaded = self.host.ensure_loaded(canonical_id);

@@ -453,7 +453,6 @@ pub struct HostUpdateResult {
 
 impl HostUpdateResult {
     /// Construct a no-op result for superseded upserts (scheduler mode).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn noop() -> Self {
         Self::no_change(String::new())
     }
@@ -816,15 +815,12 @@ pub enum HostError {
     #[error("compile error")]
     CompileError { diagnostics: DiagnosticsSnapshot },
     /// A scheduler error occurred.
-    #[cfg(not(target_arch = "wasm32"))]
     #[error("scheduler error: {0}")]
     Scheduler(#[from] verter_scheduler::job::SchedulerError),
     /// The request was superseded by a newer version of the file.
-    #[cfg(not(target_arch = "wasm32"))]
     #[error("request superseded by newer generation")]
     Superseded,
     /// The scheduler was shut down.
-    #[cfg(not(target_arch = "wasm32"))]
     #[error("scheduler shut down")]
     Shutdown,
 }
@@ -1056,23 +1052,6 @@ pub(crate) struct ScriptAnalysisArcs {
 }
 
 // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-#[cfg(target_arch = "wasm32")]
-impl ScriptAnalysisArcs {
-    /// Build Arc-wrapped caches from a script analysis snapshot.
-    pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
-        Self {
-            module_references: Arc::new(sa.module_references.clone()),
-            macros: Arc::new(sa.macros.clone()),
-            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
-            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
-            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
-            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
-            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
-            store_usages: Arc::new(sa.store_usages.clone()),
-            store_definitions: Arc::new(sa.store_definitions.clone()),
-        }
-    }
-}
 
 /// Per-specifier resolution record for an import dependency.
 ///
@@ -1259,7 +1238,6 @@ impl FileEntry {
 ///
 /// **DependencyState**: resolution metadata + invalidation hashes
 /// - `import_routes`, `dependencies`, `resolved_type_hashes`, `aliases`
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 #[allow(dead_code)] // Fields used progressively during Phase 2 migration
 pub(crate) struct CompileCacheEntry {
@@ -1348,7 +1326,6 @@ pub(crate) struct ContentOverrideWithParse {
 ///
 /// When a style preprocessor (e.g. SCSS → CSS) runs, the compiled CSS and its
 /// remapped CSS analysis (with SFC-absolute spans) are stored here per-profile.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Used in Phase 2a: apply_style_overrides
 pub(crate) struct StyleOverrideWithAnalysis {

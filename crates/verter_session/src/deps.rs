@@ -5,16 +5,10 @@
 //! and the tiered invalidation decision (`should_invalidate_dependent`).
 
 use std::collections::BTreeSet;
-#[cfg(target_arch = "wasm32")]
-use std::sync::Arc;
 
 use verter_semantic::analysis::project_resolver::{ResolvePhase, ResolveRequestKind};
 
 use crate::id;
-#[cfg(target_arch = "wasm32")]
-use crate::shared::read_lock;
-#[cfg(target_arch = "wasm32")]
-use crate::shared::write_lock;
 use crate::types::*;
 use crate::upsert::compute_changed_exports;
 
@@ -66,7 +60,7 @@ pub(crate) struct DependentView {
 }
 
 impl DependentView {
-    #[cfg(any(target_arch = "wasm32", test))]
+    #[cfg(test)]
     pub(crate) fn from_file_entry(entry: &FileEntry) -> Self {
         Self {
             canonical_id: entry.canonical_id.clone(),
@@ -170,8 +164,7 @@ fn import_resolves_to_dep_with_resolver_data(
 
 /// Check if an import source from `file` resolves to `dependency_id`.
 /// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
-#[cfg(any(target_arch = "wasm32", test))]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn import_resolves_to_dep(
     file: &FileEntry,
     import_source: &str,
@@ -199,30 +192,6 @@ fn import_resolves_to_dep_with_resolver_view(
         resolve_extensions,
         workspace,
     )
-}
-
-/// Like [`import_resolves_to_dep`], but also consults the workspace resolver
-/// for aliased specifiers that heuristic matching cannot handle.
-#[cfg(target_arch = "wasm32")]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn import_resolves_to_dep_with_resolver(
-    file: &mut FileEntry,
-    import_source: &str,
-    dependency_id: &str,
-    resolve_extensions: &[String],
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-) -> bool {
-    let mut view = DependentView::from_file_entry(file);
-    let result = import_resolves_to_dep_with_resolver_view(
-        &mut view,
-        import_source,
-        dependency_id,
-        resolve_extensions,
-        workspace,
-    );
-    file.import_routes = view.import_routes;
-    file.dependencies = view.dependencies;
-    result
 }
 
 /// Determine whether a dependent SFC should be invalidated given
@@ -361,83 +330,14 @@ pub(crate) fn should_invalidate_dependent_view(
 }
 
 /// Legacy wrapper for should_invalidate_dependent_view using FileEntry.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn should_invalidate_dependent(
-    file: &mut FileEntry,
-    dependency_id: &str,
-    changed_exports: &BTreeSet<String>,
-    no_signatures: bool,
-    dep_source: Option<&str>,
-    resolve_extensions: &[String],
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-) -> bool {
-    let mut view = DependentView::from_file_entry(file);
-    let result = should_invalidate_dependent_view(
-        &mut view,
-        dependency_id,
-        changed_exports,
-        no_signatures,
-        dep_source,
-        resolve_extensions,
-        workspace,
-    );
-    // Write back updated type hashes
-    file.resolved_type_hashes = view.resolved_type_hashes;
-    file.import_routes = view.import_routes;
-    file.dependencies = view.dependencies;
-    result
-}
 
 /// Smart invalidation using a pre-computed set of owner canonical IDs.
 ///
 /// Used by the native (non-WASM) path where reverse deps are read from the
 /// workspace's authoritative EdgeStore instead of the host's legacy
 /// `reverse_dependencies` map.
-#[cfg(target_arch = "wasm32")]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn smart_invalidate_dependents_with_owners(
-    files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
-    owners: BTreeSet<String>,
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-    config: &HostConfig,
-    dependency_id: &str,
-    old_export_signatures: &[verter_semantic::analysis::ExportSignature],
-    new_export_signatures: &[verter_semantic::analysis::ExportSignature],
-) -> BTreeSet<String> {
-    if owners.is_empty() {
-        return BTreeSet::new();
-    }
-
-    let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
-    let mut files = write_lock(files);
-    let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
-    let mut cleared = BTreeSet::new();
-
-    for owner in owners {
-        if let Some(file) = files.get_mut(&owner) {
-            if should_invalidate_dependent(
-                file,
-                dependency_id,
-                &changed_exports,
-                old_export_signatures.is_empty() && new_export_signatures.is_empty(),
-                dep_source.as_deref(),
-                &config.resolve_extensions,
-                workspace,
-            ) {
-                file.compile_slots.clear();
-                file.cached_resolved_meta.clear();
-                file.cached_meta_payloads.clear();
-                cleared.insert(owner);
-            }
-        }
-    }
-
-    cleared
-}
-
 /// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
 /// and dependency metadata from compile_cache. Clears compile_cache slots directly.
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 /// Returns the set of owner canonical IDs that were actually invalidated
 /// (compile slots cleared). Callers can use this to evict other caches
@@ -494,7 +394,6 @@ pub(crate) fn smart_invalidate_dependents_via_scheduler(
 }
 
 /// Build a `DependentView` from scheduler analysis + compile_cache metadata.
-#[cfg(not(target_arch = "wasm32"))]
 fn build_dependent_view(
     scheduler: &verter_scheduler::scheduler::Scheduler,
     compile_cache: &dashmap::DashMap<String, crate::types::CompileCacheEntry>,
@@ -533,72 +432,4 @@ fn build_dependent_view(
         imports,
         resolved_type_hashes,
     })
-}
-
-/// Smart invalidation: when a dependency changes, only invalidate dependent
-/// SFCs whose macro-consumed types were actually affected.
-///
-/// Uses tiered precision:
-/// - Tier 1: No export signatures → full invalidation
-/// - Tier 2: Export-level hashing → invalidate only if macro-consumed exports changed
-/// - Tier 3: Cross-file type resolution → invalidate only if resolved type shape changed
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn smart_invalidate_dependents(
-    files: &crate::shared::Shared<rustc_hash::FxHashMap<String, FileEntry>>,
-    reverse_dependencies: &crate::shared::Shared<rustc_hash::FxHashMap<String, BTreeSet<String>>>,
-    workspace: Option<&dyn verter_workspace::WorkspaceAccess>,
-    config: &HostConfig,
-    dependency_id: &str,
-    old_export_signatures: &[verter_semantic::analysis::ExportSignature],
-    new_export_signatures: &[verter_semantic::analysis::ExportSignature],
-) {
-    let resolve_extensions = &config.resolve_extensions;
-
-    let owners = {
-        let rev = read_lock(reverse_dependencies);
-        let mut owners = rev.get(dependency_id).cloned().unwrap_or_default();
-        // Also check extensionless variant: auto-discovered relative imports
-        // (e.g. `import './types'`) resolve to `/src/types` (no extension),
-        // so reverse_dependencies is keyed by `/src/types` while the dep's
-        // canonical_id is `/src/types.ts`. Use config extensions + no specific
-        // lang hint at this level (per-file lang is checked in import_resolves_to_dep).
-        if let Some(stem) = strip_configured_extension(dependency_id, resolve_extensions, None) {
-            if let Some(more) = rev.get(stem) {
-                for o in more {
-                    owners.insert(o.clone());
-                }
-            }
-        }
-        owners
-    };
-
-    if owners.is_empty() {
-        return;
-    }
-
-    // Compute which export names changed between old and new signatures
-    let changed_exports = compute_changed_exports(old_export_signatures, new_export_signatures);
-
-    let mut files = write_lock(files);
-
-    // Get dep source for Tier 3 resolution (clone Arc to avoid borrow conflict)
-    let dep_source = files.get(dependency_id).map(|f| Arc::clone(&f.source));
-
-    for owner in owners {
-        if let Some(file) = files.get_mut(&owner) {
-            if should_invalidate_dependent(
-                file,
-                dependency_id,
-                &changed_exports,
-                old_export_signatures.is_empty() && new_export_signatures.is_empty(),
-                dep_source.as_deref(),
-                resolve_extensions,
-                workspace,
-            ) {
-                file.compile_slots.clear();
-                file.cached_resolved_meta.clear();
-                file.cached_meta_payloads.clear();
-            }
-        }
-    }
 }

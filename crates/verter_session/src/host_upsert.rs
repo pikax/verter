@@ -11,23 +11,12 @@ use rustc_hash::FxHashMap;
 
 // `Instant` is only referenced by `upsert_legacy` (WASM-only). Native paths
 // measure parse durations via the scheduler executor.
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
-#[cfg(target_arch = "wasm32")]
-use crate::cache::invalidate_nodes;
 use crate::cache::sorted_nodes;
 use crate::hash::{compile_profile_hash, content_override_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
-#[cfg(target_arch = "wasm32")]
-use crate::parse::parse_non_sfc_snapshot;
 use crate::parse::parse_vue_snapshot;
-#[cfg(target_arch = "wasm32")]
-use crate::shared::write_lock;
 use crate::types::*;
-#[cfg(target_arch = "wasm32")]
-use crate::upsert::compute_upsert_changes;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
@@ -57,7 +46,6 @@ impl VerterHost {
     /// Scheduler-backed upsert: submits to scheduler (sole parser), waits for
     /// Source+Analysis to commit, reads back the result, populates compile_cache
     /// and the compile_cache.
-    #[cfg(not(target_arch = "wasm32"))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn upsert_via_scheduler(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         use crate::host_executor::HostSourceData;
@@ -316,7 +304,6 @@ impl VerterHost {
     }
 
     /// Sync parsed edges to VFS (extracted from upsert for reuse).
-    #[cfg(not(target_arch = "wasm32"))]
     fn record_parsed_edges_to_vfs(&self, canonical_id: &str, result_data: &UpsertResultData) {
         let mut parsed_edges = Vec::new();
 
@@ -399,263 +386,6 @@ impl VerterHost {
 
     /// Legacy upsert: direct parse, no scheduler.
     /// Used on WASM where threads are unavailable.
-    #[cfg(target_arch = "wasm32")]
-    fn upsert_legacy(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .upserts
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let canonical_id = req
-            .canonical_id
-            .clone()
-            .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
-
-        let parse_start = Instant::now();
-        let (mut snapshot, cached_parse) = match req.file_kind {
-            FileKind::VueSfc => {
-                let (snap, parsed) =
-                    parse_vue_snapshot(&canonical_id, &req.source, self.config.effective_scope());
-                (snap, Some(parsed))
-            }
-            FileKind::NonSfc => (parse_non_sfc_snapshot(&canonical_id, &req.source), None),
-        };
-        let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-        #[cfg(feature = "session_metrics")]
-        self.metrics.slice_hash_time_us_total.fetch_add(
-            parse_start.elapsed().as_micros() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        let mut alias_set: BTreeSet<String> = req
-            .aliases
-            .iter()
-            .map(|a| canonicalize_id(a).into_owned())
-            .collect();
-        alias_set.insert(canonicalize_id(&req.input_id).into_owned());
-        alias_set.insert(canonical_id.clone());
-
-        let new_deps: BTreeSet<String> = snapshot
-            .external_requests
-            .iter()
-            .map(|r| r.resolved_canonical_id.clone())
-            .chain(
-                snapshot
-                    .script_analysis
-                    .imports
-                    .iter()
-                    .filter(|imp| imp.source.starts_with('.'))
-                    .map(|imp| {
-                        let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
-                        self.resolve_eval_dependency_canonical_in_view(&resolved, None)
-                            .unwrap_or(resolved)
-                    }),
-            )
-            .collect();
-
-        // Single write lock: read old state + compute changes + apply update atomically.
-        let (
-            changes,
-            prev_nodes,
-            old_meta,
-            old_aliases,
-            old_deps,
-            old_export_signatures,
-            result_data,
-            new_export_signatures,
-        ) = {
-            let mut files = write_lock(&self.files);
-
-            let old_entry = files.get(&canonical_id);
-            let changes = compute_upsert_changes(old_entry, &snapshot);
-
-            // Fast path: nothing changed
-            if let (false, Some(existing)) = (changes.changed, old_entry) {
-                let old_aliases = existing.aliases.clone();
-                drop(files);
-                self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
-                #[cfg(not(target_arch = "wasm32"))]
-                self.ws().notify_upsert(&canonical_id, req.source.clone());
-                return Ok(HostUpdateResult {
-                    canonical_id,
-                    changed: false,
-                    slice_changes: SliceChanges::default(),
-                    changed_virtual_nodes: Vec::new(),
-                    removed_virtual_nodes: Vec::new(),
-                    changed_virtual_ids: Vec::new(),
-                    removed_virtual_ids: Vec::new(),
-                    changed_lsp_ids: Vec::new(),
-                    removed_lsp_ids: Vec::new(),
-                    diagnostics: DiagnosticsSnapshot::default(),
-                    external_source_requests: Vec::new(),
-                    import_specifiers: Vec::new(),
-                    module_references: Vec::new(),
-                    preprocessor_requests: Vec::new(),
-                    export_signatures: Vec::new(),
-                    parse_duration_ms,
-                });
-            }
-
-            let prev_nodes = old_entry.map(|e| e.all_virtual_nodes()).unwrap_or_default();
-            let old_meta = old_entry.map(|e| e.meta.clone()).unwrap_or_default();
-            let old_aliases = old_entry.map(|e| e.aliases.clone()).unwrap_or_default();
-            let old_deps = old_entry
-                .map(|e| e.dependencies.clone())
-                .unwrap_or_default();
-            let old_export_signatures = old_entry
-                .map(|e| e.export_signatures.clone())
-                .unwrap_or_default();
-
-            let export_sigs_for_result = snapshot.export_signatures.clone();
-            let new_export_signatures = std::mem::take(&mut snapshot.export_signatures);
-
-            let result_data = UpsertResultData {
-                new_meta: snapshot.meta.clone(),
-                parse_diagnostics: snapshot.parse_diagnostics.clone(),
-                imports: snapshot.script_analysis.imports.clone(),
-                module_references: snapshot.script_analysis.module_references.clone(),
-                external_requests: snapshot.external_requests.clone(),
-                preprocessor_requests: snapshot.preprocessor_requests.clone(),
-                export_signatures: export_sigs_for_result,
-            };
-
-            let entry = files
-                .entry(canonical_id.to_string())
-                .or_insert_with(|| FileEntry {
-                    canonical_id: canonical_id.to_string(),
-                    file_kind: req.file_kind,
-                    source: Arc::<str>::from(""),
-                    whole_hash: [0; 16],
-                    semantic_hash: [0; 16],
-                    slices: SliceHashes::default(),
-                    descriptor: DescriptorMin::default(),
-                    meta: FileMeta::default(),
-                    aliases: BTreeSet::new(),
-                    dependencies: BTreeSet::new(),
-                    import_routes: FxHashMap::default(),
-                    external_requests: Vec::new(),
-                    src_blocks: Vec::new(),
-                    parse_diagnostics: DiagnosticsSnapshot::default(),
-                    script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-                    export_signatures: Vec::new(),
-                    style_analyses: Arc::new(Vec::new()),
-                    template_analysis: None,
-                    arc_script_cache: ScriptAnalysisArcs::default(),
-                    resolved_type_hashes: FxHashMap::default(),
-                    style_overrides: FxHashMap::default(),
-                    content_overrides: FxHashMap::default(),
-                    compile_slots: FxHashMap::default(),
-                    latest_diagnostics: FxHashMap::default(),
-                    diagnostics_generation: 0,
-                    generation: 0,
-                    cached_parse: None,
-                    cached_tsc_extract: None,
-                    cached_resolved_meta: FxHashMap::default(),
-                    cached_meta_payloads: FxHashMap::default(),
-                    cached_fallthrough: None,
-                });
-
-            entry.file_kind = req.file_kind;
-            entry.source = req.source.clone();
-            entry.whole_hash = snapshot.whole_hash;
-            entry.semantic_hash = snapshot.semantic_hash;
-            entry.slices = snapshot.slices;
-            entry.descriptor = snapshot.descriptor;
-            entry.meta = snapshot.meta;
-            entry.external_requests = snapshot.external_requests;
-            entry.src_blocks = snapshot.src_blocks;
-            entry.parse_diagnostics = snapshot.parse_diagnostics;
-            entry.script_analysis = snapshot.script_analysis;
-            entry.arc_script_cache = ScriptAnalysisArcs::from_analysis(&entry.script_analysis);
-            entry.export_signatures = new_export_signatures.clone();
-            entry.style_analyses = Arc::new(snapshot.style_analyses);
-            entry.cached_parse = cached_parse.map(Arc::new);
-            if changes.changed {
-                entry.cached_resolved_meta.clear();
-                entry.cached_meta_payloads.clear();
-            }
-            if changes.changed
-                && (changes.slice_changes.script_changed
-                    || changes.slice_changes.structure_changed
-                    || changes.slice_changes.template_changed
-                    || changes.slice_changes.descriptor_changed)
-            {
-                entry.cached_tsc_extract = None;
-                entry.cached_resolved_meta.clear();
-                entry.cached_meta_payloads.clear();
-            }
-            entry.generation = entry.generation.saturating_add(1);
-            entry.aliases = alias_set.clone();
-            entry.dependencies = new_deps.clone();
-            entry.import_routes.clear();
-
-            if changes.changed && changes.semantic_changed {
-                entry.latest_diagnostics.clear();
-                entry.diagnostics_generation += 1;
-                if changes.slice_changes.template_changed
-                    || changes.slice_changes.script_changed
-                    || changes.slice_changes.structure_changed
-                {
-                    entry.template_analysis = None;
-                }
-                if changes.slice_changes.script_changed
-                    || changes.slice_changes.structure_changed
-                    || changes.slice_changes.descriptor_changed
-                {
-                    entry.compile_slots.clear();
-                } else if changes.slice_changes.template_changed {
-                    invalidate_nodes(
-                        &mut entry.compile_slots,
-                        &[VirtualNodeKind::Main, VirtualNodeKind::Template],
-                    );
-                } else {
-                    let mut nodes = Vec::new();
-                    for idx in &changes.slice_changes.style_indices_changed {
-                        nodes.push(VirtualNodeKind::Style { index: *idx });
-                    }
-                    for idx in &changes.slice_changes.custom_indices_changed {
-                        nodes.push(VirtualNodeKind::Custom { index: *idx });
-                    }
-                    invalidate_nodes(&mut entry.compile_slots, &nodes);
-                }
-            }
-
-            (
-                changes,
-                prev_nodes,
-                old_meta,
-                old_aliases,
-                old_deps,
-                old_export_signatures,
-                result_data,
-                new_export_signatures,
-            )
-        };
-
-        self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
-        self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
-        self.smart_invalidate_dependents(
-            &canonical_id,
-            &old_export_signatures,
-            &new_export_signatures,
-        );
-
-        {
-            self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
-            self.ws().notify_upsert(&canonical_id, req.source.clone());
-        }
-
-        let result = build_upsert_result(
-            canonical_id,
-            result_data,
-            &changes,
-            &prev_nodes,
-            &old_meta,
-            parse_duration_ms,
-        );
-        self.bump_store_view_epoch();
-        result
-    }
 
     /// Apply preprocessor-compiled style overrides for a file+profile.
     ///
@@ -791,16 +521,6 @@ impl VerterHost {
                     },
                 );
                 cc.compile_slots.remove(&profile_hash);
-            }
-
-            // Store per-profile layer in files for WASM readers.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let mut files = write_lock(&self.files);
-                if let Some(entry) = files.get_mut(&canonical) {
-                    entry.style_overrides.insert(profile_hash, layer);
-                    entry.compile_slots.remove(&profile_hash);
-                }
             }
 
             let mut changed_nodes: Vec<VirtualNodeKind> = by_index
@@ -983,16 +703,6 @@ impl VerterHost {
                     },
                 );
                 cc.compile_slots.remove(&profile_hash);
-            }
-
-            // Store per-profile layer in files for WASM readers.
-            #[cfg(target_arch = "wasm32")]
-            {
-                let mut files = write_lock(&self.files);
-                if let Some(entry) = files.get_mut(&canonical) {
-                    entry.content_overrides.insert(profile_hash, layer);
-                    entry.compile_slots.remove(&profile_hash);
-                }
             }
 
             let meta = &new_snapshot.meta;
