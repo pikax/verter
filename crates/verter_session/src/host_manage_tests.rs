@@ -10703,15 +10703,19 @@ fn archived_module_facts_rejected_when_workspace_dep_changes_content() {
     // for entries it materializes during view construction.
     host.resolver.runtime.module_facts.invalidate("/src/dep.ts");
 
-    // Step 3: change the dependency content via workspace injection.
-    // No upsert — the host doesn't know the content changed.
+    // Step 3: change the dependency content via workspace injection, then
+    // notify the scheduler via `ensure_loaded` (the canonical content-change
+    // ingress path under the new architecture: disk reads are no longer
+    // implicit inside resolvers).
     ws.inject_file(
         "/src/dep.ts",
         "export interface DepType { version: 2; extra: string }\n",
     );
+    // Evict so ensure_loaded re-reads the workspace content.
+    host.evict("/src/dep.ts");
+    assert!(host.ensure_loaded("/src/dep.ts"));
 
-    // Step 4: create a store view. The dep is not tracked (never upserted,
-    // not in scheduler or compile_cache).
+    // Step 4: create a store view snapshotted AFTER the content change.
     let view = host.owned_or_ambient_request_view();
 
     // Step 5: query module_facts with the store view. The validated cache
@@ -10772,8 +10776,12 @@ fn imported_root_invalidates_on_intermediate_barrel_change() {
         "initial root should point to types-a",
     );
 
-    // Change barrel to point to types-b instead
+    // Change barrel to point to types-b instead. Workspace inject + evict +
+    // ensure_loaded is the canonical sequence for content changes under the
+    // new architecture (no implicit disk reads inside resolvers).
     ws.inject_file("/src/barrel.ts", "export { Props } from './types-b'\n");
+    host.evict("/src/barrel.ts");
+    assert!(host.ensure_loaded("/src/barrel.ts"));
     host.set_import_dependencies(
         "/src/barrel.ts",
         vec![exact_dependency("./types-b", "/src/types-b.ts")],

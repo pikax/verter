@@ -13,7 +13,6 @@ use verter_semantic::analysis::type_solver::host::{
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::host_manage::component_meta_trace_event;
-use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
 use super::prepared_decl::ImportBinding;

@@ -71,6 +71,8 @@ Performance consequence:
 
 - very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
 
+**Request-scoped view contract:** Resolver-path helpers taking `Option<&RequestStoreView>` resolve the effective view at entry via `current_request_view().or(store_view)` (see `host_request_view::effective_request_view`). Ambient view takes precedence; live host probes (`scheduler.try_get_source`, `module_facts.get_any`, `get_whole_hash`, `read_analysis_source`) are reserved for outside-request paths. See `/host-session` for details.
+
 ### Canonical Dependency Cache Rule (CRITICAL)
 
 Host-backed type/import resolution must treat the canonical file ID as the cache identity. Load and parse each dependency at most once per canonical ID per workspace content generation. Cache the parsed state, eval env, symbol/export tables, and prepared declarations together. Later lookups hit cached maps — never rewalk the AST. VFS is the authority for file-change invalidation. Concurrent cold requests to the same file must collapse onto one materialization path. Architectural changes land as one clean cutover with no dual-path shims.

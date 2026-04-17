@@ -27,7 +27,6 @@ use crate::resolver_core::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
     SingleflightRole,
 };
-use crate::resolver_store::HostStoreView;
 use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
@@ -218,9 +217,8 @@ impl ComponentMetaRequestHost for VerterHost {
                 .compute_component_meta_state_from_captured(canonical, mode, captured, store_view);
         }
 
-        let whole_hash = store_view
-            .and_then(|view| view.whole_hash(canonical))
-            .or_else(|| self.get_whole_hash(canonical))
+        let whole_hash = self
+            .current_or_read_whole_hash_in_view(canonical, store_view)
             .unwrap_or_default();
         self.compute_component_meta_state(canonical, mode, whole_hash, store_view)
     }
@@ -6542,15 +6540,46 @@ impl VerterHost {
                 }
             }
 
+            // Route-owned cache fast path for imported-only files: if we
+            // already built a raw snapshot via the route-owned shallow state
+            // pipeline, reuse it here instead of rebuilding from the
+            // scheduler. This is gated on (a) the file not being tracked by
+            // the view (= imported, not owner) and (b) module_facts not
+            // holding it (= fully lazy).
+            if let Some(view) = store_view {
+                if !view.tracks_whole_hash(canonical)
+                    && self
+                        .resolver
+                        .runtime
+                        .module_facts
+                        .get_any(canonical)
+                        .is_none()
+                {
+                    if let Some(raw_snapshot) =
+                        self.cached_route_owned_snapshot_in_view(canonical, Some(view))
+                    {
+                        self.provenance
+                            .route_owned_snapshot_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let mut snapshot = (*raw_snapshot).clone();
+                        self.resolve_snapshot_imports_in_view(canonical, &mut snapshot, store_view);
+                        self.enrich_destructured_bindings(&mut snapshot);
+                        if self.config.effective_scope().needs_template_analysis() {
+                            self.compute_template_analysis_if_missing(canonical, &mut snapshot);
+                        }
+                        return Some(snapshot);
+                    }
+                }
+            }
+
             // Scheduler-first path for owner files: the scheduler has the
             // latest analysis after recompile, including updated import
             // routes for newly-added dependencies. ModuleFactsDb may hold
             // stale import routes for owner files whose deps changed after
             // materialization.
             if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical) {
-                let whole_hash = store_view
-                    .and_then(|view| view.whole_hash(canonical))
-                    .or_else(|| self.get_whole_hash(canonical))
+                let whole_hash = self
+                    .current_or_read_whole_hash_in_view(canonical, store_view)
                     .unwrap_or_default();
                 if !self.store_view_allows_current_whole_hash(canonical, whole_hash, store_view) {
                     return None;
@@ -6914,10 +6943,7 @@ impl VerterHost {
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) {
-        if let Some(hash) = store_view
-            .and_then(|view| view.whole_hash(canonical))
-            .or_else(|| self.get_whole_hash(canonical))
-        {
+        if let Some(hash) = self.current_or_read_whole_hash_in_view(canonical, store_view) {
             let file_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
@@ -6961,7 +6987,7 @@ impl VerterHost {
     ) -> Option<Hash16> {
         match kind {
             crate::resolver_core::DerivedFactKind::DirectSource => {
-                self.get_whole_hash(canonical_id)
+                self.current_or_read_whole_hash_in_view(canonical_id, store_view)
             }
             crate::resolver_core::DerivedFactKind::Route => {
                 // Read-only: only compute Route hash if shallow state already exists.

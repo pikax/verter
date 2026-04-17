@@ -509,3 +509,50 @@ impl Drop for RequestViewGuard {
 pub(crate) fn current_request_view() -> Option<Arc<RequestStoreView>> {
     CURRENT_REQUEST_VIEW.with(|cell| cell.borrow().as_ref().and_then(Weak::upgrade))
 }
+
+/// Effective request view for a helper that takes `Option<&RequestStoreView>`.
+///
+/// Holds either the ambient (thread-local) view as `Arc<RequestStoreView>` or
+/// the borrowed explicit-arg view. Use [`Self::as_view`] inside the helper body
+/// to obtain a `&RequestStoreView` without thinking about which case you're in.
+///
+/// [`Self::OutsideRequest`] indicates the caller is genuinely outside any
+/// request — only there is it acceptable to fall back to live host probes
+/// (`get_whole_hash`, `scheduler.try_get_source`, etc.).
+pub(crate) enum EffectiveView<'a> {
+    Ambient(Arc<RequestStoreView>),
+    Explicit(&'a RequestStoreView),
+    OutsideRequest,
+}
+
+impl<'a> EffectiveView<'a> {
+    /// Borrow the underlying view, regardless of whether it came from the
+    /// ambient thread-local or the explicit arg.
+    pub(crate) fn as_view(&self) -> Option<&RequestStoreView> {
+        match self {
+            EffectiveView::Ambient(view) => Some(&**view),
+            EffectiveView::Explicit(view) => Some(view),
+            EffectiveView::OutsideRequest => None,
+        }
+    }
+}
+
+/// Resolve the effective request view for a helper that takes
+/// `Option<&RequestStoreView>`. Ambient (`current_request_view()`) takes
+/// precedence over the explicit arg. Returns [`EffectiveView::OutsideRequest`]
+/// only when no request is installed on the current thread.
+///
+/// Reference shapes already correct in `module_facts_in_request_view`,
+/// `is_evalable`. New helpers and restructured ones use this primitive to
+/// converge on the ambient-view-first pattern.
+pub(crate) fn effective_request_view<'a>(
+    explicit: Option<&'a RequestStoreView>,
+) -> EffectiveView<'a> {
+    if let Some(ambient) = current_request_view() {
+        EffectiveView::Ambient(ambient)
+    } else if let Some(explicit) = explicit {
+        EffectiveView::Explicit(explicit)
+    } else {
+        EffectiveView::OutsideRequest
+    }
+}

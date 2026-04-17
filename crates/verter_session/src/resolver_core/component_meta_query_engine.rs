@@ -28,7 +28,6 @@ use super::declaration_metadata::{
 };
 use crate::resolver_core::solver_host::{DeclarationScopePayload, SessionSolverHost};
 use crate::resolver_core::{FuseBudgets, FuseState};
-use crate::resolver_store::HostStoreView;
 use crate::VerterHost;
 
 #[cfg(test)]
@@ -3837,10 +3836,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<Vec<crate::resolver_core::FactVersionRef>> {
         let store_view = self.store_view?;
         let mut facts = Vec::new();
-        if let Some(hash) = store_view
-            .whole_hash(scope_canonical_id)
-            .or_else(|| self.host.get_whole_hash(scope_canonical_id))
-        {
+        // Ambient-view-first: ambient governs inside a real request. Fall
+        // back to the explicit store_view, then to the live host probe for
+        // untracked-but-present canonicals.
+        let hash = crate::host_request_view::current_request_view()
+            .and_then(|ambient| ambient.whole_hash(scope_canonical_id))
+            .or_else(|| store_view.whole_hash(scope_canonical_id))
+            .or_else(|| self.host.get_whole_hash(scope_canonical_id));
+        if let Some(hash) = hash {
             facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: scope_canonical_id.to_string(),
                 hash,

@@ -1022,7 +1022,8 @@ impl VerterHost {
         if store_view.is_some()
             && !self.store_view_allows_current_whole_hash(
                 &preferred,
-                self.get_whole_hash(&preferred).unwrap_or_default(),
+                self.current_or_read_whole_hash_in_view(&preferred, store_view)
+                    .unwrap_or_default(),
                 store_view,
             )
         {
@@ -1847,9 +1848,7 @@ impl VerterHost {
         canonical: &str,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<crate::resolver_core::ResolverHash16> {
-        store_view
-            .and_then(|view| view.whole_hash(canonical))
-            .or_else(|| self.get_whole_hash(canonical))
+        self.current_or_read_whole_hash_in_view(canonical, store_view)
             .or_else(|| {
                 self.read_dep_source_for_type_resolution_in_view(canonical, None, store_view)
                     .map(|source| crate::hash::hash_16(source.as_bytes()))
@@ -2325,10 +2324,7 @@ impl VerterHost {
         store_view: Option<&crate::host_request_view::RequestStoreView>,
         route_shallow_cache: Option<&RouteShallowStateCache>,
     ) {
-        if let Some(hash) = store_view
-            .and_then(|view| view.whole_hash(canonical))
-            .or_else(|| self.get_whole_hash(canonical))
-        {
+        if let Some(hash) = self.current_or_read_whole_hash_in_view(canonical, store_view) {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
@@ -2428,9 +2424,8 @@ impl VerterHost {
 
         if let Some(view) = store_view {
             if resolved.ends_with(".vue") {
-                let known_hash = view
-                    .whole_hash(resolved.as_str())
-                    .or_else(|| self.get_whole_hash(resolved.as_str()))
+                let known_hash = self
+                    .current_or_read_whole_hash_in_view(resolved.as_str(), Some(view))
                     .or_else(|| {
                         self.cached_route_owned_shallow_whole_hash_in_view(
                             resolved.as_str(),
@@ -2564,13 +2559,25 @@ impl VerterHost {
         );
         let entry = self.route_owned_shallow_cache.lock().get(&key).cloned()?;
 
-        if let Some(view_hash) = store_view.and_then(|view| view.whole_hash(canonical_id)) {
-            if view_hash != entry.whole_hash {
-                return None;
+        // Ambient-view-first. Ambient governs inside a real request; explicit
+        // arg is fallback.
+        let ambient = crate::host_request_view::current_request_view();
+        let view_opt = ambient.as_deref().or(store_view);
+
+        // View-authoritative fast path: view tracks the canonical.
+        if let Some(view) = view_opt {
+            if let Some(view_hash) = view.whole_hash(canonical_id) {
+                if view_hash != entry.whole_hash {
+                    return None;
+                }
+                return Some(entry);
             }
-            return Some(entry);
         }
 
+        // View doesn't track this canonical. Validate the entry via the live
+        // host whole_hash (scheduler + module_facts), falling back to
+        // workspace_generation + file existence when the host also lacks
+        // authority.
         if let Some(current_hash) = self.get_whole_hash(canonical_id) {
             if current_hash != entry.whole_hash
                 || !self.store_view_allows_current_whole_hash(
@@ -2581,24 +2588,20 @@ impl VerterHost {
             {
                 return None;
             }
-        } else if (store_view.is_none() && entry.workspace_generation == workspace_generation)
-            || store_view.is_some_and(|view| !view.tracks_whole_hash(canonical_id))
-        {
+            return Some(entry);
+        }
+
+        let workspace_gen_matches = entry.workspace_generation == workspace_generation;
+        let view_untracked = view_opt.is_some_and(|v| !v.tracks_whole_hash(canonical_id));
+
+        if workspace_gen_matches && (view_opt.is_none() || view_untracked) {
             if !self.ws().file_exists(canonical_id) {
                 return None;
             }
-        } else if let Some(source) = self.read_analysis_source(canonical_id) {
-            let current_hash = crate::hash::hash_16(source.as_bytes());
-            if current_hash != entry.whole_hash
-                || !self.store_view_allows_current_whole_hash(
-                    canonical_id,
-                    current_hash,
-                    store_view,
-                )
-            {
-                return None;
-            }
-        } else if !self.ws().file_exists(canonical_id)
+            return Some(entry);
+        }
+
+        if !self.ws().file_exists(canonical_id)
             || !self.store_view_allows_current_whole_hash(
                 canonical_id,
                 entry.whole_hash,
@@ -2609,23 +2612,6 @@ impl VerterHost {
         }
 
         Some(entry)
-    }
-
-    pub(crate) fn has_cached_route_owned_shallow_state_in_view(
-        &self,
-        canonical_id: &str,
-        store_view: Option<&crate::host_request_view::RequestStoreView>,
-    ) -> bool {
-        let normalized_canonical = self
-            .resolve_eval_dependency_canonical_in_view(canonical_id, store_view)
-            .unwrap_or_else(|| canonical_id.to_string());
-        let workspace_generation = self.ws().content_generation();
-        self.cached_route_owned_shallow_state_in_view(
-            normalized_canonical.as_str(),
-            store_view,
-            workspace_generation,
-        )
-        .is_some()
     }
 
     pub(crate) fn cached_route_owned_shallow_whole_hash_in_view(

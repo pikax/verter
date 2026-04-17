@@ -863,6 +863,95 @@ impl VerterHost {
         }
     }
 
+    /// View-aware variant of [`effective_file_state`]. Gates every successful
+    /// scheduler / files-map read on `view.accepts_whole_hash(canonical_id,
+    /// scheduler.whole_hash)`. Returns `None` when the scheduler / files-map
+    /// has advanced past the view's snapshot (route resolution handles
+    /// staleness separately) or when the file isn't loaded even after an
+    /// `ensure_loaded` attempt.
+    ///
+    /// This is the request-path replacement for `effective_file_state(.., None)`
+    /// — resolver helpers must use this variant to avoid bypassing the request
+    /// view.
+    pub(crate) fn effective_file_state_in_view(
+        &self,
+        canonical_id: &str,
+        profile: Option<u64>,
+        view: &crate::host_request_view::RequestStoreView,
+    ) -> Option<EffectiveFileState> {
+        #[cfg(feature = "scheduler")]
+        {
+            use crate::host_executor::HostSourceData;
+
+            // Inside a request, the view governs. If the scheduler doesn't
+            // have the canonical, return None — callers must `ensure_loaded`
+            // first (which extends the view via thread-local hook). Do NOT
+            // auto-load here: that would seed imported dependencies the view
+            // hasn't promised to track.
+            let snap = self.scheduler.try_get_source(canonical_id)?;
+            let hd = snap.downcast_data::<HostSourceData>()?;
+
+            // View-acceptance gate: the scheduler may have advanced past the
+            // view's snapshot. Reject on mismatch so the request stays on its
+            // captured frame.
+            if !view.accepts_whole_hash(canonical_id, hd.parse.whole_hash) {
+                return None;
+            }
+
+            if let Some(profile_hash) = profile {
+                if let Some(cc) = self.compile_cache.get(canonical_id) {
+                    if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
+                        return Some(EffectiveFileState {
+                            source: ovr.source.clone(),
+                            meta: ovr.parse.meta.clone(),
+                            script_analysis: ovr.parse.script_analysis.clone(),
+                            cached_parse: ovr.cached_parse.clone(),
+                            whole_hash: ovr.parse.whole_hash,
+                        });
+                    }
+                }
+            }
+
+            Some(EffectiveFileState {
+                source: snap.source.clone(),
+                meta: hd.parse.meta.clone(),
+                script_analysis: hd.parse.script_analysis.clone(),
+                cached_parse: hd.cached_parse.clone(),
+                whole_hash: hd.parse.whole_hash,
+            })
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let files = read_lock(&self.files);
+            let entry = files.get(canonical_id)?;
+
+            if !view.accepts_whole_hash(canonical_id, entry.whole_hash) {
+                return None;
+            }
+
+            if let Some(profile_hash) = profile {
+                if let Some(ovr) = entry.content_overrides.get(&profile_hash) {
+                    return Some(EffectiveFileState {
+                        source: ovr.source.clone(),
+                        meta: ovr.parse.meta.clone(),
+                        script_analysis: ovr.parse.script_analysis.clone(),
+                        cached_parse: ovr.cached_parse.clone(),
+                        whole_hash: ovr.parse.whole_hash,
+                    });
+                }
+            }
+
+            Some(EffectiveFileState {
+                source: entry.source.clone(),
+                meta: entry.meta.clone(),
+                script_analysis: entry.script_analysis.clone(),
+                cached_parse: entry.cached_parse.clone(),
+                whole_hash: entry.whole_hash,
+            })
+        }
+    }
+
     /// Materialize native-side lifecycle state from the current scheduler snapshot.
     ///
     /// This is the scheduler-backed replacement for the old `files`-map ingress:
@@ -1324,11 +1413,15 @@ impl VerterHost {
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
         let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical_id, None);
         let canonical_id = normalized_canonical.as_ref();
-        // Fast path: already in host and not evicted
+        // Fast path: already in host and not evicted. Also verify the
+        // scheduler still has the source — `set_import_dependencies` may
+        // create an empty compile_cache stub before the file is loaded into
+        // the scheduler; in that case we must proceed to submit a load
+        // request.
         #[cfg(feature = "scheduler")]
         {
             if let Some(cc) = self.compile_cache.get(canonical_id) {
-                if !cc.evicted {
+                if !cc.evicted && self.scheduler.try_get_source(canonical_id).is_some() {
                     return true;
                 }
             }

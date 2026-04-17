@@ -1045,7 +1045,7 @@ impl MetaSession {
         // live host state.
         let request_view = self.project.host.build_request_store_view();
         let _request_guard = request_view.install();
-        let result = f(&self.project.host, &*request_view);
+        let result = f(&self.project.host, &request_view);
         Ok(result)
     }
 }

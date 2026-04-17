@@ -27,7 +27,6 @@ use crate::resolver_core::{
     FallthroughResolverHost, ImportedRuntimeValueResolver, RequestSource, ResolvedConsumedBindings,
     SingleflightRole, StoreView,
 };
-use crate::resolver_store::HostStoreView;
 use crate::shared::{read_lock, write_lock};
 use crate::types::*;
 use crate::VerterHost;
@@ -1322,7 +1321,7 @@ fn looks_like_windows_absolute_path(canonical_id: &str) -> bool {
     bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-fn is_raw_import_specifier_id(canonical_id: &str) -> bool {
+pub(crate) fn is_raw_import_specifier_id(canonical_id: &str) -> bool {
     if canonical_id.is_empty()
         || canonical_id.starts_with('/')
         || looks_like_windows_absolute_path(canonical_id)
@@ -1603,10 +1602,14 @@ impl VerterHost {
         whole_hash: Hash16,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> bool {
-        let Some(view) = store_view else {
+        // Ambient-view-first: ambient governs inside a real request. Explicit
+        // arg is fallback (test scaffolds / uninstalled views). Outside both,
+        // permissive.
+        let view = crate::host_request_view::current_request_view();
+        let view_ref = view.as_deref().or(store_view);
+        let Some(view) = view_ref else {
             return true;
         };
-
         view.accepts_whole_hash(canonical_id, whole_hash)
             || (!view.tracks_whole_hash(canonical_id)
                 && self.current_store_view_epoch() == view.mutation_epoch())
@@ -1778,32 +1781,76 @@ impl VerterHost {
             return None;
         }
 
-        let ws = self.ws();
-        let source = ws.read_file(canonical_id);
-        let workspace_source_kind =
-            workspace_vfs_source_kind(ws.take_last_read_file_trace_detail(canonical_id));
-        if let Some(source) = source.as_ref() {
+        // Native: scheduler is the sole parser + source authority. On a cache
+        // miss, submit through `ensure_loaded` (canonical loading path via
+        // the scheduler). If the scheduler still has no source, the file
+        // genuinely doesn't exist.
+        //
+        // WASM: no scheduler; the `files` map is the authority and the
+        // workspace fallback is legitimate.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.ensure_loaded(canonical_id) {
+                if let Some(source) = self.get_source(canonical_id) {
+                    component_meta_trace_event!(
+                        "read_analysis_source_result",
+                        read_analysis_source_result_detail(
+                            canonical_id,
+                            "ensure-loaded",
+                            source.len(),
+                            false,
+                        ),
+                    );
+                    return Some(source);
+                }
+                if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical_id) {
+                    component_meta_trace_event!(
+                        "read_analysis_source_result",
+                        read_analysis_source_result_detail(
+                            canonical_id,
+                            "ensure-loaded-module-facts",
+                            facts.raw_source.len(),
+                            false,
+                        ),
+                    );
+                    return Some(Arc::clone(&facts.raw_source));
+                }
+            }
             component_meta_trace_event!(
                 "read_analysis_source_result",
-                read_analysis_source_result_detail(
-                    canonical_id,
-                    workspace_source_kind.as_str(),
-                    source.len(),
-                    false,
-                ),
+                read_analysis_source_result_detail(canonical_id, "not-loaded", 0, true,),
             );
-        } else {
-            component_meta_trace_event!(
-                "read_analysis_source_result",
-                read_analysis_source_result_detail(
-                    canonical_id,
-                    workspace_source_kind.as_str(),
-                    0,
-                    true,
-                ),
-            );
+            None
         }
-        source
+        #[cfg(target_arch = "wasm32")]
+        {
+            let ws = self.ws();
+            let source = ws.read_file(canonical_id);
+            let workspace_source_kind =
+                workspace_vfs_source_kind(ws.take_last_read_file_trace_detail(canonical_id));
+            if let Some(source) = source.as_ref() {
+                component_meta_trace_event!(
+                    "read_analysis_source_result",
+                    read_analysis_source_result_detail(
+                        canonical_id,
+                        workspace_source_kind.as_str(),
+                        source.len(),
+                        false,
+                    ),
+                );
+            } else {
+                component_meta_trace_event!(
+                    "read_analysis_source_result",
+                    read_analysis_source_result_detail(
+                        canonical_id,
+                        workspace_source_kind.as_str(),
+                        0,
+                        true,
+                    ),
+                );
+            }
+            source
+        }
     }
 
     pub(crate) fn read_analysis_source_in_view(
@@ -1825,68 +1872,22 @@ impl VerterHost {
         let normalized_canonical_id =
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
-        if let Some(view) = store_view {
-            #[cfg(feature = "scheduler")]
-            {
-                if let Some(state) = self.effective_file_state(canonical_id, None) {
-                    if !self.store_view_allows_current_whole_hash(
-                        canonical_id,
-                        state.whole_hash,
-                        Some(view),
-                    ) {
-                        component_meta_trace_event!(
-                            "read_analysis_source_in_view_result",
-                            format!(
-                                "owner={} accepted=false bytes={} whole_hash={:?}",
-                                canonical_id,
-                                state.source.len(),
-                                state.whole_hash,
-                            ),
-                        );
-                        return None;
-                    }
-                    component_meta_trace_event!(
-                        "read_analysis_source_in_view_result",
-                        format!(
-                            "owner={} accepted=true bytes={} whole_hash={:?}",
-                            canonical_id,
-                            state.source.len(),
-                            state.whole_hash,
-                        ),
-                    );
-                    return Some(state.source);
-                }
-            }
 
-            #[cfg(target_arch = "wasm32")]
-            {
-                if let Some(source) = self.get_source(canonical_id) {
-                    let whole_hash = crate::hash::hash_16(source.as_bytes());
-                    if !self.store_view_allows_current_whole_hash(
+        // Ambient-view-first: ambient takes precedence over explicit arg.
+        // Inside a request, all reads are view-gated.
+        let eff = crate::host_request_view::effective_request_view(store_view);
+        if let Some(view) = eff.as_view() {
+            if let Some(state) = self.effective_file_state_in_view(canonical_id, None, view) {
+                component_meta_trace_event!(
+                    "read_analysis_source_in_view_result",
+                    format!(
+                        "owner={} accepted=true bytes={} whole_hash={:?}",
                         canonical_id,
-                        whole_hash,
-                        Some(view),
-                    ) {
-                        component_meta_trace_event!(
-                            "read_analysis_source_in_view_result",
-                            format!(
-                                "owner={} accepted=false bytes={} whole_hash={whole_hash:?}",
-                                canonical_id,
-                                source.len(),
-                            ),
-                        );
-                        return None;
-                    }
-                    component_meta_trace_event!(
-                        "read_analysis_source_in_view_result",
-                        format!(
-                            "owner={} accepted=true bytes={} whole_hash={whole_hash:?}",
-                            canonical_id,
-                            source.len(),
-                        ),
-                    );
-                    return Some(source);
-                }
+                        state.source.len(),
+                        state.whole_hash,
+                    ),
+                );
+                return Some(state.source);
             }
 
             if let Some(facts) = self.resolver.runtime.module_facts.get(canonical_id, view) {
@@ -1925,6 +1926,11 @@ impl VerterHost {
             );
             return None;
         }
+
+        // Outside any request (CLI / top-level / background): fall back to
+        // `read_analysis_source` which on native consults host_cache +
+        // module_facts only (no disk read), and on WASM still walks the
+        // workspace.
         let source = self.read_analysis_source(canonical_id)?;
         let whole_hash = crate::hash::hash_16(source.as_bytes());
         if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
@@ -3018,25 +3024,10 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        if store_view.is_none() {
-            let facts = self.ensure_module_facts_in_view(canonical_id, None)?;
-            let state = &facts.shallow_state;
-            if !canonical_id.ends_with(".vue")
-                && state.symbols.is_empty()
-                && state.value_symbols.is_empty()
-                && state.exports.is_empty()
-                && state.import_targets.is_empty()
-                && state.wildcard_reexports.is_empty()
-            {
-                return None;
-            }
-            if self.read_analysis_source(canonical_id).is_none() {
-                return self.materialize_prepared_decl_bundle(canonical_id, None);
-            }
-        }
-
+        // Ambient-view-first: ambient takes precedence; outside-request falls
+        // back to building an owned view from the current resolver snapshot.
         let owned_view = self.owned_or_ambient_request_view();
-        let current_view = store_view.unwrap_or(&*owned_view);
+        let current_view: &crate::host_request_view::RequestStoreView = &owned_view;
 
         // Fast path: fact-validated cache hit.
         let bundles = &self.resolver.runtime.prepared_decl_bundles;
@@ -3048,8 +3039,7 @@ impl VerterHost {
             return Some(bundle);
         }
 
-        if store_view.is_some() && self.current_store_view_epoch() == current_view.mutation_epoch()
-        {
+        if self.current_store_view_epoch() == current_view.mutation_epoch() {
             let refreshed_view = self.resolver_store_view();
             if let Some(bundle) = bundles.get_if_valid(&key, &refreshed_view) {
                 self.provenance
@@ -3712,34 +3702,24 @@ impl VerterHost {
         // lookup otherwise.
         let cached = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached {
-            if store_view.is_some() {
-                // Store-view validated — the cache is authoritative.
+            // View-aware staleness gate: the ambient-or-explicit view governs
+            // hash identity. Inside a request, an outdated entry is rejected
+            // and we fall through to re-materialize. Outside a request the
+            // check is permissive.
+            if self.store_view_allows_current_whole_hash(canonical_id, facts.whole_hash, store_view)
+            {
                 component_meta_trace_event!(
                     "ensure_module_facts_fast_hit",
                     format!(
-                        "owner={} store_view=true whole_hash={:?}",
-                        canonical_id, facts.whole_hash
+                        "owner={} store_view={} whole_hash={:?}",
+                        canonical_id,
+                        store_view.is_some(),
+                        facts.whole_hash
                     ),
                 );
                 return Some(facts);
             }
-            // Without a store_view the permissive cache does not check
-            // whole_hash validity. Read the authoritative source to verify
-            // the cached facts are still current. This avoids returning
-            // stale data after an upsert that changed the file content.
-            let current_hash = self
-                .read_analysis_source(canonical_id)
-                .map(|src| crate::hash::hash_16(src.as_bytes()));
-            if let Some(hash) = current_hash {
-                if hash == facts.whole_hash {
-                    return Some(facts);
-                }
-                self.resolver.runtime.module_facts.evict(canonical_id);
-            } else {
-                return Some(facts);
-            }
-            // File no longer exists — the cached facts are stale.
-            // Hash mismatch — fall through to re-materialize.
+            self.resolver.runtime.module_facts.evict(canonical_id);
         } else if store_view.is_some() {
             component_meta_trace_event!(
                 "ensure_module_facts_validated_miss",
@@ -3749,13 +3729,6 @@ impl VerterHost {
 
         if store_view.is_some() {
             if let Some(facts) = self.resolver.runtime.module_facts.get_any(canonical_id) {
-                if store_view
-                    .and_then(|view| view.whole_hash(canonical_id))
-                    .is_none()
-                    && self.read_analysis_source(canonical_id).is_none()
-                {
-                    return Some(facts);
-                }
                 if self.store_view_allows_current_whole_hash(
                     canonical_id,
                     facts.whole_hash,
@@ -3772,13 +3745,31 @@ impl VerterHost {
 
         let materialize = || -> Option<crate::resolver_core::ModuleFacts> {
             // Materialize: read source, build analysis, construct facts.
+            //
+            // Native: scheduler is the sole source authority. On a scheduler
+            // miss, call `ensure_loaded` once to submit the canonical through
+            // the scheduler — the canonical way to materialize a file. If
+            // the scheduler still misses after `ensure_loaded`, return None
+            // (file doesn't exist in the workspace).
             #[cfg(feature = "scheduler")]
-            let scheduler_state = self.effective_file_state(canonical_id, None);
-
-            #[cfg(feature = "scheduler")]
-            let (raw_source, cached_parse, whole_hash, snapshot) = if let Some(state) =
-                scheduler_state
-            {
+            let (raw_source, cached_parse, whole_hash, snapshot) = {
+                let state = match self.effective_file_state(canonical_id, None) {
+                    Some(state) => state,
+                    None => {
+                        // On scheduler miss, call ensure_loaded once — the
+                        // canonical way to materialize a file into the
+                        // scheduler + current request view's extension store.
+                        // Raw import specifiers and empty canonicals are
+                        // never loadable.
+                        if canonical_id.is_empty()
+                            || is_raw_import_specifier_id(canonical_id)
+                            || !self.ensure_loaded(canonical_id)
+                        {
+                            return None;
+                        }
+                        self.effective_file_state(canonical_id, None)?
+                    }
+                };
                 if !self.store_view_allows_current_whole_hash(
                     canonical_id,
                     state.whole_hash,
@@ -3805,22 +3796,6 @@ impl VerterHost {
                     state.whole_hash,
                     Arc::new(snapshot),
                 )
-            } else {
-                let raw_source = self.read_analysis_source(canonical_id)?;
-                let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-                if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
-                {
-                    return None;
-                }
-                let cached_parse = canonical_id.ends_with(".vue").then(|| {
-                    Arc::new(verter_compiler::compile::parse_sfc(&raw_source, None, None))
-                });
-                let snapshot = Arc::new(self.build_snapshot_from_source_state(
-                    canonical_id,
-                    &raw_source,
-                    cached_parse.as_deref(),
-                ));
-                (raw_source, cached_parse, whole_hash, snapshot)
             };
 
             #[cfg(target_arch = "wasm32")]
@@ -4190,17 +4165,42 @@ impl VerterHost {
         canonical_id: &str,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<Hash16> {
-        let cached_hash = store_view
-            .and_then(|view| view.whole_hash(canonical_id))
-            .or_else(|| self.get_whole_hash(canonical_id));
-        if cached_hash.is_some() {
-            return cached_hash;
+        // Ambient-view-first: inside a real request (ambient view installed),
+        // the view is authoritative. On view-miss for an unloaded canonical,
+        // attempt ensure_loaded once — this submits through the canonical
+        // scheduler pipeline and extends the view's extension store via the
+        // thread-local hook, so subsequent probes hit the view.
+        if let Some(ambient) = crate::host_request_view::current_request_view() {
+            if let Some(hash) = ambient.whole_hash(canonical_id) {
+                return Some(hash);
+            }
+            if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
+                return None;
+            }
+            if self.ensure_loaded(canonical_id) {
+                if let Some(hash) = ambient.whole_hash(canonical_id) {
+                    return Some(hash);
+                }
+                return self.get_whole_hash(canonical_id);
+            }
+            return None;
         }
-
-        let source = self.read_analysis_source(canonical_id)?;
-        let whole_hash = crate::hash::hash_16(source.as_bytes());
-        self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
-            .then_some(whole_hash)
+        // Outside a real request: explicit arg is best-effort; fall back to
+        // the live host probe, and as a last resort auto-load via the
+        // canonical scheduler pipeline.
+        if let Some(hash) = store_view
+            .and_then(|view| view.whole_hash(canonical_id))
+            .or_else(|| self.get_whole_hash(canonical_id))
+        {
+            return Some(hash);
+        }
+        if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
+            return None;
+        }
+        if self.ensure_loaded(canonical_id) {
+            return self.get_whole_hash(canonical_id);
+        }
+        None
     }
 
     fn import_route_cache_matches_view(
@@ -4210,8 +4210,12 @@ impl VerterHost {
         import_routes: &rustc_hash::FxHashMap<String, DependencyResolution>,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> bool {
-        let Some(view) = store_view else {
-            return true;
+        // Ambient-view-first: ambient governs inside a real request. Explicit
+        // arg is fallback. Outside any view, permissive.
+        let ambient = crate::host_request_view::current_request_view();
+        let view = match ambient.as_deref().or(store_view) {
+            Some(view) => view,
+            None => return true,
         };
 
         if let Some(whole_hash) = whole_hash {
@@ -4297,15 +4301,21 @@ impl VerterHost {
         seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) {
-        let whole_hash = store_view
-            .and_then(|view| view.whole_hash(canonical_id))
-            .or_else(|| self.get_whole_hash(canonical_id))
+        // Ambient-view-first hash chain. Ambient governs inside a real
+        // request; explicit arg is fallback; outside any view, live host.
+        // On a view-miss for an unloaded canonical, ensure_loaded once so
+        // the view's extension store captures the new canonical's hash.
+        let whole_hash = self
+            .current_or_read_whole_hash_in_view(canonical_id, store_view)
             .or_else(|| known_shallow.map(|state| state.whole_hash))
             .or_else(|| {
-                let source = self.read_analysis_source(canonical_id)?;
-                let whole_hash = crate::hash::hash_16(source.as_bytes());
-                self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view)
-                    .then_some(whole_hash)
+                if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
+                    None
+                } else if self.ensure_loaded(canonical_id) {
+                    self.current_or_read_whole_hash_in_view(canonical_id, store_view)
+                } else {
+                    None
+                }
             });
         if let Some(hash) = whole_hash {
             let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
@@ -4317,7 +4327,9 @@ impl VerterHost {
             }
         }
 
-        let route_hash = store_view
+        let ambient = crate::host_request_view::current_request_view();
+        let view_opt = ambient.as_deref().or(store_view);
+        let route_hash = view_opt
             .and_then(|view| {
                 view.derived_hash(canonical_id, crate::resolver_core::DerivedFactKind::Route)
             })
@@ -4627,7 +4639,20 @@ impl VerterHost {
         } else {
             vec![canonical_id.to_string(), resolved_canonical_id.clone()]
         };
-        if let Some(current_hash) = self.get_whole_hash(resolved_canonical_id.as_str()) {
+        // Scheduler-freshness gate: reject stale views — if the scheduler has
+        // advanced to a content hash the view cannot accept, abort.
+        let ambient = crate::host_request_view::current_request_view();
+        let view_for_staleness = ambient.as_deref().or(store_view);
+        if let Some(view) = view_for_staleness {
+            if let Some(sched_hash) = self.get_whole_hash(resolved_canonical_id.as_str()) {
+                if !view.accepts_whole_hash(resolved_canonical_id.as_str(), sched_hash) {
+                    return None;
+                }
+            }
+        }
+        if let Some(current_hash) =
+            self.current_or_read_whole_hash_in_view(resolved_canonical_id.as_str(), store_view)
+        {
             if !self.store_view_allows_current_whole_hash(
                 resolved_canonical_id.as_str(),
                 current_hash,
@@ -4636,9 +4661,8 @@ impl VerterHost {
                 return None;
             }
         }
-        let cached_whole_hash = store_view
-            .and_then(|view| view.whole_hash(resolved_canonical_id.as_str()))
-            .or_else(|| self.get_whole_hash(resolved_canonical_id.as_str()))
+        let cached_whole_hash = self
+            .current_or_read_whole_hash_in_view(resolved_canonical_id.as_str(), store_view)
             .or_else(|| {
                 self.cached_route_owned_shallow_whole_hash_in_view(
                     resolved_canonical_id.as_str(),
@@ -4957,18 +4981,6 @@ impl VerterHost {
         result.is_empty()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn current_eval_state(
-        &self,
-        canonical_id: &str,
-    ) -> Option<(
-        Arc<str>,
-        Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-        Hash16,
-    )> {
-        self.current_eval_state_in_view(canonical_id, None)
-    }
-
     pub(crate) fn current_eval_state_in_view(
         &self,
         canonical_id: &str,
@@ -5060,13 +5072,24 @@ impl VerterHost {
         // ModuleFactsDb fast path — request-view aware.
         let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached_facts {
-            // When a store_view is provided, verify the facts' hash matches
-            // the current file content. Archived facts may have an old hash
-            // from a prior version — reject them for eval state purposes
-            // (route resolution handles archived facts separately).
-            if store_view.is_some() {
-                if let Some(current) = self.get_whole_hash(canonical_id) {
-                    if current != facts.whole_hash {
+            // View-aware staleness gate: inside a request, the view governs
+            // hash identity. Outside a request, the check is permissive.
+            if !self.store_view_allows_current_whole_hash(
+                canonical_id,
+                facts.whole_hash,
+                store_view,
+            ) {
+                return None;
+            }
+            // Scheduler-freshness gate: if the view is stale relative to the
+            // scheduler's current whole_hash, reject all reads through this
+            // view — even archived-matching entries. The view's captured
+            // frame is no longer valid for the current scheduler state.
+            let ambient = crate::host_request_view::current_request_view();
+            let view_ref = ambient.as_deref().or(store_view);
+            if let Some(view) = view_ref {
+                if let Some(current_hash) = self.get_whole_hash(canonical_id) {
+                    if !view.accepts_whole_hash(canonical_id, current_hash) {
                         return None;
                     }
                 }
@@ -5078,20 +5101,15 @@ impl VerterHost {
             ));
         }
 
-        // Scheduler source path: for owner files that are in the scheduler
-        // but not yet materialized into ModuleFactsDb, read from the scheduler
-        // directly. This covers files after recompilation where ModuleFactsDb
-        // may hold stale facts from a prior materialization epoch.
-        #[cfg(feature = "scheduler")]
-        {
-            if let Some(state) = self.effective_file_state(canonical_id, None) {
-                if !self.store_view_allows_current_whole_hash(
-                    canonical_id,
-                    state.whole_hash,
-                    store_view,
-                ) {
-                    return None;
-                }
+        // Scheduler source path for files loaded via `ensure_loaded` but not
+        // yet materialized into `ModuleFactsDb` (the request-extension hook
+        // notes that module_facts may not yet be populated after mid-request
+        // loads). View-aware: the scheduler read is gated on the view
+        // accepting the canonical's whole_hash, so we never read past the
+        // view's snapshot.
+        let eff = crate::host_request_view::effective_request_view(store_view);
+        if let Some(view) = eff.as_view() {
+            if let Some(state) = self.effective_file_state_in_view(canonical_id, None, view) {
                 component_meta_trace_event!(
                     "current_eval_state_scheduler_hit",
                     format!(
@@ -5104,74 +5122,33 @@ impl VerterHost {
                 );
                 return Some((state.source, state.cached_parse, state.whole_hash));
             }
+            // Inside a request, if the view doesn't accept the canonical via
+            // module_facts OR scheduler, the caller must have ensure_loaded'd
+            // or the canonical is outside the request's frame. Return None.
+            return None;
         }
 
-        // Fallback: materialize via ModuleFactsDb (reads from disk on miss).
-        // When a store_view is provided, the file is not tracked by the view,
-        // and no cached facts exist in ModuleFactsDb, the file was never loaded.
-        // Do not auto-materialize from the workspace — that would seed
-        // unloaded imported dependencies.
-        if let Some(sv) = store_view {
-            if !sv.tracks_whole_hash(canonical_id)
-                && !self.has_cached_route_owned_shallow_state_in_view(canonical_id, Some(sv))
-                && self
-                    .resolver
-                    .runtime
-                    .module_facts
-                    .get_any(canonical_id)
-                    .is_none()
+        // Outside a request (CLI / background / top-level loads): the scheduler
+        // is still the sole source authority. If the canonical isn't materialized,
+        // call ensure_loaded once (submits through the scheduler's pipeline).
+        // Raw import specifiers (e.g. `vue`, `@nuxt/schema`) and empty strings
+        // are never loadable — skip the ensure_loaded attempt to avoid
+        // unnecessary workspace probes.
+        #[cfg(feature = "scheduler")]
+        {
+            if let Some(state) = self.effective_file_state(canonical_id, None) {
+                return Some((state.source, state.cached_parse, state.whole_hash));
+            }
+            if !canonical_id.is_empty()
+                && !is_raw_import_specifier_id(canonical_id)
+                && self.ensure_loaded(canonical_id)
             {
-                return None;
-            }
-
-            if let Some(state) = self.cached_route_owned_eval_state_in_view(canonical_id, Some(sv))
-            {
-                return Some(state);
-            }
-
-            let raw_source = self.read_analysis_source(canonical_id)?;
-            let whole_hash = crate::hash::hash_16(raw_source.as_bytes());
-            if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash, store_view) {
-                return None;
-            }
-            let cached_parse = canonical_id.ends_with(".vue").then(|| {
-                Arc::new(verter_compiler::compile::parse_sfc(
-                    raw_source.as_ref(),
-                    None,
-                    None,
-                ))
-            });
-            return Some((raw_source, cached_parse, whole_hash));
-        }
-        let facts = self.ensure_module_facts_in_view(canonical_id, store_view)?;
-        // When a store_view is provided and the file has been re-upserted
-        // (current hash differs from the facts' hash), the facts are from
-        // a prior version retrieved via the archive. For eval state purposes,
-        // reject stale-content facts — route resolution is handled separately
-        // by ensure_module_facts_in_view callers.
-        if store_view.is_some() {
-            let current_hash = self.get_whole_hash(canonical_id);
-            if let Some(current) = current_hash {
-                if current != facts.whole_hash {
-                    return None;
+                if let Some(state) = self.effective_file_state(canonical_id, None) {
+                    return Some((state.source, state.cached_parse, state.whole_hash));
                 }
             }
         }
-        component_meta_trace_event!(
-            "current_eval_state_module_facts_hit",
-            format!(
-                "owner={} source_len={} has_cached_parse={} whole_hash={:?}",
-                canonical_id,
-                facts.raw_source.len(),
-                facts.cached_parse.is_some(),
-                facts.whole_hash,
-            ),
-        );
-        Some((
-            Arc::clone(&facts.raw_source),
-            facts.cached_parse.clone(),
-            facts.whole_hash,
-        ))
+        None
     }
 
     pub(crate) fn resolve_eval_dependency_canonical_in_view(
@@ -5462,7 +5439,7 @@ impl VerterHost {
         let resolved = self.resolve_component_meta_in_view(
             canonical.as_str(),
             crate::types::ResolverMode::Expanded,
-            &*request_view,
+            &request_view,
         )?;
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
@@ -5505,7 +5482,7 @@ impl VerterHost {
         let resolved = self.resolve_component_meta_in_view(
             canonical.as_str(),
             crate::types::ResolverMode::Expanded,
-            &*request_view,
+            &request_view,
         )?;
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
@@ -5705,9 +5682,8 @@ impl VerterHost {
         let resolved = if let Some(cached) = resolved {
             cached
         } else {
-            let whole_hash = store_view
-                .and_then(|view| view.whole_hash(canonical_id))
-                .or_else(|| self.get_whole_hash(canonical_id))
+            let whole_hash = self
+                .current_or_read_whole_hash_in_view(canonical_id, store_view)
                 .unwrap_or_default();
             self.compute_component_meta_state_for_fallthrough(canonical_id, whole_hash, store_view)?
         };
@@ -7578,7 +7554,21 @@ impl VerterHost {
         resolved_canonical_id: &str,
         specifier: &str,
     ) -> Option<Arc<str>> {
-        if let Some(source) = self.read_analysis_source(resolved_canonical_id) {
+        // SFC <template src> / <script src> external-block path: read the
+        // workspace directly without promoting the file into host state.
+        // Caches/scheduler would treat these as compilable; they aren't.
+        if let Some(source) = self.get_source(resolved_canonical_id) {
+            return Some(source);
+        }
+        if let Some(facts) = self
+            .resolver
+            .runtime
+            .module_facts
+            .get_any(resolved_canonical_id)
+        {
+            return Some(Arc::clone(&facts.raw_source));
+        }
+        if let Some(source) = self.ws().read_file(resolved_canonical_id) {
             return Some(source);
         }
 
@@ -7596,7 +7586,15 @@ impl VerterHost {
                 )
             })?;
 
-        self.read_analysis_source(&dep_id)
+        self.get_source(&dep_id)
+            .or_else(|| {
+                self.resolver
+                    .runtime
+                    .module_facts
+                    .get_any(&dep_id)
+                    .map(|facts| Arc::clone(&facts.raw_source))
+            })
+            .or_else(|| self.ws().read_file(&dep_id))
     }
 
     /// Populate `resolved_canonical_id` on each import in the snapshot
@@ -8391,7 +8389,9 @@ impl VerterHost {
                 }
             }
 
-            let current_hash = self.get_whole_hash(&canonical).unwrap_or_default();
+            let current_hash = self
+                .current_or_read_whole_hash_in_view(&canonical, store_view)
+                .unwrap_or_default();
             if self.store_view_allows_current_whole_hash(&canonical, current_hash, store_view) {
                 if let (Some(source_snap), Some(analysis_snap)) = (
                     self.scheduler.try_get_source(&canonical),
@@ -10195,6 +10195,14 @@ fn collect_jsdoc_descriptions_from_root(
         if steps > 16 {
             break;
         }
+        // Ambient-view-first ensure_loaded guard: BFS may reach canonicals not
+        // yet tracked by the request view (barrel re-export chains into
+        // external packages).
+        if !host.is_evalable(current_canonical.as_str())
+            && !host.ensure_loaded(current_canonical.as_str())
+        {
+            continue;
+        }
         let Some((raw_source, cached_parse, _)) =
             host.current_eval_state_in_view(current_canonical.as_str(), store_view)
         else {
@@ -10274,6 +10282,11 @@ fn follow_heritage_type_imports(
         ),
     >,
 ) {
+    // Ambient-view-first ensure_loaded guard: BFS may reach canonicals not yet
+    // tracked by the request view (heritage imports from external packages).
+    if !host.is_evalable(defining_canonical) && !host.ensure_loaded(defining_canonical) {
+        return;
+    }
     let Some((raw_source, cached_parse, _)) =
         host.current_eval_state_in_view(defining_canonical, store_view)
     else {
@@ -10528,7 +10541,8 @@ pub(crate) fn populate_sfc_blocks_sidecar(
         return;
     }
 
-    let Some((source, cached_parse, _)) = host.current_eval_state(canonical_id) else {
+    let Some((source, cached_parse, _)) = host.current_eval_state_in_view(canonical_id, None)
+    else {
         return;
     };
     let Some(parsed) = cached_parse.as_deref() else {
