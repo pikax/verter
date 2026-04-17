@@ -9,24 +9,23 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-#[cfg(not(feature = "scheduler"))]
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+// `Instant` is only referenced by `upsert_legacy` (WASM-only). Native paths
+// measure parse durations via the scheduler executor.
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::cache::invalidate_nodes;
 use crate::cache::sorted_nodes;
 use crate::hash::{compile_profile_hash, content_override_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::parse::parse_non_sfc_snapshot;
 use crate::parse::parse_vue_snapshot;
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::shared::write_lock;
 use crate::types::*;
-#[cfg(not(feature = "scheduler"))]
+#[cfg(target_arch = "wasm32")]
 use crate::upsert::compute_upsert_changes;
 #[cfg(feature = "scheduler")]
 use crate::upsert::compute_upsert_changes_from_parse;
@@ -55,7 +54,7 @@ impl VerterHost {
             self.upsert_via_scheduler(req)
         }
 
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             self.upsert_legacy(req)
         }
@@ -406,7 +405,7 @@ impl VerterHost {
 
     /// Legacy upsert: direct parse, no scheduler.
     /// Used on WASM where threads are unavailable.
-    #[cfg(not(feature = "scheduler"))]
+    #[cfg(target_arch = "wasm32")]
     fn upsert_legacy(&self, req: UpsertRequest) -> Result<HostUpdateResult, HostError> {
         #[cfg(feature = "session_metrics")]
         self.metrics
@@ -803,7 +802,7 @@ impl VerterHost {
             }
 
             // Store per-profile layer in files for WASM readers.
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
@@ -849,7 +848,7 @@ impl VerterHost {
         }
 
         // Legacy path (WASM)
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             let entry = files
@@ -1052,7 +1051,7 @@ impl VerterHost {
                 result.changed = true;
                 return Ok(result);
             }
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let files = crate::shared::read_lock(&self.files);
                 let entry = files
@@ -1134,7 +1133,7 @@ impl VerterHost {
             }
 
             // Store per-profile layer in files for WASM readers.
-            #[cfg(not(feature = "scheduler"))]
+            #[cfg(target_arch = "wasm32")]
             {
                 let mut files = write_lock(&self.files);
                 if let Some(entry) = files.get_mut(&canonical) {
@@ -1185,7 +1184,7 @@ impl VerterHost {
         }
 
         // Legacy path (WASM)
-        #[cfg(not(feature = "scheduler"))]
+        #[cfg(target_arch = "wasm32")]
         {
             let mut files = write_lock(&self.files);
             let entry = files
