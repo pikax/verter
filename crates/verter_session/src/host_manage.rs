@@ -2190,11 +2190,7 @@ impl VerterHost {
             }
         }
 
-        let cached_facts = if let Some(view) = store_view {
-            self.resolver.runtime.module_facts.get(canonical_id, view)
-        } else {
-            self.resolver.runtime.module_facts.get_any(canonical_id)
-        };
+        let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
                 raw_source: Arc::clone(&facts.raw_source),
@@ -2217,11 +2213,7 @@ impl VerterHost {
         let (raw_source, cached_parse, whole_hash) =
             self.current_eval_state_in_view(canonical_id, store_view)?;
 
-        let refreshed_facts = if let Some(view) = store_view {
-            self.resolver.runtime.module_facts.get(canonical_id, view)
-        } else {
-            self.resolver.runtime.module_facts.get_any(canonical_id)
-        };
+        let refreshed_facts = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = refreshed_facts {
             let inputs = ExternalTypeResolutionInputs {
                 raw_source: Arc::clone(&facts.raw_source),
@@ -3703,12 +3695,11 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // Fast path: check ModuleFactsDb (validated or permissive).
-        let cached = if let Some(sv) = store_view {
-            self.resolver.runtime.module_facts.get(canonical_id, sv)
-        } else {
-            self.resolver.runtime.module_facts.get_any(canonical_id)
-        };
+        // Fast path: check ModuleFactsDb through the ambient request view
+        // when installed (mid-request-loaded canonicals validate via the
+        // extension store); fall back to the passed store_view or permissive
+        // lookup otherwise.
+        let cached = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached {
             if store_view.is_some() {
                 // Store-view validated — the cache is authoritative.
@@ -4992,12 +4983,8 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // ModuleFactsDb fast path.
-        let cached_facts = if let Some(sv) = store_view {
-            self.resolver.runtime.module_facts.get(canonical_id, sv)
-        } else {
-            self.resolver.runtime.module_facts.get_any(canonical_id)
-        };
+        // ModuleFactsDb fast path — request-view aware.
+        let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached_facts {
             // When a store_view is provided, verify the facts' hash matches
             // the current file content. Archived facts may have an old hash
@@ -7150,6 +7137,34 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn host_owned_resolved_named_types_len_for_test(&self) -> usize {
         self.host_owned_resolved_named_types.len()
+    }
+
+    /// Fetch `ModuleFacts` through the ambient request view when installed,
+    /// falling back to the passed-in `HostStoreView` or the permissive `get_any`
+    /// path outside a request.
+    ///
+    /// When a `RequestStoreView` is installed on this thread, its
+    /// `validates_fact` accepts route/import-route facts that reference
+    /// canonicals loaded mid-request (via the extension store) — the captured
+    /// `HostStoreView` alone would reject those as "untracked". Callers that
+    /// previously routed `module_facts.get(canonical, view)` through this
+    /// helper get extension-aware validation without a signature rewrite.
+    pub(crate) fn module_facts_in_request_view(
+        &self,
+        canonical_id: &str,
+        fallback_view: Option<&crate::resolver_store::HostStoreView>,
+    ) -> Option<std::sync::Arc<crate::resolver_core::module_facts_db::ModuleFacts>> {
+        if let Some(view) = crate::host_request_view::current_request_view() {
+            return self
+                .resolver
+                .runtime
+                .module_facts
+                .get(canonical_id, view.as_ref());
+        }
+        match fallback_view {
+            Some(view) => self.resolver.runtime.module_facts.get(canonical_id, view),
+            None => self.resolver.runtime.module_facts.get_any(canonical_id),
+        }
     }
 
     /// Cheap view-backed feasibility predicate for candidate-path probing.
