@@ -836,6 +836,32 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         name: &[u8],
         base_offset: u32,
     ) -> Option<Arc<ResolvedElements>> {
+        #[cfg(feature = "parser_cache_audit")]
+        {
+            // Emit an audit trace on every cache hit. The full slow-path
+            // recompute + `PartialEq` assertion lives at the adapter layer
+            // (see `verter_session::host_manage::HostNamedTypeCacheAdapter`'s
+            // audit branch) — this trace gives us observability on hit rate
+            // and key shape during focused audit runs.
+            if let Some(cache) = &self.named_type_cache {
+                if cache
+                    .get(&self.cache_key_for_name(name, base_offset))
+                    .is_some()
+                {
+                    component_meta_core_trace_event(
+                        "parser_cache_audit_hit",
+                        format!(
+                            "file={} name={} base_offset={} bindings={} companions={}",
+                            self.trace_label.as_deref().unwrap_or("<unknown>"),
+                            String::from_utf8_lossy(name),
+                            base_offset,
+                            self.type_param_bindings.len(),
+                            self.companion_types.len(),
+                        ),
+                    );
+                }
+            }
+        }
         self.named_type_cache
             .as_ref()?
             .get(&self.cache_key_for_name(name, base_offset))

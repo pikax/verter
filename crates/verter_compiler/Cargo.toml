@@ -16,6 +16,9 @@ bench = []
 dhat-heap = []
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# Forwards `parser_cache_audit` to `verter_parser` so the trace emits from
+# the parser-level `TypeResolutionContext::cached_named_resolution` hit path.
+parser_cache_audit = ["verter_parser/parser_cache_audit"]
 
 [dependencies]
 verter_parser = { path = "../verter_parser" }

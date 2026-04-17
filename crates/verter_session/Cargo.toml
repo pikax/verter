@@ -13,6 +13,12 @@ publish = false
 default = ["scheduler"]
 session_metrics = []
 scheduler = ["verter_scheduler", "dashmap"]
+# Debug-mode audit: on every `HostNamedTypeCacheAdapter::get` hit, recompute
+# the slow-path resolution and assert structural equality against the cached
+# value. Catches cache-key insufficiencies (a cached entry returned for a
+# key that should resolve differently). Not gated behind `debug_assertions`
+# because the slow path is expensive; opt-in for focused audit runs only.
+parser_cache_audit = ["verter_compiler/parser_cache_audit"]
 hotpath = [
   "dep:hotpath",
   "hotpath/hotpath",

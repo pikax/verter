@@ -15,6 +15,11 @@ publish = false
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# Opt-in audit trace: emits `parser_cache_audit_hit` core trace events for
+# every `TypeResolutionContext::cached_named_resolution` hit so cache-key
+# sufficiency can be validated against the raw resolution graph. Enable
+# from a downstream feature alias (e.g. `verter_session/parser_cache_audit`).
+parser_cache_audit = []
 
 [dependencies]
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
