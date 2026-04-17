@@ -5113,7 +5113,15 @@ impl VerterHost {
         };
         audit_timings.materialize_ms = append_start.elapsed().as_secs_f64() * 1000.0;
         let store_merge_started = audit_enabled.then(Instant::now);
-        let final_store_view = self.owned_or_ambient_request_view();
+        // Fact versions must reflect the post-resolution state of the host —
+        // mid-request `set_import_dependencies` / `ensure_loaded` calls may
+        // have updated import_routes and module_facts that the ambient
+        // captured view does not see. Build a fresh snapshot here so the
+        // stored facts match the live state at store time; a warm follow-up
+        // query will then validate against the same post-resolution state.
+        let final_store_view = crate::host_request_view::RequestStoreView::new(
+            std::sync::Arc::new(self.resolver_store_view()),
+        );
         parts.fact_versions = self.current_dependency_fact_versions_in_view(
             canonical,
             &parts.tracked_dependencies,
