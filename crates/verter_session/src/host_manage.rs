@@ -324,6 +324,72 @@ pub(crate) struct ExternalTypeAnalysisCacheKey {
     source_type: oxc_span::SourceType,
 }
 
+/// Host-owned cache key for fully-resolved named local symbols.
+///
+/// Promotes the per-context `ResolvedNamedTypeCacheKey` used by the parser's
+/// `TypeResolutionContext` into a cross-request identity: the original shape
+/// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
+/// plus `(canonical_id, whole_hash)` scoping so stored entries stay consistent
+/// with the owning file's content generation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct HostResolvedNamedTypeKey {
+    pub(crate) canonical_id: String,
+    pub(crate) whole_hash: Hash16,
+    pub(crate) inner:
+        verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
+}
+
+/// Thin adapter that implements
+/// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
+/// on top of the host-owned DashMap. Holds an `Arc<DashMap>` plus the
+/// `(canonical_id, whole_hash)` tuple for this context's entries. A new adapter
+/// is constructed per `build_type_context` call so child contexts created by
+/// `instantiate_type_params_ctx` share the same DashMap without re-building
+/// scoping metadata.
+#[derive(Debug)]
+struct HostNamedTypeCacheAdapter {
+    cache: std::sync::Arc<
+        dashmap::DashMap<
+            HostResolvedNamedTypeKey,
+            std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        >,
+    >,
+    canonical_id: String,
+    whole_hash: Hash16,
+}
+
+impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
+    for HostNamedTypeCacheAdapter
+{
+    fn get(
+        &self,
+        key: &verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
+    ) -> Option<std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>>
+    {
+        let host_key = HostResolvedNamedTypeKey {
+            canonical_id: self.canonical_id.clone(),
+            whole_hash: self.whole_hash,
+            inner: key.clone(),
+        };
+        self.cache
+            .get(&host_key)
+            .map(|entry| std::sync::Arc::clone(entry.value()))
+    }
+
+    fn insert(
+        &self,
+        key: verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
+        value: std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+    ) {
+        let host_key = HostResolvedNamedTypeKey {
+            canonical_id: self.canonical_id.clone(),
+            whole_hash: self.whole_hash,
+            inner: key,
+        };
+        self.cache.insert(host_key, value);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ExternalTypeAnalysisCacheEntry {
     whole_hash: Hash16,
@@ -2012,6 +2078,15 @@ impl VerterHost {
                 return None;
             }
 
+            let adapter: std::sync::Arc<
+                dyn verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
+                    + Send
+                    + Sync,
+            > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
+                cache: std::sync::Arc::clone(&self.host_owned_resolved_named_types),
+                canonical_id: canonical_id.to_string(),
+                whole_hash,
+            });
             let type_context = Rc::new(crate::ParsedTypeResolutionContext::new(
                 Rc::clone(&parsed_eval_program.program),
                 |parsed_program| {
@@ -2023,6 +2098,7 @@ impl VerterHost {
                             0,
                         );
                     ctx.set_trace_label(canonical_id.to_string());
+                    ctx.set_named_type_cache(Some(adapter));
                     ctx
                 },
             ));
@@ -2236,6 +2312,13 @@ impl VerterHost {
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
         self.external_type_analysis_cache.lock().clear();
+        // Clear host-owned named-type cache on epoch bump. Entries are scoped
+        // by `(canonical_id, whole_hash)`, and whole_hash reflects one
+        // workspace content generation. A bumped epoch means at least one
+        // canonical's facts changed, and we prefer to drop stale entries over
+        // validating each one lazily (which would require a per-canonical
+        // invalidation pass).
+        self.host_owned_resolved_named_types.clear();
         // Note: route_owned_shallow_cache is NOT cleared here — it's invalidated
         // per-file by invalidate_route_owned_shallow_cache() and validated by
         // content-hash on lookup. Clearing it on every epoch bump would defeat
@@ -7013,6 +7096,12 @@ impl VerterHost {
         let snap = self.scheduler.try_get_source(canonical)?;
         let hd = snap.downcast_data::<HostSourceData>()?;
         Some(hd.source_type)
+    }
+
+    /// Test-only accessor for the host-owned named-type cache size.
+    #[cfg(test)]
+    pub(crate) fn host_owned_resolved_named_types_len_for_test(&self) -> usize {
+        self.host_owned_resolved_named_types.len()
     }
 
     /// Returns the semantic hash for a file by canonical ID or alias.

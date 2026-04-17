@@ -69,6 +69,60 @@ fn infer_type(type_str: &str) -> Vec<RuntimeType> {
     vec![RuntimeType::Unknown]
 }
 
+/// Mock `NamedTypeCache` impl used by the existing `*_reuses_context_cache`
+/// tests to probe cache state without touching the (now-removed) per-context
+/// `Rc<RefCell<FxHashMap>>` field. Count-wise semantically equivalent to the
+/// pre-refactor cache: one entry per unique `ResolvedNamedTypeCacheKey`.
+#[derive(Debug, Default)]
+struct TestNamedTypeCache {
+    inner: std::sync::Mutex<
+        rustc_hash::FxHashMap<
+            super::cache_keys::ResolvedNamedTypeCacheKey,
+            std::sync::Arc<ResolvedElements>,
+        >,
+    >,
+}
+
+impl TestNamedTypeCache {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    fn contains_key(&self, key: &super::cache_keys::ResolvedNamedTypeCacheKey) -> bool {
+        self.inner.lock().unwrap().contains_key(key)
+    }
+
+    fn key_names(&self) -> std::collections::BTreeSet<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|key| String::from_utf8_lossy(&key.name).to_string())
+            .collect()
+    }
+}
+
+impl super::cache_keys::NamedTypeCache for TestNamedTypeCache {
+    fn get(
+        &self,
+        key: &super::cache_keys::ResolvedNamedTypeCacheKey,
+    ) -> Option<std::sync::Arc<ResolvedElements>> {
+        self.inner.lock().unwrap().get(key).cloned()
+    }
+
+    fn insert(
+        &self,
+        key: super::cache_keys::ResolvedNamedTypeCacheKey,
+        value: std::sync::Arc<ResolvedElements>,
+    ) {
+        self.inner.lock().unwrap().insert(key, value);
+    }
+}
+
 /// Helper to resolve a `type Test = ...` declaration using context, returning resolved elements
 /// and collected diagnostics.
 fn resolve_with_ctx(source: &str) -> (ResolvedElements, Vec<ResolutionDiagnostic>) {
@@ -464,7 +518,9 @@ interface Props extends Base { bar: number }
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let mut guard = vec!["Props".to_string()];
     let first = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
@@ -475,7 +531,7 @@ interface Props extends Base { bar: number }
         "Props should include inherited members"
     );
 
-    let cached_after_first = ctx.resolved_named_types.borrow().len();
+    let cached_after_first = mock_cache.len();
     assert!(
         cached_after_first >= 1,
         "the directly resolved root should be cached after first resolution"
@@ -490,7 +546,7 @@ interface Props extends Base { bar: number }
         "Cached resolution should stay correct"
     );
     assert_eq!(
-        ctx.resolved_named_types.borrow().len(),
+        mock_cache.len(),
         cached_after_first,
         "Repeated resolution should reuse the existing cache entries"
     );
@@ -508,7 +564,9 @@ interface Props extends Mid { baz: boolean }
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let mut guard = vec!["Props".to_string()];
     let resolved = resolve_named_local_type_with_ctx_ref("Props", None, 0, &ctx, &mut guard)
@@ -520,7 +578,7 @@ interface Props extends Mid { baz: boolean }
     );
 
     assert_eq!(
-        ctx.resolved_named_types.borrow().len(),
+        mock_cache.len(),
         1,
         "resolving the root interface should cache the requested closure without materializing each ancestor closure",
     );
@@ -538,7 +596,9 @@ type Use = Wrapper<string>
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let wrapper_alias = result
         .program
@@ -577,7 +637,7 @@ type Use = Wrapper<string>
         1,
         "Base should resolve in generic child context"
     );
-    let cached_after_first = child.resolved_named_types.borrow().len();
+    let cached_after_first = mock_cache.len();
     assert!(
         cached_after_first >= 1,
         "nongeneric Base should still be cached even when outer generic bindings are active",
@@ -592,7 +652,7 @@ type Use = Wrapper<string>
         "cached Base resolution should stay correct"
     );
     assert_eq!(
-        child.resolved_named_types.borrow().len(),
+        mock_cache.len(),
         cached_after_first,
         "repeated nongeneric resolution inside a generic context should reuse the same cache entry",
     );
@@ -611,7 +671,9 @@ type UseB = Wrapper<number>
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let wrapper_alias = result
         .program
@@ -666,7 +728,7 @@ type UseB = Wrapper<number>
         .expect("Base should resolve under Wrapper<string>");
     assert_eq!(first.props.len(), 1);
 
-    let cached_after_first = ctx.resolved_named_types.borrow().len();
+    let cached_after_first = mock_cache.len();
 
     let mut second_guard = vec!["Base".to_string()];
     let second =
@@ -675,7 +737,7 @@ type UseB = Wrapper<number>
     assert_eq!(second.props.len(), 1);
 
     assert_eq!(
-        ctx.resolved_named_types.borrow().len(),
+        mock_cache.len(),
         cached_after_first,
         "nongeneric Base should reuse the same cache entry across unrelated outer generic bindings",
     );
@@ -693,7 +755,9 @@ type B = Base<number>
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let base_interface = result
         .program
@@ -752,11 +816,11 @@ type B = Base<number>
         "distinct generic bindings should produce distinct cache keys",
     );
     assert!(
-        !ctx.resolved_named_types.borrow().contains_key(&string_key),
+        !mock_cache.contains_key(&string_key),
         "cache should start empty for Base<string>",
     );
     assert!(
-        !ctx.resolved_named_types.borrow().contains_key(&number_key),
+        !mock_cache.contains_key(&number_key),
         "cache should start empty for Base<number>",
     );
 
@@ -774,16 +838,14 @@ type B = Base<number>
         1,
         "Base<string> should expose one inherited member",
     );
-    let cache_after_string = ctx.resolved_named_types.borrow();
     assert!(
-        cache_after_string.contains_key(&string_key),
+        mock_cache.contains_key(&string_key),
         "Base<string> should be cached under its bound-parameter key",
     );
     assert!(
-        !cache_after_string.contains_key(&number_key),
+        !mock_cache.contains_key(&number_key),
         "Base<number> should not share the Base<string> cache entry",
     );
-    drop(cache_after_string);
 
     let mut number_guard = vec!["Base".to_string()];
     let resolved_number = resolve_named_local_type_with_ctx_ref(
@@ -799,17 +861,16 @@ type B = Base<number>
         1,
         "Base<number> should expose one inherited member",
     );
-    let cache_after_number = ctx.resolved_named_types.borrow();
     assert!(
-        cache_after_number.contains_key(&string_key),
+        mock_cache.contains_key(&string_key),
         "Base<string> cache entry should remain available after Base<number>",
     );
     assert!(
-        cache_after_number.contains_key(&number_key),
+        mock_cache.contains_key(&number_key),
         "Base<number> should be cached under its own bound-parameter key",
     );
     assert!(
-        cache_after_number.len() >= 2,
+        mock_cache.len() >= 2,
         "distinct generic instantiations should keep distinct cache entries",
     );
 }
@@ -826,7 +887,9 @@ type B = Base<string>
     let parser = Parser::new(&allocator, source, source_type);
     let result = parser.parse();
 
-    let ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    ctx.set_named_type_cache(Some(mock_cache.clone()));
 
     let base_interface = result
         .program
@@ -896,7 +959,7 @@ type B = Base<string>
     .expect("Base<string> should resolve");
     assert_eq!(first.props.len(), 1);
 
-    let cached_after_first = ctx.resolved_named_types.borrow().len();
+    let cached_after_first = mock_cache.len();
 
     let mut second_guard = vec!["Base".to_string()];
     let second = resolve_named_local_type_with_ctx_ref(
@@ -909,7 +972,7 @@ type B = Base<string>
     .expect("second Base<string> should reuse cache");
     assert_eq!(second.props.len(), 1);
     assert_eq!(
-        ctx.resolved_named_types.borrow().len(),
+        mock_cache.len(),
         cached_after_first,
         "second semantically identical binding should reuse the first cache entry",
     );
@@ -2001,7 +2064,9 @@ export default interface Props extends Base {
 
     let program_alloc = Allocator::new();
     let parsed = Parser::new(&program_alloc, source, SourceType::ts()).parse();
-    let base_ctx = build_type_context(&parsed.program, source.as_bytes(), 0);
+    let mut base_ctx = build_type_context(&parsed.program, source.as_bytes(), 0);
+    let mock_cache = TestNamedTypeCache::new();
+    base_ctx.set_named_type_cache(Some(mock_cache.clone()));
     let companions = FxHashMap::default();
 
     let resolved = resolve_external_type_in_context_with_analyzed_symbol_companion(
@@ -2022,12 +2087,7 @@ export default interface Props extends Base {
     assert!(prop_names.contains("id"));
     assert!(prop_names.contains("base"));
 
-    let cached_names = base_ctx
-        .resolved_named_types
-        .borrow()
-        .keys()
-        .map(|key| String::from_utf8_lossy(&key.name).to_string())
-        .collect::<std::collections::BTreeSet<_>>();
+    let cached_names = mock_cache.key_names();
 
     assert!(
         cached_names.contains("Props"),
@@ -3926,4 +3986,66 @@ type Test = TableSlots
         !names.contains(&"default"),
         "dynamic Record<string,...> should NOT synthesize 'default', got: {names:?}"
     );
+}
+
+#[test]
+fn resolution_depth_is_bounded_per_call_chain() {
+    // Phase 1 §4.7 test 5.7 Test 3.
+    //
+    // Depth-as-argument refactor replaces the `Rc<Cell<u16>>` in
+    // `TypeResolutionContext` with an explicit `u16` threaded through every
+    // recursive `resolve_type_elements_inner_*` callsite. Deeply nested
+    // generics must still bail at `MAX_TYPE_RESOLUTION_DEPTH` rather than
+    // stack-overflowing.
+    //
+    // Synthesises a `Foo<Foo<Foo<...>>>` chain of depth 100 and asserts that
+    // resolution terminates cleanly.
+    let mut source = String::from(
+        "interface Leaf { value: string }\ninterface Foo<T> { inner: T }\ntype Test = ",
+    );
+    let depth = 100;
+    for _ in 0..depth {
+        source.push_str("Foo<");
+    }
+    source.push_str("Leaf");
+    for _ in 0..depth {
+        source.push('>');
+    }
+    source.push('\n');
+
+    let (_resolved, _diagnostics) = resolve_with_ctx(&source);
+    // If we reach this line without stack overflow, the depth guard is working.
+    // The resolved output may be empty (depth limit hit before inner resolution
+    // completes) — the invariant is termination, not payload completeness.
+}
+
+#[test]
+fn resolved_elements_supports_deep_partial_eq() {
+    // Phase 1 §4.7 Commit B prerequisite for the `parser_cache_audit` feature
+    // (§2.7 item 7). `PartialEq` on `ResolvedElements`, `ResolvedProp`, and
+    // `ResolvedEmit` must be structural so cache-hit / recomputed-slow-path
+    // equality can be asserted.
+    let (resolved_a, _) =
+        resolve_with_ctx("interface Props { label: string; count?: number }\ntype Test = Props\n");
+    let (resolved_b, _) =
+        resolve_with_ctx("interface Props { label: string; count?: number }\ntype Test = Props\n");
+    assert_eq!(
+        resolved_a, resolved_b,
+        "identical source must produce structurally equal `ResolvedElements`"
+    );
+}
+
+#[test]
+fn type_resolution_context_handle_is_send_and_sync() {
+    // Phase 1 §4.7 test 5.7 Test 1 (fallback (a) + (b) combined).
+    //
+    // Pre-fix: `TypeResolutionContext` carries `Rc<RefCell<...>>` and
+    // `Rc<Cell<u16>>` — both are `!Send + !Sync`, which blocks moving the
+    // resolved-named-types cache to a host-owned DashMap.
+    //
+    // Post-fix: those fields are replaced by `Option<Arc<dyn NamedTypeCache + Send + Sync>>`
+    // (cache handle) and a threaded `u16` parameter (depth). The cache handle
+    // must itself be `Send + Sync` so it can be shared across requests.
+    fn _assert_send_sync<T: Send + Sync + ?Sized>() {}
+    _assert_send_sync::<dyn super::cache_keys::NamedTypeCache>();
 }

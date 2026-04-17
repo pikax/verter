@@ -274,6 +274,20 @@ pub struct VerterHost {
             crate::host_resolve::RouteOwnedShallowStateCacheEntry,
         >,
     >,
+    /// Host-owned fully-resolved named local symbols (migrated from the per-context
+    /// `Rc<RefCell<FxHashMap>>` cache in `TypeResolutionContext`). Keyed by the
+    /// full `(canonical_id, whole_hash, name, surface, companion_cache_key,
+    /// type_param_bindings)` identity — same shape the context cache used,
+    /// plus `(canonical_id, whole_hash)` scoping so entries are valid across
+    /// requests that share the same workspace content generation.
+    ///
+    /// Cleared on epoch bump (see `clear_thread_local_parsed_eval_program_cache`).
+    pub(crate) host_owned_resolved_named_types: std::sync::Arc<
+        dashmap::DashMap<
+            crate::host_manage::HostResolvedNamedTypeKey,
+            std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        >,
+    >,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -333,6 +347,7 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            host_owned_resolved_named_types: std::sync::Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -362,6 +377,7 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
+            host_owned_resolved_named_types: std::sync::Arc::new(dashmap::DashMap::new()),
         }
     }
 

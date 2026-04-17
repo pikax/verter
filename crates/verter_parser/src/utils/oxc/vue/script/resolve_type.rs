@@ -16,11 +16,9 @@
 #![allow(dead_code)]
 
 use std::{
-    cell::{Cell, RefCell},
     io::Write,
     path::PathBuf,
-    rc::Rc,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use oxc_ast::ast::*;
@@ -225,7 +223,7 @@ impl ResolvedMemberVisibility {
 }
 
 /// A resolved property from a type literal.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProp {
     /// Span of the entire property signature (from key to end of type)
     pub span: Span,
@@ -268,7 +266,7 @@ pub enum ResolvedEmitSignature {
     Tuple { tuple_text: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEmit {
     /// Span of the entire emit signature
     pub span: Span,
@@ -324,7 +322,7 @@ pub struct BlockedType {
 }
 
 /// Result of resolving type elements from a type annotation.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ResolvedElements {
     /// Resolved properties from the type
     pub props: Vec<ResolvedProp>,
@@ -466,7 +464,7 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Bound generic type parameters for the current instantiation.
     pub type_param_bindings: Vec<(Span, &'ctx TSType<'a>)>,
     /// Stable cache-key representation of `type_param_bindings`.
-    type_param_bindings_cache_key: Rc<[ResolvedTypeParamBindingCacheKey]>,
+    type_param_bindings_cache_key: Arc<[ResolvedTypeParamBindingCacheKey]>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
     /// Pre-resolved types from companion `<script>` block.
@@ -486,23 +484,59 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Stable sorted imported companion names available during this resolution.
     /// Included in named-type cache keys so different companion availability
     /// sets do not reuse an incompatible cached local expansion.
-    companion_cache_key: Rc<[Box<[u8]>]>,
+    companion_cache_key: Arc<[Box<[u8]>]>,
     /// Optional debug/trace label for the owning source file.
-    trace_label: Option<Rc<str>>,
-    /// Per-context cache of fully resolved named local symbols.
-    /// Child contexts share this cache so repeated local/interface expansion
-    /// can reuse one resolved shape within the request.
-    resolved_named_types: Rc<RefCell<FxHashMap<ResolvedNamedTypeCacheKey, Rc<ResolvedElements>>>>,
-    /// Shared recursion depth counter. Incremented on each `resolve_type_elements_inner_*`
-    /// call and decremented on return. When the counter exceeds [`MAX_TYPE_RESOLUTION_DEPTH`],
-    /// further expansion is skipped to prevent stack overflow on deeply nested generic types.
-    /// Shared via `Rc` so child contexts (from `instantiate_type_params_ctx`) track the same depth.
-    resolution_depth: Rc<Cell<u16>>,
+    trace_label: Option<Arc<str>>,
+    /// Injected host-owned cache handle for fully-resolved named local symbols.
+    /// `None` for standalone callers (tests, direct parsing); resolution still
+    /// succeeds but pays no memoization cost. When `Some`, the adapter closes
+    /// over a `(canonical_id, whole_hash)` scoping tuple so cache entries are
+    /// keyed against the owning file's content generation. See
+    /// [`cache_keys::NamedTypeCache`] for the trait contract.
+    named_type_cache: Option<Arc<dyn cache_keys::NamedTypeCache + Send + Sync>>,
 }
 
 /// Maximum recursion depth for in-file type resolution. Prevents stack overflow
 /// on deeply nested generic types (e.g. `InputMenuProps<T, VK, M>` chains).
 const MAX_TYPE_RESOLUTION_DEPTH: u16 = 64;
+
+thread_local! {
+    /// Module-local recursion depth tracker for [`resolve_type_elements_inner_with_ctx`]
+    /// and its `_ref` variant. Replaces the previous `Rc<Cell<u16>>` field on
+    /// `TypeResolutionContext` (V7 in `.claude/feedback/verification-2026-04-17.md` —
+    /// that field made the struct `!Send` and blocked the host-owned cache move).
+    ///
+    /// A module-local thread-local is the correct scope: depth tracks a single
+    /// call chain on one thread, always resets to `0` between top-level entries
+    /// via the RAII [`ResolutionDepthGuard`]. It is not cache state.
+    static RESOLUTION_DEPTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard that increments [`RESOLUTION_DEPTH`] on construction and decrements
+/// it on drop. Returns `None` when the depth would exceed
+/// [`MAX_TYPE_RESOLUTION_DEPTH`]; callers bail silently in that case.
+struct ResolutionDepthGuard;
+
+impl ResolutionDepthGuard {
+    fn try_enter() -> Option<Self> {
+        RESOLUTION_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current >= MAX_TYPE_RESOLUTION_DEPTH {
+                return None;
+            }
+            depth.set(current + 1);
+            Some(ResolutionDepthGuard)
+        })
+    }
+}
+
+impl Drop for ResolutionDepthGuard {
+    fn drop(&mut self) {
+        RESOLUTION_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
@@ -512,20 +546,55 @@ pub struct InterfaceResolutionEntry<'ctx, 'a: 'ctx> {
     pub type_params: Option<&'ctx TSTypeParameterDeclaration<'a>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ResolvedNamedTypeCacheKey {
-    name: Box<[u8]>,
-    surface: Option<BlockedTypeSurface>,
-    base_offset: u32,
-    companion_cache_key: Rc<[Box<[u8]>]>,
-    type_param_bindings: Rc<[ResolvedTypeParamBindingCacheKey]>,
+/// Public cache-key module exposing the types and trait that host-owned caches
+/// (e.g. `VerterHost::host_owned_resolved_named_types`) use to memoize resolved
+/// named types across requests within one workspace generation.
+///
+/// The underlying key is the exact tuple `(name, surface, base_offset,
+/// companion_cache_key, type_param_bindings)` that the in-crate resolver already
+/// used for per-context memoization — promoted to a host-shared identity, with
+/// additional `(canonical_id, whole_hash)` scoping provided by the adapter.
+pub mod cache_keys {
+    use super::{BlockedTypeSurface, ResolvedElements};
+    use std::sync::Arc;
+
+    /// Cache key for a fully-resolved named local symbol.
+    ///
+    /// Note: `companion_cache_key` and `type_param_bindings` are `Arc<[…]>` so
+    /// child contexts produced by `instantiate_type_params_ctx` share the same
+    /// underlying slice without deep-cloning.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct ResolvedNamedTypeCacheKey {
+        pub name: Box<[u8]>,
+        pub surface: Option<BlockedTypeSurface>,
+        pub base_offset: u32,
+        pub companion_cache_key: Arc<[Box<[u8]>]>,
+        pub type_param_bindings: Arc<[ResolvedTypeParamBindingCacheKey]>,
+    }
+
+    /// Stable identity for a generic parameter binding — matches the semantic
+    /// identity used by `type_param_bindings_cache_key` inside the resolver.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct ResolvedTypeParamBindingCacheKey {
+        pub name: Box<[u8]>,
+        pub bound: Box<[u8]>,
+    }
+
+    /// Injected cache handle. Implementations must be `Send + Sync` so a single
+    /// adapter instance can be cloned into child contexts and shared across
+    /// concurrent resolver threads.
+    ///
+    /// Contract: `get` is read-only and must not mutate the cache. `insert`
+    /// overwrites any prior entry under the same key (the resolver never asks
+    /// for reconciliation; two callers computing the same key must produce
+    /// structurally equal results).
+    pub trait NamedTypeCache: std::fmt::Debug + Send + Sync {
+        fn get(&self, key: &ResolvedNamedTypeCacheKey) -> Option<Arc<ResolvedElements>>;
+        fn insert(&self, key: ResolvedNamedTypeCacheKey, value: Arc<ResolvedElements>);
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ResolvedTypeParamBindingCacheKey {
-    name: Box<[u8]>,
-    bound: Box<[u8]>,
-}
+pub use cache_keys::{NamedTypeCache, ResolvedNamedTypeCacheKey, ResolvedTypeParamBindingCacheKey};
 
 #[derive(Debug, Clone)]
 enum NamedTypeResolutionPlan<'ctx, 'a: 'ctx> {
@@ -547,8 +616,8 @@ struct ClassResolutionPlan<'ctx, 'a: 'ctx> {
 
 #[derive(Debug, Clone)]
 struct ShallowResolvedElements {
-    props: Rc<[ResolvedProp]>,
-    emits: Rc<[ResolvedEmit]>,
+    props: Arc<[ResolvedProp]>,
+    emits: Arc<[ResolvedEmit]>,
     has_call_signature: bool,
 }
 
@@ -565,8 +634,8 @@ impl ShallowResolvedElements {
 impl From<ResolvedElements> for ShallowResolvedElements {
     fn from(value: ResolvedElements) -> Self {
         Self {
-            props: Rc::from(value.props.into_boxed_slice()),
-            emits: Rc::from(value.emits.into_boxed_slice()),
+            props: Arc::from(value.props.into_boxed_slice()),
+            emits: Arc::from(value.emits.into_boxed_slice()),
             has_call_signature: value.has_call_signature,
         }
     }
@@ -594,7 +663,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             classes: FxHashMap::default(),
             type_params: Vec::new(),
             type_param_bindings: Vec::new(),
-            type_param_bindings_cache_key: Rc::from(
+            type_param_bindings_cache_key: Arc::from(
                 Vec::<ResolvedTypeParamBindingCacheKey>::new().into_boxed_slice(),
             ),
             diagnostics: Vec::new(),
@@ -602,11 +671,21 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             companion_origins: rustc_hash::FxHashMap::default(),
             blocked_types: Vec::new(),
             current_surface: None,
-            companion_cache_key: Rc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
             trace_label: None,
-            resolved_named_types: Rc::new(RefCell::new(FxHashMap::default())),
-            resolution_depth: Rc::new(Cell::new(0)),
+            named_type_cache: None,
         }
+    }
+
+    /// Inject a host-owned named-type cache. Subsequent recursive resolutions
+    /// (including child contexts produced by [`instantiate_type_params_ctx`])
+    /// consult this handle before computing from AST, and store new results
+    /// on completion. Calling this with `None` disables memoization.
+    pub fn set_named_type_cache(
+        &mut self,
+        cache: Option<Arc<dyn cache_keys::NamedTypeCache + Send + Sync>>,
+    ) {
+        self.named_type_cache = cache;
     }
 
     pub fn refresh_companion_cache_key(&mut self) {
@@ -616,7 +695,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             .map(|name| name.as_bytes().to_vec().into_boxed_slice())
             .collect::<Vec<_>>();
         names.sort_unstable();
-        self.companion_cache_key = Rc::from(names.into_boxed_slice());
+        self.companion_cache_key = Arc::from(names.into_boxed_slice());
     }
 
     pub fn refresh_type_param_bindings_cache_key(&mut self) {
@@ -628,7 +707,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
                 bound: semantic_type_cache_key(bound, self),
             })
             .collect::<Vec<_>>();
-        self.type_param_bindings_cache_key = Rc::from(bindings.into_boxed_slice());
+        self.type_param_bindings_cache_key = Arc::from(bindings.into_boxed_slice());
     }
 
     pub fn clear_type_param_bindings(&mut self) {
@@ -636,7 +715,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         self.refresh_type_param_bindings_cache_key();
     }
 
-    pub fn set_trace_label(&mut self, label: impl Into<Rc<str>>) {
+    pub fn set_trace_label(&mut self, label: impl Into<Arc<str>>) {
         self.trace_label = Some(label.into());
     }
 
@@ -738,13 +817,17 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         self.classes.get(name).copied()
     }
 
-    fn cache_key_for_name(&self, name: &[u8], base_offset: u32) -> ResolvedNamedTypeCacheKey {
-        ResolvedNamedTypeCacheKey {
+    fn cache_key_for_name(
+        &self,
+        name: &[u8],
+        base_offset: u32,
+    ) -> cache_keys::ResolvedNamedTypeCacheKey {
+        cache_keys::ResolvedNamedTypeCacheKey {
             name: name.to_vec().into_boxed_slice(),
             surface: self.current_surface.clone(),
             base_offset,
-            companion_cache_key: Rc::clone(&self.companion_cache_key),
-            type_param_bindings: Rc::clone(&self.type_param_bindings_cache_key),
+            companion_cache_key: Arc::clone(&self.companion_cache_key),
+            type_param_bindings: Arc::clone(&self.type_param_bindings_cache_key),
         }
     }
 
@@ -752,22 +835,21 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
         &self,
         name: &[u8],
         base_offset: u32,
-    ) -> Option<Rc<ResolvedElements>> {
-        self.resolved_named_types
-            .borrow()
+    ) -> Option<Arc<ResolvedElements>> {
+        self.named_type_cache
+            .as_ref()?
             .get(&self.cache_key_for_name(name, base_offset))
-            .cloned()
     }
 
     fn store_named_resolution(
         &self,
         name: &[u8],
         base_offset: u32,
-        resolved: Rc<ResolvedElements>,
+        resolved: Arc<ResolvedElements>,
     ) {
-        self.resolved_named_types
-            .borrow_mut()
-            .insert(self.cache_key_for_name(name, base_offset), resolved);
+        if let Some(cache) = self.named_type_cache.as_ref() {
+            cache.insert(self.cache_key_for_name(name, base_offset), resolved);
+        }
     }
     /// Look up a type parameter constraint by comparing spans against source bytes
     pub fn find_type_param(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
@@ -1548,7 +1630,7 @@ fn resolve_named_local_type_with_ctx_ref<'ctx, 'a: 'ctx>(
     base_offset: u32,
     ctx: &TypeResolutionContext<'ctx, 'a>,
     recursion_guard: &mut Vec<String>,
-) -> Option<Rc<ResolvedElements>> {
+) -> Option<Arc<ResolvedElements>> {
     resolve_named_local_type_with_ctx_ref_inner(
         type_name,
         type_args,
@@ -1566,7 +1648,7 @@ fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
     ctx: &TypeResolutionContext<'ctx, 'a>,
     recursion_guard: &mut Vec<String>,
     store_result: bool,
-) -> Option<Rc<ResolvedElements>> {
+) -> Option<Arc<ResolvedElements>> {
     let type_name_bytes = type_name.as_bytes();
 
     if let Some((aliased_type, type_params)) = ctx.find_type_alias(type_name_bytes) {
@@ -1598,13 +1680,13 @@ fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
                 ),
             );
         }
-        let resolved = Rc::new(resolve_type_elements_with_ctx_ref(
+        let resolved = Arc::new(resolve_type_elements_with_ctx_ref(
             aliased_type,
             base_offset,
             &child,
         ));
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
         }
         return Some(resolved);
     }
@@ -1658,9 +1740,9 @@ fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
             recursion_guard,
         );
         resolved.root_runtime_types = vec![RuntimeType::Object];
-        let resolved = Rc::new(resolved);
+        let resolved = Arc::new(resolved);
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
         }
         return Some(resolved);
     }
@@ -1710,9 +1792,9 @@ fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
         );
         resolved.root_runtime_types = vec![RuntimeType::Object];
         resolved.dedup_props();
-        let resolved = Rc::new(resolved);
+        let resolved = Arc::new(resolved);
         if store_result {
-            child.store_named_resolution(type_name_bytes, base_offset, Rc::clone(&resolved));
+            child.store_named_resolution(type_name_bytes, base_offset, Arc::clone(&resolved));
         }
         return Some(resolved);
     }
@@ -1730,7 +1812,7 @@ fn resolve_named_local_type_with_ctx_ref_inner<'ctx, 'a: 'ctx>(
                 ),
             );
         }
-        return Some(Rc::new(companion));
+        return Some(Arc::new(companion));
     }
 
     if component_meta_core_trace_enabled() {
@@ -2536,19 +2618,24 @@ fn get_expression_reference_name(expr: &Expression<'_>) -> Option<String> {
 }
 
 /// Inner resolution function that uses the context for type reference lookup.
+///
+/// Recursion depth is tracked via a module-local thread-local counter
+/// (see [`RESOLUTION_DEPTH`]) rather than a shared `Rc<Cell<u16>>` field on the
+/// context. Removing that field from `TypeResolutionContext` unblocks the
+/// host-owned cache migration (the resolver context no longer carries `!Send`
+/// interior-mutability state). Depth guarding still bails at
+/// [`MAX_TYPE_RESOLUTION_DEPTH`] to prevent stack overflow on deeply nested
+/// generic types.
 fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,
     result: &mut ResolvedElements,
     ctx: &mut TypeResolutionContext<'ctx, 'a>,
 ) {
-    let prev_depth = ctx.resolution_depth.get();
-    if prev_depth >= MAX_TYPE_RESOLUTION_DEPTH {
+    let Some(_guard) = ResolutionDepthGuard::try_enter() else {
         return;
-    }
-    ctx.resolution_depth.set(prev_depth + 1);
+    };
     resolve_type_elements_inner_with_ctx_guarded(node, base_offset, result, ctx);
-    ctx.resolution_depth.set(prev_depth);
 }
 
 fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
@@ -2769,6 +2856,9 @@ fn resolve_type_elements_inner_with_ctx_guarded<'ctx, 'a: 'ctx>(
 }
 
 /// Inner resolution function that uses an immutable context (doesn't collect diagnostics).
+///
+/// Uses the module-local [`RESOLUTION_DEPTH`] thread-local counter — see
+/// [`resolve_type_elements_inner_with_ctx`] for the rationale.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
@@ -2776,13 +2866,10 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
     result: &mut ResolvedElements,
     ctx: &TypeResolutionContext<'ctx, 'a>,
 ) {
-    let prev_depth = ctx.resolution_depth.get();
-    if prev_depth >= MAX_TYPE_RESOLUTION_DEPTH {
+    let Some(_guard) = ResolutionDepthGuard::try_enter() else {
         return;
-    }
-    ctx.resolution_depth.set(prev_depth + 1);
+    };
     resolve_type_elements_inner_with_ctx_ref_guarded(node, base_offset, result, ctx);
-    ctx.resolution_depth.set(prev_depth);
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]

@@ -10804,6 +10804,59 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 
 #[cfg(feature = "scheduler")]
 #[test]
+fn host_owned_resolved_named_types_serves_cross_request_lookups() {
+    // Phase 1 §4.7 test 5.7 Test 2.
+    //
+    // Two separate queries for components that share the same imported interface
+    // `(canonical, whole_hash, type_name, surface, type_param_bindings)` must
+    // reuse the cached `Arc<ResolvedElements>` from the host-owned cache.
+    //
+    // Pre-fix: the per-context `resolved_named_types: Rc<RefCell<FxHashMap>>` is
+    // dropped at the end of each `build_type_context` invocation, so cross-request
+    // reuse is impossible — every request pays the same resolution cost again.
+    //
+    // Post-fix: `VerterHost::host_owned_resolved_named_types` (DashMap) survives
+    // across requests within one workspace generation; the adapter injected into
+    // `TypeResolutionContext` hits the cache on the second request.
+    let host = make_host();
+    let props_src = r#"<script setup lang="ts">
+import type { SharedProps } from './shared'
+defineProps<SharedProps>()
+</script>
+<template><div /></template>"#;
+    upsert_vue(&host, "/src/A.vue", props_src);
+    upsert_vue(&host, "/src/B.vue", props_src);
+    upsert_non_sfc(
+        &host,
+        "/src/shared.ts",
+        "export interface SharedProps {\n  label?: string\n  count?: number\n}\n",
+    );
+
+    // Resolve A first, then B. Both consume SharedProps from /src/shared.ts.
+    let _a = host.resolve_external_type_from_module_facts_in_view(
+        "/src/shared.ts",
+        "SharedProps",
+        &rustc_hash::FxHashMap::default(),
+        None,
+    );
+    // After B's lookup, the host-owned cache should contain one entry keyed on
+    // `(/src/shared.ts, whole_hash, "SharedProps", None, empty bindings)`.
+    let _b = host.resolve_external_type_from_module_facts_in_view(
+        "/src/shared.ts",
+        "SharedProps",
+        &rustc_hash::FxHashMap::default(),
+        None,
+    );
+
+    let cache_len = host.host_owned_resolved_named_types_len_for_test();
+    assert!(
+        cache_len >= 1,
+        "host-owned named type cache should carry at least one entry after cross-request reuse, got {cache_len}"
+    );
+}
+
+#[cfg(feature = "scheduler")]
+#[test]
 fn source_type_is_stable_across_callsites_for_same_canonical() {
     // Phase 1 §4.6 Sub-task A — test 5.6 Test name 3.
     //
