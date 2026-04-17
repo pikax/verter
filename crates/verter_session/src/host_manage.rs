@@ -9423,7 +9423,15 @@ fn choose_less_symbolic_component_meta_type_expr(
         }
     }
 
+    // §4.5 item 1 (loop-hoisting): compute scope-independent routes once per
+    // expr, not once per (expr × scope). The utility and indexed-access
+    // registry routes are pure functions of `expr`, so evaluating them inside
+    // the scope loop costs `scope_count × candidate_count` redundant calls on
+    // hot prop types with 15+ scopes (cf. InputMenu's `as` prop — V1 in
+    // `verification-2026-04-17.md`).
     for expr in &seed_exprs {
+        let utility_route_hit = crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(expr).is_some()
+            || crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(expr).is_some();
         for scope in &scopes {
             if let Some(candidate) =
                 crate::meta_resolve::materialize_inline_registry_member_route_if_materializable(
@@ -9437,18 +9445,15 @@ fn choose_less_symbolic_component_meta_type_expr(
                 }
                 continue;
             }
-            let safe_route_candidate =
-                crate::resolver_core::component_meta_registry::component_meta_registry_public_utility_route(expr)
-                    .or_else(|| {
-                        crate::resolver_core::component_meta_registry::component_meta_registry_public_indexed_access_route(expr)
-                    })
-                    .and_then(|_| {
-                        crate::meta_resolve::materialize_member_route_from_alias_body_in_owner_scope(
-                            expr,
-                            scope.as_str(),
-                            query_engine,
-                        )
-                    });
+            let safe_route_candidate = if utility_route_hit {
+                crate::meta_resolve::materialize_member_route_from_alias_body_in_owner_scope(
+                    expr,
+                    scope.as_str(),
+                    query_engine,
+                )
+            } else {
+                None
+            };
             if let Some(candidate) = safe_route_candidate {
                 if candidate_beats_current(&best, &candidate) {
                     best = candidate;
