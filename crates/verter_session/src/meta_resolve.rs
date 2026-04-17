@@ -748,6 +748,18 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     scope_canonical_id: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    // §4.5 items 2-5: per-request memo keyed on `(scope, candidate)`.
+    // Purity audit passed — the materialization output depends only on
+    // `(expr, scope, query_engine_state)` and solver caches are additive
+    // within one request, so memoization is correct. Without the memo,
+    // `choose_less_symbolic_component_meta_type_expr` re-enters this
+    // function per `(expr × scope × candidate)` triple (~102 iterations
+    // for InputMenu's `as` prop, V1 in verification-2026-04-17.md).
+    let memo_key = (scope_canonical_id.to_string(), expr.clone());
+    if let Some(cached) = query_engine.materialize_memo.get(&memo_key) {
+        return cached.clone();
+    }
+
     let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
         expr,
         scope_canonical_id,
@@ -760,6 +772,9 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     let Some(imported_scope_canonical_id) =
         imported_component_meta_materialization_scope(expr, scope_canonical_id, query_engine)
     else {
+        query_engine
+            .materialize_memo
+            .insert(memo_key, owner_materialized.clone());
         return owner_materialized;
     };
 
@@ -771,6 +786,9 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
     if owner_materialized != *expr
         && expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
     {
+        query_engine
+            .materialize_memo
+            .insert(memo_key, owner_materialized.clone());
         return owner_materialized;
     }
 
@@ -779,7 +797,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
         imported_scope_canonical_id.as_str(),
         query_engine,
     );
-    if imported_materialized != owner_materialized
+    let chosen = if imported_materialized != owner_materialized
         && component_meta_type_expr_improves(&imported_materialized, &owner_materialized)
         && (!type_expr_needs_projection_rescue(
             query_engine,
@@ -789,12 +807,16 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
             query_engine,
             scope_canonical_id,
             &owner_materialized,
-        ))
-    {
-        return imported_materialized;
-    }
+        )) {
+        imported_materialized
+    } else {
+        owner_materialized
+    };
 
-    owner_materialized
+    query_engine
+        .materialize_memo
+        .insert(memo_key, chosen.clone());
+    chosen
 }
 
 fn type_expr_has_package_backed_root(

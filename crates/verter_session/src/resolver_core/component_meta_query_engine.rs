@@ -149,6 +149,20 @@ pub struct ComponentMetaQueryEngine<'a> {
         (String, String),
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
     >,
+    /// §4.5 item 3-4: per-request memo for
+    /// `materialize_component_meta_type_expr_until_stable` keyed on
+    /// `(scope_canonical_id, candidate_expr)`. Purity audit (see
+    /// `.claude/feedback/feedback-2026-04-17-phase1cc.md`) confirmed the
+    /// materializer's output depends only on `(candidate, scope,
+    /// query_engine_state)` — no cross-candidate "best-so-far" baseline
+    /// leaks in, and the solver caches are monotonic-additive. `TypeExpr`
+    /// derives `PartialEq + Eq + Hash` so it serves as the identity
+    /// directly (no separate `TypeExprIdentity` construct needed).
+    /// Cleared at end-of-request when the engine drops.
+    pub(crate) materialize_memo: FxHashMap<
+        (String, verter_semantic::analysis::type_expr::TypeExpr),
+        verter_semantic::analysis::type_expr::TypeExpr,
+    >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
     #[cfg(test)]
@@ -310,6 +324,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_member_cache: FxHashMap::default(),
             prepared_target_cache: FxHashMap::default(),
             prepared_type_decls: FxHashMap::default(),
+            materialize_memo: FxHashMap::with_capacity_and_hasher(64, Default::default()),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
@@ -344,6 +359,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_member_cache: FxHashMap::default(),
             prepared_target_cache: FxHashMap::default(),
             prepared_type_decls: FxHashMap::default(),
+            materialize_memo: FxHashMap::with_capacity_and_hasher(64, Default::default()),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
