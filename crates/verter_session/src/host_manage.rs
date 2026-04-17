@@ -4092,28 +4092,19 @@ impl VerterHost {
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<Hash16> {
         // Ambient-view-first: inside a real request (ambient view installed),
-        // the view is authoritative. On view-miss for an unloaded canonical,
-        // attempt ensure_loaded once — this submits through the canonical
-        // scheduler pipeline and extends the view's extension store via the
-        // thread-local hook, so subsequent probes hit the view.
+        // the view is authoritative — view-miss returns None. Resolvers that
+        // need to load a canonical mid-resolution must call `ensure_loaded`
+        // explicitly; the auto-load was removed because it amplifies trace
+        // counts (every probe of an unloaded canonical triggers a scheduler
+        // round-trip, vs. the resolver pre-loading once via its import-edge
+        // walk).
         if let Some(ambient) = crate::host_request_view::current_request_view() {
-            if let Some(hash) = ambient.whole_hash(canonical_id) {
-                return Some(hash);
-            }
-            if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
-                return None;
-            }
-            if self.ensure_loaded(canonical_id) {
-                if let Some(hash) = ambient.whole_hash(canonical_id) {
-                    return Some(hash);
-                }
-                return self.get_whole_hash(canonical_id);
-            }
-            return None;
+            return ambient.whole_hash(canonical_id);
         }
         // Outside a real request: explicit arg is best-effort; fall back to
         // the live host probe, and as a last resort auto-load via the
-        // canonical scheduler pipeline.
+        // canonical scheduler pipeline (test scaffolds + CLI / top-level
+        // loads exercise this path).
         if let Some(hash) = store_view
             .and_then(|view| view.whole_hash(canonical_id))
             .or_else(|| self.get_whole_hash(canonical_id))

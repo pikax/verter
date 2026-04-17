@@ -18,31 +18,6 @@ pub(crate) struct UpsertChangeResult {
     pub(crate) semantic_changed: bool,
 }
 
-/// Compare old file entry state against a new parse snapshot to determine what changed.
-/// Consolidates all change detection logic into a single function.
-/// Used by the legacy (non-scheduler) upsert path, WASM, and unit tests.
-#[cfg(test)]
-pub(crate) fn compute_upsert_changes(
-    old_entry: Option<&FileEntry>,
-    new: &ParseSnapshot,
-) -> UpsertChangeResult {
-    let Some(old) = old_entry else {
-        return UpsertChangeResult {
-            slice_changes: SliceChanges::default(),
-            changed: true,
-            semantic_changed: true,
-        };
-    };
-
-    compute_upsert_changes_core(
-        old.whole_hash,
-        old.semantic_hash,
-        &old.slices,
-        &old.descriptor,
-        new,
-    )
-}
-
 /// Compare two ParseSnapshots to determine what changed (scheduler-backed path).
 ///
 /// Takes the old parse snapshot directly rather than a FileEntry. Used by

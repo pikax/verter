@@ -2428,7 +2428,15 @@ impl VerterHost {
                 .current_or_read_whole_hash_in_view(resolved.as_str(), Some(view))
                 .is_none()
             {
-                return None;
+                // Canonical resolver-edge ensure_loaded: when a cross-file type
+                // import resolves to a workspace `.ts`/`.d.ts` file the view
+                // hasn't seen yet, load it once so subsequent probes hit the
+                // view's extension store. This is the only place auto-load
+                // happens inside an ambient request — every other site is
+                // expected to have explicit `ensure_loaded` upstream.
+                if !self.is_evalable(resolved.as_str()) && !self.ensure_loaded(resolved.as_str()) {
+                    return None;
+                }
             }
         }
 

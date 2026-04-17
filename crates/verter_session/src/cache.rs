@@ -4,8 +4,6 @@ use std::collections::BTreeSet;
 
 #[cfg(test)]
 use crate::types::CompileSlot;
-#[cfg(test)]
-use crate::types::FileEntry;
 use crate::types::{SliceChanges, VirtualNodeKind};
 
 pub(crate) fn node_sort_key(node: &VirtualNodeKind) -> (u8, usize) {
@@ -95,23 +93,6 @@ pub(crate) fn invalidate_nodes(
                 last_good.remove(node);
             }
         }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn enforce_profile_cap(entry: &mut FileEntry, max_profiles: usize) {
-    if entry.compile_slots.len() <= max_profiles {
-        return;
-    }
-    let mut items: Vec<(u64, u64)> = entry
-        .compile_slots
-        .iter()
-        .map(|(k, v)| (*k, v.last_access_tick))
-        .collect();
-    items.sort_by_key(|(_, tick)| *tick);
-    let excess = entry.compile_slots.len() - max_profiles;
-    for (k, _) in items.into_iter().take(excess) {
-        entry.compile_slots.remove(&k);
     }
 }
 
@@ -229,90 +210,10 @@ mod tests {
     // Phase 3: Additional cache tests
     // ═══════════════════════════════════════════════════════════
 
-    use std::collections::BTreeSet;
-
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
-    use crate::types::{
-        CachedVirtualFile, CompileSlot, DescriptorMin, DiagnosticsSnapshot, FileKind, FileMeta,
-        SliceHashes, VirtualMeta,
-    };
-
-    fn make_file_entry(n_slots: usize) -> FileEntry {
-        let mut entry = FileEntry {
-            canonical_id: "test.vue".to_string(),
-            file_kind: FileKind::VueSfc,
-            source: Arc::from(""),
-            whole_hash: [0; 16],
-            semantic_hash: [0; 16],
-            slices: SliceHashes::default(),
-            descriptor: DescriptorMin::default(),
-            meta: FileMeta::default(),
-            aliases: BTreeSet::new(),
-            dependencies: BTreeSet::new(),
-            import_routes: FxHashMap::default(),
-            external_requests: Vec::new(),
-            src_blocks: Vec::new(),
-            parse_diagnostics: DiagnosticsSnapshot::default(),
-            script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-            export_signatures: Vec::new(),
-            style_analyses: Arc::new(Vec::new()),
-            template_analysis: None,
-            arc_script_cache: crate::types::ScriptAnalysisArcs::default(),
-            resolved_type_hashes: FxHashMap::default(),
-            style_overrides: FxHashMap::default(),
-            content_overrides: FxHashMap::default(),
-            compile_slots: FxHashMap::default(),
-            latest_diagnostics: FxHashMap::default(),
-            diagnostics_generation: 0,
-            generation: 0,
-            cached_parse: None,
-            cached_tsc_extract: None,
-            cached_resolved_meta: FxHashMap::default(),
-            cached_meta_payloads: FxHashMap::default(),
-            cached_fallthrough: None,
-        };
-        for i in 0..n_slots {
-            entry.compile_slots.insert(
-                i as u64,
-                CompileSlot {
-                    semantic_hash: [0; 16],
-                    style_override_hash: 0,
-                    content_override_hash: 0,
-                    outputs: FxHashMap::default(),
-                    diagnostics: DiagnosticsSnapshot::default(),
-                    last_good_outputs: None,
-                    last_access_tick: i as u64,
-                    tsx: None,
-                    template_analysis: None,
-                },
-            );
-        }
-        entry
-    }
-
-    /// @ai-generated - enforce_profile_cap at exactly cap → no eviction
-    #[test]
-    fn enforce_profile_cap_at_cap_no_eviction() {
-        let mut entry = make_file_entry(3);
-        enforce_profile_cap(&mut entry, 3);
-        assert_eq!(entry.compile_slots.len(), 3);
-    }
-
-    /// @ai-generated - enforce_profile_cap over cap → lowest tick evicted
-    #[test]
-    fn enforce_profile_cap_evicts_oldest() {
-        let mut entry = make_file_entry(4);
-        // Slot 0 has tick=0 (oldest), slot 3 has tick=3 (newest)
-        enforce_profile_cap(&mut entry, 2);
-        assert_eq!(entry.compile_slots.len(), 2);
-        // Oldest two (tick 0, tick 1) should be evicted
-        assert!(!entry.compile_slots.contains_key(&0));
-        assert!(!entry.compile_slots.contains_key(&1));
-        assert!(entry.compile_slots.contains_key(&2));
-        assert!(entry.compile_slots.contains_key(&3));
-    }
+    use crate::types::{CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, VirtualMeta};
 
     /// @ai-generated - Fallback: changed=true but no slice changes → all new nodes reported
     /// This covers non-SFC files where semantic_hash changes but no specific slices exist.

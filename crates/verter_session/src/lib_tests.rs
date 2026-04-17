@@ -12,8 +12,8 @@ use super::id::canonicalize_id;
 use super::parse::parse_vue_snapshot;
 use super::shared::{read_lock, write_lock};
 use super::upsert::{
-    build_upsert_result, compute_changed_exports, compute_upsert_changes, UpsertChangeResult,
-    UpsertResultData,
+    build_upsert_result, compute_changed_exports, compute_upsert_changes_from_parse,
+    UpsertChangeResult, UpsertResultData,
 };
 use super::*;
 use verter_semantic::analysis::AnalysisScope;
@@ -85,42 +85,6 @@ fn host_internal_diagnostic_spans_remain_byte_offsets() {
             ))
             .collect::<Vec<_>>()
     );
-}
-
-fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot) -> FileEntry {
-    FileEntry {
-        canonical_id: canonical_id.to_string(),
-        file_kind: FileKind::VueSfc,
-        source: Arc::from(src),
-        whole_hash: snap.whole_hash,
-        semantic_hash: snap.semantic_hash,
-        slices: snap.slices.clone(),
-        descriptor: snap.descriptor.clone(),
-        meta: snap.meta.clone(),
-        aliases: BTreeSet::new(),
-        dependencies: BTreeSet::new(),
-        import_routes: FxHashMap::default(),
-        external_requests: Vec::new(),
-        src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-        export_signatures: Vec::new(),
-        style_analyses: Arc::new(Vec::new()),
-        template_analysis: None,
-        arc_script_cache: ScriptAnalysisArcs::default(),
-        resolved_type_hashes: FxHashMap::default(),
-        style_overrides: FxHashMap::default(),
-        content_overrides: FxHashMap::default(),
-        compile_slots: FxHashMap::default(),
-        latest_diagnostics: FxHashMap::default(),
-        diagnostics_generation: 0,
-        generation: 1,
-        cached_parse: None,
-        cached_tsc_extract: None,
-        cached_resolved_meta: FxHashMap::default(),
-        cached_meta_payloads: FxHashMap::default(),
-        cached_fallthrough: None,
-    }
 }
 
 /// @ai-generated - AnalysisLevel::Essential runs script analysis but not style
@@ -567,7 +531,7 @@ fn compute_upsert_changes_first_insert() {
         "<script setup>const n = 1</script><template><div/></template>",
         AnalysisScope::LSP,
     );
-    let result = compute_upsert_changes(None, &new);
+    let result = compute_upsert_changes_from_parse(None, &new);
     assert!(result.changed, "first insert should be changed");
     assert!(
         result.semantic_changed,
@@ -585,8 +549,8 @@ fn compute_upsert_changes_identical_content() {
     let src = "<script setup>const n = 1</script><template><div/></template>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(!result.changed, "identical content should not be changed");
     assert!(!result.semantic_changed);
 }
@@ -598,8 +562,8 @@ fn compute_upsert_changes_script_change() {
     let src2 = "<script setup>const n = 2</script><template><div/></template>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src1;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(result.changed);
     assert!(result.slice_changes.script_changed);
     assert!(!result.slice_changes.template_changed);
@@ -612,8 +576,8 @@ fn compute_upsert_changes_structure_change() {
     let src2 = "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src1;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(result.changed);
     assert!(result.slice_changes.structure_changed);
 }
@@ -625,8 +589,8 @@ fn compute_upsert_changes_template_change() {
     let src2 = "<script setup>const n = 1</script><template><section/></template>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src1;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(result.changed);
     assert!(!result.slice_changes.script_changed);
     assert!(result.slice_changes.template_changed);
@@ -639,8 +603,8 @@ fn compute_upsert_changes_style_only() {
     let src2 = "<script setup>const n = 1</script><template><div/></template><style>.b{}</style>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src1;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(result.changed);
     assert!(
         result.slice_changes.is_style_only(),
@@ -659,8 +623,8 @@ fn compute_upsert_changes_script_and_style_not_style_only() {
     let src2 = "<script setup>const n = 2</script><template><div/></template><style>.b{}</style>";
     let (old_snap, _) = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
     let (new_snap, _) = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
-    let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
-    let result = compute_upsert_changes(Some(&old_entry), &new_snap);
+    let _ = src1;
+    let result = compute_upsert_changes_from_parse(Some(&old_snap), &new_snap);
     assert!(result.changed);
     assert!(!result.slice_changes.is_style_only(), "script also changed");
 }
@@ -806,48 +770,32 @@ fn generation_counter_increments_on_upsert() {
     }
 }
 
+fn make_dependent_view(
+    canonical_id: &str,
+    dependencies: BTreeSet<String>,
+    script_lang: Option<String>,
+) -> DependentView {
+    DependentView {
+        canonical_id: canonical_id.to_string(),
+        import_routes: FxHashMap::default(),
+        dependencies,
+        script_lang,
+        macro_type_deps: Vec::new(),
+        imports: Vec::new(),
+        resolved_type_hashes: FxHashMap::default(),
+    }
+}
+
 /// @ai-generated - import_resolves_to_dep: non-relative in dependency set
 #[test]
 fn import_resolves_to_dep_non_relative_in_deps() {
     let mut deps = BTreeSet::new();
     deps.insert("lodash".to_string());
-    let entry = FileEntry {
-        canonical_id: "/src/A.vue".to_string(),
-        file_kind: FileKind::VueSfc,
-        source: Arc::from(""),
-        whole_hash: [0; 16],
-        semantic_hash: [0; 16],
-        slices: SliceHashes::default(),
-        descriptor: DescriptorMin::default(),
-        meta: FileMeta::default(),
-        aliases: BTreeSet::new(),
-        dependencies: deps,
-        import_routes: FxHashMap::default(),
-        external_requests: Vec::new(),
-        src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-        export_signatures: Vec::new(),
-        style_analyses: Arc::new(Vec::new()),
-        template_analysis: None,
-        arc_script_cache: ScriptAnalysisArcs::default(),
-        resolved_type_hashes: FxHashMap::default(),
-        style_overrides: FxHashMap::default(),
-        content_overrides: FxHashMap::default(),
-        compile_slots: FxHashMap::default(),
-        latest_diagnostics: FxHashMap::default(),
-        diagnostics_generation: 0,
-        generation: 0,
-        cached_parse: None,
-        cached_tsc_extract: None,
-        cached_resolved_meta: FxHashMap::default(),
-        cached_meta_payloads: FxHashMap::default(),
-        cached_fallthrough: None,
-    };
+    let view = make_dependent_view("/src/A.vue", deps, None);
     let exts = vec![".ts".to_string()];
-    assert!(import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
+    assert!(import_resolves_to_dep(&view, "lodash", "lodash", &exts));
     assert!(!import_resolves_to_dep(
-        &entry,
+        &view,
         "lodash",
         "underscore",
         &exts
@@ -857,128 +805,29 @@ fn import_resolves_to_dep_non_relative_in_deps() {
 /// @ai-generated - import_resolves_to_dep: non-relative not in deps → false
 #[test]
 fn import_resolves_to_dep_non_relative_not_in_deps() {
-    let entry = FileEntry {
-        canonical_id: "/src/A.vue".to_string(),
-        file_kind: FileKind::VueSfc,
-        source: Arc::from(""),
-        whole_hash: [0; 16],
-        semantic_hash: [0; 16],
-        slices: SliceHashes::default(),
-        descriptor: DescriptorMin::default(),
-        meta: FileMeta::default(),
-        aliases: BTreeSet::new(),
-        dependencies: BTreeSet::new(),
-        import_routes: FxHashMap::default(),
-        external_requests: Vec::new(),
-        src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-        export_signatures: Vec::new(),
-        style_analyses: Arc::new(Vec::new()),
-        template_analysis: None,
-        arc_script_cache: ScriptAnalysisArcs::default(),
-        resolved_type_hashes: FxHashMap::default(),
-        style_overrides: FxHashMap::default(),
-        content_overrides: FxHashMap::default(),
-        compile_slots: FxHashMap::default(),
-        latest_diagnostics: FxHashMap::default(),
-        diagnostics_generation: 0,
-        generation: 0,
-        cached_parse: None,
-        cached_tsc_extract: None,
-        cached_resolved_meta: FxHashMap::default(),
-        cached_meta_payloads: FxHashMap::default(),
-        cached_fallthrough: None,
-    };
+    let view = make_dependent_view("/src/A.vue", BTreeSet::new(), None);
     let exts = vec![".ts".to_string()];
-    assert!(!import_resolves_to_dep(&entry, "lodash", "lodash", &exts));
+    assert!(!import_resolves_to_dep(&view, "lodash", "lodash", &exts));
 }
 
 /// @ai-generated - import_resolves_to_dep: relative import exact match
 #[test]
 fn import_resolves_to_dep_relative_exact() {
-    let entry = FileEntry {
-        canonical_id: "/src/A.vue".to_string(),
-        file_kind: FileKind::VueSfc,
-        source: Arc::from(""),
-        whole_hash: [0; 16],
-        semantic_hash: [0; 16],
-        slices: SliceHashes::default(),
-        descriptor: DescriptorMin::default(),
-        meta: FileMeta::default(),
-        aliases: BTreeSet::new(),
-        dependencies: BTreeSet::new(),
-        import_routes: FxHashMap::default(),
-        external_requests: Vec::new(),
-        src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-        export_signatures: Vec::new(),
-        style_analyses: Arc::new(Vec::new()),
-        template_analysis: None,
-        arc_script_cache: ScriptAnalysisArcs::default(),
-        resolved_type_hashes: FxHashMap::default(),
-        style_overrides: FxHashMap::default(),
-        content_overrides: FxHashMap::default(),
-        compile_slots: FxHashMap::default(),
-        latest_diagnostics: FxHashMap::default(),
-        diagnostics_generation: 0,
-        generation: 0,
-        cached_parse: None,
-        cached_tsc_extract: None,
-        cached_resolved_meta: FxHashMap::default(),
-        cached_meta_payloads: FxHashMap::default(),
-        cached_fallthrough: None,
-    };
+    let view = make_dependent_view("/src/A.vue", BTreeSet::new(), None);
     let exts = vec![".ts".to_string(), ".js".to_string()];
-    assert!(import_resolves_to_dep(&entry, "./B", "/src/B", &exts));
-    assert!(!import_resolves_to_dep(&entry, "./B", "/other/B", &exts));
+    assert!(import_resolves_to_dep(&view, "./B", "/src/B", &exts));
+    assert!(!import_resolves_to_dep(&view, "./B", "/other/B", &exts));
 }
 
 /// @ai-generated - import_resolves_to_dep: relative import with extension strip
 #[test]
 fn import_resolves_to_dep_relative_extension_strip() {
-    let entry = FileEntry {
-        canonical_id: "/src/A.vue".to_string(),
-        file_kind: FileKind::VueSfc,
-        source: Arc::from(""),
-        whole_hash: [0; 16],
-        semantic_hash: [0; 16],
-        slices: SliceHashes::default(),
-        descriptor: DescriptorMin::default(),
-        meta: FileMeta {
-            script_lang: Some("ts".to_string()),
-            ..FileMeta::default()
-        },
-        aliases: BTreeSet::new(),
-        dependencies: BTreeSet::new(),
-        import_routes: FxHashMap::default(),
-        external_requests: Vec::new(),
-        src_blocks: Vec::new(),
-        parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-        export_signatures: Vec::new(),
-        style_analyses: Arc::new(Vec::new()),
-        template_analysis: None,
-        arc_script_cache: ScriptAnalysisArcs::default(),
-        resolved_type_hashes: FxHashMap::default(),
-        style_overrides: FxHashMap::default(),
-        content_overrides: FxHashMap::default(),
-        compile_slots: FxHashMap::default(),
-        latest_diagnostics: FxHashMap::default(),
-        diagnostics_generation: 0,
-        generation: 0,
-        cached_parse: None,
-        cached_tsc_extract: None,
-        cached_resolved_meta: FxHashMap::default(),
-        cached_meta_payloads: FxHashMap::default(),
-        cached_fallthrough: None,
-    };
+    let view = make_dependent_view("/src/A.vue", BTreeSet::new(), Some("ts".to_string()));
     let exts = vec![".ts".to_string(), ".js".to_string()];
     // ./types resolves to /src/types, dep is /src/types.ts
     // Extension strip on /src/types.ts → /src/types → match
     assert!(import_resolves_to_dep(
-        &entry,
+        &view,
         "./types",
         "/src/types.ts",
         &exts

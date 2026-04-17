@@ -57,21 +57,6 @@ pub(crate) struct DependentView {
     pub(crate) resolved_type_hashes: rustc_hash::FxHashMap<(String, String), Hash16>,
 }
 
-impl DependentView {
-    #[cfg(test)]
-    pub(crate) fn from_file_entry(entry: &FileEntry) -> Self {
-        Self {
-            canonical_id: entry.canonical_id.clone(),
-            import_routes: entry.import_routes.clone(),
-            dependencies: entry.dependencies.clone(),
-            script_lang: entry.meta.script_lang.clone(),
-            macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
-            imports: entry.script_analysis.imports.clone(),
-            resolved_type_hashes: entry.resolved_type_hashes.clone(),
-        }
-    }
-}
-
 /// Check if an import source from `view` resolves to `dependency_id`.
 /// Handles both relative paths (resolved via resolve_external) and
 /// non-relative paths (matched via the file's registered dependencies).
@@ -160,17 +145,16 @@ fn import_resolves_to_dep_with_resolver_data(
     false
 }
 
-/// Check if an import source from `file` resolves to `dependency_id`.
-/// Legacy wrapper that delegates to `import_resolves_to_dep_view`.
+/// Check if an import source from `view` resolves to `dependency_id`.
+/// Test-only wrapper that exposes the private `import_resolves_to_dep_view`.
 #[cfg(test)]
 pub(crate) fn import_resolves_to_dep(
-    file: &FileEntry,
+    view: &DependentView,
     import_source: &str,
     dependency_id: &str,
     resolve_extensions: &[String],
 ) -> bool {
-    let view = DependentView::from_file_entry(file);
-    import_resolves_to_dep_view(&view, import_source, dependency_id, resolve_extensions)
+    import_resolves_to_dep_view(view, import_source, dependency_id, resolve_extensions)
 }
 
 fn import_resolves_to_dep_with_resolver_view(

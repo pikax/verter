@@ -1,8 +1,5 @@
 #[cfg(feature = "session_metrics")]
 use std::collections::BTreeMap;
-// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-#[cfg(test)]
-use std::collections::BTreeSet;
 #[cfg(feature = "session_metrics")]
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -871,6 +868,27 @@ pub(crate) struct FileMeta {
     pub(crate) custom_langs: Vec<Option<String>>,
 }
 
+impl FileMeta {
+    pub(crate) fn virtual_nodes(&self) -> Vec<VirtualNodeKind> {
+        let mut nodes = vec![VirtualNodeKind::Main];
+        if self.has_script || self.has_scoped_style {
+            // Include Script for template-only components with scoped styles:
+            // the compiler emits a synthetic script block with __scopeId.
+            nodes.push(VirtualNodeKind::Script);
+        }
+        if self.has_template {
+            nodes.push(VirtualNodeKind::Template);
+        }
+        for i in 0..self.style_langs.len() {
+            nodes.push(VirtualNodeKind::Style { index: i });
+        }
+        for i in 0..self.custom_types.len() {
+            nodes.push(VirtualNodeKind::Custom { index: i });
+        }
+        nodes
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SrcBlockInfo {
     pub(crate) tag_name: String,
@@ -1030,29 +1048,6 @@ pub(crate) struct CompileInput {
 /// Cached Arc-wrapped views of immutable `ScriptAnalysisSnapshot` fields.
 ///
 /// Built once during upsert and shared across all `get_analysis()` calls.
-/// These fields are never mutated after construction, so Arc sharing is safe.
-/// On the scheduler path, `AnalysisArcs` in `HostAnalysisData` serves this role.
-// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-// `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ScriptAnalysisArcs {
-    pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
-    pub(crate) css_var_manipulations:
-        Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
-    pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
-}
-
-// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-
 /// Per-specifier resolution record for an import dependency.
 ///
 /// Callers (unplugin, LSP, TS plugin) resolve import specifiers to canonical IDs
@@ -1118,107 +1113,6 @@ impl DependencyResolution {
             .iter()
             .min_by_key(|c| extension_priority(c))
             .map(|s| s.as_str())
-    }
-}
-
-// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-// `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) struct FileEntry {
-    // ── Identity ──────────────────────────────────────────────────────
-    pub(crate) canonical_id: String,
-    pub(crate) file_kind: FileKind,
-    pub(crate) aliases: BTreeSet<String>,
-    pub(crate) generation: u64,
-
-    // ── Content & hashes ──────────────────────────────────────────────
-    pub(crate) source: Arc<str>,
-    pub(crate) whole_hash: Hash16,
-    pub(crate) semantic_hash: Hash16,
-    pub(crate) slices: SliceHashes,
-    pub(crate) descriptor: DescriptorMin,
-    pub(crate) meta: FileMeta,
-
-    // ── Dependencies ──────────────────────────────────────────────────
-    pub(crate) dependencies: BTreeSet<String>,
-    /// Per-specifier resolution records from the last `set_import_dependencies` call.
-    /// Keyed by raw import specifier. Used by `resolve_loaded_dependency_canonical`
-    /// for exact lookup before falling back to heuristics.
-    pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
-    pub(crate) external_requests: Vec<ExternalSourceRequest>,
-    pub(crate) src_blocks: Vec<SrcBlockInfo>,
-    /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
-    /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
-    pub(crate) resolved_type_hashes: FxHashMap<(String, String), Hash16>,
-
-    // ── Analysis snapshots ────────────────────────────────────────────
-    pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) script_analysis: verter_semantic::analysis::ScriptAnalysisSnapshot,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
-    /// Template analysis from the most recent compilation. Populated when
-    /// the analysis scope includes template flags and the file has a template.
-    pub(crate) template_analysis:
-        Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
-    /// Cached Arc-wrapped script analysis fields for cheap snapshot cloning.
-    /// Built once during upsert, shared across all `get_analysis()` calls.
-    pub(crate) arc_script_cache: ScriptAnalysisArcs,
-
-    // ── Compilation cache ─────────────────────────────────────────────
-    pub(crate) style_overrides: FxHashMap<u64, StyleOverrideLayer>,
-    /// Per-profile content overrides for preprocessed template/script blocks.
-    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
-    pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
-    pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
-    /// Monotonic counter incremented on every write to `latest_diagnostics`.
-    /// Used by the LSP cache to detect host-driven recompiles that don't change
-    /// the document version (e.g., dependency hydration clearing stale errors).
-    pub(crate) diagnostics_generation: u64,
-    /// Cached parsed SFC from upsert, reused during compilation to avoid re-parsing.
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    /// Cached intermediate TSC extract state. Populated on first `get_public_api_with_mode`
-    /// call and reused for subsequent calls with different external types or modes.
-    /// Cleared on source change (semantic_hash mismatch during upsert).
-    pub(crate) cached_tsc_extract: Option<(Hash16, Arc<verter_compiler::tsc::ExtractedTscState>)>,
-    /// Mode-aware cached resolved component-meta sidecar keyed by owner/dependency hashes.
-    pub(crate) cached_resolved_meta: FxHashMap<ResolverMode, ResolvedComponentMetaCacheEntry>,
-    /// Cached encoded protobuf payloads for component-meta queries.
-    pub(crate) cached_meta_payloads: FxHashMap<MetaPayloadKind, CachedMetaPayload>,
-    /// Cached fallthrough resolution keyed by semantic fact versions and
-    /// generic-root-propagation behavior.
-    pub(crate) cached_fallthrough: Option<CachedFallthroughEntry>,
-}
-
-impl FileMeta {
-    pub(crate) fn virtual_nodes(&self) -> Vec<VirtualNodeKind> {
-        let mut nodes = vec![VirtualNodeKind::Main];
-        if self.has_script || self.has_scoped_style {
-            // Include Script for template-only components with scoped styles:
-            // the compiler emits a synthetic script block with __scopeId.
-            nodes.push(VirtualNodeKind::Script);
-        }
-        if self.has_template {
-            nodes.push(VirtualNodeKind::Template);
-        }
-        for i in 0..self.style_langs.len() {
-            nodes.push(VirtualNodeKind::Style { index: i });
-        }
-        for i in 0..self.custom_types.len() {
-            nodes.push(VirtualNodeKind::Custom { index: i });
-        }
-        nodes
-    }
-}
-
-// WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
-// `test` retained so native-test builds that exercise the legacy `files` map still compile.
-#[cfg(test)]
-impl FileEntry {
-    #[allow(dead_code)]
-    pub(crate) fn all_virtual_nodes(&self) -> Vec<VirtualNodeKind> {
-        self.meta.virtual_nodes()
     }
 }
 
