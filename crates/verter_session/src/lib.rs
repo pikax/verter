@@ -991,17 +991,15 @@ impl VerterHost {
         // Notify the workspace for each tracked file so overlays AND edge store
         // are cleared before scheduler nodes are removed. Use notify_delete (not
         // notify_close) to clear the VFS edge store entries.
+        #[cfg(not(target_arch = "wasm32"))]
         {
             let ws = self.ws();
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let ids = self.scheduler.node_ids();
-                for id in &ids {
-                    ws.notify_delete(id);
-                }
-                for id in &ids {
-                    self.scheduler.close_file(id);
-                }
+            let ids = self.scheduler.node_ids();
+            for id in &ids {
+                ws.notify_delete(id);
+            }
+            for id in &ids {
+                self.scheduler.close_file(id);
             }
         }
 

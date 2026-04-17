@@ -66,6 +66,18 @@ pub(crate) struct RequestExtension {
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
 }
 
+/// Shared map of request-scoped external-type-resolution inputs. Keyed by
+/// `(canonical_id, whole_hash)` so content-version collisions within a
+/// request (e.g. from archived vs current facts) produce distinct entries.
+type ExternalInputsMemoMap =
+    FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>;
+
+/// Shared map of request-scoped `current_eval_state_in_view` results. Keyed
+/// by normalized canonical; the outer `Option` distinguishes "never seen"
+/// (entry absent) from "seen and returned `None`" (entry present, value
+/// `None`).
+type EvalStateMemoMap = FxHashMap<String, Option<EvalStateMemoEntry>>;
+
 /// Request-scoped view: one captured `HostStoreView` plus an additive extension
 /// store. Held via `Arc` so the thread-local [`CURRENT_REQUEST_VIEW`] can hold
 /// a `Weak` without extending the lifetime of the view.
@@ -92,9 +104,7 @@ pub struct RequestStoreView {
     /// `Arc::clone`s that the raw fetch costs. The underlying host-scoped
     /// analysis cache remains the single source of truth for the
     /// `Arc<AnalyzedExternalTypeSource>` data.
-    external_inputs_memo: Arc<
-        RwLock<FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>>,
-    >,
+    external_inputs_memo: Arc<RwLock<ExternalInputsMemoMap>>,
     /// Per-request memo for `current_eval_state_in_view` results. Keyed by
     /// canonical only — the raw source + parse + whole_hash tuple returned
     /// from the host is stable for the lifetime of a request, so a single
@@ -105,7 +115,7 @@ pub struct RequestStoreView {
     /// per unique canonical per query). The memo is consulted at function
     /// entry and populated on first miss — subsequent probes return the
     /// cached tuple with only a request-view lock + hashmap lookup.
-    eval_state_memo: Arc<RwLock<FxHashMap<String, Option<EvalStateMemoEntry>>>>,
+    eval_state_memo: Arc<RwLock<EvalStateMemoMap>>,
 }
 
 /// Cached value of `VerterHost::current_eval_state_in_view` shared via the

@@ -4932,11 +4932,7 @@ impl VerterHost {
             }
         }
 
-        let result = self.current_eval_state_in_view_uncached(
-            memo_canonical.as_str(),
-            store_view,
-            &normalized_canonical_id,
-        );
+        let result = self.current_eval_state_in_view_uncached(memo_canonical.as_str(), store_view);
         if let Some(view) = memo_view {
             let entry = result
                 .as_ref()
@@ -4956,7 +4952,6 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         store_view: Option<&crate::host_request_view::RequestStoreView>,
-        normalized_canonical_id: &std::borrow::Cow<'_, str>,
     ) -> Option<(
         Arc<str>,
         Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
@@ -4966,7 +4961,6 @@ impl VerterHost {
             "current_eval_state",
             format!("owner={} store_view={}", canonical_id, store_view.is_some()),
         );
-        let _ = normalized_canonical_id;
 
         // ModuleFactsDb fast path — request-view aware.
         let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);
