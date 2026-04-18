@@ -4657,8 +4657,9 @@ impl VerterHost {
         store_view: Option<&crate::host_request_view::RequestStoreView>,
     ) -> Option<(String, String)> {
         let surface = self.owner_import_surface_in_view(owner_canonical, store_view)?;
-        let key: Arc<str> = Arc::from(local_name);
-        let binding = surface.bindings.get(&key)?;
+        // `Arc<str>` borrows as `&str`, so the surface lookup uses the
+        // caller-supplied slice directly without allocating a fresh Arc.
+        let binding = surface.bindings.get(local_name)?;
         Some((
             binding.canonical_id.as_ref().to_string(),
             binding.exported_name.as_ref().to_string(),
@@ -5485,7 +5486,7 @@ impl VerterHost {
             Some(&*request_view),
         );
 
-        self.publish_component_meta_cache_entry(canonical.as_str(), meta.clone());
+        self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, meta.clone());
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -5528,13 +5529,16 @@ impl VerterHost {
     }
 
     /// Phase 3: publish the cold-build result into the project-global
-    /// final-result cache. The dep-signature carries the owner's whole-hash
-    /// plus the current project generation so a later lookup invalidates on
-    /// content changes or workspace-shape shifts. Transitive dep observation
-    /// lands in Phase 4 together with the `_in_view` signature cut.
+    /// final-result cache. The dep-signature carries the owner's whole-hash,
+    /// the current project generation, and every transitive file fact the
+    /// resolver observed while producing the result. A later lookup
+    /// revalidates the full signature against the live host so an edit to
+    /// *any* file the resolver touched invalidates the cached payload — not
+    /// just edits to the owner itself.
     fn publish_component_meta_cache_entry(
         &self,
         canonical: &str,
+        resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     ) {
         let Some(shallow) = self.shallow_file_state_in_view(canonical, None) else {
@@ -5549,19 +5553,11 @@ impl VerterHost {
                 &ComponentMetaOptions::default(),
             ),
         };
-        let project_gen = self.project_type_store.project_generation();
-        let dep_signature: crate::semantic_query::DepSignature = Arc::from(
-            vec![
-                (
-                    Arc::<str>::from(canonical),
-                    crate::semantic_query::DepVersion::WholeHash(whole_hash),
-                ),
-                (
-                    Arc::<str>::from(canonical),
-                    crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
-                ),
-            ]
-            .into_boxed_slice(),
+        let dep_signature = Self::build_component_meta_dep_signature(
+            canonical,
+            whole_hash,
+            self.project_type_store.project_generation(),
+            &resolved.fact_versions,
         );
         self.project_type_store.component_meta_results().insert(
             key,
@@ -5570,6 +5566,45 @@ impl VerterHost {
                 dep_signature,
             },
         );
+    }
+
+    /// Lower the resolver's observed fact-version list into a transitive
+    /// `DepSignature`. Owner + project-generation facts always participate;
+    /// file whole-hashes discovered during resolution are deduped per
+    /// canonical so a single entry per touched file ends up in the signature.
+    /// Derived-fact hashes (route / import-route) are intentionally skipped
+    /// for now — they are validated via their underlying file hashes plus
+    /// the project-generation bump on shape changes. Including them in the
+    /// signature would require extending `HostFenceValidator` with a
+    /// derived-fact-aware path, which lands with the Phase 4 cut.
+    fn build_component_meta_dep_signature(
+        owner_canonical: &str,
+        owner_whole_hash: Hash16,
+        project_gen: u64,
+        fact_versions: &[crate::resolver_core::FactVersionRef],
+    ) -> crate::semantic_query::DepSignature {
+        use crate::semantic_query::DepVersion;
+        let mut entries: Vec<(Arc<str>, DepVersion)> = Vec::with_capacity(fact_versions.len() + 2);
+        entries.push((
+            Arc::<str>::from(owner_canonical),
+            DepVersion::WholeHash(owner_whole_hash),
+        ));
+        entries.push((
+            Arc::<str>::from(owner_canonical),
+            DepVersion::ProjectGeneration(project_gen),
+        ));
+        let mut seen: rustc_hash::FxHashSet<(Arc<str>, Hash16)> = rustc_hash::FxHashSet::default();
+        seen.insert((Arc::<str>::from(owner_canonical), owner_whole_hash));
+        for fact in fact_versions {
+            if let crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } = fact
+            {
+                let canonical: Arc<str> = Arc::from(canonical_id.as_str());
+                if seen.insert((canonical.clone(), *hash)) {
+                    entries.push((canonical, DepVersion::WholeHash(*hash)));
+                }
+            }
+        }
+        Arc::from(entries.into_boxed_slice())
     }
 
     /// Combined query: resolves component-meta once and returns both the

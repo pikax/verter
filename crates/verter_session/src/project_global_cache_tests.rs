@@ -377,6 +377,62 @@ fn component_meta_warm_rerun_hits_final_result_cache_phase3() {
     );
 }
 
+/// Phase 3 regression: a warm `get_component_meta` cache hit must
+/// invalidate when a *transitive* dependency file changes, not just
+/// the owner file. Before the dep-signature included transitive
+/// whole-hashes, editing a dep left the cached entry warm under an
+/// unchanged owner hash — the hit returned a stale payload.
+#[test]
+fn component_meta_cache_invalidates_on_transitive_dep_edit_phase3() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/props.ts",
+        "export interface Props { label: string }",
+    );
+    upsert_vue(
+        &host,
+        "/w/App.vue",
+        "<script setup lang=\"ts\">\nimport type { Props } from './props'\ndefineProps<Props>()\n</script>\n<template><div /></template>\n",
+    );
+
+    let first = host
+        .get_component_meta("/w/App.vue")
+        .expect("initial cold build");
+    assert_eq!(
+        first.props.len(),
+        1,
+        "initial build should see one prop from the dep file"
+    );
+
+    // Warm-entry live counter is 1 — the cache published the owner's result.
+    assert_eq!(
+        host.project_type_store()
+            .counters
+            .snapshot()
+            .component_meta_live,
+        1
+    );
+
+    // Edit the dep file, not the owner. Owner's whole-hash is unchanged, but
+    // the dep's whole-hash advanced. Without transitive dep tracking the
+    // warm entry would return the pre-edit single-prop payload.
+    upsert_ts(
+        &host,
+        "/w/props.ts",
+        "export interface Props { label: string; disabled: boolean }",
+    );
+
+    let refreshed = host
+        .get_component_meta("/w/App.vue")
+        .expect("post-transitive-edit lookup");
+    assert_eq!(
+        refreshed.props.len(),
+        2,
+        "transitive dep edit must invalidate the owner's cache entry and pick up the new prop"
+    );
+}
+
 /// Phase 3: editing the owner file bumps its whole-hash; a subsequent
 /// `get_component_meta` call misses at the key level, runs a cold build,
 /// and publishes under the new hash.
@@ -485,6 +541,44 @@ fn owner_direct_imports_resolve_once_per_owner_version_phase2() {
         store.counters.snapshot().owner_import_live,
         1,
         "exactly one owner-import surface is live for this owner"
+    );
+}
+
+/// Phase 2 regression: when a barrel file re-routes a binding to a
+/// different final file, the owner's import surface must re-resolve
+/// against the new target. The surface caches the final `(canonical,
+/// exported_name)` so a stale cached surface would return the old
+/// final even after the barrel points at a different file.
+#[test]
+fn owner_import_surface_picks_up_barrel_retargeting_phase2() {
+    let host = host();
+    upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
+    upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
+    // Barrel re-exports Foo from /w/a.ts initially.
+    upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Foo } from './barrel'\nexport type Owner = Foo",
+    );
+
+    let first = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .expect("initial resolution follows the barrel to /w/a.ts");
+    assert_eq!(first.0, "/w/a.ts");
+
+    // Retarget the barrel: Foo now comes from /w/b.ts. The owner's raw
+    // import statement is unchanged, so its whole-hash stays the same.
+    // The cached surface must be invalidated or revalidated so the next
+    // lookup sees the new final target.
+    upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './b'");
+
+    let refreshed = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .expect("post-retarget resolution must follow the updated barrel");
+    assert_eq!(
+        refreshed.0, "/w/b.ts",
+        "barrel retargeting must invalidate the cached owner surface"
     );
 }
 
