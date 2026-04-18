@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
 
 /// Well-known intrinsic implementation identity. The resolver chooses the
 /// matching arm after the declaration resolves to `= intrinsic`.
@@ -47,6 +48,32 @@ pub enum IntrinsicImpl {
     /// intrinsics without the resolver noticing, so we document its
     /// existence here even when the implementation is a thin passthrough.
     BuiltinIteratorReturn,
+}
+
+impl IntrinsicImpl {
+    /// Map this intrinsic identity onto the solver's
+    /// [`BuiltinUtility`](verter_semantic::analysis::type_solver::builtin::BuiltinUtility)
+    /// when one exists. `BuiltinIteratorReturn` has no `BuiltinUtility`
+    /// equivalent today — callers are expected to return a symbolic node
+    /// or emit a structured diagnostic in that case.
+    ///
+    /// This conversion is the bridge between the host-owned intrinsic
+    /// registry and the existing solver dispatch: the solver looks up a
+    /// name through [`IntrinsicRegistry::lookup`], and the session layer
+    /// uses [`Self::as_builtin_utility`] to route the hit onto the
+    /// established solver arm. Future phases route everything through
+    /// `SemanticQueryApi::execute(Expand { .. })` directly.
+    #[must_use]
+    pub fn as_builtin_utility(self) -> Option<BuiltinUtility> {
+        match self {
+            Self::UppercaseString => Some(BuiltinUtility::Uppercase),
+            Self::LowercaseString => Some(BuiltinUtility::Lowercase),
+            Self::CapitalizeString => Some(BuiltinUtility::Capitalize),
+            Self::UncapitalizeString => Some(BuiltinUtility::Uncapitalize),
+            Self::NoInfer => Some(BuiltinUtility::NoInfer),
+            Self::BuiltinIteratorReturn => None,
+        }
+    }
 }
 
 /// Lookup outcome. The resolver maps `Found` to the implementation path
@@ -267,5 +294,169 @@ type   NoInfer   <   T  >   = intrinsic   ;
             IntrinsicLookup::Found(id) => assert_eq!(id, IntrinsicImpl::NoInfer),
             other => panic!("expected Found, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn intrinsic_impl_maps_to_builtin_utility() {
+        assert_eq!(
+            IntrinsicImpl::UppercaseString.as_builtin_utility(),
+            Some(BuiltinUtility::Uppercase)
+        );
+        assert_eq!(
+            IntrinsicImpl::LowercaseString.as_builtin_utility(),
+            Some(BuiltinUtility::Lowercase)
+        );
+        assert_eq!(
+            IntrinsicImpl::CapitalizeString.as_builtin_utility(),
+            Some(BuiltinUtility::Capitalize)
+        );
+        assert_eq!(
+            IntrinsicImpl::UncapitalizeString.as_builtin_utility(),
+            Some(BuiltinUtility::Uncapitalize)
+        );
+        assert_eq!(
+            IntrinsicImpl::NoInfer.as_builtin_utility(),
+            Some(BuiltinUtility::NoInfer)
+        );
+        // BuiltinIteratorReturn has no BuiltinUtility equivalent today.
+        assert_eq!(
+            IntrinsicImpl::BuiltinIteratorReturn.as_builtin_utility(),
+            None
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // Active-SDK intrinsic audit (plan § Phase 2.1)
+    //
+    // Walks the workspace's installed TypeScript SDK, scans `lib*.d.ts` for
+    // `type X<...> = intrinsic;` declarations, and asserts the default
+    // registry implements every one. The audit is a hard correctness gate
+    // — a new intrinsic in the active SDK must land with matching
+    // implementation work in the resolver.
+    //
+    // The test is a no-op on machines without an installed TypeScript
+    // package (e.g. shallow CI images) so `cargo test` stays green without
+    // pnpm install. CI configurations that want the hard-failure behaviour
+    // should ensure the workspace `pnpm install` runs before tests.
+    // ----------------------------------------------------------------------
+
+    /// Scan a TypeScript `lib` directory and collect every intrinsic
+    /// declaration name across its `lib*.d.ts` files.
+    fn scan_intrinsics_in_lib_dir(lib_dir: &std::path::Path) -> Vec<Arc<str>> {
+        let mut found: Vec<Arc<str>> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(lib_dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("lib.") || !name.ends_with(".d.ts") {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            found.extend(extract_intrinsics_from_lib_source(&source));
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// Locate a `typescript/lib` directory within the workspace (if any).
+    /// Looks for both the top-level `node_modules/typescript/lib` (hoisted)
+    /// and pnpm's virtual-store layout `node_modules/.pnpm/typescript@*/node_modules/typescript/lib`.
+    fn find_active_ts_lib_dir() -> Option<std::path::PathBuf> {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // workspace root = crates/verter_session → ../../
+        let workspace_root = manifest_dir.parent()?.parent()?.to_path_buf();
+
+        // 1. Hoisted install
+        let hoisted = workspace_root.join("node_modules/typescript/lib");
+        if hoisted.is_dir() {
+            return Some(hoisted);
+        }
+
+        // 2. pnpm virtual store — any typescript@* entry is fine.
+        let pnpm_dir = workspace_root.join("node_modules/.pnpm");
+        let Ok(entries) = std::fs::read_dir(&pnpm_dir) else {
+            return None;
+        };
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if name_str.starts_with("typescript@") && !name_str.contains('+') {
+                // Skip `@typescript/...` entries, keep plain `typescript@X.Y.Z`.
+                let lib = entry.path().join("node_modules/typescript/lib");
+                if lib.is_dir() {
+                    candidates.push(lib);
+                }
+            }
+        }
+        // Prefer the lexically latest version so the test is deterministic.
+        candidates.sort();
+        candidates.pop()
+    }
+
+    /// Active-SDK audit — hard correctness gate. Fails if any intrinsic
+    /// declared in the workspace TypeScript is missing from the registry.
+    #[test]
+    fn active_ts_sdk_intrinsic_audit_matches_default_registry() {
+        let Some(lib_dir) = find_active_ts_lib_dir() else {
+            // No TypeScript installed (e.g. shallow CI image before
+            // `pnpm install`). Skip rather than fail the workspace build.
+            eprintln!(
+                "skipping active-SDK intrinsic audit: no `typescript` package found under the workspace"
+            );
+            return;
+        };
+        let scanned = scan_intrinsics_in_lib_dir(&lib_dir);
+        assert!(
+            !scanned.is_empty(),
+            "scanner must find at least one intrinsic declaration in {:?} — \
+             an empty scan suggests the walker is broken",
+            lib_dir
+        );
+        let registry = IntrinsicRegistry::with_defaults();
+        let missing = audit_unsupported(&registry, &scanned);
+        assert!(
+            missing.is_empty(),
+            "active TypeScript SDK declares intrinsics the registry does not implement: {:?} \
+             (lib dir: {:?})",
+            missing.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+            lib_dir
+        );
+    }
+
+    /// Maintenance-CI audit — same scanner, opt-in via
+    /// `cargo test -- --ignored typescript_latest_intrinsic_audit`.
+    /// Intended to run against `typescript@latest` in a dedicated job so
+    /// upstream lib changes land in the registry before the pinned SDK
+    /// catches up.
+    ///
+    /// The audit reuses the same discovery path as the active-SDK gate so
+    /// the two only differ in which version is installed; keeping them
+    /// textually identical avoids drift between the two code paths.
+    #[test]
+    #[ignore = "maintenance: run with `cargo test -- --ignored` after installing typescript@latest"]
+    fn typescript_latest_intrinsic_audit() {
+        let Some(lib_dir) = find_active_ts_lib_dir() else {
+            panic!(
+                "typescript@latest audit requires a `typescript` package in the workspace; install with `pnpm install` first"
+            );
+        };
+        let scanned = scan_intrinsics_in_lib_dir(&lib_dir);
+        let registry = IntrinsicRegistry::with_defaults();
+        let missing = audit_unsupported(&registry, &scanned);
+        assert!(
+            missing.is_empty(),
+            "typescript@latest declares intrinsics the registry does not implement: {:?}",
+            missing.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+        );
     }
 }

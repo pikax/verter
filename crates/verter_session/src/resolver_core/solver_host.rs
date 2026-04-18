@@ -390,6 +390,19 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 return UtilitySource::Shadowed;
             }
         }
+        // Phase 2.1: dispatch intrinsics through the project-global
+        // `IntrinsicRegistry`. A `Found` hit means the SDK declares the
+        // name as `= intrinsic` and the registry owns its implementation
+        // — these are not shadowable and must always classify as Builtin.
+        // Everything else falls back to the solver's utility-name table.
+        if let crate::intrinsic_registry::IntrinsicLookup::Found(_) = self
+            .host
+            .project_type_store()
+            .intrinsic_registry()
+            .lookup(name)
+        {
+            return UtilitySource::Builtin;
+        }
         if BuiltinUtility::from_name(name).is_some() {
             UtilitySource::Builtin
         } else {
