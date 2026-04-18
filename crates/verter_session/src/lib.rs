@@ -66,6 +66,8 @@ mod id;
 mod meta;
 pub mod meta_resolve;
 mod parse;
+#[cfg(test)]
+mod project_global_cache_tests;
 pub mod project_type_store;
 pub mod resolver_core;
 mod resolver_store;
@@ -286,6 +288,10 @@ pub struct VerterHost {
             std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         >,
     >,
+    /// Project-global type-resolution cache root (Phase 1+ of the cache
+    /// overhaul). Owns `IndexedReady`, `AnalysisReady`, and the rehomed
+    /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
+    pub(crate) project_type_store: Arc<crate::project_type_store::ProjectTypeStore>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -353,6 +359,7 @@ impl VerterHost {
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             host_owned_resolved_named_types: std::sync::Arc::new(dashmap::DashMap::new()),
+            project_type_store: Arc::new(crate::project_type_store::ProjectTypeStore::new()),
         }
     }
 
@@ -371,6 +378,13 @@ impl VerterHost {
     /// Get a clone of the workspace Arc.
     pub fn workspace(&self) -> Arc<dyn verter_workspace::WorkspaceAccess> {
         self.workspace.read().clone()
+    }
+
+    /// Access the project-global type-resolution cache root. Owned exclusively
+    /// by the host; shared through an `Arc` so downstream cache consumers can
+    /// hold stable references without taking the host lock.
+    pub fn project_type_store(&self) -> &Arc<crate::project_type_store::ProjectTypeStore> {
+        &self.project_type_store
     }
 
     /// Current semantic revision marker based on session state.
@@ -1572,11 +1586,14 @@ impl VerterHost {
 
         let shallow_state = Arc::new(shallow_state);
 
+        let import_route_hash = (!import_routes.is_empty())
+            .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
+        let import_routes_arc = Arc::new(import_routes.clone());
+
         let facts = crate::resolver_core::module_facts_db::ModuleFacts {
             whole_hash: effective_whole_hash,
-            import_route_hash: (!import_routes.is_empty())
-                .then(|| crate::resolver_store::hash_import_route_targets(&import_routes)),
-            import_routes: Arc::new(import_routes.clone()),
+            import_route_hash,
+            import_routes: Arc::clone(&import_routes_arc),
             raw_source,
             cached_parse,
             script_analysis,
@@ -1590,6 +1607,21 @@ impl VerterHost {
             .runtime
             .module_facts
             .insert(canonical_id.to_owned(), facts);
+
+        // Publish the matching IndexedReady into the project-global store so
+        // downstream Phase 1+ consumers can read the canonical post-parse
+        // artifact without going through ModuleFactsDb. The two caches agree
+        // on whole_hash by construction; the legacy ModuleFactsDb stays live
+        // during the rewrite until consumers finish migrating.
+        let indexed = crate::project_type_store::IndexedReady {
+            whole_hash: effective_whole_hash,
+            shallow_state: Arc::clone(&shallow_state),
+            import_routes: Arc::clone(&import_routes_arc),
+            import_route_hash,
+        };
+        self.project_type_store
+            .indexed()
+            .insert(Arc::from(canonical_id), Arc::new(indexed));
 
         let mut dep_edges = FxHashMap::default();
         for target in shallow_state.import_targets.values() {

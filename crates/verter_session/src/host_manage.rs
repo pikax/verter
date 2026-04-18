@@ -3953,6 +3953,20 @@ impl VerterHost {
 
             let import_routes = Arc::new(import_routes);
 
+            // Publish IndexedReady alongside ModuleFacts so Phase 1+ consumers
+            // see the canonical post-parse artifact at the same moment the
+            // legacy path does. Both caches observe identical whole_hash and
+            // shallow_state by construction.
+            let indexed = crate::project_type_store::IndexedReady {
+                whole_hash,
+                shallow_state: Arc::clone(&shallow_state),
+                import_routes: Arc::clone(&import_routes),
+                import_route_hash,
+            };
+            self.project_type_store
+                .indexed()
+                .insert(Arc::from(canonical_id), Arc::new(indexed));
+
             Some(crate::resolver_core::ModuleFacts {
                 whole_hash,
                 import_route_hash,
