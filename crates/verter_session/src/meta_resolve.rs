@@ -5935,6 +5935,7 @@ impl VerterHost {
             let source_hint = Some(meta.declaration.canonical_source.as_str());
             let entry_import_root = owner_component_meta_registry_import_root(
                 self,
+                owner_canonical,
                 snapshot,
                 entry.name.as_str(),
                 store_view,
@@ -6025,6 +6026,7 @@ impl VerterHost {
             } = pending;
             let imported_owner_route = owner_component_meta_registry_import_root(
                 self,
+                owner_canonical,
                 snapshot,
                 type_name.as_str(),
                 store_view,

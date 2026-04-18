@@ -1455,10 +1455,6 @@ impl VerterHost {
         let (effective_dep_canonical, effective_type_name) = target;
         tracked_deps.insert(effective_dep_canonical.clone());
         resolution_deps.insert(effective_dep_canonical.clone());
-        cache.record_resolved_root(
-            cache_key.clone(),
-            (effective_dep_canonical.clone(), effective_type_name.clone()),
-        );
 
         if use_host_cache {
             if let Some(entry) = self.lookup_resolved_external_type_cache_in_view(
@@ -1604,23 +1600,15 @@ impl VerterHost {
         let cache_key = (dep_canonical.clone(), type_name.to_string());
         if let Some(cached) = cache.get(&cache_key).cloned() {
             let elements = cached?;
-            // Reuse the `(target_canonical, target_symbol)` memoized during the
-            // materialization that populated this cache slot. Falls back to a
-            // fresh `resolve_imported_type_root_in_view` only if the memo is
-            // absent (e.g., the entry was populated before the memo existed or
-            // the cache was externally seeded).
-            let (target_canonical, target_name) =
-                if let Some(target) = cache.resolved_root(&cache_key).cloned() {
-                    target
-                } else {
-                    let target = self.resolve_imported_type_root_in_view(
-                        dep_canonical.as_str(),
-                        type_name,
-                        store_view,
-                    );
-                    cache.record_resolved_root(cache_key.clone(), target.clone());
-                    target
-                };
+            // Re-query the project-global `ImportedRootDb` for the target
+            // identity. It collapses concurrent cold requests internally, so
+            // repeated calls are cheap warm hits — there is no need for a
+            // second per-request memo layer above it.
+            let (target_canonical, target_name) = self.resolve_imported_type_root_in_view(
+                dep_canonical.as_str(),
+                type_name,
+                store_view,
+            );
             tracked_deps.insert(target_canonical.clone());
             resolution_deps.insert(target_canonical.clone());
             return Some((dep_canonical, target_canonical, target_name, elements));
@@ -1628,10 +1616,6 @@ impl VerterHost {
 
         let (seed_canonical, seed_type_name) =
             self.resolve_imported_type_root_in_view(dep_canonical.as_str(), type_name, store_view);
-        cache.record_resolved_root(
-            cache_key.clone(),
-            (seed_canonical.clone(), seed_type_name.clone()),
-        );
         tracked_deps.insert(seed_canonical.clone());
         resolution_deps.insert(seed_canonical.clone());
 
@@ -1678,7 +1662,6 @@ impl VerterHost {
         resolution_deps.insert(effective_dep_canonical.clone());
 
         let final_target_key = (effective_dep_canonical.clone(), effective_type_name.clone());
-        cache.record_resolved_root(cache_key.clone(), final_target_key.clone());
         if let Some(cached) = cache.get(&final_target_key).cloned() {
             cache.insert(cache_key, cached.clone());
             let elements = cached?;

@@ -10,12 +10,6 @@ use verter_workspace::ResolveRequestKind;
 #[derive(Debug, Clone, Default)]
 pub struct ExternalTypeBodyCache {
     resolved: FxHashMap<(String, String), Option<ResolvedElements>>,
-    /// Per-request memo of `(dep_canonical, type_name) → (target_canonical, target_symbol)`.
-    /// Populated alongside `resolved` so cache-hit callers avoid a second
-    /// `resolve_imported_type_root_in_view` trip through the request view +
-    /// imported-root DB. Without this memo every `resolved` hit still pays
-    /// a full route walk to derive `target_canonical` for the returned tuple.
-    resolved_roots: FxHashMap<(String, String), (String, String)>,
     source_analysis:
         FxHashMap<(String, verter_semantic::analysis::Hash16), AnalyzedExternalTypeSource>,
 }
@@ -39,21 +33,6 @@ impl ExternalTypeBodyCache {
         value: Option<ResolvedElements>,
     ) -> Option<Option<ResolvedElements>> {
         self.resolved.insert(key, value)
-    }
-
-    /// Look up a memoized `(target_canonical, target_symbol)` for a previously
-    /// resolved `(dep_canonical, type_name)` pair. Returns `None` before a call
-    /// to [`record_resolved_root`] for the same key.
-    pub fn resolved_root(&self, key: &(String, String)) -> Option<&(String, String)> {
-        self.resolved_roots.get(key)
-    }
-
-    /// Record the `(target_canonical, target_symbol)` that
-    /// `resolve_imported_type_root_in_view` computed for `key`. Idempotent —
-    /// re-insertions with the same mapping are safe; different mappings are
-    /// overwritten (last-writer-wins matches the resolved-elements semantics).
-    pub fn record_resolved_root(&mut self, key: (String, String), target: (String, String)) {
-        self.resolved_roots.insert(key, target);
     }
 
     pub fn source_analysis_len(&self) -> usize {

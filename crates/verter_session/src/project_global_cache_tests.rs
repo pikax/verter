@@ -306,12 +306,116 @@ fn component_meta_warm_rerun_hits_final_result_cache_phase3() {
     // Intentionally ignored until Phase 3 introduces the result cache.
 }
 
-/// Placeholder: once Phase 2 lands, direct owner imports are resolved once
-/// per owner version and reused across stages.
+/// Phase 2: direct owner imports are resolved once per owner version and
+/// reused across stages. The first lookup on an owner builds the surface;
+/// every subsequent lookup against the same `(owner, whole_hash)` must hit
+/// the cached surface without rebuilding.
 #[test]
-#[ignore = "Phase 2 — pending OwnerImportSurfaceDb"]
 fn owner_direct_imports_resolve_once_per_owner_version_phase2() {
-    // Intentionally ignored until Phase 2 introduces the owner surface DB.
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/types.ts",
+        "export type Foo = { x: number }\nexport type Bar = { y: string }",
+    );
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Foo, Bar } from './types'\nexport type Owner = Foo & Bar",
+    );
+
+    // Force ModuleFacts materialization so whole_hash is available and the
+    // surface cache is reachable.
+    let owner_hash = ensure_facts(&host, "/w/owner.ts");
+    let _ = ensure_facts(&host, "/w/types.ts");
+
+    // First lookup for Foo builds the surface and caches it.
+    let first = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .expect("Foo must resolve to its defining root");
+    assert_eq!(first.0, "/w/types.ts");
+    assert_eq!(first.1, "Foo");
+
+    // Surface is now live in the project-global cache under owner_hash.
+    let store = host.project_type_store();
+    let surface_after_first = store
+        .owner_import_surfaces()
+        .get("/w/owner.ts", owner_hash)
+        .expect("surface must exist after first direct-import lookup");
+    assert_eq!(
+        surface_after_first.bindings.len(),
+        2,
+        "owner surface must cover both direct imports"
+    );
+
+    // Second lookup for Bar returns the same Arc — no rebuild.
+    let _ = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Bar", None)
+        .expect("Bar must resolve to its defining root");
+    let surface_after_second = store
+        .owner_import_surfaces()
+        .get("/w/owner.ts", owner_hash)
+        .expect("surface must still exist after second direct-import lookup");
+    assert!(
+        Arc::ptr_eq(&surface_after_first, &surface_after_second),
+        "direct owner imports must resolve through one cached surface per owner version"
+    );
+    assert_eq!(
+        store.counters.snapshot().owner_import_live,
+        1,
+        "exactly one owner-import surface is live for this owner"
+    );
+}
+
+/// Phase 2: editing an owner bumps the owner's whole_hash and rebuilds the
+/// surface under the new key. The old surface becomes unreachable at the
+/// key level; the new surface reflects the current import set.
+#[test]
+fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/types.ts",
+        "export type Foo = { x: number }\nexport type Bar = { y: string }",
+    );
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Foo } from './types'\nexport type Owner = Foo",
+    );
+
+    let hash_v1 = ensure_facts(&host, "/w/owner.ts");
+    let _ = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .expect("Foo resolves cold");
+
+    // Edit owner to import Bar instead of Foo.
+    upsert_ts(
+        &host,
+        "/w/owner.ts",
+        "import type { Bar } from './types'\nexport type Owner = Bar",
+    );
+    let hash_v2 = ensure_facts(&host, "/w/owner.ts");
+    assert_ne!(hash_v1, hash_v2);
+
+    // The old surface was evicted — direct hash lookup must miss.
+    assert!(host
+        .project_type_store()
+        .owner_import_surfaces()
+        .get("/w/owner.ts", hash_v1)
+        .is_none());
+
+    // A new lookup for Bar rebuilds the surface under hash_v2.
+    let resolved = host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Bar", None)
+        .expect("Bar resolves under the new owner hash");
+    assert_eq!(resolved.0, "/w/types.ts");
+    assert_eq!(resolved.1, "Bar");
+
+    // Foo is no longer a local binding — surface lookup misses.
+    assert!(host
+        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .is_none());
 }
 
 /// Sanity: the project-global store is reachable from the public

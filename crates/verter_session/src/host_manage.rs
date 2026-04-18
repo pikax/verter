@@ -3468,25 +3468,37 @@ impl VerterHost {
             if let Some((import_source, imported_name)) =
                 analysis.local_import_symbol_target(root_name)
             {
-                let imported_member = if root_name == referenced_name {
-                    imported_name.to_string()
-                } else if let Some(suffix) = referenced_name.strip_prefix(root_name) {
-                    format!("{}{}", imported_name, suffix)
+                let (resolved_canonical, resolved_name) = if root_name == referenced_name {
+                    // Direct owner import — resolve via the project-global
+                    // owner surface so every stage reads the same cached
+                    // answer for this `(owner, local_name)` pair.
+                    match self.resolve_owner_direct_import_in_view(
+                        canonical_id,
+                        root_name,
+                        store_view,
+                    ) {
+                        Some(resolved) => resolved,
+                        None => continue,
+                    }
                 } else {
-                    imported_name.to_string()
+                    // Dotted reference like `Foo.Bar` — preserve the legacy
+                    // suffixed name lookup path; the direct-import surface
+                    // only caches top-level `local_name` entries.
+                    let suffix = referenced_name.strip_prefix(root_name).unwrap_or("");
+                    let imported_member = format!("{}{}", imported_name, suffix);
+                    let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
+                        canonical_id,
+                        import_source,
+                        store_view,
+                    ) else {
+                        continue;
+                    };
+                    self.resolve_imported_type_root_in_view(
+                        dep_canonical.as_str(),
+                        imported_member.as_str(),
+                        store_view,
+                    )
                 };
-                let Some(dep_canonical) = self.resolve_type_dependency_canonical_in_view(
-                    canonical_id,
-                    import_source,
-                    store_view,
-                ) else {
-                    continue;
-                };
-                let (resolved_canonical, resolved_name) = self.resolve_imported_type_root_in_view(
-                    dep_canonical.as_str(),
-                    imported_member.as_str(),
-                    store_view,
-                );
                 if seen.insert((
                     referenced_name.clone(),
                     resolved_canonical.clone(),
@@ -4503,6 +4515,102 @@ impl VerterHost {
         }
 
         resolved
+    }
+
+    /// Get-or-build the [`OwnerImportSurface`](crate::owner_import_surface::OwnerImportSurface)
+    /// for `owner_canonical`. Phase 2 of the project-global cache overhaul:
+    /// direct owner imports resolve exactly once per owner version and every
+    /// downstream stage reads the same surface entry.
+    ///
+    /// Cache identity is `(owner_canonical, owner_whole_hash)`. Stale owner
+    /// versions miss at the key level; building populates
+    /// `project_type_store().owner_import_surfaces()` with the fully-resolved
+    /// root for each direct import binding in the owner file.
+    pub(crate) fn owner_import_surface_in_view(
+        &self,
+        owner_canonical: &str,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
+    ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
+        let shallow = self.shallow_file_state_in_view(owner_canonical, store_view)?;
+        let whole_hash = shallow.whole_hash;
+        let surfaces = self.project_type_store.owner_import_surfaces();
+        if let Some(cached) = surfaces.get(owner_canonical, whole_hash) {
+            return Some(cached);
+        }
+
+        let _trace = component_meta_trace_scope!(
+            "owner_import_surface_build",
+            format!("owner={}", owner_canonical),
+        );
+
+        // (local_name, final_canonical, final_exported_name, target_whole_hash)
+        type SurfaceBuildEntry = (Arc<str>, Arc<str>, Arc<str>, Option<Hash16>);
+        let mut entries: Vec<SurfaceBuildEntry> = Vec::with_capacity(shallow.import_targets.len());
+        for (local_name, target) in shallow.import_targets.iter() {
+            let resolved_canonical_id = if target.canonical_id.is_empty() {
+                match self.resolve_type_dependency_canonical_in_view(
+                    owner_canonical,
+                    &target.source_specifier,
+                    store_view,
+                ) {
+                    Some(canonical) => canonical,
+                    None => continue,
+                }
+            } else {
+                target.canonical_id.clone()
+            };
+
+            let (final_canonical, final_name) = self.resolve_imported_type_root_in_view(
+                resolved_canonical_id.as_str(),
+                target.imported_name.as_str(),
+                store_view,
+            );
+
+            let target_hash = self
+                .shallow_file_state_in_view(final_canonical.as_str(), store_view)
+                .map(|s| s.whole_hash);
+
+            entries.push((
+                Arc::from(local_name.as_str()),
+                Arc::from(final_canonical),
+                Arc::from(final_name),
+                target_hash,
+            ));
+        }
+
+        let surface = crate::owner_import_surface::build_owner_import_surface(
+            Arc::from(owner_canonical),
+            whole_hash,
+            entries,
+        );
+        surfaces.insert(Arc::from(owner_canonical), Arc::clone(&surface));
+        Some(surface)
+    }
+
+    /// Resolve a direct owner import binding to its final root identity via
+    /// the Phase 2 owner import surface. Returns `(final_canonical,
+    /// final_exported_name)` matching the legacy
+    /// [`Self::resolve_imported_type_root_in_view`] contract for direct
+    /// owner imports, but sourced from one cached surface per owner version.
+    ///
+    /// Callers that already have the owner canonical plus a local binding
+    /// name must prefer this method over `resolve_imported_type_root_in_view`
+    /// so direct owner imports resolve exactly once per owner version. The
+    /// `resolve_imported_type_root_in_view` helper remains the authority for
+    /// transitive chain walks inside route/barrel code.
+    pub(crate) fn resolve_owner_direct_import_in_view(
+        &self,
+        owner_canonical: &str,
+        local_name: &str,
+        store_view: Option<&crate::host_request_view::RequestStoreView>,
+    ) -> Option<(String, String)> {
+        let surface = self.owner_import_surface_in_view(owner_canonical, store_view)?;
+        let key: Arc<str> = Arc::from(local_name);
+        let binding = surface.bindings.get(&key)?;
+        Some((
+            binding.canonical_id.as_ref().to_string(),
+            binding.exported_name.as_ref().to_string(),
+        ))
     }
 
     fn cache_eval_env_arc(
