@@ -11,7 +11,7 @@
 //!
 //! - A. `IndexedReady` is published once per `(canonical_id, whole_hash)`
 //!   and is shared across consumers.
-//! - B. `IndexedReady` matches `ModuleFacts` in the transitional coexistence
+//! - B. `IndexedReady` matches `IndexedReady` in the transitional coexistence
 //!   window — same `whole_hash`, same `shallow_state`, same `import_routes`
 //!   (identity, not deep equality).
 //! - C. Unrelated files stay warm across an edit to one file.
@@ -66,26 +66,24 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
-/// Force ModuleFacts (and IndexedReady by extension) materialization for a
-/// canonical. Consumers normally trigger this implicitly through a query;
-/// tests need an explicit hook because the upsert path evicts on content
-/// change and ModuleFactsDb is lazily re-materialized on first demand.
+/// Force IndexedReady materialization for a canonical. Consumers normally
+/// trigger this implicitly through a query; tests need an explicit hook
+/// because the upsert path evicts on content change and `IndexedReadyDb`
+/// is lazily re-materialized on first demand.
 fn ensure_facts(host: &VerterHost, canonical_id: &str) -> [u8; 16] {
-    let facts = host
-        .ensure_module_facts_in_view(canonical_id, None)
-        .unwrap_or_else(|| panic!("ensure_module_facts_in_view returned None for {canonical_id}"));
-    facts.whole_hash
+    let indexed = host
+        .ensure_indexed_ready(canonical_id)
+        .unwrap_or_else(|| panic!("ensure_indexed_ready returned None for {canonical_id}"));
+    indexed.whole_hash
 }
 
 fn indexed_whole_hash(host: &VerterHost, canonical_id: &str) -> Option<[u8; 16]> {
-    // Ensure ModuleFacts (and IndexedReady) are materialized. In the final
-    // tree after the cutover this helper disappears — IndexedReady will be
-    // the only post-parse cache and it will warm eagerly from the upsert
-    // flow. During the transitional coexistence window it is still lazy
-    // behind ensure_module_facts_in_view, so we trigger that explicitly.
+    // Post-Phase-5: `IndexedReady` is the only post-parse cache; warm it
+    // via `ensure_indexed_ready` then verify the project store reflects
+    // the same whole_hash.
     let whole_hash = host
-        .ensure_module_facts_in_view(canonical_id, None)
-        .map(|facts| facts.whole_hash)?;
+        .ensure_indexed_ready(canonical_id)
+        .map(|indexed| indexed.whole_hash)?;
     host.project_type_store()
         .indexed()
         .get(canonical_id, whole_hash)
@@ -101,39 +99,6 @@ fn upsert_publishes_indexed_ready() {
     let hash =
         indexed_whole_hash(&host, "/w/types.ts").expect("IndexedReady must be published on upsert");
     assert_ne!(hash, [0u8; 16]);
-}
-
-/// B. `IndexedReady` and `ModuleFacts` agree on the canonical post-parse
-/// artifact in the transitional coexistence window. The shared
-/// `shallow_state` pointer is the same Arc by construction.
-#[test]
-fn indexed_and_module_facts_share_shallow_state() {
-    let host = host();
-    upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
-    ensure_facts(&host, "/w/types.ts");
-
-    let facts = host
-        .resolver
-        .runtime
-        .module_facts
-        .get_any("/w/types.ts")
-        .expect("module facts must exist after ensure_facts");
-    let indexed = host
-        .project_type_store()
-        .indexed()
-        .get("/w/types.ts", facts.whole_hash)
-        .expect("indexed must exist under the same whole_hash");
-
-    assert_eq!(indexed.whole_hash, facts.whole_hash);
-    // shallow_state is shared by Arc — identity check is stronger than
-    // structural equality and is the authoritative signal for the "single
-    // canonical post-parse artifact" invariant.
-    assert!(
-        Arc::ptr_eq(&indexed.shallow_state, &facts.shallow_state),
-        "IndexedReady and ModuleFacts must share the same shallow_state Arc \
-         so there is only one canonical post-parse artifact per file version"
-    );
-    assert!(Arc::ptr_eq(&indexed.import_routes, &facts.import_routes));
 }
 
 /// C. Unrelated files stay warm across an edit to one file — the
@@ -501,14 +466,14 @@ fn owner_direct_imports_resolve_once_per_owner_version_phase2() {
         "import type { Foo, Bar } from './types'\nexport type Owner = Foo & Bar",
     );
 
-    // Force ModuleFacts materialization so whole_hash is available and the
+    // Force IndexedReady materialization so whole_hash is available and the
     // surface cache is reachable.
     let owner_hash = ensure_facts(&host, "/w/owner.ts");
     let _ = ensure_facts(&host, "/w/types.ts");
 
     // First lookup for Foo builds the surface and caches it.
     let first = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
         .expect("Foo must resolve to its defining root");
     assert_eq!(first.0, "/w/types.ts");
     assert_eq!(first.1, "Foo");
@@ -527,7 +492,7 @@ fn owner_direct_imports_resolve_once_per_owner_version_phase2() {
 
     // Second lookup for Bar returns the same Arc — no rebuild.
     let _ = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Bar", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Bar")
         .expect("Bar must resolve to its defining root");
     let surface_after_second = store
         .owner_import_surfaces()
@@ -563,7 +528,7 @@ fn owner_import_surface_picks_up_barrel_retargeting_phase2() {
     );
 
     let first = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
         .expect("initial resolution follows the barrel to /w/a.ts");
     assert_eq!(first.0, "/w/a.ts");
 
@@ -574,7 +539,7 @@ fn owner_import_surface_picks_up_barrel_retargeting_phase2() {
     upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './b'");
 
     let refreshed = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
         .expect("post-retarget resolution must follow the updated barrel");
     assert_eq!(
         refreshed.0, "/w/b.ts",
@@ -601,7 +566,7 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
 
     let hash_v1 = ensure_facts(&host, "/w/owner.ts");
     let _ = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
         .expect("Foo resolves cold");
 
     // Edit owner to import Bar instead of Foo.
@@ -622,167 +587,75 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
 
     // A new lookup for Bar rebuilds the surface under hash_v2.
     let resolved = host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Bar", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Bar")
         .expect("Bar resolves under the new owner hash");
     assert_eq!(resolved.0, "/w/types.ts");
     assert_eq!(resolved.1, "Bar");
 
     // Foo is no longer a local binding — surface lookup misses.
     assert!(host
-        .resolve_owner_direct_import_in_view("/w/owner.ts", "Foo", None)
+        .resolve_owner_direct_import("/w/owner.ts", "Foo")
         .is_none());
 }
 
-/// Phase 4 progress audit: `RequestStoreView` retired its per-request
-/// `external_inputs_memo` and `eval_state_memo` — the project-global
-/// `ModuleFactsDb` is now the single lookup-memo authority for
-/// canonical external-type resolution inputs and `current_eval_state`
-/// tuples. This test documents the retirement by asserting the
-/// corresponding accessor methods are gone from the source.
-///
-/// The full `_in_view` signature cut is the large remaining Phase 4
-/// deliverable; it lands as a dedicated signature-rewrite pass that
-/// touches the component-meta engine (~9k lines) atomically. Until
-/// then, the assertions here cover the concrete pieces of Phase 4 that
-/// landed in this track: memo retirement + cache authority convergence.
+/// Final source-audit: the `RequestStoreView` type and the
+/// `host_request_view` module were retired as part of the Phase 4/5
+/// cutover. They must not resurface anywhere in the crate outside of
+/// archived historical comments. This test asserts the post-cut state.
 #[test]
-fn phase4_request_view_memo_retirement_source_audit() {
-    let host_request_view_src = include_str!("host_request_view.rs");
-    // Field declaration marker — the struct no longer carries these fields.
-    assert!(
-        !host_request_view_src.contains("external_inputs_memo:"),
-        "Phase 4 retired the RequestStoreView::external_inputs_memo field"
-    );
-    assert!(
-        !host_request_view_src.contains("eval_state_memo:"),
-        "Phase 4 retired the RequestStoreView::eval_state_memo field"
-    );
-    // Access methods must not exist anywhere in the source.
-    assert!(
-        !host_request_view_src.contains("fn external_inputs_memo_get"),
-        "Phase 4 retired external_inputs_memo_get"
-    );
-    assert!(
-        !host_request_view_src.contains("fn eval_state_memo_get"),
-        "Phase 4 retired eval_state_memo_get"
-    );
-    assert!(
-        !host_request_view_src.contains("fn record_external_inputs"),
-        "Phase 4 retired record_external_inputs"
-    );
-    assert!(
-        !host_request_view_src.contains("fn record_eval_state"),
-        "Phase 4 retired record_eval_state"
-    );
-    assert!(
-        !host_request_view_src.contains("struct EvalStateMemoEntry"),
-        "Phase 4 retired EvalStateMemoEntry"
-    );
-
-    let host_manage_src = include_str!("host_manage.rs");
-    assert!(
-        !host_manage_src.contains("external_inputs_memo_get"),
-        "host_manage must not probe the retired external_inputs_memo"
-    );
-    assert!(
-        !host_manage_src.contains("eval_state_memo_get"),
-        "host_manage must not probe the retired eval_state_memo"
-    );
-}
-
-/// Phase 4 progress ratchet: tracks the shrinking `_in_view` /
-/// `RequestStoreView` surface across the hot-path modules listed in
-/// plan § G1. The assertion is intentionally a **ceiling, not a
-/// target** — each session that lands a slice of the signature cut
-/// should lower these counts rather than preserve them. If the count
-/// drops below the ceiling the test still passes; if a regression
-/// *adds* new `_in_view` plumbing to any hot-path module the test
-/// fails and the author must justify why that is the correct
-/// direction (or lower the ceiling in the same commit).
-///
-/// When the cut completes the ceilings below reach zero and this
-/// whole test deletes in the same commit that deletes
-/// `host_request_view.rs`.
-#[test]
-fn phase4_in_view_surface_ratchet() {
-    struct Budget {
-        path: &'static str,
-        src: &'static str,
-        max_in_view: usize,
-        max_request_store_view: usize,
-    }
-
-    // Ceilings match the actual count at the time this ratchet lands so
-    // any regression — even +1 — fails the test immediately. Lowering
-    // requires editing this table in the same commit that lowers the
-    // count. Raising requires justifying the new plumbing in the commit
-    // message (or, preferably, not adding it).
-    let budgets = [
-        Budget {
-            path: "host_manage.rs",
-            src: include_str!("host_manage.rs"),
-            max_in_view: 228,
-            max_request_store_view: 83,
-        },
-        Budget {
-            path: "host_resolve.rs",
-            src: include_str!("host_resolve.rs"),
-            max_in_view: 150,
-            max_request_store_view: 41,
-        },
-        Budget {
-            path: "meta_resolve.rs",
-            src: include_str!("meta_resolve.rs"),
-            max_in_view: 56,
-            max_request_store_view: 22,
-        },
-        Budget {
-            path: "resolver_core/component_meta_query_engine.rs",
-            src: include_str!("resolver_core/component_meta_query_engine.rs"),
-            max_in_view: 20,
-            max_request_store_view: 10,
-        },
-        Budget {
-            path: "resolver_core/solver_host.rs",
-            src: include_str!("resolver_core/solver_host.rs"),
-            max_in_view: 18,
-            max_request_store_view: 5,
-        },
-        Budget {
-            path: "resolver_core/component_meta_registry.rs",
-            src: include_str!("resolver_core/component_meta_registry.rs"),
-            max_in_view: 9,
-            max_request_store_view: 3,
-        },
-        Budget {
-            path: "meta.rs",
-            src: include_str!("meta.rs"),
-            max_in_view: 3,
-            max_request_store_view: 2,
-        },
+fn request_view_is_retired_from_crate_sources() {
+    // Each entry is (path, source). Every source must be free of non-comment
+    // references to `RequestStoreView` / `CURRENT_REQUEST_VIEW` /
+    // `host_request_view::`. Comments starting with `//` or `///` are
+    // tolerated — those are historical notes about the retirement.
+    let sources: &[(&str, &str)] = &[
+        ("host_manage.rs", include_str!("host_manage.rs")),
+        ("host_resolve.rs", include_str!("host_resolve.rs")),
+        ("meta_resolve.rs", include_str!("meta_resolve.rs")),
+        ("meta.rs", include_str!("meta.rs")),
+        (
+            "resolver_core/component_meta_query_engine.rs",
+            include_str!("resolver_core/component_meta_query_engine.rs"),
+        ),
+        (
+            "resolver_core/solver_host.rs",
+            include_str!("resolver_core/solver_host.rs"),
+        ),
+        (
+            "resolver_core/component_meta_registry.rs",
+            include_str!("resolver_core/component_meta_registry.rs"),
+        ),
+        (
+            "resolver_core/type_expansion_verter.rs",
+            include_str!("resolver_core/type_expansion_verter.rs"),
+        ),
+        ("resolver_store.rs", include_str!("resolver_store.rs")),
+        ("lib.rs", include_str!("lib.rs")),
     ];
 
-    for b in &budgets {
-        let in_view = b.src.matches("_in_view").count();
-        let request_store_view = b.src.matches("RequestStoreView").count();
-        assert!(
-            in_view <= b.max_in_view,
-            "{}: `_in_view` count regressed (actual={}, ceiling={}). \
-             Lower the ceiling in the same commit that lowers the count, or \
-             justify the regression if you intentionally added new plumbing.",
-            b.path,
-            in_view,
-            b.max_in_view,
-        );
-        assert!(
-            request_store_view <= b.max_request_store_view,
-            "{}: `RequestStoreView` count regressed (actual={}, ceiling={}). \
-             Lower the ceiling in the same commit that lowers the count, or \
-             justify the regression if you intentionally added new plumbing.",
-            b.path,
-            request_store_view,
-            b.max_request_store_view,
-        );
+    let forbidden = [
+        "RequestStoreView",
+        "CURRENT_REQUEST_VIEW",
+        "host_request_view::",
+        "current_request_view(",
+        "owned_or_ambient_request_view(",
+    ];
+
+    for (path, src) in sources {
+        for line in src.lines() {
+            let stripped = line.trim_start();
+            // Skip line-comment lines outright. Block comments are unusual
+            // in this codebase; anything surviving here must be active code.
+            if stripped.starts_with("//") {
+                continue;
+            }
+            for token in forbidden {
+                assert!(
+                    !line.contains(token),
+                    "{path}: forbidden reference `{token}` survives in non-comment code:\n  {line}"
+                );
+            }
+        }
     }
 }
 
@@ -822,28 +695,6 @@ fn dep_version_for_whole_hash_returns_whole_hash_variant() {
         crate::semantic_query::DepVersion::WholeHash(h) => assert_eq!(h, [9u8; 16]),
         other => panic!("expected WholeHash, got {other:?}"),
     }
-}
-
-/// ModuleFactsDb still exists during the coexistence window — this test
-/// exists to be deleted in Phase 5 (or earlier if the final migration
-/// completes). The presence of this assertion documents the transitional
-/// state explicitly.
-#[test]
-fn transitional_module_facts_db_coexists_with_indexed_ready() {
-    let host = host();
-    upsert_ts(&host, "/w/t.ts", "export type T = {}");
-    ensure_facts(&host, "/w/t.ts");
-    let has_module_facts = host
-        .resolver
-        .runtime
-        .module_facts
-        .get_any("/w/t.ts")
-        .is_some();
-    let has_indexed = indexed_whole_hash(&host, "/w/t.ts").is_some();
-    assert!(
-        has_module_facts && has_indexed,
-        "transitional: both ModuleFactsDb and IndexedReadyDb must be populated"
-    );
 }
 
 /// The `IndexedReadyDb::find_satisfying`-flavoured lookups on
@@ -963,33 +814,6 @@ fn project_type_store_exposes_stable_route_and_imported_root_handles() {
     assert!(Arc::ptr_eq(&i1, &i2));
 }
 
-/// Helper: when the upsert pipeline publishes IndexedReady, the entry's
-/// import_routes map matches ModuleFacts' — same Arc identity in the
-/// transitional coexistence window.
-#[test]
-fn indexed_ready_import_routes_are_shared_with_module_facts() {
-    let host = host();
-    upsert_ts(
-        &host,
-        "/w/importer.ts",
-        r#"import type { Foo } from './other'; export type Bar = Foo;"#,
-    );
-    ensure_facts(&host, "/w/importer.ts");
-
-    let facts = host
-        .resolver
-        .runtime
-        .module_facts
-        .get_any("/w/importer.ts")
-        .unwrap();
-    let indexed = host
-        .project_type_store()
-        .indexed()
-        .get("/w/importer.ts", facts.whole_hash)
-        .unwrap();
-    assert!(Arc::ptr_eq(&indexed.import_routes, &facts.import_routes));
-}
-
 /// An empty, never-used canonical key returns None cleanly from the project
 /// store (no panic, no partial result). This is the expected behaviour when
 /// the host has not yet seen the file.
@@ -1010,4 +834,262 @@ fn unseen_canonical_returns_none_from_indexed_db() {
 fn empty_import_routes_default_is_zero_len() {
     let m: FxHashMap<String, crate::types::DependencyResolution> = FxHashMap::default();
     assert_eq!(m.len(), 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Slice 11 — dep-signature propagation contract tests
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A semantic query result is cached: a second query for the same key
+/// observes the warm memo entry without re-running the cold build. The
+/// memo counter does not grow on the second ask.
+#[test]
+fn semantic_query_second_call_hits_warm_memo_slice11() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let key = resolve_decl_key("/w/t.ts", "T");
+    let before = host
+        .project_type_store()
+        .semantic_graph()
+        .memo_entry_count();
+    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let after_first = host
+        .project_type_store()
+        .semantic_graph()
+        .memo_entry_count();
+    let second = dispatch.execute(SemanticQueryKey::ResolveDecl(key));
+    let after_second = host
+        .project_type_store()
+        .semantic_graph()
+        .memo_entry_count();
+
+    match (first, second) {
+        (QueryResult::Value(a), QueryResult::Value(b)) => assert_eq!(a, b),
+        other => panic!("expected two values, got {other:?}"),
+    }
+    assert_eq!(
+        after_first - before,
+        1,
+        "cold build must publish exactly one warm entry"
+    );
+    assert_eq!(
+        after_second, after_first,
+        "warm rerun must not publish a new memo entry"
+    );
+}
+
+/// Editing the owner file of a semantic query key invalidates the warm
+/// memo entry — the next query runs a fresh cold build and publishes
+/// under the new file version. Verified two ways: the memo entry is
+/// gone after the edit (so the lookup misses at the key level), and the
+/// re-executed query records a new dep signature matching the new file
+/// whole-hash.
+#[test]
+fn semantic_query_invalidates_on_owner_edit_slice11() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{DepVersion, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
+    // Ensure IndexedReady is materialized before the first query — the
+    // dispatcher consults shallow state as its cache-read-only source.
+    let _ = ensure_facts(&host, "/w/t.ts");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let key = resolve_decl_key("/w/t.ts", "T");
+    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let warm_before_edit = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&SemanticQueryKey::ResolveDecl(key.clone()))
+        .expect("entry must be warm after first ask");
+    let hash_v1 = warm_before_edit
+        .dep_signature
+        .iter()
+        .find_map(|(_, dv)| match dv {
+            DepVersion::WholeHash(h) => Some(*h),
+            _ => None,
+        })
+        .expect("pre-edit dep signature must carry a whole-hash fact");
+
+    // Edit the file — the semantic memo entry for this scope must drop
+    // so the next query reflects the new file version.
+    upsert_ts(&host, "/w/t.ts", "export type T = { x: number; y: string }");
+
+    // Warm entry keyed on the old canonical is gone.
+    assert!(
+        host.project_type_store()
+            .semantic_graph()
+            .get(&SemanticQueryKey::ResolveDecl(key.clone()))
+            .is_none(),
+        "post-edit: warm entry for the edited canonical must be invalidated"
+    );
+
+    // Re-materialize post-edit so the dispatcher sees the new shallow
+    // state — production callers always materialize via a higher-level
+    // request, but tests exercise the semantic memo directly.
+    let _ = ensure_facts(&host, "/w/t.ts");
+    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let warm_after_edit = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&SemanticQueryKey::ResolveDecl(key))
+        .expect("post-edit entry must be warm after rebuild");
+    let hash_v2 = warm_after_edit
+        .dep_signature
+        .iter()
+        .find_map(|(_, dv)| match dv {
+            DepVersion::WholeHash(h) => Some(*h),
+            _ => None,
+        })
+        .expect("post-edit dep signature must carry a whole-hash fact");
+    assert_ne!(
+        hash_v1, hash_v2,
+        "file edit must produce a fresh dep signature pointing at the new whole-hash"
+    );
+}
+
+/// Editing an unrelated file keeps warm semantic memo entries intact.
+/// The dep-signature on the warm entry doesn't reference the unrelated
+/// canonical, so the targeted invalidation does not touch it.
+#[test]
+fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
+    upsert_ts(&host, "/w/b.ts", "export type B = { b: string }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let a_key = resolve_decl_key("/w/a.ts", "A");
+    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(a_key.clone()));
+    let QueryResult::Value(first_id) = first else {
+        panic!("expected value");
+    };
+    let warm_before = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&SemanticQueryKey::ResolveDecl(a_key.clone()))
+        .expect("entry must be warm after first ask");
+
+    // Edit an unrelated file — a.ts must remain warm.
+    upsert_ts(
+        &host,
+        "/w/b.ts",
+        "export type B = { b: string; extra: number }",
+    );
+
+    let warm_after = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&SemanticQueryKey::ResolveDecl(a_key.clone()))
+        .expect("unrelated edit must not invalidate a.ts entry");
+    match (warm_before.value, warm_after.value) {
+        (QueryResult::Value(x), QueryResult::Value(y)) => assert_eq!(x, y, "same node id"),
+        other => panic!("expected two warm values, got {other:?}"),
+    }
+
+    // And a fresh execute yields the same id — no cold rebuild.
+    let refreshed = dispatch.execute(SemanticQueryKey::ResolveDecl(a_key));
+    match refreshed {
+        QueryResult::Value(id) => assert_eq!(id, first_id, "warm hit must return the original id"),
+        other => panic!("expected value, got {other:?}"),
+    }
+}
+
+/// Warm memo entries record a non-empty dep signature so the completion
+/// fence has something to validate against. A memo hit on a structural
+/// `ResolveDecl` must carry both a file whole-hash and a project-generation
+/// fact.
+#[test]
+fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{DepVersion, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, "/w/a.ts", "export type A = { x: number }");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let key = resolve_decl_key("/w/a.ts", "A");
+    let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let warm = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&SemanticQueryKey::ResolveDecl(key))
+        .expect("warm entry must exist");
+    assert!(
+        !warm.dep_signature.is_empty(),
+        "warm hit must carry a non-empty dep signature"
+    );
+    let mut has_whole_hash = false;
+    let mut has_project_gen = false;
+    for (_, dv) in warm.dep_signature.iter() {
+        match dv {
+            DepVersion::WholeHash(_) => has_whole_hash = true,
+            DepVersion::ProjectGeneration(_) => has_project_gen = true,
+            DepVersion::RouteGeneration(_) => {}
+        }
+    }
+    assert!(has_whole_hash, "dep signature must capture file whole hash");
+    assert!(
+        has_project_gen,
+        "dep signature must capture project generation"
+    );
+}
+
+/// Derived semantic queries (Instantiate, NormalizeUnion, etc.) record a
+/// project-generation anchor so warm hits can still be validated by the
+/// completion fence. Absent any project-gen fact, an entry would appear
+/// valid across project-shape changes.
+#[test]
+fn derived_semantic_query_records_project_generation_anchor_slice11() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        DepVersion, PrimitiveKind, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
+        SemanticQueryKey,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let members: Arc<[SemanticNodeId]> = Arc::from(vec![a, b].into_boxed_slice());
+
+    let key = SemanticQueryKey::NormalizeUnion {
+        members: members.clone(),
+    };
+    let _ = dispatch.execute(key.clone());
+    // After canonicalization, the on-memo key is sorted — fetch via the
+    // same sorted identity.
+    let mut sorted: Vec<SemanticNodeId> = members.iter().copied().collect();
+    sorted.sort_by_key(|id| id.0);
+    sorted.dedup();
+    let lookup_key = SemanticQueryKey::NormalizeUnion {
+        members: Arc::from(sorted.into_boxed_slice()),
+    };
+    let warm = host
+        .project_type_store()
+        .semantic_graph()
+        .get(&lookup_key)
+        .expect("warm entry must exist");
+    let mut has_project_gen = false;
+    for (_, dv) in warm.dep_signature.iter() {
+        if matches!(dv, DepVersion::ProjectGeneration(_)) {
+            has_project_gen = true;
+            break;
+        }
+    }
+    assert!(
+        has_project_gen,
+        "derived semantic query must anchor to the project generation"
+    );
+    // Sanity: the query returned a warm union (not a miss).
+    assert!(matches!(warm.value, QueryResult::Value(_)));
 }

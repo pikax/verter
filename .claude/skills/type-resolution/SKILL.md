@@ -9,12 +9,13 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 
 `VerterHost` owns one `ProjectTypeStore` accessed via `.project_type_store()`. The store holds:
 
-- `IndexedReadyDb` — the canonical post-parse artifact per `(canonical_id, whole_hash)`. Publishes alongside `ModuleFactsDb` during the transitional window (they share `shallow_state` / `import_routes` `Arc`s by construction).
+- `IndexedReadyDb` — the single canonical post-parse artifact per `(canonical_id, whole_hash)` (the former `ModuleFactsDb` has been retired).
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation with bitflag-based satisfaction (`find_satisfying`).
 - `RouteDb` — rehomed barrel/route surface cache, validated against live host facts.
-- `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface_in_view(...)` builds-or-fetches the surface; `resolve_owner_direct_import_in_view(owner, local_name)` is the single-call lookup that every direct-owner-import caller now uses.
-- `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`.
+- `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface(...)` builds-or-fetches the surface; `resolve_owner_direct_import(owner, local_name)` is the single-call lookup that every direct-owner-import caller now uses.
+- `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Every `SemanticQueryKey` variant dispatches through `ProjectSemanticDispatch::execute`. Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`.
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final payload cache for `get_component_meta`. Warm hits revalidate the recorded `DepSignature` via `HostFenceValidator` before returning.
+- `ResolvedNamedTypesDb` — host-owned resolved-named-type cache (folded in from the former `host_owned_resolved_named_types` DashMap).
 - `IntrinsicRegistry` — authoritative table for `= intrinsic` declarations. `SessionSolverHost::utility_source` consults it before the `BuiltinUtility` fallback.
 
 Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carrying the touched fact fragment. Callers merge those fragments into the active `CompletionFence`, which bounds retries at 3 and publishes `UnstableState` when mid-flight invalidation persists.
@@ -194,7 +195,7 @@ Cross-file type resolution for macros (`defineProps<T>()`, component-meta, etc.)
 - `symbols` (all locally-declared type symbols with raw body, type params, local deps, external deps)
 - `import_locals` / `import_targets` (import classification for closure)
 
-Populated once through the shared host ensure-path and cached in `ModuleFactsDb`. Invalidated when the file's whole-hash changes.
+Populated once through the shared host ensure-path and cached in `IndexedReadyDb`. Invalidated when the file's whole-hash changes.
 
 **ExternalTypeFrontier** (`external_type_frontier.rs`) is the single BFS engine for all cross-file type deepening. Level-by-level traversal:
 1. Seed with initial `(canonical_id, exported_name)` pairs
@@ -214,7 +215,7 @@ Populated once through the shared host ensure-path and cached in `ModuleFactsDb`
 
 When a budget trips, the system returns a structured `BudgetExceededFailure` with domain, limit, actual count, and context -- never silently normalizes.
 
-**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through `ModuleFactsDb` for per-file facts, `RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback for cold misses. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
+**Host integration**: `HostFrontierAdapter` (`host_resolve.rs`) bridges the frontier to the real `VerterHost`, resolving through `IndexedReadyDb` for per-file facts, `RouteDb`/`ImportedRootDb` for cross-file routing, and workspace fallback for cold misses. Route discovery runs exclusively through the frontier/final-target path; once the defining symbol is selected, the shared source-body evaluator materializes the final `ResolvedElements`.
 
 **Key files:**
 
@@ -222,7 +223,7 @@ When a budget trips, the system returns a structured `BudgetExceededFailure` wit
 | --- | --- |
 | `crates/verter_session/src/resolver_core/shallow_file_state.rs` | ShallowFileState, ExportTarget, ShallowTypeSymbol, ExternalSymbolRef, ResolutionBudgets, local_closure() |
 | `crates/verter_session/src/resolver_core/external_type_frontier.rs` | ExternalTypeFrontier, FrontierHost trait, PendingExternalSymbol, ResolvedSymbol, RouteKind |
-| `crates/verter_session/src/host_resolve.rs` | HostFrontierAdapter, resolve_external_type_from_loaded_files_in_view() |
+| `crates/verter_session/src/host_resolve.rs` | HostFrontierAdapter, resolve_external_type_from_loaded_files() |
 | `crates/verter_session/src/frontier_tests.rs` | Behavioral invariant tests (diamond dedup, barrel ordering, cycle termination, budget enforcement, etc.) |
 
 ## Native Type Solver
@@ -246,7 +247,7 @@ When a budget trips, the system returns a structured `BudgetExceededFailure` wit
 
 **Declaration context propagation:** `PreparedTypeDecl` and `PreparedValueDecl` carry a `name_resolution: FxHashMap<String, ResolvedRootIdentity>` field that maps bare names appearing in their bodies to resolved root identities. Built at preparation time from the defining file's local and import scope (local deps -> same-file identity, external deps -> resolved canonical_id via dep_edges). The solver's `SolveState` maintains `type_decl_context_stack` and `value_decl_context_stack`. When `resolve_prepared_ref` enters a declaration body, it pushes the prepared decl onto the stack. The `resolve_name_in_context` helper checks only the INNERMOST context (topmost stack entry) -- bare names in an imported type body resolve in that declaration's defining file scope, not in parent scopes.
 
-**Barrel re-export following:** `prepared_type_decl_in_view` and `prepared_value_decl_in_view` follow barrel re-exports when a symbol is not found in the target file's local prepared decl cache. For named re-exports (`export { Foo } from './bar'`), the source specifier is resolved and the lookup continues in the target file. For wildcard re-exports (`export * from './bar'`), all wildcard sources are tried in declaration order with depth-limited recursion (max 20 hops).
+**Barrel re-export following:** `prepared_type_decl` and `prepared_value_decl` follow barrel re-exports when a symbol is not found in the target file's local prepared decl cache. For named re-exports (`export { Foo } from './bar'`), the source specifier is resolved and the lookup continues in the target file. For wildcard re-exports (`export * from './bar'`), all wildcard sources are tried in declaration order with depth-limited recursion (max 20 hops).
 
 **Namespace import resolution:** `SessionSolverHost::root_identity` handles dotted names (`Ns.Member`) by splitting on the first dot, resolving the prefix through import bindings, and looking up the member in the resolved file's prepared decl cache.
 
@@ -254,7 +255,7 @@ When a budget trips, the system returns a structured `BudgetExceededFailure` wit
 
 **Operators implemented:** keyof, indexed access, conditionals (with distributive distribution + infer binding collection), mapped types (with key remapping via `as` clause), template literals (iterative cartesian expansion with 10k guard), typeof, built-in utilities (Partial, Required, Readonly, Pick, Omit, Record, Extract, Exclude, NonNullable, ReturnType, Parameters, ConstructorParameters, InstanceType, Awaited, Uppercase, Lowercase, Capitalize, Uncapitalize, NoInfer).
 
-**Parser-level `TypeResolutionContext`:** `TypeResolutionContext` (in `verter_parser::utils::oxc::vue::script::resolve_type`) no longer carries a per-context resolved-types cache or a recursion-depth `Cell`. Memoization is delegated to an injected `Arc<dyn NamedTypeCache + Send + Sync>` (trait in the public `verter_parser::utils::oxc::vue::resolve_type::cache_keys` module, alongside `ResolvedNamedTypeCacheKey` and `ResolvedTypeParamBindingCacheKey`). Recursion depth is tracked via a module-local `thread_local!` RAII guard; the `MAX_TYPE_RESOLUTION_DEPTH = 64` bound is enforced at each recursive call site. The host-owned cache (`VerterHost::host_owned_resolved_named_types`, an `Arc<DashMap<HostResolvedNamedTypeKey, Arc<ResolvedElements>>>`) survives across requests within one workspace generation; it is cleared by `clear_thread_local_parsed_eval_program_cache` (which runs on `bump_store_view_epoch`). A debug-mode validation feature `parser_cache_audit` (not yet enabled by default -- deep `PartialEq` impls on `ResolvedElements`/`ResolvedProp`/`ResolvedEmit` are in place to support it) will re-run the slow-path resolver on cache hits and assert equality to lock in cache-key sufficiency.
+**Parser-level `TypeResolutionContext`:** `TypeResolutionContext` (in `verter_parser::utils::oxc::vue::script::resolve_type`) no longer carries a per-context resolved-types cache or a recursion-depth `Cell`. Memoization is delegated to an injected `Arc<dyn NamedTypeCache + Send + Sync>` (trait in the public `verter_parser::utils::oxc::vue::resolve_type::cache_keys` module, alongside `ResolvedNamedTypeCacheKey` and `ResolvedTypeParamBindingCacheKey`). Recursion depth is tracked via a module-local `thread_local!` RAII guard; the `MAX_TYPE_RESOLUTION_DEPTH = 64` bound is enforced at each recursive call site. The host-owned cache (`ProjectTypeStore::resolved_named_types()`, a `ResolvedNamedTypesDb` wrapping `DashMap<HostResolvedNamedTypeKey, Arc<ResolvedElements>>`) survives across requests within one workspace generation; it is cleared by `clear_thread_local_parsed_eval_program_cache` (which runs on `bump_store_view_epoch`). A debug-mode validation feature `parser_cache_audit` (not yet enabled by default -- deep `PartialEq` impls on `ResolvedElements`/`ResolvedProp`/`ResolvedEmit` are in place to support it) will re-run the slow-path resolver on cache hits and assert equality to lock in cache-key sufficiency.
 
 **Key files:**
 

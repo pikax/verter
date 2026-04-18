@@ -325,7 +325,7 @@ pub struct PreparedDeclBundle {
     pub scope_value_names: FxHashSet<String>,
     /// Script-setup generic type parameter bindings (Vue SFC only).
     /// Empty for non-Vue files. Populated once during bundle materialization
-    /// so the solver hot path never calls `current_eval_state_in_view`.
+    /// so the solver hot path never calls `current_eval_state`.
     pub script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
 }
 

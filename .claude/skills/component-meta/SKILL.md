@@ -11,14 +11,14 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 
 Flow on each call:
 
-1. Look up `shallow_file_state_in_view(owner)` for the current whole-hash.
+1. Look up `shallow_file_state(owner)` for the current whole-hash.
 2. Build `ComponentMetaResultKey` with `component_meta_options_fingerprint(&ComponentMetaOptions::default())` — xxh3-128 over a manually-versioned encoding (schema + `compat` + `include_fallthrough`).
 3. Try `component_meta_results().get(&key)`. On hit, revalidate the entry's `DepSignature` via `HostFenceValidator::validate` (walks every `(canonical, DepVersion)` pair against the live host). Stable signatures return `Arc<ComponentMetaAnalysis>` with zero resolver work.
-4. On miss or stale signature, install a `RequestStoreView`, run the existing resolver, and publish the result with the owner's whole-hash + current project generation as the dep-signature.
+4. On miss or stale signature, run the existing resolver and publish the result with the owner's whole-hash + transitive dep facts + current project generation as the dep-signature.
 
 Cache eviction is automatic: `host.upsert(...)` calls `project_type_store.evict_canonical(owner)` which `invalidate_owner`s every key for the changed canonical. Workspace-shape shifts (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing all result entries.
 
-Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_direct_import_in_view`; no legacy `resolve_imported_type_root_in_view` caller survives for direct-owner resolution, though the legacy helper remains the authority for transitive chain walks inside route/barrel code.
+Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_direct_import`; no legacy `resolve_imported_type_root` caller survives for direct-owner resolution, though the helper remains the authority for transitive chain walks inside route/barrel code.
 
 ## Native Vs Compat (CRITICAL)
 

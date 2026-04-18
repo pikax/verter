@@ -537,7 +537,6 @@ fn extract_component_meta_from_resolved_with_evaluated(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> ComponentMetaAnalysis {
     let resolved_macros = resolver_component_meta_resolved_macros(
         resolved.snapshot.macros.as_ref(),
@@ -571,7 +570,6 @@ fn extract_component_meta_from_resolved_with_evaluated(
             resolved,
             None,
             &mut visiting,
-            store_view,
         ) {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
@@ -784,7 +782,7 @@ type ComponentSlots<T extends { slots?: Record<string, any> }> = {
 }
 
 export type ComponentConfig<T extends Record<string, any>, A> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   appConfig?: A
 }"#,
@@ -859,7 +857,7 @@ defineProps<ButtonProps>()
         };
         assert!(
             variants_shape.properties.iter().any(
-                |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+                |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
             ),
             "expected Button.variants to expose color, got {:?}",
             variants_member
@@ -939,9 +937,9 @@ export type ComponentConfig<
   K extends string,
   U extends 'ui' | 'ui.prose' = 'ui'
 > = {
-  AppConfig: ComponentAppConfig<T, A, K, U>
+  AppConfig: ComponentAppConfig<T, A, K, U>,
   variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
-  slots: ComponentSlots<T>
+  slots: ComponentSlots<T>,
   ui: ComponentUI<T>
 }"#
                     .to_string(),
@@ -1217,14 +1215,10 @@ import Link from './Link.vue'
         )
         .unwrap();
 
-        let store_view = host.host().owned_or_ambient_request_view();
+        let _store_view = host.host().resolver_store_view();
         let resolved = host
             .host()
-            .resolve_component_meta_in_view(
-                "/src/Button.vue",
-                crate::types::ResolverMode::Expanded,
-                &store_view,
-            )
+            .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
             .expect("button resolved state should exist for the captured store view");
 
         host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")
@@ -1236,7 +1230,6 @@ import Link from './Link.vue'
             &resolved,
             resolved.evaluated_types.as_ref(),
             true,
-            Some(&*store_view),
         );
 
         assert!(

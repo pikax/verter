@@ -1976,7 +1976,7 @@ export interface Props {
         }],
     );
 
-    let view = host.owned_or_ambient_request_view();
+    let _view = host.resolver_store_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -1985,12 +1985,11 @@ export interface Props {
     let mut companion_plans = super::FrontierCompanionPlans::default();
 
     let (frontier, target, _had_route_cycle) = host
-        .run_external_type_frontier_closure_in_view(
+        .run_external_type_frontier_closure(
             "/src/barrel.ts",
             "PublicProps",
             &mut requested_routes,
             &mut companion_plans,
-            Some(&*view),
         )
         .expect("frontier closure should complete");
     assert_eq!(
@@ -2008,16 +2007,14 @@ export interface Props {
 
     let adapter = super::HostFrontierAdapter {
         host: &host,
-        store_view: Some(&*view),
         materialize_symbols: false,
         route_exports_only: true,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
     };
     let mut inspected_symbols = rustc_hash::FxHashSet::default();
-    let seeds = host.collect_frontier_companion_seeds_in_view(
+    let seeds = host.collect_frontier_companion_seeds(
         &frontier,
         &adapter,
-        Some(&*view),
         &mut inspected_symbols,
         &mut requested_routes,
         &mut companion_plans,
@@ -2067,7 +2064,7 @@ import type { Leaf } from './leaf'
 import type { UnusedLeaf } from './unused-leaf'
 
 export interface AlphaProps {
-  label: Leaf
+  label: Leaf,
   other: UnusedLeaf
 }
 "#,
@@ -2135,7 +2132,7 @@ export interface Props {
         }],
     );
 
-    let view = host.owned_or_ambient_request_view();
+    let _view = host.resolver_store_view();
     let mut requested_routes = super::FrontierRequestedRoutes::default();
     requested_routes.insert(
         ("/src/barrel.ts".to_string(), "PublicProps".to_string()),
@@ -2144,12 +2141,11 @@ export interface Props {
     let mut companion_plans = super::FrontierCompanionPlans::default();
 
     let (frontier, target, _had_route_cycle) = host
-        .run_external_type_frontier_closure_in_view(
+        .run_external_type_frontier_closure(
             "/src/barrel.ts",
             "PublicProps",
             &mut requested_routes,
             &mut companion_plans,
-            Some(&*view),
         )
         .expect("frontier closure should complete");
 
@@ -2419,97 +2415,6 @@ defineProps<Props>()
     assert!(
         host.provenance().snapshot().resolver_cycle_detections >= 1,
         "cycle detection counter should increment for cyclic external type traversal"
-    );
-}
-
-#[test]
-fn stale_store_view_keeps_external_type_resolution_on_captured_import_routes() {
-    let host = strict_host();
-
-    upsert_vue(
-        &host,
-        "/src/Consumer.vue",
-        r#"<script setup lang="ts">
-import type { Props } from './types'
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-    );
-    upsert_non_sfc(&host, "/src/types.ts", "export { Props } from './dep'\n");
-    upsert_non_sfc(
-        &host,
-        "/src/old.ts",
-        "export interface Props { old: string }\n",
-    );
-    upsert_non_sfc(
-        &host,
-        "/src/new.ts",
-        "export interface Props { fresh: string }\n",
-    );
-
-    host.set_import_dependencies(
-        "/src/Consumer.vue",
-        vec![crate::DependencyResolution {
-            specifier: "./types".to_string(),
-            resolved_canonical_id: Some("/src/types.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./dep".to_string(),
-            resolved_canonical_id: Some("/src/old.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let store_view = host.owned_or_ambient_request_view();
-
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![crate::DependencyResolution {
-            specifier: "./dep".to_string(),
-            resolved_canonical_id: Some("/src/new.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let mut tracked_deps = std::collections::BTreeSet::new();
-    let mut resolution_deps = std::collections::BTreeSet::new();
-    let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
-    let mut visiting = rustc_hash::FxHashSet::default();
-    let resolved = host
-        .resolve_external_type_from_loaded_files_in_view(
-            "/src/Consumer.vue",
-            "./types",
-            "Props",
-            &mut tracked_deps,
-            &mut resolution_deps,
-            &mut cache,
-            &mut visiting,
-            true,
-            verter_workspace::ResolveRequestKind::TypeImport,
-            true,
-            None,
-            0,
-            Some(&*store_view),
-        )
-        .expect("resolution should complete")
-        .expect("captured view should still resolve the original Props route");
-
-    let names: Vec<_> = resolved
-        .props
-        .iter()
-        .filter_map(|prop| prop.key_name.as_deref())
-        .collect();
-    assert!(
-        names.contains(&"old"),
-        "captured store view must keep the original external type route: {names:?}"
-    );
-    assert!(
-        !names.contains(&"fresh"),
-        "captured store view must not switch to the newer live route: {names:?}"
     );
 }
 
@@ -3009,14 +2914,14 @@ defineProps<ButtonProps>()
 <template><div /></template>"#,
     );
 
-    let view = host.owned_or_ambient_request_view();
+    let _view = host.resolver_store_view();
     let mut tracked_deps = std::collections::BTreeSet::new();
     let mut resolution_deps = std::collections::BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = rustc_hash::FxHashSet::default();
 
     let link_props = host
-        .resolve_external_type_from_loaded_files_in_view(
+        .resolve_external_type_from_loaded_files(
             "/workspace/components/Button.vue",
             "../types",
             "LinkProps",
@@ -3029,7 +2934,6 @@ defineProps<ButtonProps>()
             true,
             None,
             0,
-            Some(&*view),
         )
         .expect("LinkProps resolution should complete")
         .expect("LinkProps should resolve through the cyclic barrel");
@@ -3051,7 +2955,7 @@ defineProps<ButtonProps>()
     );
 
     let use_icons = host
-        .resolve_external_type_from_loaded_files_in_view(
+        .resolve_external_type_from_loaded_files(
             "/workspace/components/Button.vue",
             "../composables/useComponentIcons",
             "UseComponentIconsProps",
@@ -3064,7 +2968,6 @@ defineProps<ButtonProps>()
             true,
             None,
             0,
-            Some(&*view),
         )
         .expect("UseComponentIconsProps resolution should complete")
         .expect("UseComponentIconsProps should resolve through the cyclic barrel");
@@ -3738,12 +3641,8 @@ fn shallow_type_import_route_finds_loaded_overlay_relative_targets() {
         "export interface ComponentConfig { label: string }",
     );
 
-    let store_view = host.owned_or_ambient_request_view();
-    let result = host.resolve_type_dependency_canonical_shallow_in_view(
-        "/src/Button.vue",
-        "./tv",
-        Some(&*store_view),
-    );
+    let _store_view = host.resolver_store_view();
+    let result = host.resolve_type_dependency_canonical_shallow("/src/Button.vue", "./tv");
 
     assert_eq!(
         result,
@@ -3897,12 +3796,8 @@ defineProps<FancyProps>()
         }],
     );
 
-    let view = host.owned_or_ambient_request_view();
-    let resolved = host.resolve_type_dependency_canonical_in_view(
-        "/workspace/src/App.vue",
-        "fancy",
-        Some(&*view),
-    );
+    let _view = host.resolver_store_view();
+    let resolved = host.resolve_type_dependency_canonical("/workspace/src/App.vue", "fancy");
 
     assert_eq!(
         resolved.as_deref(),
@@ -3979,18 +3874,14 @@ defineProps<FancyProps>()
         }],
     );
 
-    let view = host.owned_or_ambient_request_view();
+    let _view = host.resolver_store_view();
     let _ = host
-        .ensure_module_facts_in_view(
-            "/workspace/node_modules/fancy/dist/index.d.ts",
-            Some(&*view),
-        )
+        .ensure_indexed_ready("/workspace/node_modules/fancy/dist/index.d.ts")
         .expect("package declaration entrypoint should materialize module facts");
 
-    let resolved = host.resolve_type_dependency_canonical_in_view(
+    let resolved = host.resolve_type_dependency_canonical(
         "/workspace/node_modules/fancy/dist/index.d.ts",
         "./inner.js",
-        Some(&*view),
     );
 
     assert_eq!(
@@ -4090,13 +3981,13 @@ fn type_import_reexport_prefers_declaration_companion_over_runtime_js() {
             .collect::<Vec<_>>()
     );
 
-    // In the new ModuleFacts DB, ensure_module_facts_in_view normalizes .js → .d.ts
+    // In the new IndexedReady DB, ensure_indexed_ready normalizes .js → .d.ts
     // companion and eagerly materializes. Verify via direct DB lookup that the
     // .js entry itself was not cached (only the .d.ts companion is).
     let declaration_entry = host
-        .ensure_module_facts_in_view("/workspace/node_modules/fancy/dist/index3.d.ts", None)
+        .ensure_indexed_ready("/workspace/node_modules/fancy/dist/index3.d.ts")
         .expect("external type resolution should cache the declaration companion entry");
-    // external_type_analysis is Arc (non-optional) in ModuleFacts; verify it has content.
+    // external_type_analysis is Arc (non-optional) in IndexedReady; verify it has content.
     assert!(
         declaration_entry
             .external_type_analysis

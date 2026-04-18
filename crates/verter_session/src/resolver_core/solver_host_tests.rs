@@ -133,7 +133,7 @@ fn seed_ts_file_with_routes(
         Some(&env),
     ));
 
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         canonical_id,
         Hash16::default(),
         Arc::<str>::from(source),
@@ -158,7 +158,7 @@ fn noop_host_returns_none() {
 #[test]
 fn session_host_without_env() {
     let host = VerterHost::new_standalone(Default::default());
-    let solver_host = SessionSolverHost::new(&host, None);
+    let solver_host = SessionSolverHost::new(&host);
     let id = ResolvedRootIdentity::new("/t.ts", "T");
     assert!(solver_host.resolve_prepared_type_decl(&id).is_none());
 }
@@ -180,7 +180,7 @@ export interface Props { child: Inner }
         Arc::clone(&analysis),
         Some(&env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/decl.ts",
         Hash16::default(),
         Arc::<str>::from(source),
@@ -201,7 +201,7 @@ export interface Props { child: Inner }
         )]),
     );
 
-    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/decl.ts");
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, "/decl.ts");
     let id = ResolvedRootIdentity::new("/decl.ts", "Props");
     let decl = solver_host
         .resolve_prepared_type_decl(&id)
@@ -234,7 +234,7 @@ export const defaults: Props = {} as Props
         Arc::clone(&analysis),
         Some(&env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/decl.ts",
         Hash16::default(),
         Arc::<str>::from(source),
@@ -255,7 +255,7 @@ export const defaults: Props = {} as Props
         )]),
     );
 
-    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/decl.ts");
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, "/decl.ts");
 
     let props = solver_host
         .root_identity("", "Props")
@@ -291,7 +291,7 @@ fn explicit_canonical_root_identity_resolves_import_bindings_from_shallow_state(
         Arc::clone(&helper_analysis),
         Some(&helper_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/helper.d.ts",
         Hash16::default(),
         Arc::<str>::from(helper_source),
@@ -317,7 +317,7 @@ export type FancyProps = Prettify<{ open: boolean }>
         Some(&decl_env),
     ));
 
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/decl.d.ts",
         Hash16::default(),
         Arc::<str>::from(decl_source),
@@ -338,7 +338,7 @@ export type FancyProps = Prettify<{ open: boolean }>
         )]),
     );
 
-    let solver_host = SessionSolverHost::new(&host, None);
+    let solver_host = SessionSolverHost::new(&host);
     let prettify = solver_host.root_identity("/decl.d.ts", "Prettify").expect(
         "explicit canonical lookups should resolve import bindings from cached shallow state",
     );
@@ -364,7 +364,7 @@ fn explicit_canonical_root_identity_does_not_follow_uncached_import_bindings() {
         Arc::clone(&helper_analysis),
         Some(&helper_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/helper.d.ts",
         Hash16::default(),
         Arc::<str>::from(helper_source),
@@ -390,7 +390,7 @@ export type FancyProps = Prettify<{ open: boolean }>
         Some(&decl_env),
     ));
 
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/decl.d.ts",
         Hash16::default(),
         Arc::<str>::from(decl_source),
@@ -404,7 +404,7 @@ export type FancyProps = Prettify<{ open: boolean }>
         FxHashMap::default(),
     );
 
-    let solver_host = SessionSolverHost::new(&host, None);
+    let solver_host = SessionSolverHost::new(&host);
     assert!(
         solver_host
             .root_identity("/decl.d.ts", "Prettify")
@@ -436,22 +436,21 @@ export type UsesGlobals<T> =
         "utils fixture should load into the host",
     );
 
-    let store_view = host.owned_or_ambient_request_view();
+    let _store_view = host.resolver_store_view();
     let bundle = host
-        .prepared_decl_bundle_in_view("/workspace/src/utils.ts", Some(&*store_view))
+        .prepared_decl_bundle("/workspace/src/utils.ts")
         .expect("warming the prepared bundle should succeed");
     assert!(
         bundle.prepared_type_decls.contains_key("UsesGlobals"),
         "fixture should publish the prepared type declaration before the root lookup test",
     );
 
-    host.resolver
-        .runtime
-        .module_facts
-        .evict("/workspace/src/utils.ts");
+    host.project_type_store()
+        .indexed()
+        .remove("/workspace/src/utils.ts");
     ws.reset_reads();
 
-    let solver_host = SessionSolverHost::new(&host, Some(&*store_view));
+    let solver_host = SessionSolverHost::new(&host);
     for builtin in [
         "Date", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "Promise", "Error",
     ] {
@@ -487,7 +486,7 @@ fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         None,
     ));
 
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/index.ts",
         Hash16::default(),
         Arc::<str>::from(barrel_source),
@@ -516,7 +515,7 @@ fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         Arc::clone(&props_analysis),
         Some(&props_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/props.ts",
         Hash16::default(),
         Arc::<str>::from(props_source),
@@ -530,19 +529,19 @@ fn prepared_type_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         FxHashMap::default(),
     );
 
-    let root = host.resolve_imported_type_root_in_view("/types/index.ts", "Props", None);
+    let root = host.resolve_imported_type_root("/types/index.ts", "Props");
     assert_eq!(
         root,
         ("/types/props.ts".to_string(), "Props".to_string()),
         "barrel root resolution should route to the defining declaration target",
     );
     assert!(
-        host.prepared_type_decl_in_view("/types/props.ts", "Props", None)
+        host.prepared_type_decl("/types/props.ts", "Props")
             .is_some(),
         "the defining prepared decl should be available directly once the root resolves",
     );
 
-    let solver_host = SessionSolverHost::new(&host, None);
+    let solver_host = SessionSolverHost::new(&host);
     let prepared = solver_host
         .resolve_prepared_type_decl(&ResolvedRootIdentity::new("/types/index.ts", "Props"))
         .expect("barrel lookup should route to the defining prepared type decl");
@@ -566,7 +565,7 @@ fn declaration_scope_root_identity_routes_barrel_import_bindings_to_final_target
         Arc::clone(&barrel_analysis),
         None,
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/index.ts",
         Hash16::default(),
         Arc::<str>::from(barrel_source),
@@ -595,7 +594,7 @@ fn declaration_scope_root_identity_routes_barrel_import_bindings_to_final_target
         Arc::clone(&props_analysis),
         Some(&props_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/props.ts",
         Hash16::default(),
         Arc::<str>::from(props_source),
@@ -622,7 +621,7 @@ export interface OwnerProps {
         Arc::clone(&owner_analysis),
         Some(&owner_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/owner.ts",
         Hash16::default(),
         Arc::<str>::from(owner_source),
@@ -643,7 +642,7 @@ export interface OwnerProps {
         )]),
     );
 
-    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/owner.ts");
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, "/owner.ts");
     let root = solver_host
         .root_identity("", "Props")
         .expect("barrel import binding should resolve in declaration scope");
@@ -679,7 +678,7 @@ fn prepared_value_decl_lookup_routes_barrel_targets_before_cache_lookup() {
         }],
     );
 
-    let solver_host = SessionSolverHost::new(&host, None);
+    let solver_host = SessionSolverHost::new(&host);
     let prepared = solver_host
         .resolve_prepared_value_decl(&ResolvedRootIdentity::new("/theme/index.ts", "theme"))
         .expect("barrel lookup should route to the defining prepared value decl");
@@ -722,7 +721,7 @@ export type ComponentConfig<T extends { slots?: Record<string, any> }> = {
         Arc::clone(&config_analysis),
         Some(&config_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/config.ts",
         Hash16::default(),
         Arc::<str>::from(config_source),
@@ -747,7 +746,7 @@ export type CheckboxGroup = ComponentConfig<Theme>
         Arc::clone(&consumer_analysis),
         Some(&consumer_env),
     ));
-    host.seed_module_facts_for_test(
+    host.seed_indexed_ready_for_test(
         "/types/consumer.ts",
         Hash16::default(),
         Arc::<str>::from(consumer_source),
@@ -768,7 +767,7 @@ export type CheckboxGroup = ComponentConfig<Theme>
         )]),
     );
 
-    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/types/consumer.ts");
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, "/types/consumer.ts");
 
     let (solved, trace) = solve_type_with_trace(
         &TypeExpr::IndexedAccess {
@@ -795,7 +794,7 @@ export type CheckboxGroup = ComponentConfig<Theme>
     );
     assert!(matches!(
         item.ty,
-        TypeExpr::Primitive(PrimitiveName::String)
+        TypeExpr::Primitive(PrimitiveName::String),
     ));
     assert!(
         !trace.iter().any(|identity| {
@@ -841,8 +840,8 @@ export interface Container { child: Props }"#;
         )]),
     );
 
-    let scope_a = SessionSolverHost::with_declaration_scope(&host, None, "/file_a.ts");
-    let scope_b = SessionSolverHost::with_declaration_scope(&host, None, "/file_b.ts");
+    let scope_a = SessionSolverHost::with_declaration_scope(&host, "/file_a.ts");
+    let scope_b = SessionSolverHost::with_declaration_scope(&host, "/file_b.ts");
 
     let resolved_a = scope_a
         .root_identity("", "Props")
@@ -871,8 +870,8 @@ fn miss_in_one_scope_does_not_poison_another() {
         r#"export interface Theme { color: string }"#,
     );
 
-    let scope_a = SessionSolverHost::with_declaration_scope(&host, None, "/file_a.ts");
-    let scope_b = SessionSolverHost::with_declaration_scope(&host, None, "/file_b.ts");
+    let scope_a = SessionSolverHost::with_declaration_scope(&host, "/file_a.ts");
+    let scope_b = SessionSolverHost::with_declaration_scope(&host, "/file_b.ts");
 
     assert!(
         scope_a.root_identity("/file_a.ts", "Theme").is_none(),
@@ -932,8 +931,8 @@ export interface WrapB { child: Ns.Member }"#;
         )]),
     );
 
-    let scope_a = SessionSolverHost::with_declaration_scope(&host, None, "/file_a.ts");
-    let scope_b = SessionSolverHost::with_declaration_scope(&host, None, "/file_b.ts");
+    let scope_a = SessionSolverHost::with_declaration_scope(&host, "/file_a.ts");
+    let scope_b = SessionSolverHost::with_declaration_scope(&host, "/file_b.ts");
 
     let resolved_a = scope_a
         .root_identity("", "Ns.Member")
@@ -969,7 +968,7 @@ export interface Props { value: Dep }"#;
     );
 
     let bundle1 = host
-        .prepared_decl_bundle_in_view("/owner.ts", None)
+        .prepared_decl_bundle("/owner.ts")
         .expect("bundle should materialize");
     assert!(
         !bundle1.dep_edges.is_empty(),
@@ -981,7 +980,7 @@ export interface Props { value: Dep }"#;
     );
 
     let bundle2 = host
-        .prepared_decl_bundle_in_view("/owner.ts", None)
+        .prepared_decl_bundle("/owner.ts")
         .expect("bundle should hit cache");
     assert!(
         Arc::ptr_eq(&bundle1, &bundle2),
@@ -1015,7 +1014,7 @@ export interface Props { child: Inner }"#;
         )]),
     );
 
-    let solver_host = SessionSolverHost::with_declaration_scope(&host, None, "/imported.ts");
+    let solver_host = SessionSolverHost::with_declaration_scope(&host, "/imported.ts");
 
     let props = solver_host
         .root_identity("", "Props")
@@ -1029,7 +1028,7 @@ export interface Props { child: Inner }"#;
     assert_eq!(inner.symbol_name, "Inner");
 
     let bundle = host
-        .prepared_decl_bundle_in_view("/imported.ts", None)
+        .prepared_decl_bundle("/imported.ts")
         .expect("bundle should exist");
     let props_decl = bundle
         .prepared_type_decls
@@ -1074,7 +1073,7 @@ export interface Props { a: A, b: B }"#;
     );
 
     let bundle = host
-        .prepared_decl_bundle_in_view("/component.ts", None)
+        .prepared_decl_bundle("/component.ts")
         .expect("bundle should materialize");
 
     assert_eq!(

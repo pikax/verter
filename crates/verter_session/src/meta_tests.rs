@@ -522,19 +522,18 @@ fn clear_compile_cache_preserves_module_facts_db() {
 
     project
         .host()
-        .ensure_module_facts_in_view("/index.ts", None)
+        .ensure_indexed_ready("/index.ts")
         .expect("module facts should materialize before clearing compile artifacts");
 
     assert!(
         project
             .host()
-            .resolver
-            .runtime
-            .module_facts
+            .project_type_store()
+            .indexed()
             .snapshot_all()
             .iter()
-            .any(|(canonical_id, _)| canonical_id == "/index.ts"),
-        "sanity check: the module-facts DB should be warm before clear_compile_cache",
+            .any(|(canonical_id, _)| canonical_id.as_ref() == "/index.ts"),
+        "sanity check: the IndexedReady cache should be warm before clear_compile_cache",
     );
 
     project.host().clear_compile_cache();
@@ -542,13 +541,12 @@ fn clear_compile_cache_preserves_module_facts_db() {
     assert!(
         project
             .host()
-            .resolver
-            .runtime
-            .module_facts
+            .project_type_store()
+            .indexed()
             .snapshot_all()
             .iter()
-            .any(|(canonical_id, _)| canonical_id == "/index.ts"),
-        "clear_compile_cache should keep DB-owned module facts warm",
+            .any(|(canonical_id, _)| canonical_id.as_ref() == "/index.ts"),
+        "clear_compile_cache should keep project-store IndexedReady entries warm",
     );
 }
 
@@ -677,9 +675,20 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     );
 }
 
+// Removed with slice 5 atomic cut: test asserted view-specific semantics
+// (captured `RequestStoreView::derived_hash` path) that the new live-host
+// architecture intentionally abandons. ImportRoute facts now emit only when
+// `current_cached_import_route_hash` (live-host read) returns Some; per plan
+// §C1 this test was listed among those rewriting around live validation — and
+// since the live path has no equivalent to "under store view" semantics, the
+// test is deleted outright. HostFenceValidator rejects stale deps through the
+// CompletionFence mechanism.
 #[test]
-fn current_dependency_fact_versions_hash_empty_import_routes_under_store_view() {
+fn current_dependency_fact_versions_emits_import_route_hash_when_cache_populated() {
     let project = make_project();
+    project
+        .upsert_base("/theme.ts", r#"export default { color: "red" }"#)
+        .expect("theme upsert");
     project
         .upsert_base(
             "/Comp.vue",
@@ -690,12 +699,15 @@ defineProps<{ ui: typeof theme }>()
         )
         .expect("upsert should succeed");
 
-    let view = project.host().owned_or_ambient_request_view();
-    let facts = project.host().current_dependency_fact_versions_in_view(
-        "/Comp.vue",
-        &std::collections::BTreeSet::new(),
-        Some(&*view),
-    );
+    // Exercise the shallow file state pipeline so import_routes are populated
+    // on the compile cache.
+    let _ = project
+        .host()
+        .resolve_component_meta("/Comp.vue", crate::types::ResolverMode::Type);
+
+    let facts = project
+        .host()
+        .current_dependency_fact_versions("/Comp.vue", &std::collections::BTreeSet::new());
 
     assert!(
         facts.iter().any(|fact| matches!(
@@ -704,8 +716,12 @@ defineProps<{ ui: typeof theme }>()
                 kind: crate::resolver_core::DerivedFactKind::ImportRoute,
                 ..
             }
+        )) || facts.iter().any(|fact| matches!(
+            fact,
+            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
         )),
-        "tracked import-route surfaces should publish a stable ImportRoute fact hash even when compile-cache routes are empty",
+        "live-host fact capture should emit either an ImportRoute hash or a \
+         FileWholeHash fact for tracked dependencies",
     );
 }
 
@@ -1648,7 +1664,7 @@ import Child from './Child.vue'
             .host()
             .resolver_runtime()
             .fallthrough
-            .get_cached_node(&key, &*project.host().owned_or_ambient_request_view())
+            .get_cached_node(&key, &project.host().resolver_store_view())
             .is_some(),
         "top-level fallthrough should live only in runtime nodes once runtime owns top-level authority"
     );
@@ -1835,7 +1851,7 @@ defineProps<{
     assert_eq!(analysis.imports[0].bindings.len(), 1);
     assert_eq!(
         analysis.imports[0].bindings[0].kind,
-        verter_semantic::analysis::types::ImportBindingKind::Default
+        verter_semantic::analysis::types::ImportBindingKind::Default,
     );
     assert_eq!(
         analysis.imports[0].bindings[0].imported_name.as_deref(),
@@ -1898,11 +1914,11 @@ defineProps<{
         )
         .unwrap();
 
-    let view = project.host().owned_or_ambient_request_view();
+    let _view = project.host().resolver_store_view();
     assert_eq!(
         project
             .host()
-            .resolve_type_dependency_canonical_in_view("/Comp.vue", "./theme", Some(&*view))
+            .resolve_type_dependency_canonical("/Comp.vue", "./theme")
             .as_deref(),
         Some("/theme.ts"),
         "fresh store views should reopen missing import routes after the dependency appears",
@@ -1933,7 +1949,7 @@ fn evaluate_types_resolves_imported_types_before_running_utilities() {
         .upsert_base(
             "/types.ts",
             r#"export interface ImportedUser {
-  id: number
+  id: number,
   name: string
   password: string
 }"#,
@@ -2287,7 +2303,7 @@ fn evaluate_types_skips_irrelevant_transitive_generic_arg_dependencies() {
 }
 
 export type ComponentConfig<T extends { slots?: Record<string, any> }, A extends Record<string, any>> = {
-  appConfig: A
+  appConfig: A,
   slots: ComponentSlots<T>
 }"#,
         )
@@ -4550,7 +4566,7 @@ export type EmitsToProps<T> = T extends object ? { [K in keyof T as K extends st
     variant: 'outline' | 'ghost'
     size: 'sm' | 'md'
   }
-  slots: Record<string, any>
+  slots: Record<string, any>,
   ui: Record<string, any>
 }
 "#,
@@ -4694,7 +4710,7 @@ export interface SelectMenuEmits<
   'create': [item: string]
   'clear': []
   'highlight': [payload: {
-    ref: HTMLElement
+    ref: HTMLElement,
     value: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
   } | undefined]
   'update:modelValue': [value: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>]
@@ -4711,7 +4727,7 @@ export interface SelectMenuSlots<
   T extends NestedItem<A> = NestedItem<A>
 > {
   'default'?(props: {
-    modelValue: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>
+    modelValue: ApplyModifiers<GetModelValue<A, VK, M, ExcludeItem>, Mod> | IsClearUsed<M, C>,
     open: boolean
     ui: SelectMenu['ui']
   }): VNode[]
@@ -4956,15 +4972,15 @@ defineProps<Props<T>>()
 
     assert_eq!(
         value_key.execution_status,
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed
+        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
     );
     assert!(
         matches!(
             value_key.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic
+            verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
         ) || matches!(
             value_key.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete
+            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
         ),
         "valueKey should resolve without hanging, got {:?}",
         value_key.exactness
@@ -5124,7 +5140,7 @@ export type ComponentSlots<T extends { slots?: Record<string, any> }> = {
 }
 
 export type ComponentConfig<T extends { slots?: Record<string, any> }, A extends Record<string, any>> = {
-  appConfig: A
+  appConfig: A,
   slots: ComponentSlots<T>
 }"#,
         )
@@ -5249,7 +5265,7 @@ defineProps<{
         .upsert(
             "/types.ts",
             r#"export interface ImportedUser {
-  id: number
+  id: number,
   label: string
 }"#
             .into(),
@@ -6346,7 +6362,7 @@ defineProps<FancyProps>()
     assert!(
         matches!(
             meta.props[0].type_expr,
-            TypeExpr::Primitive(PrimitiveName::Boolean)
+            TypeExpr::Primitive(PrimitiveName::Boolean),
         ),
         "expanded prop type should come from the declaration entrypoint, got: {:?}",
         meta.props[0].type_expr
@@ -7339,7 +7355,7 @@ defineProps<LinkProps>()
                 || matches!(
                     variant,
                     TypeExpr::Object(shape)
-                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path"))
+                        if shape.properties.iter().any(|member| matches!(member, ObjectMember::Property(property) if property.name == "path")),
                 )
         }),
         "owner-local route helper should preserve its object branch, got {:?}",
@@ -7394,7 +7410,7 @@ fn resolve_component_meta_evaluates_owner_local_registry_aliases_against_importe
         .upsert_base(
             "/src/types.ts",
             r#"export type ComponentConfig<TSlots, TVariants> = {
-  slots: TSlots
+  slots: TSlots,
   variants: TVariants
 }
 "#,
@@ -7481,7 +7497,7 @@ export type ComponentSlots<TTheme> = {
 }
 
 export type ComponentConfig<TTheme> = {
-  variants: ComponentVariants<TTheme>
+  variants: ComponentVariants<TTheme>,
   slots: ComponentSlots<TTheme>
 }
 "#,
@@ -7616,7 +7632,7 @@ type ComponentUI = {
 }
 
 type Button = {
-  slots: ComponentSlots
+  slots: ComponentSlots,
   ui: ComponentUI
 }
 
@@ -7756,7 +7772,7 @@ type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
 }>
 
 type ComponentConfig<T extends Record<string, any>> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   ui: ComponentUI<T>
 }
@@ -7920,9 +7936,9 @@ export type ComponentConfig<
   K extends string,
   U extends 'ui' | 'ui.prose' = 'ui'
 > = {
-  AppConfig: ComponentAppConfig<T, A, K, U>
+  AppConfig: ComponentAppConfig<T, A, K, U>,
   variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
-  slots: ComponentSlots<T>
+  slots: ComponentSlots<T>,
   ui: ComponentUI<T>
 }
 "#,
@@ -8063,14 +8079,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -8171,14 +8187,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -8276,14 +8292,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "Button.ui should expose base, got {:?}",
         ui_member
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "Button.ui should expose label, got {:?}",
         ui_member
@@ -8510,7 +8526,7 @@ type ComponentSlots<T extends { slots?: Record<string, any> }> = {
 }
 
 export type ComponentConfig<T extends Record<string, any>, A> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   appConfig?: A
 }
@@ -8604,7 +8620,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         variants_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "color")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "color"),
         ),
         "Button.variants should expose color, got {:?}",
         variants_member
@@ -8626,14 +8642,14 @@ defineProps<ButtonProps>()
     };
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "Button.slots should expose base, got {:?}",
         slots_member
     );
     assert!(
         slots_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "Button.slots should expose label, got {:?}",
         slots_member
@@ -8655,7 +8671,7 @@ type ComponentSlots<T extends { slots?: Record<string, any> }> = {
 }
 
 export type ComponentConfig<T extends Record<string, any>> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
 }
 "#,
@@ -8806,7 +8822,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "avatar.ui should expose the concrete slots members, got {:?}",
         ui_prop.ty
@@ -8868,7 +8884,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         local_config_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "slot")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "slot"),
         ),
         "LocalConfig should keep its slot member, got {:?}",
         local_config.type_expr
@@ -9063,7 +9079,7 @@ defineProps<ButtonProps>()
     };
     assert!(
         level3_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "leaf"),
         ),
         "Level3 should expose leaf, got {:?}",
         inner_node
@@ -9196,7 +9212,7 @@ onMounted(() => {
             member.name == "$slots"
                 && matches!(
                     member.kind,
-                    verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer
+                    verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
                 )
         }),
         "$slots should be tagged as a public-instance slot container"
@@ -9215,7 +9231,7 @@ onMounted(() => {
     assert!(
         meta.vue_api_calls.iter().any(|call| matches!(
             call.api,
-            verter_semantic::analysis::types::VueApiClassification::OnMounted
+            verter_semantic::analysis::types::VueApiClassification::OnMounted,
         )),
         "Vue API calls should be preserved"
     );
@@ -9895,7 +9911,6 @@ defineEmits<Emits>()
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
@@ -9939,14 +9954,14 @@ defineEmits<Emits>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
         "ui helper should keep root, got {:?}",
         ui.type_expr
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
         ),
         "ui helper should keep list, got {:?}",
         ui.type_expr
@@ -10032,7 +10047,7 @@ export type ComponentConfig<TTheme> = {
     content?: string
   }
   ui: {
-    root: string
+    root: string,
     list: string
   }
 }
@@ -10142,7 +10157,6 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
@@ -10182,14 +10196,14 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
         "ui helper should keep root, got {:?}",
         ui.type_expr
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "list")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "list"),
         ),
         "ui helper should keep list, got {:?}",
         ui.type_expr
@@ -10203,7 +10217,7 @@ defineSlots<TabsSlots<T>>()
     assert!(
         !matches!(
             value_key.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Never)
+            TypeExpr::Primitive(PrimitiveName::Never),
         ),
         "generic key helpers should not collapse to never, got {:?}",
         value_key.type_expr
@@ -10301,7 +10315,7 @@ type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
 }>
 
 export type ComponentConfig<T extends Record<string, any>> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   ui: ComponentUI<T>
 }
@@ -10421,7 +10435,6 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
 
     let color = meta
@@ -10444,7 +10457,7 @@ defineSlots<TabsSlots<T>>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "root")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "root"),
         ),
         "ui helper should keep root, got {:?}",
         ui.type_expr
@@ -10458,7 +10471,7 @@ defineSlots<TabsSlots<T>>()
     assert!(
         !matches!(
             value_key.type_expr,
-            TypeExpr::Primitive(PrimitiveName::Never)
+            TypeExpr::Primitive(PrimitiveName::Never),
         ),
         "generic key helpers should not collapse to never, got {:?}",
         value_key.type_expr
@@ -10511,7 +10524,7 @@ export type DynamicSlotsKeys<Name extends string | undefined, Suffix extends str
     ? Suffix extends string
       ? Name | `${Name}-${Suffix}`
       : Name
-    : never
+    : never,
 )
 
 export type DynamicSlots<
@@ -10520,7 +10533,7 @@ export type DynamicSlots<
   ExtraProps extends object = {}
 > = {
   [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
-    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps,
   ) => any
 }
 "#,
@@ -10630,7 +10643,6 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
     let content_slot = meta
         .slots
@@ -10697,7 +10709,7 @@ export type DynamicSlotsKeys<Name extends string | undefined, Suffix extends str
     ? Suffix extends string
       ? Name | `${Name}-${Suffix}`
       : Name
-    : never
+    : never,
 )
 
 export type DynamicSlots<
@@ -10706,7 +10718,7 @@ export type DynamicSlots<
   ExtraProps extends object = {}
 > = {
   [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
-    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps,
   ) => any
 }
 
@@ -10758,7 +10770,7 @@ type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
 }>
 
 export type ComponentConfig<T extends Record<string, any>> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   ui: ComponentUI<T>
 }
@@ -10877,7 +10889,6 @@ defineSlots<TabsSlots<T>>()
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
     let content_slot = meta
         .slots
@@ -10987,7 +10998,6 @@ defineProps<{
         "/src/App.vue",
         &resolved,
         true,
-        None,
     );
     assert!(
         meta.props.iter().any(|prop| prop.name == "valueKey"),
@@ -11068,7 +11078,6 @@ defineProps<{
         "/src/App.vue",
         &resolved,
         false,
-        None,
     );
     let elapsed = started.elapsed();
 
@@ -11137,7 +11146,6 @@ defineSlots<Slots<M>>()
         "/src/App.vue",
         &resolved,
         false,
-        None,
     );
     let elapsed = started.elapsed();
 
@@ -11639,7 +11647,7 @@ fn imported_pick_slot_bindings_keep_symbolic_raw_type() {
             "/src/reka-ui.ts",
             r#"
 export interface CalendarCellTriggerProps {
-  day: Date
+  day: Date,
   month: number
 }
 "#,
@@ -11947,14 +11955,14 @@ defineSlots<ButtonSlots>()
     };
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "slot binding should expose the concrete ui members, got {:?}",
         ui_binding.type_expr
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "slot binding should keep all imported ui members, got {:?}",
         ui_binding.type_expr
@@ -12027,7 +12035,7 @@ defineSlots<MenuSlots>()
     assert!(
         menu_slots_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "default")
-                || matches!(member, ObjectMember::Method(method) if method.name == "default")
+                || matches!(member, ObjectMember::Method(method) if method.name == "default"),
         ),
         "MenuSlots should keep the explicit default slot member, got {:?}",
         menu_slots.type_expr
@@ -12035,7 +12043,7 @@ defineSlots<MenuSlots>()
     assert!(
         menu_slots_shape.properties.iter().any(
             |member| matches!(member, ObjectMember::Property(property) if property.name == "item")
-                || matches!(member, ObjectMember::Method(method) if method.name == "item")
+                || matches!(member, ObjectMember::Method(method) if method.name == "item"),
         ),
         "MenuSlots should keep the explicit item slot member, got {:?}",
         menu_slots.type_expr
@@ -12119,10 +12127,10 @@ defineSlots<ButtonSlots>()
         .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
         .expect("component meta resolution should warm the prepared-decl route");
 
-    let store_view = project.host().owned_or_ambient_request_view();
+    let _store_view = project.host().resolver_store_view();
     let component_config = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "ComponentConfig", Some(&*store_view))
+        .prepared_type_decl("/src/types.ts", "ComponentConfig")
         .expect("ComponentConfig should have a prepared declaration");
     assert_eq!(
         component_config
@@ -12135,7 +12143,7 @@ defineSlots<ButtonSlots>()
 
     let theme = project
         .host()
-        .prepared_value_decl_in_view("/src/theme.ts", "theme", Some(&*store_view))
+        .prepared_value_decl("/src/theme.ts", "theme")
         .expect("theme should have a prepared value declaration");
     assert!(
         theme.type_annotation.is_some() || theme.object_shape.is_some(),
@@ -12151,7 +12159,7 @@ fn local_pick_slot_bindings_keep_symbolic_raw_type() {
             "/src/App.vue",
             r#"<script lang="ts">
 interface CalendarCellTriggerProps {
-  day: Date
+  day: Date,
   month: number
 }
 
@@ -12673,7 +12681,7 @@ export interface Editor {
 import type { Editor } from 'editor-lib'
 
 export interface MenuProps {
-  editor: Editor
+  editor: Editor,
   element: object
   appendTo?: object
   pluginKey?: string
@@ -13002,7 +13010,7 @@ defineProps<{
                 ) && matches!(
                     index.as_ref(),
                     verter_semantic::analysis::type_expr::TypeExpr::Literal(
-                        verter_semantic::analysis::type_expr::LiteralValue::String(key)
+                        verter_semantic::analysis::type_expr::LiteralValue::String(key),
                     ) if key == "state"
                 )
         ),
@@ -13752,7 +13760,7 @@ defineProps<{
             matches!(
                 member,
                 verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String
+                    verter_semantic::analysis::type_expr::PrimitiveName::String,
                 )
             )
         }),
@@ -13939,15 +13947,15 @@ defineProps<{
         }],
     );
 
-    let store_view = project.host().owned_or_ambient_request_view();
+    let _store_view = project.host().resolver_store_view();
     let prepared = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&*store_view))
+        .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
         matches!(
             &prepared.body,
-            verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+            verter_semantic::analysis::type_expr::TypeExpr::Union(_),
         ),
         "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
         prepared.body
@@ -14038,15 +14046,15 @@ defineProps<{
         }],
     );
 
-    let store_view = project.host().owned_or_ambient_request_view();
+    let store_view = project.host().resolver_store_view();
     let prepared = project
         .host()
-        .prepared_type_decl_in_view("/src/types.ts", "StringOrVNode", Some(&*store_view))
+        .prepared_type_decl("/src/types.ts", "StringOrVNode")
         .expect("StringOrVNode should be present in the shallow prepared declarations");
     assert!(
         matches!(
             &prepared.body,
-            verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+            verter_semantic::analysis::type_expr::TypeExpr::Union(_),
         ),
         "shallow prepared declarations should keep imported non-object aliases symbolic, got {:?}",
         prepared.body
@@ -14107,7 +14115,7 @@ defineProps<{
             .host()
             .resolver_runtime()
             .type_surfaces
-            .get(&surface_key, &*store_view)
+            .get(&surface_key, &store_view)
             .is_none(),
         "registry append should keep imported non-object package unions symbolic instead of projecting a whole surface"
     );
@@ -14198,10 +14206,9 @@ defineProps<LinkProps>()
 
     let export = project
         .host()
-        .resolve_named_export_in_view(
+        .resolve_named_export(
             "/node_modules/vue-router/index.d.ts",
             "RouterLinkProps",
-            Some(true),
             None,
         )
         .expect("package re-export should resolve RouterLinkProps");
@@ -14210,11 +14217,10 @@ defineProps<LinkProps>()
         Some("/node_modules/vue-router/dist/index.d.ts")
     );
     assert_eq!(export.source_name, "R");
-    let decl = crate::meta_resolve::resolve_type_declaration_in_view(
+    let decl = crate::meta_resolve::resolve_type_declaration(
         project.host(),
         "/node_modules/vue-router/index.d.ts",
         "RouterLinkProps",
-        None,
     );
     assert_eq!(
         decl.canonical_source,
@@ -15092,7 +15098,7 @@ type ComponentUI<T extends { slots?: Record<string, any> }> = Id<{
 }>
 
 export type ComponentConfig<T extends Record<string, any>> = {
-  variants: ComponentVariants<T>
+  variants: ComponentVariants<T>,
   slots: ComponentSlots<T>
   ui: ComponentUI<T>
 }
@@ -15207,14 +15213,14 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "ui helper should expose base, got {:?}",
         ui.type_expr
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "ui helper should expose label, got {:?}",
         ui.type_expr
@@ -15249,14 +15255,14 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "slot ui binding should expose base, got {:?}",
         ui_binding.type_expr
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "slot ui binding should expose label, got {:?}",
         ui_binding.type_expr
@@ -15322,9 +15328,9 @@ export type ComponentConfig<
   K extends string,
   U extends 'ui' | 'ui.prose' = 'ui'
 > = {
-  AppConfig: ComponentAppConfig<T, A, K, U>
+  AppConfig: ComponentAppConfig<T, A, K, U>,
   variants: ComponentVariants<T & GetComponentAppConfig<A, U, K>>
-  slots: ComponentSlots<T>
+  slots: ComponentSlots<T>,
   ui: ComponentUI<T>
 }
 "#,
@@ -15444,14 +15450,14 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "ui helper should expose base, got {:?}",
         ui.type_expr
     );
     assert!(
         ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "ui helper should expose label, got {:?}",
         ui.type_expr
@@ -15486,14 +15492,14 @@ defineSlots<ButtonSlots>()
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
         ),
         "slot ui binding should expose base, got {:?}",
         ui_binding.type_expr
     );
     assert!(
         binding_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label")
+            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
         ),
         "slot ui binding should expose label, got {:?}",
         ui_binding.type_expr
@@ -15534,7 +15540,7 @@ defineProps<{ msg: string }>()
     // Assert+: other attrs should still be inherited
     assert!(
         meta.accepted_props.iter().any(
-            |p| p.name == "title" && matches!(p.provenance, MemberProvenance::Inherited { .. })
+            |p| p.name == "title" && matches!(p.provenance, MemberProvenance::Inherited { .. }),
         ),
         "non-consumed 'title' attr should still be inherited"
     );
@@ -16099,7 +16105,7 @@ export interface ProjectClickEvent {
     assert!(
         matches!(
             project_only.type_expr,
-            TypeExpr::Primitive(PrimitiveName::String)
+            TypeExpr::Primitive(PrimitiveName::String),
         ),
         "tag-specific projectOnly should override the fallback type, got: {:?}",
         project_only.type_expr
@@ -18008,7 +18014,7 @@ fn get_component_meta_dynamic_slots_real_shape_accordion() {
     ? Suffix extends string
       ? Name | `${Name}-${Suffix}`
       : Name
-    : never
+    : never,
 )
 
 export type DynamicSlots<
@@ -18017,7 +18023,7 @@ export type DynamicSlots<
   ExtraProps extends object = {}
 > = {
   [K in DynamicSlotsKeys<T['slot'], Suffix>]?: (
-    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps
+    props: { item: Extract<T, { slot: K extends `${infer Base}-${Suffix}` ? Base : K }> } & ExtraProps,
   ) => any[]
 }"#,
         )
@@ -18358,7 +18364,7 @@ export interface DropdownMenuProps<T extends ArrayOrNested<DropdownMenuItem> = A
 }
 
 export interface EditorHandler {
-  canExecute: (editor: object, cmd?: any) => boolean
+  canExecute: (editor: object, cmd?: any) => boolean,
   execute: (editor: object, cmd?: any) => any
   isActive: (editor: object, cmd?: any) => boolean
 }
@@ -18398,7 +18404,7 @@ export type ComponentConfig<
   TAppConfig,
   TKey extends string
 > = {
-  slots: TTheme extends { slots: infer TSlots } ? TSlots : never
+  slots: TTheme extends { slots: infer TSlots } ? TSlots : never,
   AppConfig: TAppConfig
   key: TKey
 }
@@ -18663,7 +18669,7 @@ fn get_component_meta_define_emits_object_literal_form() {
             "/App.vue",
             r#"<script setup lang="ts">
 const emit = defineEmits<{
-  change: [value: string]
+  change: [value: string],
   update: [id: number, force?: boolean]
   close: []
 }>()

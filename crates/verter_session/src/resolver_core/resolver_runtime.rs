@@ -10,10 +10,9 @@ use std::sync::Arc;
 
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
-    module_facts_db::ModuleFactsDb, prepared_decl::PreparedDeclBundle, route_db::RouteDb,
-    symbol_resolver::SymbolResolverState, type_surface_db::TypeSurfaceDb, FactVersionRef,
-    FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
-    StableExecutionValue, StoreView, ValidatedFactCache,
+    prepared_decl::PreparedDeclBundle, route_db::RouteDb, symbol_resolver::SymbolResolverState,
+    type_surface_db::TypeSurfaceDb, FactVersionRef, FallthroughNodeKey, ResolutionNodeKey,
+    ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView, ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -116,9 +115,12 @@ where
     pub counters: Arc<ResolverCounters>,
 
     // -- Semantic DB layers --
-    /// Sole long-lived owner of per-file immutable facts (raw source, parse,
-    /// analysis, shallow state). Keyed by `(canonical_id, whole_hash)`.
-    pub module_facts: ModuleFactsDb,
+    /// Singleflight used by `ensure_indexed_ready` to collapse concurrent cold
+    /// loads for the same canonical file onto one materialization path. The
+    /// flight value is the materialized `Arc<IndexedReady>`, which is then
+    /// unwrapped from the outer singleflight `Arc` at the call site.
+    pub indexed_singleflight:
+        SingleflightGroup<String, Arc<crate::project_type_store::IndexedReady>, ()>,
     /// Host-owned cross-file route subsystem: barrel surfaces, route results,
     /// and stable negative answers.
     pub routes: RouteDb,
@@ -143,7 +145,7 @@ where
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
-            module_facts: ModuleFactsDb::new(),
+            indexed_singleflight: SingleflightGroup::default(),
             routes: RouteDb::new(),
             imported_roots: ImportedRootDb::new(),
             type_surfaces: TypeSurfaceDb::new(),
@@ -159,7 +161,7 @@ where
             prepared_decl_bundles: StableRequestState::new(),
             top_level_fallthrough_singleflight: SingleflightGroup::default(),
             counters,
-            module_facts: ModuleFactsDb::new(),
+            indexed_singleflight: SingleflightGroup::default(),
             routes: RouteDb::new(),
             imported_roots: ImportedRootDb::new(),
             type_surfaces: TypeSurfaceDb::new(),
@@ -173,7 +175,7 @@ where
         self.component_meta.clear();
         self.prepared_decl_bundles.clear();
         self.top_level_fallthrough_singleflight.clear();
-        self.module_facts.clear();
+        self.indexed_singleflight.clear();
         self.routes.clear();
         self.imported_roots.clear();
         self.type_surfaces.clear();
@@ -185,7 +187,6 @@ where
     /// Hard-evict all artifacts for a canonical file (e.g. after content change).
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
-        self.module_facts.evict(canonical_id);
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
         self.type_surfaces.evict_owner(canonical_id);
@@ -197,18 +198,18 @@ where
     pub fn hard_evict_canonical(&self, canonical_id: &str) {
         self.prepared_decl_bundles
             .hard_remove(&canonical_id.to_string());
-        self.module_facts.hard_evict(canonical_id);
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
         self.type_surfaces.evict_owner(canonical_id);
     }
 
     /// Soft-invalidate artifacts for a canonical file (e.g. after import
-    /// route change where file content is unchanged). Module facts are
-    /// archived so stale store views can still find the prior generation.
+    /// route change where file content is unchanged). The `IndexedReadyDb`
+    /// is keyed by `(canonical_id, whole_hash)` and is invalidated at the
+    /// project-store level by `evict_canonical`; this runtime-level helper
+    /// only clears subsystem caches that live outside the project store.
     pub fn invalidate_canonical(&self, canonical_id: &str) {
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
-        self.module_facts.invalidate(canonical_id);
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
         self.type_surfaces.evict_owner(canonical_id);

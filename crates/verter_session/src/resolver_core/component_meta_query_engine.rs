@@ -115,7 +115,6 @@ struct ScopedSolveEntry {
 /// alias across files.
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
     owner_engine: TypeQueryEngine<'a>,
     current_prepared_request_root: Option<String>,
     scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
@@ -273,7 +272,7 @@ fn assert_prepared_structural_substitution_slow_lane_allowed(expr: &TypeExpr) {
             | TypeExpr::Intersection(_)
             | TypeExpr::Union(_)
             | TypeExpr::Function(_)
-            | TypeExpr::Parenthesized(_)
+            | TypeExpr::Parenthesized(_),
     );
     if is_structural {
         assert!(
@@ -302,14 +301,9 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
 fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn new(
-        host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
-        owner_solver_host: &'a dyn TypeSolverHost,
-    ) -> Self {
+    pub fn new(host: &'a VerterHost, owner_solver_host: &'a dyn TypeSolverHost) -> Self {
         Self {
             host,
-            store_view,
             owner_engine: TypeQueryEngine::new(owner_solver_host),
             current_prepared_request_root: None,
             scoped_cache: FxHashMap::default(),
@@ -337,14 +331,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    pub fn from_owner_engine(
-        host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
-        owner_engine: TypeQueryEngine<'a>,
-    ) -> Self {
+    pub fn from_owner_engine(host: &'a VerterHost, owner_engine: TypeQueryEngine<'a>) -> Self {
         Self {
             host,
-            store_view,
             owner_engine,
             current_prepared_request_root: None,
             scoped_cache: FxHashMap::default(),
@@ -385,20 +374,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
     ) -> Option<std::sync::Arc<DeclarationScopePayload>> {
         let host = self.host;
-        let store_view = self.store_view;
         self.scope_payloads
             .entry(scope_canonical_id.to_string())
             .or_insert_with(|| {
-                host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
+                host.prepared_decl_bundle(scope_canonical_id)
                     .or_else(|| {
                         // Lazy first-time loading for dependency files discovered
                         // during resolution. This is NOT re-walking cached state —
                         // it triggers the normal load/parse/cache pipeline for files
                         // not yet in the host's cache.
                         host.ensure_loaded(scope_canonical_id)
-                            .then(|| {
-                                host.prepared_decl_bundle_in_view(scope_canonical_id, store_view)
-                            })
+                            .then(|| host.prepared_decl_bundle(scope_canonical_id))
                             .flatten()
                     })
                     .map(|bundle| {
@@ -412,14 +398,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// previously-fetched declaration-scope payload when available.
     fn solver_host_for_scope(&mut self, scope_canonical_id: &str) -> SessionSolverHost<'a> {
         if let Some(scope_payload) = self.scope_payload_for_scope(scope_canonical_id) {
-            SessionSolverHost::from_scope_payload(
-                self.host,
-                self.store_view,
-                scope_canonical_id,
-                scope_payload,
-            )
+            SessionSolverHost::from_scope_payload(self.host, scope_canonical_id, scope_payload)
         } else {
-            SessionSolverHost::new(self.host, self.store_view)
+            SessionSolverHost::new(self.host)
         }
     }
 
@@ -451,7 +432,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.host,
             canonical_id,
             exported_name,
-            self.store_view,
             || self.allow_wildcard_route(),
         );
         self.imported_registry_symbols.insert(key, resolved.clone());
@@ -468,12 +448,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.host,
             canonical_source,
             resolved_name,
-            self.store_view,
         )?;
-        let resolver = DirectPreparedDeclarationResolver {
-            host: self.host,
-            store_view: self.store_view,
-        };
+        let resolver = DirectPreparedDeclarationResolver { host: self.host };
         Some(crate::resolver_core::resolve_local_type_declaration(
             &resolver,
             canonical_source,
@@ -492,15 +468,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.host,
             canonical_source,
             resolved_name,
-            self.store_view,
         )?;
         Some(ResolvedTypeDeclaration {
             requested_name: resolved_name.to_string(),
-            declaration_id: self.host.local_type_declaration_id_in_view(
-                canonical_source,
-                resolved_name,
-                self.store_view,
-            ),
+            declaration_id: self
+                .host
+                .local_type_declaration_id(canonical_source, resolved_name),
             resolved_name: resolved_name.to_string(),
             canonical_source: canonical_source.to_string(),
             span: metadata.span,
@@ -522,11 +495,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let declaration = self
             .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
             .unwrap_or_else(|| {
-                crate::meta_resolve::resolve_type_declaration_in_view(
+                crate::meta_resolve::resolve_type_declaration(
                     self.host,
                     canonical_source,
                     requested_name,
-                    self.store_view,
                 )
             });
         self.declarations.insert(key, declaration.clone());
@@ -546,11 +518,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         self.host
-            .resolve_named_type_export_target_shallow_in_view(
-                canonical_source,
-                resolved_name,
-                self.store_view,
-            )
+            .resolve_named_type_export_target_shallow(canonical_source, resolved_name)
             .filter(|(target_canonical, target_name)| {
                 self.prepared_type_decl(target_canonical.as_str(), target_name.as_str())
                     .is_some()
@@ -661,8 +629,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
-        self.host
-            .shallow_file_state_in_view(scope_canonical_id, self.store_view)?;
+        self.host.shallow_file_state(scope_canonical_id)?;
 
         let solver_host = self.solver_host_for_scope(scope_canonical_id);
         let type_ref = TypeExpr::named(requested_name);
@@ -818,18 +785,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         let resolved = self
             .host
-            .prepared_type_decl_in_view(canonical_id, symbol_name, self.store_view)
+            .prepared_type_decl(canonical_id, symbol_name)
             .or_else(|| {
                 // Lazy first-time loading (see scope_payload_for_scope comment).
                 self.host
                     .ensure_loaded(canonical_id)
-                    .then(|| {
-                        self.host.prepared_type_decl_in_view(
-                            canonical_id,
-                            symbol_name,
-                            self.store_view,
-                        )
-                    })
+                    .then(|| self.host.prepared_type_decl(canonical_id, symbol_name))
                     .flatten()
             });
         self.prepared_type_decls.insert(key, resolved.clone());
@@ -844,10 +805,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     pub(crate) fn host(&self) -> &VerterHost {
         self.host
-    }
-
-    pub(crate) fn store_view(&self) -> Option<&crate::host_request_view::RequestStoreView> {
-        self.store_view
     }
 
     // -------------------------------------------------------------------
@@ -888,84 +845,51 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         let op_key = TypeSurfaceOpKey::Surface(surface_key);
         let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        if let Some(store_view) = self.store_view {
-            let host = self.host;
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            let cached = host
-                .resolver
-                .runtime
-                .type_surfaces
-                .get_or_project_with_facts(op_key, store_view, || {
-                    if host
-                        .prepared_type_decl_in_view(
-                            scope_canonical_id,
-                            symbol_name,
-                            Some(store_view),
-                        )
-                        .is_none()
-                    {
-                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                    }
-                    if let Some(surface) =
-                        self.project_prepared_root_surface(scope_canonical_id, symbol_name)
-                    {
-                        return Some((
-                            TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(
-                                surface,
-                            )),
-                            facts.clone(),
-                        ));
-                    }
-                    let subject_key = SubjectKey::Decl {
-                        canonical_id: scope_canonical_id.to_string(),
-                        symbol_name: symbol_name.to_string(),
-                        args_hash: 0,
-                        conditional_ctx_hash: 0,
-                    };
-                    let subject_id = self.owner_engine.intern_subject(subject_key);
-                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                        SessionSolverHost::from_scope_payload(
-                            host,
-                            Some(store_view),
-                            scope_canonical_id,
-                            scope_payload.clone(),
-                        )
-                    } else {
-                        SessionSolverHost::new(host, Some(store_view))
-                    };
-                    self.owner_engine
-                        .project_surface(subject_id, &solver_host, scope_canonical_id)
-                        .map(|surface| (TypeSurfaceOpResult::Surface(surface), facts.clone()))
-                })?;
-            return cached.as_surface().cloned();
-        }
-
-        if let Some(surface) = self.project_prepared_root_surface(scope_canonical_id, symbol_name) {
-            return Some(projected_surface_unwrap_or_clone(surface));
-        }
-
-        let owned_view = self.host.owned_or_ambient_request_view();
-        let subject_key = SubjectKey::Decl {
-            canonical_id: scope_canonical_id.to_string(),
-            symbol_name: symbol_name.to_string(),
-            args_hash: 0,
-            conditional_ctx_hash: 0,
-        };
-        let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-            SessionSolverHost::from_scope_payload(
-                self.host,
-                Some(&*owned_view),
-                scope_canonical_id,
-                scope_payload.clone(),
-            )
-        } else {
-            SessionSolverHost::new(self.host, Some(&*owned_view))
-        };
-        self.owner_engine
-            .project_surface(subject_id, &solver_host, scope_canonical_id)
+        let host = self.host;
+        let store_view = host.resolver_store_view();
+        let facts = self
+            .type_surface_facts(scope_canonical_id)
+            .unwrap_or_default();
+        let cached = host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get_or_project_with_facts(op_key, &store_view, || {
+                if host
+                    .prepared_type_decl(scope_canonical_id, symbol_name)
+                    .is_none()
+                {
+                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                }
+                if let Some(surface) =
+                    self.project_prepared_root_surface(scope_canonical_id, symbol_name)
+                {
+                    return Some((
+                        TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(surface)),
+                        facts.clone(),
+                    ));
+                }
+                let subject_key = SubjectKey::Decl {
+                    canonical_id: scope_canonical_id.to_string(),
+                    symbol_name: symbol_name.to_string(),
+                    args_hash: 0,
+                    conditional_ctx_hash: 0,
+                };
+                let subject_id = self.owner_engine.intern_subject(subject_key);
+                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                    SessionSolverHost::from_scope_payload(
+                        host,
+                        scope_canonical_id,
+                        scope_payload.clone(),
+                    )
+                } else {
+                    SessionSolverHost::new(host)
+                };
+                self.owner_engine
+                    .project_surface(subject_id, &solver_host, scope_canonical_id)
+                    .map(|surface| (TypeSurfaceOpResult::Surface(surface), facts.clone()))
+            })?;
+        cached.as_surface().cloned()
     }
 
     pub fn project_type_surface_expr(
@@ -1024,13 +948,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let (resolved_scope, resolved_symbol) =
             self.resolve_final_prepared_type_target(scope_canonical_id, symbol_name);
 
-        let Some(store_view) = self.store_view else {
-            return self
-                .project_prepared_root_surface(&resolved_scope, &resolved_symbol)
-                .map(projected_surface_unwrap_or_clone);
-        };
-
         let host = self.host;
+        let store_view = host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
             canonical_owner: scope_canonical_id.to_owned(),
             symbol_name: symbol_name.to_owned(),
@@ -1046,13 +965,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get_or_project_with_facts(op_key, store_view, || {
+            .get_or_project_with_facts(op_key, &store_view, || {
                 if host
-                    .prepared_type_decl_in_view(
-                        resolved_scope_ref,
-                        resolved_symbol_ref,
-                        Some(store_view),
-                    )
+                    .prepared_type_decl(resolved_scope_ref, resolved_symbol_ref)
                     .is_none()
                 {
                     return Some((TypeSurfaceOpResult::Miss, facts.clone()));
@@ -1738,10 +1653,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 if canonical_source != scope_canonical_id {
                     if let Some((routed_source, routed_name)) =
-                        this.host.resolve_named_type_export_target_shallow_in_view(
+                        this.host.resolve_named_type_export_target_shallow(
                             canonical_source.as_str(),
                             resolved_name.as_str(),
-                            this.store_view,
                         )
                     {
                         if this
@@ -2143,71 +2057,44 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name: member_name.to_owned(),
         };
         let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        if let Some(store_view) = self.store_view {
-            let host = self.host;
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            let owner_engine = &mut self.owner_engine;
-            let cached = host
-                .resolver
-                .runtime
-                .type_surfaces
-                .get_or_project_with_facts(op_key, store_view, || {
-                    if host
-                        .prepared_type_decl_in_view(
-                            scope_canonical_id,
-                            symbol_name,
-                            Some(store_view),
-                        )
-                        .is_none()
-                    {
-                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                    }
-                    let subject_key = SubjectKey::Decl {
-                        canonical_id: scope_canonical_id.to_string(),
-                        symbol_name: symbol_name.to_string(),
-                        args_hash: 0,
-                        conditional_ctx_hash: 0,
-                    };
-                    let subject_id = owner_engine.intern_subject(subject_key);
-                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                        SessionSolverHost::from_scope_payload(
-                            host,
-                            Some(store_view),
-                            scope_canonical_id,
-                            scope_payload.clone(),
-                        )
-                    } else {
-                        SessionSolverHost::new(host, Some(store_view))
-                    };
-                    owner_engine
-                        .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
-                        .map(|member| (TypeSurfaceOpResult::Member(member), facts.clone()))
-                })?;
-            return cached.as_member().cloned();
-        }
-
-        let owned_view = self.host.owned_or_ambient_request_view();
-        let subject_key = SubjectKey::Decl {
-            canonical_id: scope_canonical_id.to_string(),
-            symbol_name: symbol_name.to_string(),
-            args_hash: 0,
-            conditional_ctx_hash: 0,
-        };
-        let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-            SessionSolverHost::from_scope_payload(
-                self.host,
-                Some(&*owned_view),
-                scope_canonical_id,
-                scope_payload.clone(),
-            )
-        } else {
-            SessionSolverHost::new(self.host, Some(&*owned_view))
-        };
-        self.owner_engine
-            .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
+        let host = self.host;
+        let store_view = host.resolver_store_view();
+        let facts = self
+            .type_surface_facts(scope_canonical_id)
+            .unwrap_or_default();
+        let owner_engine = &mut self.owner_engine;
+        let cached = host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get_or_project_with_facts(op_key, &store_view, || {
+                if host
+                    .prepared_type_decl(scope_canonical_id, symbol_name)
+                    .is_none()
+                {
+                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                }
+                let subject_key = SubjectKey::Decl {
+                    canonical_id: scope_canonical_id.to_string(),
+                    symbol_name: symbol_name.to_string(),
+                    args_hash: 0,
+                    conditional_ctx_hash: 0,
+                };
+                let subject_id = owner_engine.intern_subject(subject_key);
+                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                    SessionSolverHost::from_scope_payload(
+                        host,
+                        scope_canonical_id,
+                        scope_payload.clone(),
+                    )
+                } else {
+                    SessionSolverHost::new(host)
+                };
+                owner_engine
+                    .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
+                    .map(|member| (TypeSurfaceOpResult::Member(member), facts.clone()))
+            })?;
+        cached.as_member().cloned()
     }
 
     /// Project the keyspace (member names) from a type expression in a
@@ -2240,71 +2127,44 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         let op_key = TypeSurfaceOpKey::Keyspace(surface_key);
         let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        if let Some(store_view) = self.store_view {
-            let host = self.host;
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            let owner_engine = &mut self.owner_engine;
-            let cached = host
-                .resolver
-                .runtime
-                .type_surfaces
-                .get_or_project_with_facts(op_key, store_view, || {
-                    if host
-                        .prepared_type_decl_in_view(
-                            scope_canonical_id,
-                            symbol_name,
-                            Some(store_view),
-                        )
-                        .is_none()
-                    {
-                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                    }
-                    let subject_key = SubjectKey::Decl {
-                        canonical_id: scope_canonical_id.to_string(),
-                        symbol_name: symbol_name.to_string(),
-                        args_hash: 0,
-                        conditional_ctx_hash: 0,
-                    };
-                    let subject_id = owner_engine.intern_subject(subject_key);
-                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                        SessionSolverHost::from_scope_payload(
-                            host,
-                            Some(store_view),
-                            scope_canonical_id,
-                            scope_payload.clone(),
-                        )
-                    } else {
-                        SessionSolverHost::new(host, Some(store_view))
-                    };
-                    owner_engine
-                        .project_keyspace(subject_id, &solver_host, scope_canonical_id)
-                        .map(|keyspace| (TypeSurfaceOpResult::Keyspace(keyspace), facts.clone()))
-                })?;
-            return cached.as_keyspace().cloned();
-        }
-
-        let owned_view = self.host.owned_or_ambient_request_view();
-        let subject_key = SubjectKey::Decl {
-            canonical_id: scope_canonical_id.to_string(),
-            symbol_name: symbol_name.to_string(),
-            args_hash: 0,
-            conditional_ctx_hash: 0,
-        };
-        let subject_id = self.owner_engine.intern_subject(subject_key);
-        let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-            SessionSolverHost::from_scope_payload(
-                self.host,
-                Some(&*owned_view),
-                scope_canonical_id,
-                scope_payload.clone(),
-            )
-        } else {
-            SessionSolverHost::new(self.host, Some(&*owned_view))
-        };
-        self.owner_engine
-            .project_keyspace(subject_id, &solver_host, scope_canonical_id)
+        let host = self.host;
+        let store_view = host.resolver_store_view();
+        let facts = self
+            .type_surface_facts(scope_canonical_id)
+            .unwrap_or_default();
+        let owner_engine = &mut self.owner_engine;
+        let cached = host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get_or_project_with_facts(op_key, &store_view, || {
+                if host
+                    .prepared_type_decl(scope_canonical_id, symbol_name)
+                    .is_none()
+                {
+                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                }
+                let subject_key = SubjectKey::Decl {
+                    canonical_id: scope_canonical_id.to_string(),
+                    symbol_name: symbol_name.to_string(),
+                    args_hash: 0,
+                    conditional_ctx_hash: 0,
+                };
+                let subject_id = owner_engine.intern_subject(subject_key);
+                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                    SessionSolverHost::from_scope_payload(
+                        host,
+                        scope_canonical_id,
+                        scope_payload.clone(),
+                    )
+                } else {
+                    SessionSolverHost::new(host)
+                };
+                owner_engine
+                    .project_keyspace(subject_id, &solver_host, scope_canonical_id)
+                    .map(|keyspace| (TypeSurfaceOpResult::Keyspace(keyspace), facts.clone()))
+            })?;
+        cached.as_keyspace().cloned()
     }
 
     pub fn project_expr_surface_expr(
@@ -2490,29 +2350,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 root_symbol,
                 path,
             ) {
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
+                self.cache_routed_expr_surface_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    route,
+                    &projected_expr,
+                );
+                if let [member_name] = path.as_slice() {
+                    if let Some(projected_member) = single_member_route_cache_entry(
+                        self,
                         scope_canonical_id,
                         root_symbol,
-                        route,
+                        member_name,
                         &projected_expr,
-                        store_view,
-                    );
-                    if let [member_name] = path.as_slice() {
-                        if let Some(projected_member) = single_member_route_cache_entry(
-                            self,
+                    ) {
+                        self.cache_projected_member(
                             scope_canonical_id,
                             root_symbol,
-                            member_name,
-                            &projected_expr,
-                        ) {
-                            self.cache_projected_member(
-                                scope_canonical_id,
-                                root_symbol,
-                                &projected_member,
-                                store_view,
-                            );
-                        }
+                            &projected_member,
+                        );
                     }
                 }
                 return Some(projected_expr);
@@ -2521,21 +2377,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let projected_member =
                     self.project_type_member(scope_canonical_id, root_symbol, member_name)?;
                 let projected_expr = projected_member.ty.clone();
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        route,
-                        &projected_expr,
-                        store_view,
-                    );
-                    self.cache_projected_member(
-                        scope_canonical_id,
-                        root_symbol,
-                        &projected_member,
-                        store_view,
-                    );
-                }
+                self.cache_routed_expr_surface_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    route,
+                    &projected_expr,
+                );
+                self.cache_projected_member(scope_canonical_id, root_symbol, &projected_member);
                 return Some(projected_expr);
             }
         }
@@ -2546,15 +2394,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 root_symbol,
                 members,
             ) {
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        route,
-                        &projected_expr,
-                        store_view,
-                    );
-                }
+                self.cache_routed_expr_surface_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    route,
+                    &projected_expr,
+                );
                 return Some(projected_expr);
             }
             if let Some(projected_expr) = self.project_pick_route_surface_expr_via_members(
@@ -2562,15 +2407,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 root_symbol,
                 members,
             ) {
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        route,
-                        &projected_expr,
-                        store_view,
-                    );
-                }
+                self.cache_routed_expr_surface_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    route,
+                    &projected_expr,
+                );
                 return Some(projected_expr);
             }
             if let Some(projected_expr) = self.project_pick_route_surface_expr_via_routed_expr(
@@ -2579,22 +2421,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 route,
                 members,
             ) {
-                if let Some(store_view) = self.store_view {
-                    self.cache_routed_expr_surface_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        route,
-                        &projected_expr,
-                        store_view,
-                    );
-                    self.cache_pick_members_from_projected_expr(
-                        scope_canonical_id,
-                        root_symbol,
-                        members,
-                        &projected_expr,
-                        store_view,
-                    );
-                }
+                self.cache_routed_expr_surface_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    route,
+                    &projected_expr,
+                );
+                self.cache_pick_members_from_projected_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    members,
+                    &projected_expr,
+                );
                 return Some(projected_expr);
             }
         }
@@ -2610,7 +2448,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<TypeExpr> {
         use crate::resolver_core::type_surface_db::{TypeSurfaceKey, TypeSurfaceOpKey};
 
-        let store_view = self.store_view?;
+        let _store_view = self.host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::RoutedExpr {
             subject: TypeSurfaceKey {
                 canonical_owner: scope_canonical_id.to_owned(),
@@ -2624,7 +2462,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .and_then(|cached| cached.as_expr().cloned())
     }
 
@@ -2634,7 +2472,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
         projected_expr: &TypeExpr,
-        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use crate::resolver_core::type_surface_db::{
             TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
@@ -2649,12 +2486,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             },
             route: route.clone(),
         };
+        let _store_view = self.host.resolver_store_view();
         if self
             .host
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .is_none()
         {
             let facts = self
@@ -2674,7 +2512,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         members: &[String],
         projected_expr: &TypeExpr,
-        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use std::collections::BTreeSet;
         use verter_semantic::analysis::type_expr::ObjectMember;
@@ -2706,12 +2543,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 _ => None,
             };
             if let Some(projected_member) = projected_member {
-                self.cache_projected_member(
-                    scope_canonical_id,
-                    root_symbol,
-                    &projected_member,
-                    store_view,
-                );
+                self.cache_projected_member(scope_canonical_id, root_symbol, &projected_member);
             }
         }
     }
@@ -2721,7 +2553,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         root_symbol: &str,
         projected_member: &ProjectedMember,
-        store_view: &crate::host_request_view::RequestStoreView,
     ) {
         use crate::resolver_core::type_surface_db::{
             TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
@@ -2736,12 +2567,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             },
             member_name: projected_member.name.clone(),
         };
+        let _store_view = self.host.resolver_store_view();
         if self
             .host
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .is_none()
         {
             let facts = self
@@ -2767,7 +2599,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
 
-        let store_view = self.store_view?;
+        let _store_view = self.host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::Member {
             subject: TypeSurfaceKey {
                 canonical_owner: scope_canonical_id.to_owned(),
@@ -2782,7 +2614,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .and_then(|cached| cached.as_member().cloned());
         #[cfg(test)]
         if cached.is_some() {
@@ -2802,7 +2634,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
 
-        let store_view = self.store_view?;
+        let _store_view = self.host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
             canonical_owner: scope_canonical_id.to_owned(),
             symbol_name: symbol_name.to_owned(),
@@ -2814,7 +2646,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .and_then(|cached| cached.as_surface().cloned())
             .map(std::sync::Arc::new);
         #[cfg(test)]
@@ -2839,9 +2671,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
 
-        let Some(store_view) = self.store_view else {
-            return;
-        };
+        let _store_view = self.host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
             canonical_owner: scope_canonical_id.to_owned(),
             symbol_name: symbol_name.to_owned(),
@@ -2853,7 +2683,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .is_none()
         {
             let facts = self
@@ -2879,9 +2709,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
 
-        let Some(store_view) = self.store_view else {
-            return;
-        };
+        let _store_view = self.host.resolver_store_view();
         let op_key = TypeSurfaceOpKey::Member {
             subject: TypeSurfaceKey {
                 canonical_owner: scope_canonical_id.to_owned(),
@@ -2896,7 +2724,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .resolver
             .runtime
             .type_surfaces
-            .get(&op_key, store_view)
+            .get(&op_key, &self.host.resolver_store_view())
             .is_none()
         {
             let facts = self
@@ -2916,7 +2744,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
     ) -> bool {
         !substitutions.is_empty()
-            && self.store_view.is_some()
             && self
                 .current_prepared_request_root
                 .as_deref()
@@ -2928,11 +2755,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
     ) -> bool {
-        self.store_view.is_some()
-            && self
-                .current_prepared_request_root
-                .as_deref()
-                .is_some_and(|request_root| request_root != scope_canonical_id)
+        self.current_prepared_request_root
+            .as_deref()
+            .is_some_and(|request_root| request_root != scope_canonical_id)
             && (!substitutions.is_empty() || is_package_source(Some(scope_canonical_id)))
     }
 
@@ -3677,14 +3502,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             } else {
                 self.project_type_member(scope_canonical_id, symbol_name, member_name)?
             };
-            if let Some(store_view) = self.store_view {
-                self.cache_projected_member(
-                    scope_canonical_id,
-                    symbol_name,
-                    &projected_member,
-                    store_view,
-                );
-            }
+            self.cache_projected_member(scope_canonical_id, symbol_name, &projected_member);
             if projected_member.is_method {
                 if let TypeExpr::Function(function) = &projected_member.ty {
                     properties.push(ObjectMember::Method(MethodSignature {
@@ -3741,54 +3559,41 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
 
-        if let Some(store_view) = self.store_view {
-            let host = self.host;
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            let owner_engine = &mut self.owner_engine;
-            let cached = host
-                .resolver
-                .runtime
-                .type_surfaces
-                .get_or_project_with_facts(op_key, store_view, || {
-                    if host
-                        .prepared_type_decl_in_view(
-                            scope_canonical_id,
-                            root_symbol,
-                            Some(store_view),
-                        )
-                        .is_none()
-                    {
-                        return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                    }
-                    let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                        SessionSolverHost::from_scope_payload(
-                            host,
-                            Some(store_view),
-                            scope_canonical_id,
-                            scope_payload.clone(),
-                        )
-                    } else {
-                        SessionSolverHost::new(host, Some(store_view))
-                    };
-                    owner_engine
-                        .project_expr_surface_as_type_expr(
-                            &solver_host,
-                            scope_canonical_id,
-                            &route_expr,
-                        )
-                        .map(|expr| (TypeSurfaceOpResult::Expr(expr), facts.clone()))
-                })?;
-            return cached.as_expr().cloned();
-        }
-
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        self.owner_engine.project_expr_surface_as_type_expr(
-            &solver_host,
-            scope_canonical_id,
-            &route_expr,
-        )
+        let host = self.host;
+        let store_view = host.resolver_store_view();
+        let facts = self
+            .type_surface_facts(scope_canonical_id)
+            .unwrap_or_default();
+        let owner_engine = &mut self.owner_engine;
+        let cached = host
+            .resolver
+            .runtime
+            .type_surfaces
+            .get_or_project_with_facts(op_key, &store_view, || {
+                if host
+                    .prepared_type_decl(scope_canonical_id, root_symbol)
+                    .is_none()
+                {
+                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
+                }
+                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
+                    SessionSolverHost::from_scope_payload(
+                        host,
+                        scope_canonical_id,
+                        scope_payload.clone(),
+                    )
+                } else {
+                    SessionSolverHost::new(host)
+                };
+                owner_engine
+                    .project_expr_surface_as_type_expr(
+                        &solver_host,
+                        scope_canonical_id,
+                        &route_expr,
+                    )
+                    .map(|expr| (TypeSurfaceOpResult::Expr(expr), facts.clone()))
+            })?;
+        cached.as_expr().cloned()
     }
 
     fn project_prepared_pick_route_surface_expr(
@@ -3834,14 +3639,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &self,
         scope_canonical_id: &str,
     ) -> Option<Vec<crate::resolver_core::FactVersionRef>> {
-        let store_view = self.store_view?;
+        let store_view = self.host.resolver_store_view();
         let mut facts = Vec::new();
-        // Ambient-view-first: ambient governs inside a real request. Fall
-        // back to the explicit store_view, then to the live host probe for
+        // Post-cut: live-host whole-hash with store-view as the first
+        // consultation, falling back to the live host probe for
         // untracked-but-present canonicals.
-        let hash = crate::host_request_view::current_request_view()
-            .and_then(|ambient| ambient.whole_hash(scope_canonical_id))
-            .or_else(|| store_view.whole_hash(scope_canonical_id))
+        let hash = store_view
+            .whole_hash(scope_canonical_id)
             .or_else(|| self.host.get_whole_hash(scope_canonical_id));
         if let Some(hash) = hash {
             facts.push(crate::resolver_core::FactVersionRef::FileWholeHash {
@@ -3882,9 +3686,8 @@ fn local_type_symbol_metadata_for_known_source(
     host: &VerterHost,
     canonical_source: &str,
     resolved_name: &str,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<ResolvedLocalTypeSymbolMetadata> {
-    let analysis = host.external_type_analysis_in_view(canonical_source, store_view)?;
+    let analysis = host.external_type_analysis(canonical_source)?;
     let symbol = analysis.local_type_symbol(resolved_name)?;
     let kind = match symbol.kind {
         verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSymbolKind::TypeAlias => {
@@ -3905,7 +3708,6 @@ fn local_type_symbol_metadata_for_known_source(
 
 struct DirectPreparedDeclarationResolver<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
 }
 
 impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
@@ -3927,7 +3729,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
 
     fn read_source(&self, canonical_source: &str) -> Option<String> {
         self.host
-            .read_analysis_source_in_view(canonical_source, self.store_view)
+            .read_analysis_source(canonical_source)
             .as_deref()
             .map(str::to_string)
     }
@@ -3937,11 +3739,8 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         resolved_name: &str,
     ) -> Option<DeclarationId> {
-        self.host.local_type_declaration_id_in_view(
-            canonical_source,
-            resolved_name,
-            self.store_view,
-        )
+        self.host
+            .local_type_declaration_id(canonical_source, resolved_name)
     }
 
     fn resolve_type_dependency_canonical(
@@ -5055,14 +4854,13 @@ fn resolve_imported_registry_symbol_with_budget<F>(
     host: &VerterHost,
     canonical_id: &str,
     exported_name: &str,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
     mut allow_route: F,
 ) -> Option<ResolvedImportedRegistrySymbol>
 where
     F: FnMut() -> bool,
 {
     let (resolved_id, resolved_name) = if host
-        .prepared_type_decl_in_view(canonical_id, exported_name, store_view)
+        .prepared_type_decl(canonical_id, exported_name)
         .is_some()
     {
         (canonical_id.to_string(), exported_name.to_string())
@@ -5070,14 +4868,10 @@ where
         if !allow_route() {
             return None;
         }
-        host.resolve_named_type_export_target_shallow_in_view(
-            canonical_id,
-            exported_name,
-            store_view,
-        )?
+        host.resolve_named_type_export_target_shallow(canonical_id, exported_name)?
     };
 
-    let prepared = host.prepared_type_decl_in_view(&resolved_id, &resolved_name, store_view)?;
+    let prepared = host.prepared_type_decl(&resolved_id, &resolved_name)?;
 
     Some(ResolvedImportedRegistrySymbol {
         canonical_id: resolved_id.clone(),
@@ -5322,8 +5116,8 @@ export interface AvatarProps {
         );
         assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let declaration = engine
             .resolve_direct_prepared_type_declaration("/src/Avatar.vue", "AvatarProps")
@@ -5333,7 +5127,7 @@ export interface AvatarProps {
         assert_eq!(declaration.resolved_name, "AvatarProps");
         assert_eq!(
             declaration.kind,
-            crate::resolver_core::ResolvedDeclarationKind::Interface
+            crate::resolver_core::ResolvedDeclarationKind::Interface,
         );
         assert!(
             declaration
@@ -5371,8 +5165,8 @@ export interface AvatarProps {
         );
         assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let declaration = engine
             .resolve_direct_prepared_type_declaration_metadata("/src/Avatar.vue", "AvatarProps")
@@ -5382,7 +5176,7 @@ export interface AvatarProps {
         assert_eq!(declaration.resolved_name, "AvatarProps");
         assert_eq!(
             declaration.kind,
-            crate::resolver_core::ResolvedDeclarationKind::Interface
+            crate::resolver_core::ResolvedDeclarationKind::Interface,
         );
         assert!(
             declaration.span.end > declaration.span.start,
@@ -5431,8 +5225,8 @@ export interface Props extends Pick<BaseProps, 'disabled' | 'type'> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "ui")
@@ -5480,8 +5274,8 @@ export interface Props {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "name")
@@ -5547,8 +5341,8 @@ export interface Props {
         ]);
         assert!(host.ensure_loaded("/workspace/src/Link.vue"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/workspace/src/Link.vue", "Props", "to")
@@ -5619,9 +5413,9 @@ export interface Wrapper extends PackageProps {}
         ]);
         assert!(host.ensure_loaded("/workspace/src/Child.vue"));
 
-        let view = host.owned_or_ambient_request_view();
-        let solver_host = SessionSolverHost::new(&host, Some(&*view));
-        let mut engine = ComponentMetaQueryEngine::new(&host, Some(&*view), &solver_host);
+        let _view = host.resolver_store_view();
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let shape = engine
             .project_prepared_type_surface_shape("/workspace/src/Child.vue", "Wrapper")
@@ -5637,25 +5431,22 @@ export interface Wrapper extends PackageProps {}
             "prepared package wrapper projection should stay on shallow projection without solver fallback",
         );
         assert!(
-            host.resolver
-                .runtime
-                .module_facts
+            host.project_type_store
+                .indexed()
                 .get_any("/workspace/node_modules/pkg/dist/index.d.ts")
                 .is_none(),
-            "prepared package projection should keep the provider barrel off ModuleFactsDb",
+            "prepared package projection should keep the provider barrel off IndexedReadyDb",
         );
         assert!(
-            host.resolver
-                .runtime
-                .module_facts
+            host.project_type_store
+                .indexed()
                 .get_any("/workspace/node_modules/pkg/dist/index3.d.ts")
                 .is_none(),
-            "prepared package projection should keep the routed package target off ModuleFactsDb",
+            "prepared package projection should keep the routed package target off IndexedReadyDb",
         );
         assert!(
-            host.resolver
-                .runtime
-                .module_facts
+            host.project_type_store
+                .indexed()
                 .get_any("/workspace/node_modules/pkg/dist/payload.d.ts")
                 .is_none(),
             "prepared package projection should keep imported helper edges shallow too",
@@ -5705,8 +5496,8 @@ export interface Props {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
         let requested = vec!["icon".to_string(), "ui".to_string(), "variant".to_string()];
 
         let projected = engine
@@ -5797,8 +5588,8 @@ export interface Props<T extends { id?: string } = { id?: string }> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
         let requested = vec!["item".to_string()];
 
         assert!(
@@ -5907,10 +5698,9 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
             ],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let expr = TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::IndexedAccess {
                 object: Arc::new(TypeExpr::named("Tabs")),
@@ -5978,10 +5768,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let first = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -6060,10 +5849,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let first = query_engine
             .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
@@ -6130,11 +5918,10 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
 
-        let mut first_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let first = first_query
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
             .expect("first prepared projection should succeed");
@@ -6154,15 +5941,14 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &*store_view)
+                    .get(&stable_surface_key, &host.resolver_store_view())
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
             "prepared root surfaces should publish into the shared type-surface DB for later requests",
         );
 
-        let mut second_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let second = second_query
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
             .expect("repeat prepared projection should reuse the shared cache");
@@ -6225,10 +6011,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let expr_surface = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -6295,10 +6080,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let projected = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -6358,10 +6142,9 @@ export type IdentityProps<T> = RootProps<T>
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let identity_surface = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "IdentityProps")
@@ -6458,11 +6241,10 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
         assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
         assert!(host.ensure_loaded("/src/InputMenu.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
 
-        let mut first_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let first = first_query
             .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
             .expect("first query should project the imported generic pick members");
@@ -6493,7 +6275,7 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_member_key, &*store_view)
+                    .get(&stable_member_key, &host.resolver_store_view())
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Member(_))
             ),
@@ -6512,13 +6294,12 @@ export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&dependent_member_key, &*store_view)
+                .get(&dependent_member_key, &host.resolver_store_view())
                 .is_none(),
             "generic-dependent members must stay out of the shared cache because their projected meaning depends on the caller substitutions",
         );
 
-        let mut second_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let second = second_query
             .project_prepared_type_surface_expr("/src/InputMenu.vue", "InputMenuProps")
             .expect("second query should reuse the cached imported member route");
@@ -6625,11 +6406,10 @@ export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 
         assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
         assert!(host.ensure_loaded("/src/ColorModeSelectCopy.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
 
-        let mut first_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let first = first_query
             .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
             .expect("first query should project the imported generic omit surface");
@@ -6657,15 +6437,14 @@ export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &*store_view)
+                    .get(&stable_surface_key, &host.resolver_store_view())
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
             "stable imported generic surfaces should publish into the shared type-surface DB after the first query",
         );
 
-        let mut second_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let second = second_query
             .project_prepared_type_surface_expr(
                 "/src/ColorModeSelectCopy.vue",
@@ -6755,11 +6534,10 @@ export interface BProps extends SharedProps {}
         assert!(host.ensure_loaded("/src/A.vue"));
         assert!(host.ensure_loaded("/src/B.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
 
-        let mut first_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let first = first_query
             .project_prepared_type_surface_expr("/src/A.vue", "AProps")
             .expect("first query should project the imported surface");
@@ -6777,13 +6555,12 @@ export interface BProps extends SharedProps {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&stable_surface_key, &*store_view)
+                .get(&stable_surface_key, &host.resolver_store_view())
                 .is_none(),
             "non-generic imported whole surfaces should stay request-local instead of prepublishing root-cache entries from nested projection",
         );
 
-        let mut second_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let second = second_query
             .project_prepared_type_surface_expr("/src/B.vue", "BProps")
             .expect("second query should still project the imported surface");
@@ -6887,11 +6664,10 @@ export interface BProps extends SharedProps {}
             }],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
 
-        let mut first_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let first = first_query
             .project_prepared_type_surface_expr("/src/A.vue", "AProps")
             .expect("first query should project the imported package surface");
@@ -6910,15 +6686,14 @@ export interface BProps extends SharedProps {}
             matches!(
                 host.resolver_runtime()
                     .type_surfaces
-                    .get(&stable_surface_key, &*store_view)
+                    .get(&stable_surface_key, &host.resolver_store_view())
                     .as_deref(),
                 Some(TypeSurfaceOpResult::Surface(_))
             ),
             "package-backed imported whole surfaces should publish into the shared type-surface DB after the first query",
         );
 
-        let mut second_query =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let second = second_query
             .project_prepared_type_surface_expr("/src/B.vue", "BProps")
             .expect("second query should reuse the cached imported package surface");
@@ -6987,9 +6762,9 @@ export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query = ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let projected = query
             .project_prepared_type_surface_expr("/src/App.vue", "AppProps")
@@ -7032,7 +6807,7 @@ export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
         assert!(
             host.resolver_runtime()
                 .type_surfaces
-                .get(&key, &*store_view)
+                .get(&key, &host.resolver_store_view())
                 .is_none(),
             "same-file generic members should stay request-local instead of publishing into the shared type-surface DB",
         );
@@ -7075,10 +6850,9 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         );
         assert!(host.ensure_loaded("/src/base.ts"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route = crate::resolver_core::RouteDemand::Pick(vec![
             "open".to_string(),
             "defaultOpen".to_string(),
@@ -7141,10 +6915,9 @@ export interface LinkProps extends NuxtLinkProps {
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -7224,10 +6997,9 @@ export interface LinkProps extends NuxtLinkProps {
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -7328,10 +7100,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -7459,10 +7230,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             ws,
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -7595,10 +7365,9 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
                 },
             ],
         );
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -7754,10 +7523,9 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
             ],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let projected = query_engine
             .project_type_surface_expr("/src/EditorToolbar.vue", "EditorToolbarProps")
@@ -7884,10 +7652,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             ],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let projected = query_engine
             .project_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -7996,10 +7763,9 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             ],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
         let projected = query_engine
@@ -8066,8 +7832,8 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         let projected =
             query_engine.project_prepared_type_surface_expr("/src/types.ts", "ComboboxRootProps");
@@ -8107,8 +7873,8 @@ export interface Props<T extends { base?: string } = { base?: string }> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
 
         assert!(
             engine
@@ -8143,10 +7909,9 @@ export type Concrete = Wrapper<string>
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
         assert!(
@@ -8290,8 +8055,8 @@ defineSlots<ImportedSlot>()
         assert!(host.ensure_loaded("/src/button-types.ts"));
         assert!(host.ensure_loaded("/src/ImportedSlotButton.vue"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
         let projected = engine
             .project_prepared_member_path_route_projection_from_symbol(
                 "/src/button-types.ts",
@@ -8427,8 +8192,8 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         );
         assert!(host.ensure_loaded("/src/Button.vue"));
 
-        let solver_host = SessionSolverHost::new(&host, None);
-        let mut engine = ComponentMetaQueryEngine::new(&host, None, &solver_host);
+        let solver_host = SessionSolverHost::new(&host);
+        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
         let projected = engine
             .project_prepared_member_path_route_projection_from_symbol(
                 "/src/Button.vue",
@@ -8564,10 +8329,9 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
             ],
         );
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let expr = TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::IndexedAccess {
@@ -8714,7 +8478,7 @@ defineProps<{
             .expect("should have color prop");
         let is_resolved_color = matches!(
             &color_prop.type_expr,
-            TypeExpr::Union(_) | TypeExpr::Literal(_)
+            TypeExpr::Union(_) | TypeExpr::Literal(_),
         );
         assert!(
             is_resolved_color,
@@ -8730,7 +8494,7 @@ defineProps<{
             .expect("should have variant prop");
         let is_resolved_variant = matches!(
             &variant_prop.type_expr,
-            TypeExpr::Union(_) | TypeExpr::Literal(_)
+            TypeExpr::Union(_) | TypeExpr::Literal(_),
         );
         assert!(
             is_resolved_variant,
@@ -8843,10 +8607,9 @@ const props = defineProps<AppProps>()
         );
         assert!(host.ensure_loaded("/src/App.vue"));
 
-        let store_view = host.owned_or_ambient_request_view();
-        let owner_solver_host = SessionSolverHost::new(&host, Some(&store_view));
-        let mut query_engine =
-            ComponentMetaQueryEngine::new(&host, Some(&store_view), &owner_solver_host);
+        let _store_view = host.resolver_store_view();
+        let owner_solver_host = SessionSolverHost::new(&host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
 
         let shape = query_engine
             .project_prepared_type_surface_shape("/src/App.vue", "AppProps")

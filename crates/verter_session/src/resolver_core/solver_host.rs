@@ -51,7 +51,6 @@ impl DeclarationScopePayload {
 /// 3. Host-owned prepared decl caches for cross-file lookups
 pub struct SessionSolverHost<'a> {
     host: &'a VerterHost,
-    store_view: Option<&'a crate::host_request_view::RequestStoreView>,
     /// Canonical file scope for declaration-scoped solving.
     scope_canonical_id: Option<String>,
     /// Shared declaration-scope payload derived from the host-owned prepared bundle.
@@ -59,13 +58,9 @@ pub struct SessionSolverHost<'a> {
 }
 
 impl<'a> SessionSolverHost<'a> {
-    pub fn new(
-        host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
-    ) -> Self {
+    pub fn new(host: &'a VerterHost) -> Self {
         Self {
             host,
-            store_view,
             scope_canonical_id: None,
             scope_payload: None,
         }
@@ -77,22 +72,15 @@ impl<'a> SessionSolverHost<'a> {
     /// All declaration-scope data (symbol names, import bindings, script-setup
     /// generics) is read from the host-owned bundle — the single authority for
     /// declaration-scope bundle materialization and reuse.
-    pub fn with_declaration_scope(
-        host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
-        declaration_canonical_id: &str,
-    ) -> Self {
-        if let Some(bundle) =
-            host.prepared_decl_bundle_in_view(declaration_canonical_id, store_view)
-        {
+    pub fn with_declaration_scope(host: &'a VerterHost, declaration_canonical_id: &str) -> Self {
+        if let Some(bundle) = host.prepared_decl_bundle(declaration_canonical_id) {
             Self::from_scope_payload(
                 host,
-                store_view,
                 declaration_canonical_id,
                 Arc::new(DeclarationScopePayload::from_bundle(&bundle)),
             )
         } else {
-            Self::new(host, store_view)
+            Self::new(host)
         }
     }
 
@@ -100,13 +88,11 @@ impl<'a> SessionSolverHost<'a> {
     /// a repeated bundle lookup when the caller already has the bundle cached.
     pub fn from_bundle(
         host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         declaration_canonical_id: &str,
         bundle: &crate::resolver_core::prepared_decl::PreparedDeclBundle,
     ) -> Self {
         Self::from_scope_payload(
             host,
-            store_view,
             declaration_canonical_id,
             Arc::new(DeclarationScopePayload::from_bundle(bundle)),
         )
@@ -114,13 +100,11 @@ impl<'a> SessionSolverHost<'a> {
 
     pub(crate) fn from_scope_payload(
         host: &'a VerterHost,
-        store_view: Option<&'a crate::host_request_view::RequestStoreView>,
         declaration_canonical_id: &str,
         scope_payload: Arc<DeclarationScopePayload>,
     ) -> Self {
         Self {
             host,
-            store_view,
             scope_canonical_id: Some(declaration_canonical_id.to_string()),
             scope_payload: Some(scope_payload),
         }
@@ -134,17 +118,16 @@ impl<'a> SessionSolverHost<'a> {
             .unwrap_or(0)
     }
 
-    fn cached_module_facts(
+    fn cached_indexed_ready(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<crate::resolver_core::ModuleFacts>> {
-        self.host
-            .ensure_module_facts_in_view(canonical_id, self.store_view)
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.host.ensure_indexed_ready(canonical_id)
     }
 
     fn symbol_exists_in_facts(
         &self,
-        entry: &crate::resolver_core::ModuleFacts,
+        entry: &crate::project_type_store::IndexedReady,
         symbol_name: &str,
     ) -> bool {
         entry.shallow_state.symbol(symbol_name).is_some()
@@ -156,15 +139,12 @@ impl<'a> SessionSolverHost<'a> {
         canonical_id: &str,
         local_name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        if let Some(entry) = self.cached_module_facts(canonical_id) {
+        if let Some(entry) = self.cached_indexed_ready(canonical_id) {
             let state = &entry.shallow_state;
             if let Some(target) = state.import_target(local_name) {
                 let resolved_id = if target.canonical_id.is_empty() {
-                    self.host.resolve_type_dependency_canonical_in_view(
-                        canonical_id,
-                        &target.source_specifier,
-                        self.store_view,
-                    )?
+                    self.host
+                        .resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?
                 } else {
                     target.canonical_id.clone()
                 };
@@ -174,9 +154,7 @@ impl<'a> SessionSolverHost<'a> {
             }
         }
 
-        let bundle = self
-            .host
-            .prepared_decl_bundle_in_view(canonical_id, self.store_view)?;
+        let bundle = self.host.prepared_decl_bundle(canonical_id)?;
         let binding = bundle.import_bindings.get(local_name)?;
         Some(
             self.resolve_imported_type_root_identity(&binding.canonical_id, &binding.exported_name),
@@ -193,7 +171,7 @@ impl<'a> SessionSolverHost<'a> {
         let member = &symbol_name[dot_pos + 1..];
         let binding = self.resolve_import_binding_from_facts(canonical_id, prefix)?;
 
-        let target_entry = self.cached_module_facts(&binding.canonical_id)?;
+        let target_entry = self.cached_indexed_ready(&binding.canonical_id)?;
         if self.symbol_exists_in_facts(&target_entry, member) {
             return Some(ResolvedRootIdentity::new(&binding.canonical_id, member));
         }
@@ -205,21 +183,13 @@ impl<'a> SessionSolverHost<'a> {
             ),
             _ => self
                 .host
-                .resolve_named_type_export_target_in_view(
-                    &binding.canonical_id,
-                    member,
-                    self.store_view,
-                )
+                .resolve_named_type_export_target(&binding.canonical_id, member)
                 .map(|(canonical_id, exported_name)| {
                     ResolvedRootIdentity::new(&canonical_id, &exported_name)
                 })
                 .or_else(|| {
                     self.host
-                        .resolve_value_export_target_in_view(
-                            &binding.canonical_id,
-                            member,
-                            self.store_view,
-                        )
+                        .resolve_value_export_target(&binding.canonical_id, member)
                         .map(|target| ResolvedRootIdentity::new(&target.canonical_id, &target.name))
                 }),
         }
@@ -236,7 +206,7 @@ impl<'a> SessionSolverHost<'a> {
 
         let (resolved_canonical_id, resolved_symbol_name) = self
             .host
-            .resolve_imported_type_root_in_view(canonical_id, exported_name, self.store_view);
+            .resolve_imported_type_root(canonical_id, exported_name);
         ResolvedRootIdentity::new(resolved_canonical_id, resolved_symbol_name)
     }
 }
@@ -259,9 +229,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         "solver_resolve_prepared_type_decl_result",
                         format!(
                             "root={}::{} source=scope_binding hit=true store_view={}",
-                            root_identity.canonical_id,
-                            root_identity.symbol_name,
-                            self.store_view.is_some()
+                            root_identity.canonical_id, root_identity.symbol_name, false
                         ),
                     );
                     return Some(Arc::clone(bound));
@@ -270,18 +238,15 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         }
 
         // Resolve from the host-owned prepared decl cache.
-        if let Some(prepared) = self.host.prepared_type_decl_in_view(
-            &root_identity.canonical_id,
-            &root_identity.symbol_name,
-            self.store_view,
-        ) {
+        if let Some(prepared) = self
+            .host
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        {
             component_meta_trace_event!(
                 "solver_resolve_prepared_type_decl_result",
                 format!(
                     "root={}::{} source=direct_prepared hit=true store_view={}",
-                    root_identity.canonical_id,
-                    root_identity.symbol_name,
-                    self.store_view.is_some()
+                    root_identity.canonical_id, root_identity.symbol_name, false
                 ),
             );
             return Some(prepared);
@@ -297,19 +262,15 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 "solver_resolve_prepared_type_decl_result",
                 format!(
                     "root={}::{} source=empty_canonical hit=false store_view={}",
-                    root_identity.canonical_id,
-                    root_identity.symbol_name,
-                    self.store_view.is_some()
+                    root_identity.canonical_id, root_identity.symbol_name, false
                 ),
             );
             return None;
         }
 
-        let (final_canonical_id, final_symbol_name) = self.host.resolve_imported_type_root_in_view(
-            &root_identity.canonical_id,
-            &root_identity.symbol_name,
-            self.store_view,
-        );
+        let (final_canonical_id, final_symbol_name) = self
+            .host
+            .resolve_imported_type_root(&root_identity.canonical_id, &root_identity.symbol_name);
         if final_canonical_id == root_identity.canonical_id
             && final_symbol_name == root_identity.symbol_name
         {
@@ -317,19 +278,15 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 "solver_resolve_prepared_type_decl_result",
                 format!(
                     "root={}::{} source=root_resolve_same hit=false store_view={}",
-                    root_identity.canonical_id,
-                    root_identity.symbol_name,
-                    self.store_view.is_some()
+                    root_identity.canonical_id, root_identity.symbol_name, false
                 ),
             );
             return None;
         }
 
-        let resolved = self.host.prepared_type_decl_in_view(
-            &final_canonical_id,
-            &final_symbol_name,
-            self.store_view,
-        );
+        let resolved = self
+            .host
+            .prepared_type_decl(&final_canonical_id, &final_symbol_name);
         component_meta_trace_event!(
             "solver_resolve_prepared_type_decl_result",
             format!(
@@ -339,7 +296,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 final_canonical_id,
                 final_symbol_name,
                 resolved.is_some(),
-                self.store_view.is_some()
+                false
             ),
         );
         resolved
@@ -350,11 +307,10 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         root_identity: &ResolvedRootIdentity,
     ) -> Option<Arc<PreparedValueDecl>> {
         // Resolve from the host-owned prepared decl cache.
-        if let Some(prepared) = self.host.prepared_value_decl_in_view(
-            &root_identity.canonical_id,
-            &root_identity.symbol_name,
-            self.store_view,
-        ) {
+        if let Some(prepared) = self
+            .host
+            .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        {
             return Some(prepared);
         }
 
@@ -362,11 +318,9 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             return None;
         }
 
-        let target = self.host.resolve_value_export_target_in_view(
-            &root_identity.canonical_id,
-            &root_identity.symbol_name,
-            self.store_view,
-        )?;
+        let target = self
+            .host
+            .resolve_value_export_target(&root_identity.canonical_id, &root_identity.symbol_name)?;
         let final_canonical_id = target.canonical_id;
         let final_symbol_name = target.name;
         if final_canonical_id == root_identity.canonical_id
@@ -375,11 +329,8 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             return None;
         }
 
-        self.host.prepared_value_decl_in_view(
-            &final_canonical_id,
-            &final_symbol_name,
-            self.store_view,
-        )
+        self.host
+            .prepared_value_decl(&final_canonical_id, &final_symbol_name)
     }
 
     fn utility_source(&self, name: &str) -> UtilitySource {
@@ -443,7 +394,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
@@ -453,7 +404,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
         // 2. If canonical_id is provided and non-empty, resolve within that
         // file's cached shallow/prepared scope before giving up.
         if !canonical_id.is_empty() {
-            if let Some(entry) = self.cached_module_facts(canonical_id) {
+            if let Some(entry) = self.cached_indexed_ready(canonical_id) {
                 if self.symbol_exists_in_facts(&entry, symbol_name) {
                     let resolved = ResolvedRootIdentity::new(canonical_id, symbol_name);
                     component_meta_trace_event!(
@@ -464,7 +415,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                             symbol_name,
                             resolved.canonical_id,
                             resolved.symbol_name,
-                            self.store_view.is_some()
+                            false
                         ),
                     );
                     return Some(resolved);
@@ -472,7 +423,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             }
 
             if self
-                .cached_module_facts(canonical_id)
+                .cached_indexed_ready(canonical_id)
                 .map(|entry| entry.shallow_state.clone())
                 .is_some_and(|state| {
                     matches!(
@@ -490,7 +441,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
@@ -506,7 +457,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
@@ -522,17 +473,14 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
             }
-            if let Some((resolved_canonical, resolved_symbol)) =
-                self.host.resolve_named_type_export_target_in_view(
-                    canonical_id,
-                    symbol_name,
-                    self.store_view,
-                )
+            if let Some((resolved_canonical, resolved_symbol)) = self
+                .host
+                .resolve_named_type_export_target(canonical_id, symbol_name)
             {
                 let resolved = ResolvedRootIdentity::new(&resolved_canonical, &resolved_symbol);
                 component_meta_trace_event!(
@@ -543,7 +491,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
@@ -554,7 +502,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                     "requested_canonical={} requested_symbol={} source=explicit_canonical hit=false store_view={}",
                     canonical_id,
                     symbol_name,
-                    self.store_view.is_some()
+                    false
                 ),
             );
             return None;
@@ -578,7 +526,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                         symbol_name,
                         resolved.canonical_id,
                         resolved.symbol_name,
-                        self.store_view.is_some()
+                        false
                     ),
                 );
                 return Some(resolved);
@@ -597,7 +545,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
             {
                 if self
                     .host
-                    .prepared_type_decl_in_view(&binding.canonical_id, member, self.store_view)
+                    .prepared_type_decl(&binding.canonical_id, member)
                     .is_some()
                 {
                     let resolved = ResolvedRootIdentity::new(&binding.canonical_id, member);
@@ -609,14 +557,14 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                             symbol_name,
                             resolved.canonical_id,
                             resolved.symbol_name,
-                            self.store_view.is_some()
+                            false
                         ),
                     );
                     return Some(resolved);
                 }
                 if self
                     .host
-                    .prepared_value_decl_in_view(&binding.canonical_id, member, self.store_view)
+                    .prepared_value_decl(&binding.canonical_id, member)
                     .is_some()
                 {
                     let resolved = ResolvedRootIdentity::new(&binding.canonical_id, member);
@@ -628,17 +576,14 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                             symbol_name,
                             resolved.canonical_id,
                             resolved.symbol_name,
-                            self.store_view.is_some()
+                            false
                         ),
                     );
                     return Some(resolved);
                 }
-                if let Some((canonical_id, exported_name)) =
-                    self.host.resolve_named_type_export_target_in_view(
-                        &binding.canonical_id,
-                        member,
-                        self.store_view,
-                    )
+                if let Some((canonical_id, exported_name)) = self
+                    .host
+                    .resolve_named_type_export_target(&binding.canonical_id, member)
                 {
                     let resolved = ResolvedRootIdentity::new(&canonical_id, &exported_name);
                     component_meta_trace_event!(
@@ -649,16 +594,15 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                             symbol_name,
                             resolved.canonical_id,
                             resolved.symbol_name,
-                            self.store_view.is_some()
+                            false
                         ),
                     );
                     return Some(resolved);
                 }
-                if let Some(target) = self.host.resolve_value_export_target_in_view(
-                    &binding.canonical_id,
-                    member,
-                    self.store_view,
-                ) {
+                if let Some(target) = self
+                    .host
+                    .resolve_value_export_target(&binding.canonical_id, member)
+                {
                     let resolved = ResolvedRootIdentity::new(&target.canonical_id, &target.name);
                     component_meta_trace_event!(
                         "solver_root_identity_result",
@@ -668,7 +612,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                             symbol_name,
                             resolved.canonical_id,
                             resolved.symbol_name,
-                            self.store_view.is_some()
+                            false
                         ),
                     );
                     return Some(resolved);
@@ -687,7 +631,7 @@ impl TypeSolverHost for SessionSolverHost<'_> {
                 "requested_canonical={} requested_symbol={} source=unresolved_bare_name hit=false store_view={}",
                 canonical_id,
                 symbol_name,
-                self.store_view.is_some()
+                false
             ),
         );
         None

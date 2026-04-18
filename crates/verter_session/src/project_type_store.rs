@@ -36,6 +36,110 @@ use crate::semantic_query::DepVersion;
 use crate::semantic_query_memo::SemanticGraphStore;
 
 // ──────────────────────────────────────────────────────────────────────────
+// ResolvedNamedTypesDb — host-owned fully-resolved named local symbols
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Host-owned cache key for fully-resolved named local symbols.
+///
+/// Promotes the per-context `ResolvedNamedTypeCacheKey` used by the parser's
+/// `TypeResolutionContext` into a cross-request identity: the original shape
+/// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
+/// plus `(canonical_id, whole_hash)` scoping so stored entries stay consistent
+/// with the owning file's content generation.
+///
+/// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
+/// construction is a refcount bump instead of a `String` heap allocation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostResolvedNamedTypeKey {
+    pub canonical_id: Arc<str>,
+    pub whole_hash: Hash16,
+    pub inner:
+        verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
+}
+
+/// Host-owned cache of fully-resolved named local symbols. Keyed by the
+/// `(canonical_id, whole_hash, ResolvedNamedTypeCacheKey)` identity so entries
+/// are valid across requests that share the same workspace content generation.
+///
+/// Cleared on epoch bump (see `VerterHost::bump_store_view_epoch`) because
+/// entries are scoped by `(canonical_id, whole_hash)` and whole_hash reflects
+/// one workspace content generation — a bumped epoch means at least one
+/// canonical's facts changed, and dropping stale entries is cheaper than
+/// per-canonical validation.
+pub struct ResolvedNamedTypesDb {
+    entries: Arc<
+        DashMap<
+            HostResolvedNamedTypeKey,
+            Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        >,
+    >,
+}
+
+impl ResolvedNamedTypesDb {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn get(
+        &self,
+        key: &HostResolvedNamedTypeKey,
+    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>> {
+        self.entries.get(key).map(|entry| Arc::clone(entry.value()))
+    }
+
+    pub fn insert(
+        &self,
+        key: HostResolvedNamedTypeKey,
+        value: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+    ) {
+        self.entries.insert(key, value);
+    }
+
+    /// Drop every cached entry. Called on epoch bumps — entries are
+    /// `(canonical_id, whole_hash)`-scoped and a bumped epoch means at least
+    /// one canonical's facts changed.
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Internal shared handle to the underlying `DashMap`. Used by the
+    /// host-side adapter that bridges `NamedTypeCache` onto this DB — it
+    /// clones the `Arc` once and performs `(canonical_id, whole_hash)`-scoped
+    /// lookups without going through this DB's methods for each hit, keeping
+    /// the hot path refcount-only.
+    pub(crate) fn shared_entries(
+        &self,
+    ) -> Arc<
+        DashMap<
+            HostResolvedNamedTypeKey,
+            Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+        >,
+    > {
+        Arc::clone(&self.entries)
+    }
+}
+
+impl Default for ResolvedNamedTypesDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -90,19 +194,18 @@ pub struct AnalysisArtifactKey {
 ///
 /// `IndexedReady` is what a canonical file lowers into after the scheduler
 /// parse. It owns the shallow symbol inventory, canonical imports and
-/// exports, and anything else later semantic passes need so they do not
-/// rescan the raw file.
+/// exports, the raw and eval source snapshots, the script analysis snapshot,
+/// and anything else later semantic passes need so they do not rescan the
+/// raw file.
 ///
 /// The OXC parse arena is transient — `IndexedReady` stores only owned
 /// `Send + Sync` data so long-lived host-owned caches do not carry borrowed
 /// AST pointers.
 ///
-/// In Phase 1 this type wraps the pre-existing
-/// [`ShallowFileState`](crate::resolver_core::shallow_file_state::ShallowFileState)
-/// and the canonical import-route table. Later phases expand its schema to
-/// cover the full `/type-resolution` skill contract — prepared declarations,
-/// value-symbol annotations, SFC block anchors, etc. — rather than piping
-/// each new field through an ad hoc side channel.
+/// As of Phase 5 this is the single canonical post-parse artifact. The
+/// transitional `IndexedReadyDb` cache that previously duplicated this
+/// payload has been retired; every consumer reads from
+/// [`IndexedReadyDb`] through [`ProjectTypeStore::indexed`].
 #[derive(Debug, Clone)]
 pub struct IndexedReady {
     pub whole_hash: Hash16,
@@ -114,6 +217,26 @@ pub struct IndexedReady {
     /// cache validation so route-surface changes invalidate only the files
     /// whose imports actually shifted.
     pub import_route_hash: Option<Hash16>,
+    /// Raw file source as-read. Shared immutable handle across consumers.
+    pub raw_source: Arc<str>,
+    /// SFC-extracted `<script>` content used as the body of the eval
+    /// environment. For non-SFC files this equals the script slice of the
+    /// raw source.
+    pub eval_source: Arc<str>,
+    /// Cached parsed SFC payload when the canonical file is a Vue SFC.
+    /// Other file kinds carry `None`.
+    pub cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
+    /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
+    /// Always present after materialization.
+    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    /// Cached per-export signatures used by smart dependent invalidation.
+    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+    /// File-level analysis snapshot consumed by component-meta / linter
+    /// pipelines.
+    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    /// Cached external-type analysis used by the shared type resolver.
+    pub external_type_analysis:
+        Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -188,6 +311,26 @@ impl IndexedReadyDb {
         } else {
             None
         }
+    }
+
+    /// Look up the cached artifact for `canonical_id` without hash check.
+    ///
+    /// Returned whenever an entry exists in the store. Callers must validate
+    /// against their expected `whole_hash` if they need a strict match; this
+    /// hook is the drop-in replacement for the retired
+    /// `IndexedReadyDb::get_any` access pattern.
+    #[must_use]
+    pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
+        self.entries.get(canonical_id).map(|entry| entry.clone())
+    }
+
+    /// Snapshot every live entry for auditing / diagnostics.
+    #[must_use]
+    pub fn snapshot_all(&self) -> Vec<(Arc<str>, Arc<IndexedReady>)> {
+        self.entries
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
     }
 
     /// Insert or replace the entry for `canonical_id`. Older versions for the
@@ -429,6 +572,14 @@ pub struct ProjectTypeStore {
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
     intrinsic_registry: IntrinsicRegistry,
+    /// Host-owned fully-resolved named local symbols (migrated from the
+    /// per-context `Rc<RefCell<FxHashMap>>` cache in `TypeResolutionContext`).
+    /// Keyed by the full `(canonical_id, whole_hash, name, surface,
+    /// companion_cache_key, type_param_bindings)` identity — same shape the
+    /// context cache used, plus `(canonical_id, whole_hash)` scoping so
+    /// entries are valid across requests that share the same workspace
+    /// content generation.
+    resolved_named_types: ResolvedNamedTypesDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -481,6 +632,7 @@ impl ProjectTypeStore {
             owner_import_surfaces,
             component_meta_results,
             intrinsic_registry: IntrinsicRegistry::with_defaults(),
+            resolved_named_types: ResolvedNamedTypesDb::new(),
             counters,
         }
     }
@@ -540,6 +692,11 @@ impl ProjectTypeStore {
     /// the active TS SDK is swapped.
     pub fn intrinsic_registry(&self) -> &IntrinsicRegistry {
         &self.intrinsic_registry
+    }
+
+    /// Host-owned fully-resolved named local symbols cache.
+    pub fn resolved_named_types(&self) -> &ResolvedNamedTypesDb {
+        &self.resolved_named_types
     }
 
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
@@ -726,6 +883,15 @@ mod tests {
                 shallow_state: shallow,
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
+                raw_source: Arc::from(""),
+                eval_source: Arc::from(""),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                external_type_analysis: Arc::new(
+                    verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+                ),
             }),
         );
         assert!(db.get("/w/a.ts", hash_v1).is_some());
@@ -771,6 +937,13 @@ mod tests {
                 ),
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
+                raw_source: Arc::from(""),
+                eval_source: Arc::from(""),
+                cached_parse: None,
+                script_analysis: None,
+                export_signatures: None,
+                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                external_type_analysis: Arc::clone(&analysis),
             })
         };
 

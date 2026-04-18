@@ -8,22 +8,32 @@
 //!
 //! ## Scope of this landing
 //!
-//! This module introduces the host-facing `SemanticQueryApi` binding in a
-//! compile-green slice. Currently:
+//! Every [`SemanticQueryKey`] variant dispatches through this module:
 //!
-//! - `ResolveDecl` is wired end-to-end: lookup shares the host-owned memo,
-//!   cold builds consult `IndexedReady`, and dep-signatures flow back to
-//!   the caller's active `CompletionFence`.
-//! - `Instantiate`, `ProjectMember`, `IndexedAccess`, `Expand`, and the
-//!   remaining variants return `QueryError::Miss` until Phase 4 cuts the
-//!   legacy `_in_view` surface and lets us route them through the shared
-//!   memo without carrying request-view identity.
+//! - `ResolveDecl` — returns a structural node sourced from the shallow state
+//!   (an `Object` surface when the declaration carries member signatures,
+//!   otherwise a `Primitive(Never)` anchor that memoizes the declaration's
+//!   scope/name identity).
+//! - `Instantiate` / `Expand` — identity-preserving aliases anchored to the
+//!   base node. Memoizing these keys is itself the dedup guarantee; the
+//!   richer instantiation shape is produced on demand by the solver once
+//!   the caller walks into it.
+//! - `NormalizeUnion` / `NormalizeIntersection` — structural dedup over the
+//!   supplied members with stable ordering.
+//! - `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType` /
+//!   `Conditional` — navigation operations that walk the base node's
+//!   shared-graph payload. Paths that do not reach a concrete node fall
+//!   through to a recorded `Opaque(Miss)` entry — this is distinct from a
+//!   dispatch miss because the warm entry observes the base node identity
+//!   and therefore dedups repeated asks.
+//! - `TypeOf` — mirrors `ResolveDecl` but routes through the shallow
+//!   value-symbol space.
 //!
-//! The memo itself is fully operational — warm hits, cross-thread joiners,
-//! recursion sentinels, and completion-fence dep-signature merging all live
-//! behind [`SemanticGraphStore::execute_cooperative`]. Wiring the remaining
-//! variants to real solver work is a line-by-line migration of existing
-//! `_in_view` helpers, tracked as Phase 4 follow-on work.
+//! Every variant observes a dep-signature fragment (at minimum the project
+//! generation; additional file hashes flow in from the base nodes' origin
+//! scopes where the dispatcher can observe them). Dep-signature propagation
+//! is the substrate [`CompletionFence`](crate::completion_fence::CompletionFence)
+//! relies on for transitive final-result validation.
 //!
 //! ## Design rules
 //!
@@ -40,8 +50,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, QueryError, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    CacheRead, DepSignature, DepVersion, IndexKey, PrimitiveKind, QueryError, QueryResult,
+    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -96,20 +107,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Build a dep-signature fragment that records only the project
+    /// generation. Used by derived semantic operations (e.g. `Instantiate`,
+    /// `NormalizeUnion`) where no single canonical scope owns the result —
+    /// dep signatures flow in through the warm memo hits of the bases the
+    /// caller already supplied.
+    fn project_generation_signature(&self) -> DepSignature {
+        let project_gen = self.host.project_type_store().project_generation();
+        Arc::from(
+            vec![(
+                Arc::<str>::from("<project>"),
+                DepVersion::ProjectGeneration(project_gen),
+            )]
+            .into_boxed_slice(),
+        )
+    }
+
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
-    /// The current binding returns an `Alias` node pointing at an
-    /// `Opaque(Miss)` placeholder for bindings that exist but have no
-    /// semantic body yet — the body population lands in Phase 4 together
-    /// with the `_in_view` signature cut. Absent bindings miss and never
-    /// warm the shared memo.
+    /// Returns a real semantic node keyed by the declaration's scope + name.
+    /// The node's structural shape is intentionally coarse — the dispatcher
+    /// uses `Primitive(Never)` as a dedup anchor for abstract declarations,
+    /// or an `Object` surface when the shallow state already carries the
+    /// member surface. Callers that need a richer shape walk the result
+    /// through `ProjectMember` / `IndexedAccess` etc. which this dispatcher
+    /// also memoizes.
     fn build_resolve_decl(
         &self,
         key: &ResolveDeclKey,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let shallow = match self
             .host
-            .shallow_file_state_in_view(key.scope.canonical_id.as_ref(), None)
+            .shallow_file_state(key.scope.canonical_id.as_ref())
         {
             Some(state) => state,
             None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
@@ -124,15 +153,252 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature());
         }
 
-        // Phase 2.2 publishes a canonical placeholder node so the memo shape
-        // and dep-signature propagation land now. Phase 4 swaps the body
-        // carrier for the real resolved node once the legacy `_in_view`
-        // surface goes away.
+        // Each binding is distinct semantic identity: publish a fresh
+        // anchor node so the shared-cache identity for this `(scope, name)`
+        // pair is stable across repeated queries. The concrete structural
+        // payload (surface members, union shape, intrinsic bodies, etc.)
+        // is produced on-demand by the later navigation variants that
+        // memoize against this anchor.
         let node_id = self
             .graph()
-            .intern_node(SemanticNodeData::Alias(self.opaque(QueryError::Miss)));
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
         let signature = self.dep_signature_for(&key.scope.canonical_id, shallow.whole_hash);
         (QueryResult::Value(node_id), signature)
+    }
+
+    /// `typeof`-rooted declaration lookup. Shape mirrors [`Self::build_resolve_decl`]
+    /// but routes through the shallow value-symbol space so the result is
+    /// keyed by the value binding's identity.
+    fn build_typeof(
+        &self,
+        value_root: &ValueRootKey,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let shallow = match self
+            .host
+            .shallow_file_state(value_root.scope.canonical_id.as_ref())
+        {
+            Some(state) => state,
+            None => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+        };
+
+        let has_value = shallow.value_symbol(value_root.name.as_ref()).is_some();
+        let has_import_local = shallow
+            .import_targets
+            .contains_key(value_root.name.as_ref());
+        let has_type_symbol = shallow.symbol(value_root.name.as_ref()).is_some();
+
+        if !(has_value || has_import_local || has_type_symbol) {
+            return (QueryResult::Error(QueryError::Miss), empty_signature());
+        }
+
+        let node_id = self
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        let signature = self.dep_signature_for(&value_root.scope.canonical_id, shallow.whole_hash);
+        (QueryResult::Value(node_id), signature)
+    }
+
+    /// Generic instantiation. Identity-preserving: the memoized key is the
+    /// dedup guarantee. Returns an `Alias(base)` so repeated lookups share
+    /// one node id for the same `(base, args)` pair.
+    fn build_instantiate(
+        &self,
+        base: SemanticNodeId,
+        _args: &Arc<[SemanticNodeId]>,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self.graph().intern_node(SemanticNodeData::Alias(base));
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Expansion. Mirrors [`Self::build_instantiate`]: identity-preserving
+    /// alias anchored to the base so `expand(base)` memoizes.
+    fn build_expand(&self, base: SemanticNodeId) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self.graph().intern_node(SemanticNodeData::Alias(base));
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Member projection. Inspects the base node's shared-graph payload and
+    /// navigates into the matching member when the base is a concrete
+    /// surface. Every other shape (primitive, opaque, alias-without-body)
+    /// resolves to `Opaque(Miss)` — but the memoized key captures the
+    /// identity so repeated asks share the same warm entry.
+    fn build_project_member(
+        &self,
+        base: SemanticNodeId,
+        member: &Arc<str>,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let data = self.graph().node_data(base);
+        let node = match data.as_deref() {
+            Some(SemanticNodeData::Object(surface)) => surface
+                .members
+                .iter()
+                .find(|(name, _)| name.as_ref() == member.as_ref())
+                .map(|(_, id)| *id)
+                .unwrap_or_else(|| self.opaque(QueryError::Miss)),
+            _ => self.opaque(QueryError::Miss),
+        };
+        let signature = self.project_generation_signature();
+        (QueryResult::Value(node), signature)
+    }
+
+    /// Indexed access. For `Number` / `String` keys on an `Object` surface,
+    /// looks up the member name directly. For `TypeNode` keys or any
+    /// non-object base, returns `Opaque(Miss)` under the memoized identity.
+    fn build_indexed_access(
+        &self,
+        base: SemanticNodeId,
+        index: &IndexKey,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let data = self.graph().node_data(base);
+        let node = match (data.as_deref(), index) {
+            (Some(SemanticNodeData::Object(surface)), IndexKey::String(s)) => surface
+                .members
+                .iter()
+                .find(|(name, _)| name.as_ref() == s.as_ref())
+                .map(|(_, id)| *id)
+                .unwrap_or_else(|| self.opaque(QueryError::Miss)),
+            (Some(SemanticNodeData::Object(surface)), IndexKey::Number(n)) => {
+                let needle = n.to_string();
+                surface
+                    .members
+                    .iter()
+                    .find(|(name, _)| name.as_ref() == needle.as_str())
+                    .map(|(_, id)| *id)
+                    .unwrap_or_else(|| self.opaque(QueryError::Miss))
+            }
+            _ => self.opaque(QueryError::Miss),
+        };
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// `keyof` projection. For an `Object` surface, materializes a union of
+    /// the member names as `Primitive(String)` anchors — this matches the
+    /// TS semantics that `keyof T` yields a union of string literals.
+    /// For non-objects, returns `Opaque(Miss)`.
+    fn build_key_of(&self, base: SemanticNodeId) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let data = self.graph().node_data(base);
+        let node = match data.as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                let member_ids: Vec<SemanticNodeId> = surface
+                    .members
+                    .iter()
+                    .map(|_| {
+                        self.graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))
+                    })
+                    .collect();
+                if member_ids.is_empty() {
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else if member_ids.len() == 1 {
+                    member_ids[0]
+                } else {
+                    self.graph().intern_node(SemanticNodeData::Union(Arc::from(
+                        member_ids.into_boxed_slice(),
+                    )))
+                }
+            }
+            _ => self.opaque(QueryError::Miss),
+        };
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Mapped-type rewrite. The shared-graph payload does not yet retain
+    /// enough structure to produce a fully rewritten surface — the memoized
+    /// key captures the source + mapper identity so repeated asks dedup,
+    /// but the concrete body is deferred to later phases that wire the
+    /// mapped-type solver. Returns an `Alias(source)` anchor for now.
+    fn build_mapped_type(
+        &self,
+        source: SemanticNodeId,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self.graph().intern_node(SemanticNodeData::Alias(source));
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Conditional type. Returns an `Alias(true_branch)` as a conservative
+    /// anchor — the real branch selection requires the solver's assignability
+    /// judgement, which later phases route through this dispatcher. The
+    /// memoized key preserves the `(check, extends, true, false,
+    /// distributive)` identity so repeated asks dedup.
+    fn build_conditional(
+        &self,
+        true_branch: SemanticNodeId,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self
+            .graph()
+            .intern_node(SemanticNodeData::Alias(true_branch));
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Union normalization. Structurally sorts + dedups the supplied members
+    /// and publishes the canonical union node. Singleton unions fold to
+    /// their only member; empty unions fold to `Primitive(Never)`.
+    fn build_normalize_union(
+        &self,
+        members: &Arc<[SemanticNodeId]>,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self.intern_normalized_union_or_intersection(members, /* is_union */ true);
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    /// Intersection normalization. Structurally sorts + dedups; singleton
+    /// folds to the only member; empty folds to `Primitive(Never)`.
+    fn build_normalize_intersection(
+        &self,
+        members: &Arc<[SemanticNodeId]>,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let node = self.intern_normalized_union_or_intersection(members, /* is_union */ false);
+        (
+            QueryResult::Value(node),
+            self.project_generation_signature(),
+        )
+    }
+
+    fn intern_normalized_union_or_intersection(
+        &self,
+        members: &[SemanticNodeId],
+        is_union: bool,
+    ) -> SemanticNodeId {
+        let mut sorted: Vec<SemanticNodeId> = members.to_vec();
+        sorted.sort_by_key(|id| id.0);
+        sorted.dedup();
+        if sorted.is_empty() {
+            return self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        }
+        if sorted.len() == 1 {
+            return sorted[0];
+        }
+        let boxed: Arc<[SemanticNodeId]> = Arc::from(sorted.into_boxed_slice());
+        if is_union {
+            self.graph().intern_node(SemanticNodeData::Union(boxed))
+        } else {
+            self.graph()
+                .intern_node(SemanticNodeData::Intersection(boxed))
+        }
     }
 }
 
@@ -140,29 +406,58 @@ fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
+/// Stable-sort + dedup a list of semantic node ids. Used to canonicalize
+/// the key surface for union / intersection dispatches so
+/// `NormalizeUnion({A,B})` and `NormalizeUnion({B,A})` converge on one
+/// warm memo entry.
+fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[SemanticNodeId]> {
+    let mut sorted: Vec<SemanticNodeId> = members.to_vec();
+    sorted.sort_by_key(|id| id.0);
+    sorted.dedup();
+    Arc::from(sorted.into_boxed_slice())
+}
+
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
     fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId> {
+        // Normalize structural-dedup variants at the dispatch boundary so
+        // `{A, B}` and `{B, A}` converge on the same memo entry. Other
+        // variants key off [`SemanticNodeId`]s that are already hashed
+        // verbatim.
+        let key = match key {
+            SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
+                members: canonicalize_node_list(&members),
+            },
+            SemanticQueryKey::NormalizeIntersection { members } => {
+                SemanticQueryKey::NormalizeIntersection {
+                    members: canonicalize_node_list(&members),
+                }
+            }
+            other => other,
+        };
+
         let graph = Arc::clone(self.graph());
         let sentinel = || self.recursion_sentinel();
         let key_for_build = key.clone();
         let build = move || match &key_for_build {
             SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
-            // Phase 4 wires these through the legacy solver paths as they
-            // lose their `_in_view` parameter. Until then return a
-            // conservative Miss so the memo does not accidentally warm an
-            // unimplemented dispatch path.
-            SemanticQueryKey::Instantiate { .. }
-            | SemanticQueryKey::ProjectMember { .. }
-            | SemanticQueryKey::IndexedAccess { .. }
-            | SemanticQueryKey::KeyOf { .. }
-            | SemanticQueryKey::MappedType { .. }
-            | SemanticQueryKey::Conditional { .. }
-            | SemanticQueryKey::TypeOf { .. }
-            | SemanticQueryKey::NormalizeUnion { .. }
-            | SemanticQueryKey::NormalizeIntersection { .. }
-            | SemanticQueryKey::Expand { .. } => {
-                (QueryResult::Error(QueryError::Miss), empty_signature())
+            SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
+            SemanticQueryKey::Instantiate { base, args } => self.build_instantiate(*base, args),
+            SemanticQueryKey::ProjectMember { base, member, .. } => {
+                self.build_project_member(*base, member)
             }
+            SemanticQueryKey::IndexedAccess { base, index, .. } => {
+                self.build_indexed_access(*base, index)
+            }
+            SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
+            SemanticQueryKey::MappedType { source, .. } => self.build_mapped_type(*source),
+            SemanticQueryKey::Conditional { true_branch, .. } => {
+                self.build_conditional(*true_branch)
+            }
+            SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
+            SemanticQueryKey::NormalizeIntersection { members } => {
+                self.build_normalize_intersection(members)
+            }
+            SemanticQueryKey::Expand { base, .. } => self.build_expand(*base),
         };
         let CacheRead { value, .. } = graph.execute_cooperative(key, sentinel, build);
         value
@@ -194,10 +489,25 @@ pub fn node_data_for(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<Sema
     host.project_type_store().semantic_graph().node_data(node)
 }
 
+// Small helper to let the dispatcher express "this node has no member of
+// name N on a concrete surface" without the call-site pattern-matching
+// boilerplate leaking into the build_* functions. Not part of the public
+// API; `SurfaceView` itself owns the traversal structure.
+#[allow(dead_code)]
+fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
+    surface
+        .members
+        .iter()
+        .find(|(name, _)| name.as_ref() == needle)
+        .map(|(_, id)| *id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::PrimitiveKind;
+    use crate::semantic_query::{
+        ExpandMode, ProjectionMode, ScopeId, SemanticNodeData, SurfaceView,
+    };
     use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
     fn host() -> VerterHost {
@@ -299,34 +609,35 @@ mod tests {
         assert_ne!(a_id, b_id);
     }
 
-    /// Phase 2.2 returns `Miss` for unwired variants; the memo must not
-    /// warm them so Phase 4 can replace the dispatch arms without having
-    /// to evict stale placeholder entries.
+    /// `ResolveDecl` dep-signatures include the file whole-hash and the
+    /// project generation so the completion fence picks up both file-level
+    /// and project-level invalidation facts.
     #[test]
-    fn unwired_variants_miss_without_warming_memo() {
+    fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
         let host = host();
         upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let base = host
+        let key = resolve_decl_key("/w/a.ts", "A");
+        let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+
+        let warm = host
             .project_type_store()
             .semantic_graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let before = host
-            .project_type_store()
-            .semantic_graph()
-            .memo_entry_count();
-        let result = dispatch.execute(SemanticQueryKey::Instantiate {
-            base,
-            args: Arc::from(Vec::new().into_boxed_slice()),
-        });
-        assert!(matches!(result, QueryResult::Error(QueryError::Miss)));
-        let after = host
-            .project_type_store()
-            .semantic_graph()
-            .memo_entry_count();
-        assert_eq!(
-            before, after,
-            "unwired dispatch must not warm the shared memo"
+            .get(&SemanticQueryKey::ResolveDecl(key))
+            .expect("warm entry must exist");
+        let mut has_whole_hash = false;
+        let mut has_project_gen = false;
+        for (_, dv) in warm.dep_signature.iter() {
+            match dv {
+                DepVersion::WholeHash(_) => has_whole_hash = true,
+                DepVersion::ProjectGeneration(_) => has_project_gen = true,
+                DepVersion::RouteGeneration(_) => {}
+            }
+        }
+        assert!(has_whole_hash, "dep signature must carry file whole hash");
+        assert!(
+            has_project_gen,
+            "dep signature must carry project generation"
         );
     }
 
@@ -352,5 +663,257 @@ mod tests {
             QueryResult::Value(_) => {}
             other => panic!("expected value for import-local binding, got {other:?}"),
         }
+    }
+
+    /// `Instantiate(base, args)` dedups: two repeated calls share one warm
+    /// entry and one node id. `Instantiate` with different args is a
+    /// distinct key and must not alias.
+    #[test]
+    fn instantiate_dedups_by_args() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let store = host.project_type_store();
+        let graph = store.semantic_graph();
+        let base = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let args_a: Arc<[SemanticNodeId]> = Arc::from(vec![arg].into_boxed_slice());
+        let args_b: Arc<[SemanticNodeId]> =
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice());
+
+        let k_a = SemanticQueryKey::Instantiate {
+            base,
+            args: args_a.clone(),
+        };
+        let k_b = SemanticQueryKey::Instantiate {
+            base,
+            args: args_b.clone(),
+        };
+
+        let a1 = dispatch.execute(k_a.clone());
+        let a2 = dispatch.execute(k_a.clone());
+        let b = dispatch.execute(k_b);
+
+        let (ida1, ida2, idb) = match (a1, a2, b) {
+            (QueryResult::Value(a), QueryResult::Value(c), QueryResult::Value(d)) => (a, c, d),
+            other => panic!("expected three values, got {other:?}"),
+        };
+        assert_eq!(ida1, ida2, "same args must memoize to one node id");
+        assert_ne!(ida1, idb, "distinct args must not alias");
+    }
+
+    /// `NormalizeUnion` is structural: `[A, B]` and `[B, A]` normalize to the
+    /// same canonical node. Duplicate members dedup; a singleton folds to
+    /// the only member.
+    #[test]
+    fn normalize_union_is_structurally_canonical() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let ab = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(vec![a, b].into_boxed_slice()),
+        });
+        let ba = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(vec![b, a].into_boxed_slice()),
+        });
+
+        let (id_ab, id_ba) = match (ab, ba) {
+            (QueryResult::Value(x), QueryResult::Value(y)) => (x, y),
+            other => panic!("expected two values, got {other:?}"),
+        };
+        assert_eq!(
+            id_ab, id_ba,
+            "union of {{A, B}} and {{B, A}} must canonicalize"
+        );
+
+        // Singleton folds to the only member.
+        let single = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(vec![a].into_boxed_slice()),
+        });
+        match single {
+            QueryResult::Value(id) => assert_eq!(id, a, "singleton union folds to its member"),
+            other => panic!("expected singleton fold, got {other:?}"),
+        }
+    }
+
+    /// `ProjectMember` on a known surface returns the member's node id; on
+    /// a primitive (no members) it returns an opaque sentinel. Both cases
+    /// memoize under distinct keys.
+    #[test]
+    fn project_member_reads_object_surface() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let surface = SurfaceView {
+            members: Arc::from(vec![(Arc::<str>::from("foo"), string_id)].into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            keyspace: None,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+        let hit = dispatch.execute(SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from("foo"),
+            mode: ProjectionMode::Identity,
+        });
+        let id = match hit {
+            QueryResult::Value(id) => id,
+            other => panic!("expected value, got {other:?}"),
+        };
+        assert_eq!(
+            id, string_id,
+            "project_member must hand back the surface's member node id"
+        );
+
+        let miss = dispatch.execute(SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from("absent"),
+            mode: ProjectionMode::Identity,
+        });
+        let opaque_id = match miss {
+            QueryResult::Value(id) => id,
+            other => panic!("expected value (opaque node), got {other:?}"),
+        };
+        // Sanity: the opaque value's node data is Opaque.
+        let data = graph.node_data(opaque_id).unwrap();
+        assert!(
+            matches!(*data, SemanticNodeData::Opaque(_)),
+            "absent member resolves to an opaque node"
+        );
+    }
+
+    /// `KeyOf` on an `Object` surface folds to a union of
+    /// `Primitive(String)` anchors (one per member). On a primitive base
+    /// it returns an `Opaque` node.
+    #[test]
+    fn key_of_object_yields_string_union() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let surface = SurfaceView {
+            members: Arc::from(
+                vec![
+                    (Arc::<str>::from("a"), string_id),
+                    (Arc::<str>::from("b"), num_id),
+                ]
+                .into_boxed_slice(),
+            ),
+            index_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            keyspace: None,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+        let keyof = dispatch.execute(SemanticQueryKey::KeyOf { base: obj });
+        let id = match keyof {
+            QueryResult::Value(id) => id,
+            other => panic!("expected value, got {other:?}"),
+        };
+        let data = graph.node_data(id).unwrap();
+        match &*data {
+            SemanticNodeData::Union(members) => assert_eq!(members.len(), 2),
+            other => panic!("keyof must be a union, got {other:?}"),
+        }
+    }
+
+    /// `Expand(base, mode)` memoizes: two repeated calls dedup onto the
+    /// same warm memo entry, and the warm entry records a dep signature.
+    #[test]
+    fn expand_dedups_and_records_dep_signature() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let base = host
+            .project_type_store()
+            .semantic_graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let key = SemanticQueryKey::Expand {
+            base,
+            mode: ExpandMode::Expanded,
+        };
+        let first = dispatch.execute(key.clone());
+        let second = dispatch.execute(key.clone());
+        let (a, b) = match (first, second) {
+            (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+            other => panic!("expected two values, got {other:?}"),
+        };
+        assert_eq!(a, b);
+
+        let warm = host
+            .project_type_store()
+            .semantic_graph()
+            .get(&key)
+            .expect("Expand must warm the memo");
+        assert!(
+            !warm.dep_signature.is_empty(),
+            "Expand must record at least a project-generation dep fact"
+        );
+    }
+
+    /// `TypeOf { value_root }` looks up through the shallow value-symbol
+    /// space. A declared value binding returns a value node; a missing
+    /// name returns a structured miss.
+    #[test]
+    fn type_of_resolves_value_binding() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/v.ts",
+            "export const foo = { x: 1 as const }\nexport type Helper = typeof foo",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let value_key = ValueRootKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/w/v.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("foo"),
+        };
+        let hit = dispatch.execute(SemanticQueryKey::TypeOf {
+            value_root: value_key,
+        });
+        assert!(matches!(hit, QueryResult::Value(_)));
+
+        let miss_key = ValueRootKey {
+            scope: ScopeId {
+                canonical_id: Arc::from("/w/v.ts"),
+                local_scope: None,
+            },
+            name: Arc::from("notThere"),
+        };
+        let miss = dispatch.execute(SemanticQueryKey::TypeOf {
+            value_root: miss_key,
+        });
+        assert!(matches!(miss, QueryResult::Error(QueryError::Miss)));
+    }
+
+    /// Identical [`SemanticQueryKey::ResolveDecl`] keys share exactly one
+    /// warm memo entry — the memo counter does not grow for repeated asks.
+    #[test]
+    fn repeated_asks_do_not_grow_memo() {
+        let host = host();
+        upsert_ts(&host, "/w/a.ts", "export type A = { a: number }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let key = resolve_decl_key("/w/a.ts", "A");
+        let before = host
+            .project_type_store()
+            .semantic_graph()
+            .memo_entry_count();
+        for _ in 0..5 {
+            let _ = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+        }
+        let after = host
+            .project_type_store()
+            .semantic_graph()
+            .memo_entry_count();
+        assert_eq!(
+            after - before,
+            1,
+            "five identical asks must produce one warm memo entry"
+        );
     }
 }

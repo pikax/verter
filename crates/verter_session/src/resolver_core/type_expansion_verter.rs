@@ -187,7 +187,6 @@ pub fn resolved_macro_to_expansion(macro_meta: &ResolvedMacroMeta) -> TypeExpans
 pub fn resolved_macro_to_expansion_via_solver(
     macro_meta: &ResolvedMacroMeta,
     host: &crate::VerterHost,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> (
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
@@ -217,11 +216,10 @@ pub fn resolved_macro_to_expansion_via_solver(
     }
 
     let solver_host = if macro_meta.declaration.canonical_source.is_empty() {
-        crate::resolver_core::SessionSolverHost::new(host, store_view)
+        crate::resolver_core::SessionSolverHost::new(host)
     } else {
         crate::resolver_core::SessionSolverHost::with_declaration_scope(
             host,
-            store_view,
             macro_meta.declaration.canonical_source.as_str(),
         )
     };
@@ -428,7 +426,7 @@ mod tests {
         // Solver path (standalone host — no files loaded, so solver can't
         // resolve cross-file refs, but primitive type_text should match)
         let host = crate::VerterHost::new_standalone(Default::default());
-        let (solver, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (solver, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);
 
         // Same number of members
         assert_eq!(old.members.len(), solver.members.len());
@@ -454,7 +452,7 @@ mod tests {
     fn solver_expansion_preserves_completeness() {
         let macro_meta = make_resolved_macro();
         let host = crate::VerterHost::new_standalone(Default::default());
-        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);
         assert_eq!(result.completeness, ExpansionCompleteness::Exact);
     }
 
@@ -463,7 +461,7 @@ mod tests {
         let mut macro_meta = make_resolved_macro();
         macro_meta.props.clear();
         let host = crate::VerterHost::new_standalone(Default::default());
-        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);
         assert_eq!(result.completeness, ExpansionCompleteness::LowerBound);
     }
 
@@ -474,7 +472,7 @@ mod tests {
             audit_enabled: true,
             ..Default::default()
         });
-        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);
 
         assert_eq!(result.completeness, ExpansionCompleteness::Exact);
         assert_eq!(result.members.len(), 2);
@@ -510,7 +508,7 @@ export interface Button {
             Some(&env),
         ));
         let host = crate::VerterHost::new_standalone(Default::default());
-        host.seed_module_facts_for_test(
+        host.seed_indexed_ready_for_test(
             "/src/types.ts",
             Hash16::default(),
             Arc::<str>::from(source),
@@ -538,7 +536,7 @@ export interface Button {
             resolution_error: None,
         }];
 
-        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host, None);
+        let (result, _trace) = resolved_macro_to_expansion_via_solver(&macro_meta, &host);
 
         assert_eq!(result.members.len(), 1);
         match &result.members[0].type_expr {

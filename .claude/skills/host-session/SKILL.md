@@ -12,15 +12,16 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 - `IndexedReadyDb` — canonical post-parse artifacts.
 - `AnalysisReadyDb` — scope-parameterised analysis augmentation.
 - `RouteDb` (rehomed) — barrel / route surface cache.
-- `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface_in_view` / `resolve_owner_direct_import_in_view`.
-- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache (Phase 3 wiring in `get_component_meta`).
-- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch` / `SemanticQueryApi`.
+- `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface` / `resolve_owner_direct_import`.
+- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache consulted by `get_component_meta` before any cold work.
+- `ResolvedNamedTypesDb` — host-owned resolved-named-type cache (folded in from the former `host_owned_resolved_named_types` DashMap).
+- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Every `SemanticQueryKey` variant dispatches through this memo.
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
 
 Eviction hooks run on every `upsert`: `resolver.runtime.evict_canonical` + `project_type_store.evict_canonical` — both run atomically so a file-content change cannot leave one cache authority stale. Workspace-shape changes (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict` which clears route-sensitive layers (`OwnerImportSurfaceDb`, `ComponentMetaResultDb`, `SemanticGraphStore`) atomically.
 
-Request-view state: `RequestStoreView` retains `captured` + `extensions` during the transitional window so mid-request `ensure_loaded` can extend visibility. The per-request `external_inputs_memo` and `eval_state_memo` were retired in Phase 4 — repeated in-request probes hit `ModuleFactsDb` / `IndexedReadyDb` directly. Remaining Phase 4 work (the full `_in_view` signature cut) is tracked in `.claude/audits/project-global-type-rewrite-correctness-audit.md`.
+Host view: resolver-path helpers receive `&HostStoreView` directly. The request-view-era `RequestStoreView` / `CURRENT_REQUEST_VIEW` thread-local / `EffectiveView` / `_in_view` helpers are retired; `IndexedReady` is the single canonical post-parse artifact (the former `ModuleFactsDb` has been deleted). Validated-cache writes record dep-signatures; warm hits revalidate through `HostFenceValidator` before returning.
 
 ## Language Server Architecture
 
@@ -255,21 +256,19 @@ Architectural target for the project-global cache overhaul:
 - `AnalysisReady` should build on and enhance `IndexedReady`, not replace it with a parallel file-understanding path
 - component-meta and analysis-triggered symbol expansion should populate the same host-owned resolver caches
 
-### Request-Scoped View Contract
+### Host Store View (Post-Request-View Cutover)
 
-`RequestStoreView` (`crates/verter_session/src/host_request_view.rs`) is the single per-request view captured at request entry. It wraps the host-owned `HostStoreView` snapshot plus a request-private `RequestExtension` map covering `whole_hash`, derived hashes (`Route`, `ImportRoute`), and `import_route` resolutions for canonicals discovered mid-request via `ensure_loaded`.
+The request-view era (`RequestStoreView`, `CURRENT_REQUEST_VIEW` thread-local, `EffectiveView`, `*_in_view` helpers) is retired. Resolver-path helpers take `&HostStoreView` (or use the host's live probes directly). `HostStoreView::from_host(self)` snapshots a cheap immutable view of the host's current state for cache-validation identity (`StoreView::compat_token` = `mutation_epoch`).
 
 Key rules:
 
-- Resolvers inside a request consult the request view for all "what does the host know about this canonical?" lookups. Live `host.scheduler.try_get_source(...)`, `module_facts.get_any(...)`, `host.get_whole_hash(...)` probes inside resolver paths are considered view-bypass.
-- `RequestStoreView::is_evalable(canonical)` is the canonical shallow-probe API for feasibility checks. `VerterHost::is_evalable(canonical)` reads from the current request view via the thread-local `CURRENT_REQUEST_VIEW`, falling back to the cheap `get_whole_hash` check outside of any request.
-- Mid-request `ensure_loaded` integration uses the thread-local `CURRENT_REQUEST_VIEW` guard to record extensions via `VerterHost::record_current_request_extension_for`; top-level callers see no plumbing change.
-- The request-scoped `external_inputs_memo` on `RequestStoreView` caches the *result of fetching from* `external_type_analysis_cache` / `module_facts`, keyed by `(canonical_id, whole_hash)`. It is a lookup memo, NOT a parallel parser path -- the host-scoped cache remains the single source of truth for `Arc<AnalyzedExternalTypeSource>`.
-- View staleness during long-running requests (Editor menus, multi-second queries) is bounded -- the captured view does not see post-snapshot upserts; the next request snapshots fresh.
+- Resolver-path helpers read state directly from the host and `ProjectTypeStore`. There is no request-private extension store — canonicals loaded mid-request via `ensure_loaded` publish to `ProjectTypeStore` / `IndexedReadyDb` and become visible to all readers.
+- `VerterHost::is_evalable(canonical)` is the canonical shallow-probe API; it calls `get_whole_hash(canonical).is_some()` directly.
+- `ensure_loaded` publishes to the scheduler + `IndexedReadyDb`; there is no extension-store plumbing.
+- Cache-validation staleness is enforced by `HostFenceValidator` + dep-signatures on `ValidatedFactCache` entries. Warm hits revalidate every recorded fact before returning; stale entries miss and force a cold rebuild.
+- Host-scoped caches (final `ComponentMetaResultDb`, `OwnerImportSurfaceDb`, `SemanticGraphStore`) validate through dep-signatures; transient `TypeSurfaceDb` writes only happen through `publish_with_facts` which attaches dep-signatures.
 
-**Ambient-view-first helper pattern**: resolver-path helpers taking `Option<&RequestStoreView>` MUST resolve the effective view at function entry via `current_request_view().or(store_view)`. Ambient (thread-local) takes precedence over the explicit arg; "outside any request" is the only place live host probes (`scheduler.try_get_source`, `module_facts.get_any`, `get_whole_hash`, `read_analysis_source`) are acceptable. Reference shapes: `module_facts_in_request_view`, `is_evalable`. The `effective_request_view(store_view)` helper (in `host_request_view.rs`) returns an `EffectiveView` enum with `.as_view()` accessor.
-
-Signature rewrite landed at commit `6f5ec245` — all `pub(crate) fn *_in_view(...)` helpers now accept `Option<&RequestStoreView>`. Disk-read rule-3 fall-throughs deleted on native (scheduler is the sole source authority; canonical loading goes through `ensure_loaded`). `read_analysis_source` auto-loads via `ensure_loaded` on cache miss; `current_or_read_whole_hash_in_view` extends the ambient view's extension store when probing unloaded canonicals. WASM path keeps the `files` map + workspace fallback per canonical plan rule 1.
+Native canonical loading goes through `ensure_loaded` — the scheduler is the sole source authority. Disk-read fall-throughs were deleted on native. WASM keeps the `files` map + workspace fallback.
 
 ### Key Files
 

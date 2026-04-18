@@ -30,13 +30,11 @@ pub mod type_text_parser;
 
 pub mod fuses;
 pub mod imported_root_db;
-pub mod module_facts_db;
 pub mod route_db;
 pub mod type_surface_db;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
-pub use module_facts_db::{ModuleFacts, ModuleFactsDb};
 pub use route_db::{BarrelRouteSurface, RouteDb, RouteResult};
 pub use type_surface_db::{TypeSurfaceDb, TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
 
@@ -125,7 +123,7 @@ pub trait StoreView {
     }
     /// Whether the view tracks a specific file (has its hash in the snapshot).
     ///
-    /// Used by `ModuleFactsDb::get_or_materialize` to decide whether to
+    /// Used by route-derived cache materialization paths to decide whether to
     /// include `DerivedFactHash::ImportRoute` in validation facts. Untracked
     /// dependency files never have `set_import_dependencies` called on them,
     /// so their route facts are safe to omit — eliminating false cache misses.

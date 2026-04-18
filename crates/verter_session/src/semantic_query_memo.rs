@@ -387,7 +387,9 @@ impl SemanticGraphStore {
             );
         }
 
-        // 6. Finalize in-flight and wake joiners.
+        // 6. Finalize in-flight and wake joiners. The completed flag
+        //    guarantees any thread that acquired the flight before step 7
+        //    retires the entry still observes the winner's result.
         {
             let mut state = inflight.state.lock();
             state.completed = Some(result.clone());
@@ -395,9 +397,13 @@ impl SemanticGraphStore {
         }
         inflight.ready.notify_all();
 
-        // 7. Retire the in-flight entry for non-publishable results so the
-        //    next caller starts fresh.
-        if !publishable {
+        // 7. Retire the in-flight entry regardless of publish status.
+        //    Leaving the entry alive after a publish would let a later
+        //    caller — e.g. after targeted invalidation drops the memo
+        //    entry — latch onto the stale completed flag and skip the
+        //    cold rebuild. Future callers after invalidation must start
+        //    a fresh flight under the new state of the world.
+        {
             let mut table = self.inflight.lock();
             table.remove(&key);
         }

@@ -7,7 +7,7 @@
 //! serves every consumer — dependency collection, registry hydration, the
 //! solver host, fallthrough / meta projection — from the same entry.
 //!
-//! Today the pipeline asks `resolve_imported_type_root_in_view` from each
+//! Today the pipeline asks `resolve_imported_type_root` from each
 //! stage independently. Phase 2 wires the stages onto this cache so direct
 //! imports resolve exactly once per owner version.
 //!

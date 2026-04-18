@@ -688,13 +688,11 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
+        self.with_overlay_target_context(canonical_or_alias, |host| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-            let Some(resolved) = host.resolve_component_meta_in_view(
-                canonical.as_str(),
-                crate::types::ResolverMode::Expanded,
-                store_view,
-            ) else {
+            let Some(resolved) = host
+                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+            else {
                 return Ok(None);
             };
             let analysis = crate::host_manage::extract_component_meta_from_resolved(
@@ -702,7 +700,6 @@ impl MetaSession {
                 canonical.as_str(),
                 &resolved,
                 false,
-                Some(store_view),
             );
 
             if let Some(err) = component_meta_resolution_budget_error(
@@ -768,14 +765,13 @@ impl MetaSession {
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use std::sync::atomic::Ordering::Relaxed;
         self.check_alive()?;
-        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
+        self.with_overlay_target_context(canonical_or_alias, |host| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
             // Attempt payload cache hit
             if let Some(cached) = host.try_get_cached_meta_payload(
                 canonical.as_str(),
                 crate::types::MetaPayloadKind::Declared,
-                store_view,
             ) {
                 host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
                 return Ok(Some(cached));
@@ -783,11 +779,9 @@ impl MetaSession {
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
             // Miss — compute from scratch
-            let Some(resolved) = host.resolve_component_meta_in_view(
-                canonical.as_str(),
-                crate::types::ResolverMode::Expanded,
-                store_view,
-            ) else {
+            let Some(resolved) = host
+                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+            else {
                 return Ok(None);
             };
             let analysis = crate::host_manage::extract_component_meta_from_resolved(
@@ -795,7 +789,6 @@ impl MetaSession {
                 canonical.as_str(),
                 &resolved,
                 false,
-                Some(store_view),
             );
 
             if let Some(err) = component_meta_resolution_budget_error(
@@ -836,27 +829,23 @@ impl MetaSession {
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use std::sync::atomic::Ordering::Relaxed;
         self.check_alive()?;
-        self.with_overlay_target_context_view(canonical_or_alias, |host, store_view| {
+        self.with_overlay_target_context(canonical_or_alias, |host| {
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
             // Attempt payload cache hit (Full reuses the same slot as Resolved)
             if let Some(cached) = host.try_get_cached_meta_payload(
                 canonical.as_str(),
                 crate::types::MetaPayloadKind::Full,
-                store_view,
             ) {
                 host.provenance().payload_cache_hits.fetch_add(1, Relaxed);
                 return Ok(Some(cached));
             }
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
-            // Miss — resolve + build with fallthrough in-view so we capture
-            // the fallthrough fact versions for cache validation.
-            let Some(resolved) = host.resolve_component_meta_in_view(
-                canonical.as_str(),
-                crate::types::ResolverMode::Expanded,
-                store_view,
-            ) else {
+            // Miss — resolve + build with fallthrough.
+            let Some(resolved) = host
+                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+            else {
                 return Ok(None);
             };
 
@@ -867,7 +856,6 @@ impl MetaSession {
                     host,
                     canonical.as_str(),
                     &resolved,
-                    Some(store_view),
                 );
 
             if let Some(err) = component_meta_resolution_budget_error(
@@ -990,14 +978,6 @@ impl MetaSession {
         canonical_or_alias: &str,
         f: impl FnOnce(&VerterHost) -> T,
     ) -> Result<T, MetaError> {
-        self.with_overlay_target_context_view(canonical_or_alias, |host, _store_view| f(host))
-    }
-
-    fn with_overlay_target_context_view<T>(
-        &self,
-        canonical_or_alias: &str,
-        f: impl FnOnce(&VerterHost, &crate::host_request_view::RequestStoreView) -> T,
-    ) -> Result<T, MetaError> {
         let mut gate = self
             .project
             .overlay_gate
@@ -1027,17 +1007,9 @@ impl MetaSession {
             }
         }
 
-        // §4.2 RequestStoreView install: every meta request runs under a
-        // captured view + request-private extension store. The thread-local
-        // `CURRENT_REQUEST_VIEW` is populated for the duration of `f` so
-        // mid-request `ensure_loaded` calls push into the extension store
-        // (via `VerterHost::record_current_request_extension_for`), and
-        // `is_evalable` / `external_inputs_memo` consult the view instead of
-        // live host state.
-        let request_view = self.project.host.build_request_store_view();
-        let _request_guard = request_view.install();
-        let result = f(&self.project.host, &request_view);
-        Ok(result)
+        // Post-cut: resolver hot path probes live-host state directly through
+        // the project-global caches (validated by `HostFenceValidator`).
+        Ok(f(&self.project.host))
     }
 }
 

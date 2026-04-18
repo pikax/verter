@@ -81,25 +81,26 @@ impl HostStoreView {
 
         // WASM-only: scheduler is unavailable on web; see CLAUDE.md "Scheduler as Sole Compile Authority".
 
-        // Snapshot ModuleFactsDb entries into the store view.
-        for (canonical_id, facts) in host.resolver.runtime.module_facts.snapshot_all() {
+        // Snapshot IndexedReadyDb entries into the store view.
+        for (canonical_id, indexed) in host.project_type_store.indexed().snapshot_all() {
+            let canonical_str = canonical_id.as_ref().to_owned();
             view.whole_hashes
-                .entry(canonical_id.clone())
-                .or_insert(facts.whole_hash);
+                .entry(canonical_str.clone())
+                .or_insert(indexed.whole_hash);
             // Insert Route fact from shallow state.
-            if facts.shallow_state.has_resolvable_surface() {
+            if indexed.shallow_state.has_resolvable_surface() {
                 view.derived_hashes.insert(
                     (
-                        canonical_id.clone(),
+                        canonical_str.clone(),
                         crate::resolver_core::DerivedFactKind::Route,
                     ),
-                    hash_route_surface(&facts.shallow_state),
+                    hash_route_surface(&indexed.shallow_state),
                 );
             }
-            if let Some(hash) = facts.import_route_hash {
+            if let Some(hash) = indexed.import_route_hash {
                 view.derived_hashes.insert(
                     (
-                        canonical_id.clone(),
+                        canonical_str,
                         crate::resolver_core::DerivedFactKind::ImportRoute,
                     ),
                     hash,
@@ -168,6 +169,7 @@ impl HostStoreView {
         self.mutation_epoch
     }
 
+    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover but kept for symmetry with other accessors.
     pub(crate) fn accepts_whole_hash(&self, canonical_id: &str, hash: Hash16) -> bool {
         self.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
             canonical_id: canonical_id.to_string(),
@@ -175,6 +177,7 @@ impl HostStoreView {
         })
     }
 
+    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover.
     pub(crate) fn tracks_whole_hash(&self, canonical_id: &str) -> bool {
         self.whole_hashes.contains_key(canonical_id)
     }
@@ -193,6 +196,7 @@ impl HostStoreView {
             .copied()
     }
 
+    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover.
     pub(crate) fn import_route(
         &self,
         canonical_id: &str,
@@ -204,7 +208,7 @@ impl HostStoreView {
     }
 
     /// Returns true if ALL fact versions are still valid in this view.
-    #[allow(dead_code)] // Retained for parity with RequestStoreView::validates_all.
+    #[allow(dead_code)] // Retained for fact-list validation call sites.
     pub(crate) fn validates_all(&self, facts: &[crate::resolver_core::FactVersionRef]) -> bool {
         use crate::resolver_core::StoreView;
         facts.iter().all(|fact| self.validates(fact))
@@ -341,7 +345,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     // the facts were just materialized from current disk/workspace
                     // state and are valid. This avoids forcing every dependency
                     // access through the expensive permissive fallback path in
-                    // `ensure_module_facts_in_view`.
+                    // `ensure_indexed_ready`.
                     None => true,
                 }
             }
@@ -400,13 +404,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
 }
 
 impl crate::resolver_core::ResolverStore for VerterHost {
-    type View = crate::host_request_view::RequestStoreView;
+    type View = HostStoreView;
 
     fn snapshot_view(&self) -> Self::View {
-        (*crate::host_request_view::RequestStoreView::new(std::sync::Arc::new(
-            self.resolver_store_view(),
-        )))
-        .clone()
+        self.resolver_store_view()
     }
 }
 
@@ -417,17 +418,16 @@ impl VerterHost {
 
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
-        store_view: Option<&crate::host_request_view::RequestStoreView>,
+        store_view: Option<&HostStoreView>,
     ) -> crate::component_meta_audit::RustStoreAudit {
-        let module_facts_entries = self.resolver.runtime.module_facts.len() as u32;
-        let module_facts_bytes = self
-            .resolver
-            .runtime
-            .module_facts
+        let indexed_entries = self.project_type_store.indexed().len() as u32;
+        let indexed_bytes = self
+            .project_type_store
+            .indexed()
             .snapshot_all()
             .iter()
-            .map(|(id, facts)| {
-                id.len() as u64 + facts.raw_source.len() as u64 + facts.eval_source.len() as u64
+            .map(|(id, indexed)| {
+                id.len() as u64 + indexed.raw_source.len() as u64 + indexed.eval_source.len() as u64
             })
             .sum::<u64>();
 
@@ -446,8 +446,8 @@ impl VerterHost {
             store_view_hits: u32::from(store_view.is_some()),
             store_view_misses: u32::from(store_view.is_none()),
             structural_merges: 0,
-            imported_dependency_entries: module_facts_entries,
-            imported_dependency_bytes: module_facts_bytes,
+            imported_dependency_entries: indexed_entries,
+            imported_dependency_bytes: indexed_bytes,
             prepared_type_decls,
             prepared_value_decls,
         }
@@ -455,13 +455,12 @@ impl VerterHost {
 
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
         let host_cache_bytes: u64 = self
-            .resolver
-            .runtime
-            .module_facts
+            .project_type_store
+            .indexed()
             .snapshot_all()
             .iter()
-            .map(|(id, facts)| {
-                id.len() as u64 + facts.raw_source.len() as u64 + facts.eval_source.len() as u64
+            .map(|(id, indexed)| {
+                id.len() as u64 + indexed.raw_source.len() as u64 + indexed.eval_source.len() as u64
             })
             .sum();
 

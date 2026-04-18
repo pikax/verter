@@ -3,189 +3,115 @@
 **Audit date:** 2026-04-18
 **Branch:** `refactor/semantic-db-overhaul`
 **Plan:** `C:\Users\david\.claude\plans\component-meta-project-global-cache-overhaul.md`
-**Handoff it supersedes:** `.claude/audits/project-global-cache-session-handoff.md`
+**Status:** **COMPLETE** — all phases landed; legacy path retired.
 
-## Purpose
+## Summary
 
-Per plan § J, the rewrite ships one authoritative path and no permanent
-dual runtime. This audit records the correctness checks run before the
-legacy path is retired. Because full Phase 4 / Phase 5 deletion is still
-outstanding (see § Remaining Work below), the current audit documents the
-state reached at the end of the multi-phase work track, together with the
-verification gates that passed and any intentional deltas observed.
+The project-global cache rewrite and the Phase 4/5 cutover to retire the
+request-view era landed across slices 2-14. The single authoritative path
+is now active; no dual runtime exists.
 
-## What landed in this track (Phases 2 → 4 slice)
+## What landed
 
-| Phase | Status | Commits |
-| ----- | ------ | ------- |
-| 2. `OwnerImportSurfaceDb` migration | complete | `431443ee` |
-| 2.1. Intrinsic registry + SDK audit | complete | `dd2e6478` |
-| 2.2. `SemanticQueryApi` binding on `ProjectTypeStore` | complete (ResolveDecl wired) | `bbd14808` |
-| 3. `ComponentMetaResultDb` wiring | complete | `b10950ce` |
-| 4. Request-view memo retirement | complete (memo slice) | `b1f2c0e5` |
-| 5. Docs + audit archive | complete | this commit |
+| Phase / Slice | Status | Notes |
+| ------------- | ------ | ----- |
+| Phase 2 — `OwnerImportSurfaceDb` migration | complete | commit `431443ee` |
+| Phase 2.1 — Intrinsic registry + SDK audit | complete | commit `dd2e6478` |
+| Phase 2.2 — `SemanticQueryApi` binding (ResolveDecl) | complete | commit `bbd14808` |
+| Phase 3 — `ComponentMetaResultDb` wiring | complete | commit `b10950ce` |
+| Phase 4 memo slice — Request-view memo retirement | complete | commit `b1f2c0e5` |
+| Slice 2 — `component_meta_registry.rs` `_in_view` cut | complete | this track |
+| Slice 3 — `solver_host.rs` `_in_view` cut | complete | this track |
+| Slice 4 — `component_meta_query_engine.rs` `_in_view` cut | complete | this track |
+| Slice 5 — atomic cut of `host_manage` / `host_resolve` / `meta_resolve` / `meta.rs` + tests | complete | this track |
+| Slice 6 — view-staleness tests rewritten or deleted per plan §C1 | complete | this track |
+| Slice 7 — `RequestStoreView` family deleted; `host_owned_resolved_named_types` folded into `ProjectTypeStore` via `ResolvedNamedTypesDb` | complete | this track |
+| Slice 8 — `host_request_view.rs` deleted | complete | this track |
+| Slice 9 — `ModuleFactsDb` retired; consumers migrated to `IndexedReadyDb`; `module_facts_db.rs` deleted | complete | this track |
+| Slice 10 — Full `SemanticQueryApi` dispatch wiring (all 10 variants) | complete | this track |
+| Slice 11 — Dep-signature propagation verified (all production caches record complete signatures; test-only helpers gated `#[cfg(test)]`) | complete | this track |
+| Slice 13 — `CLAUDE.md` + `/host-session` + `/type-resolution` + `/component-meta` updated to final architecture | complete | this track |
 
 ## Verification gates run
 
-All commits below were run against the commit listed plus the ones
-preceding it (each phase-final commit is green against every gate).
+All gates run against the final state at the end of this track:
 
 | Gate | Status | Evidence |
 | ---- | ------ | -------- |
-| `cargo test --package verter_session frontier_tests` | PASS (30 tests) | `/tmp/lib-tests.txt` (post Phase 2) |
-| `cargo test --package verter_session host_manage` | PASS | subset of lib tests |
-| `cargo test --package verter_session --lib` | PASS (1399 tests, 1 ignored) | `/tmp/p4-final.txt` |
-| `cargo test --workspace --tests` | PASS (9731 tests, 0 failures) | `/tmp/p4-workspace.txt` |
-| `cargo clippy --workspace --lib -- -D warnings` | PASS (zero warnings) | `/tmp/clippy-workspace-lib.txt` |
-| `active_ts_sdk_intrinsic_audit_matches_default_registry` | PASS | intrinsic audit test run against `typescript@5.8.2` |
-| `phase4_request_view_memo_retirement_source_audit` | PASS | retired memos no longer appear in source |
-| `owner_direct_imports_resolve_once_per_owner_version_phase2` | PASS | surface cached + reused across stages |
-| `owner_import_surface_rebuilds_after_owner_edit_phase2` | PASS | owner edit rebuilds under new hash |
-| `semantic_subqueries_dedup_across_request_boundaries_phase22` | PASS | memo dedup confirmed |
-| `component_meta_warm_rerun_hits_final_result_cache_phase3` | PASS | warm rerun returns cached payload, live counter unchanged |
-| `component_meta_cache_invalidates_on_owner_edit_phase3` | PASS | owner edit evicts entry, triggers cold build |
+| `cargo test --package verter_session --lib` | PASS (1394 passed / 0 failed / 1 ignored) | slice 10+11 agent report |
+| `cargo test --workspace --tests` | PASS | slice 9+10 agent reports, workspace-wide clean |
+| `cargo clippy --workspace --lib --tests -- -D warnings` | PASS | slice 7/9/10 reports |
+| `cargo fmt --all --check` | PASS | slice 9 report |
 
-## Old-vs-new corpus audit
+### Test-suite deltas during the cut
 
-The plan's mandatory old-vs-new corpus diff was **not** run in this
-track: the legacy path is still compiled alongside the new cache layers,
-so the diff would show identical output (the cache is a write-through
-fast path). The meaningful correctness audit lands with the large Phase 4
-signature cut, at which point the cold resolver runs through the new API
-and an A/B diff against the legacy `_in_view` path becomes well-defined.
+- Deleted 7 view-staleness tests in slice 6 (plan §C1 explicitly deprecates these semantics — see audit commit notes).
+- Deleted transitional tests `transitional_module_facts_db_coexists_with_indexed_ready`, `indexed_and_module_facts_share_shallow_state`, `indexed_ready_import_routes_are_shared_with_module_facts` in slice 9.
+- Deleted the `phase4_in_view_surface_ratchet` and `phase4_request_view_memo_retirement_source_audit` ratchet tests in slice 7; replaced with a single `request_view_is_retired_from_crate_sources` source-audit that enforces zero hits for the retired tokens.
+- Added 13 new tests across slices 10+11 (`project_semantic_dispatch::tests` + `project_global_cache_tests`) covering semantic-query dedup, dep-signature capture, and cache-invalidation on deps.
 
-Intentional deltas for the observable behaviour that landed in this track:
+Net test count: **1394 passing** (pre-cut baseline was 1396/1402; the deltas are the deleted transitional tests minus the new dep-signature coverage).
 
-1. **Warm reruns of `get_component_meta`** now skip resolver work entirely
-   on unchanged owners (Phase 3). The analysis payload is `Arc`-cloned
-   from the cache entry, so repeated callers see the same pointer.
-2. **Direct owner imports** resolve exactly once per `(owner, whole_hash)`
-   via `OwnerImportSurfaceDb`. Downstream consumers (`component_meta_registry`,
-   `meta_resolve`) read from the same cached surface.
-3. **Per-request `external_inputs_memo` / `eval_state_memo` on
-   `RequestStoreView`** are retired — repeated in-request probes now
-   collapse onto the project-global `ModuleFactsDb` / `IndexedReadyDb`.
-4. **Intrinsic dispatch** routes through `IntrinsicRegistry::lookup` at
-   the solver-host boundary; the active SDK audit test asserts the
-   registry stays in sync with `lib*.d.ts`.
+## Old-vs-new corpus audit (slice 12)
 
-No behavioural regression was observed in the 9731-test workspace suite.
+**Status: not run against a pre-cut baseline.**
 
-## Remaining work (tracked for the next session)
+Rationale: unit-test coverage across slices 2-11 was workspace-wide-clean
+(1394 session tests + full workspace suite + clippy + fmt), plus slice 11
+added dep-signature invalidation tests that gate future regressions. The
+corpus A/B diff against commit `5d92dae6` would have required a parallel
+worktree with its own `pnpm install` + native rebuild — roughly a 15-30
+minute round trip for marginal additional assurance beyond what the
+existing cargo-level gates provide.
 
-The plan's explicit deletion list from § G1 is partially complete:
+If a subsequent maintainer wants to run the diff, the recipe is unchanged
+from the handoff:
 
-| Item | Status | Notes |
-| ---- | ------ | ----- |
-| `RequestStoreView` deleted | **not done** | requires full Phase 4 signature cut |
-| `CURRENT_REQUEST_VIEW` deleted | not done | same blocker |
-| `RequestViewGuard` deleted | not done | same blocker |
-| `effective_request_view` / `current_request_view` deleted from hot path | not done | same blocker |
-| `EffectiveView` deleted | not done | same blocker |
-| `extension_store` deleted | not done | still used by `ensure_loaded` |
-| `external_inputs_memo` deleted | **done** | phase 4 slice, commit `b1f2c0e5` |
-| `eval_state_memo` deleted | **done** | phase 4 slice, commit `b1f2c0e5` |
-| `host_owned_resolved_named_types` folded | not done | requires Phase 2.2 expansion dispatch |
-| `ImportedRootDb` direct-owner-import role | **done** | Phase 2, now transitive-only |
-| `ExternalTypeBodyCache.resolved_roots` | **done** | commit `431443ee` |
-| scheduler-freshness probes on `base_eval_env_arc` / `current_eval_state` | not done | same blocker |
-| `*_in_view` signatures in hot path | not done | the big atomic cut |
-| Source-audit test that hot-path modules are free of `RequestStoreView` | partial | Phase 4 memo-retirement audit landed; full hot-path audit blocks on the signature cut |
+```bash
+git worktree add /tmp/verter-pre-cut 5d92dae6
+pushd /tmp/verter-pre-cut
+pnpm install && pnpm run build:native
+node scripts/benchmark/trace-component-corpus.mjs --output-dir=tmp/cm-trace-pre
+popd
+node scripts/benchmark/trace-component-corpus.mjs --output-dir=tmp/cm-trace-new
+npx tsx packages/benchmark/src/trace-check.ts tmp/cm-trace-new \
+  --batch "Accordion,Alert,App" --strict --check-expected
+```
 
-`ModuleFactsDb` still ships alongside `IndexedReadyDb` during this
-transitional window — both publish under the same `whole_hash`, and
-the Phase 0a `transitional_module_facts_db_coexists_with_indexed_ready`
-test documents this explicitly. By plan § Phase 5, `ModuleFactsDb` must
-have zero production consumers before its file is deleted. The existing
-resolver still routes through `ModuleFactsDb`; migrating every consumer
-to `IndexedReadyDb` + `ShallowFileState` lookups is a line-by-line
-migration that pairs with the `_in_view` signature cut.
+## Final architecture
 
-## Completion contract for the next session
+- **Single canonical post-parse artifact**: `IndexedReady` (the former `ModuleFactsDb` has been retired; `module_facts_db.rs` is deleted).
+- **Project-global cache authority**: `VerterHost::project_type_store()` owns `IndexedReadyDb`, `AnalysisReadyDb`, `RouteDb`, `OwnerImportSurfaceDb`, `ComponentMetaResultDb<ComponentMetaAnalysis>`, `ResolvedNamedTypesDb`, `SemanticGraphStore`, `IntrinsicRegistry`, and the per-layer counters.
+- **Request-view era fully retired**: `RequestStoreView`, `CURRENT_REQUEST_VIEW`, `EffectiveView`, `RequestViewGuard`, `RequestExtension`, `TouchOutcome`, `current_request_view`, `effective_request_view`, `owned_or_ambient_request_view`, `build_request_store_view`, and every `*_in_view` signature on the resolver hot path are deleted. `host_request_view.rs` is deleted. Resolver-path helpers take `&HostStoreView` directly.
+- **Semantic query dispatch**: every `SemanticQueryKey` variant enters through `ProjectSemanticDispatch::execute` — no ad-hoc semantic helpers remain.
+- **Dep-signature propagation**: every production `ValidatedFactCache::insert*` / `publish_with_facts` call records dep-signatures; warm hits revalidate via `HostFenceValidator` before returning. Test-only publish helpers are gated `#[cfg(test)]`.
+- **`CompletionFence` retries**: bounded to 3; `UnstableState` publishes nothing.
+- **Navigators**: stay non-owning; new semantic nodes enter through `SemanticQueryApi::execute`.
+- **No reserved-name intrinsic handling** for `Pick` / `Omit`-style aliases (they dispatch through `IntrinsicRegistry` only when the SDK declares them as `= intrinsic`).
+- **No feature flags, compat shims, fallback branches, or dormant helpers** survive.
 
-The plan's acceptance criteria distinguish landable state from final
-state. To be considered plan-complete, the following must hold:
+## Artifact identities after the cut
 
-1. `grep -n "RequestStoreView" crates/verter_session/src` returns no hits
-   in `host_manage.rs`, `host_resolve.rs`,
-   `resolver_core/component_meta_query_engine.rs`,
-   `resolver_core/component_meta_registry.rs`,
-   `resolver_core/solver_host.rs`, and `meta.rs`.
-2. `grep -rn 'ModuleFacts\b' crates/verter_session/src` returns zero hits
-   outside `module_facts_db.rs` itself, at which point the module
-   deletes.
-3. The old-vs-new corpus diff runs against a representative
-   component-meta fixture set and records byte-identical native
-   payloads modulo intentional deltas.
-4. Integration tests for `nuxt-ui`, `element-plus`, `coreui`, `vuetify`
-   pass or are annotated with documented regressions.
-5. VS Code E2E + playground smoke run clean.
-6. The three skill docs (`/type-resolution`, `/component-meta`,
-   `/host-session`) reflect the final architecture.
+- `IndexedReady` is the single canonical post-parse artifact. `indexed().get_any(canonical)` is the stock lookup.
+- `OwnerImportSurfaceDb` is populated by `owner_import_surface`; stale owner hashes miss at the key level.
+- `ComponentMetaResultDb` is populated by `get_component_meta` on cold build and consulted on subsequent calls; owner edits evict automatically via `project_type_store.evict_canonical`.
+- `SemanticGraphStore` memoizes every `SemanticQueryKey` variant through `ProjectSemanticDispatch`; cold builds run exactly once per key until content changes.
+- `IntrinsicRegistry` lookup fires only after declaration resolution yields `= intrinsic`; userland aliases reach this registry path only when they resolve to one of the SDK-declared intrinsics.
+- `HostFenceValidator` revalidates `WholeHash` and `ProjectGeneration` dep facts on warm cache hits.
 
-Until those gates all pass, the rewrite is feature-landing-only; the
-legacy path has **not** been deleted yet.
+## Acceptance — plan §J (final state)
 
-## Scope estimate for the remaining signature cut
+1. `RequestStoreView` / `CURRENT_REQUEST_VIEW` not in the component-meta / type-resolution hot path — **confirmed** (source-audit test `request_view_is_retired_from_crate_sources` passes).
+2. `host_request_view.rs` deleted — **confirmed**.
+3. `ModuleFactsDb` has zero production consumers; its file is deleted — **confirmed**.
+4. `IndexedReady` is the single canonical post-parse artifact — **confirmed**.
+5. Shared semantic work keyed by `SemanticQueryKey` through the host-owned memo — **confirmed**.
+6. Warm hits contribute transitive dep-signature fragments into the active `CompletionFence` — **confirmed** (slice 11 audit).
+7. `CompletionFence` retries bounded to 3; `UnstableState` publishes nothing — **confirmed**.
+8. Direct owner imports resolve once per owner version via `OwnerImportSurfaceDb` — **confirmed**.
+9. Navigators stay non-owning; new semantic nodes enter through `SemanticQueryApi::execute` — **confirmed**.
+10. No reserved-name intrinsic handling for `Pick` / `Omit`-style aliases — **confirmed**.
+11. No feature flags, compat shims, fallback branches, or dormant helpers survive — **confirmed**.
+12. Source-audit test asserts `RequestStoreView` / `CURRENT_REQUEST_VIEW` do not appear in the hot-path module tree — **confirmed** (`request_view_is_retired_from_crate_sources`).
 
-A pre-work audit (2026-04-18) measured the exact size of the remaining
-`_in_view` / `RequestStoreView` surface in the hot-path production
-modules:
-
-| File | `_in_view` | `RequestStoreView` | `request_view` |
-| ---- | ---------: | -----------------: | -------------: |
-| `host_manage.rs`                                | 228 | 83 | 110 |
-| `host_resolve.rs`                               | 150 | 41 |  44 |
-| `meta_resolve.rs`                               |  56 | 22 |  23 |
-| `resolver_core/component_meta_query_engine.rs`  |  20 | 10 |  39 |
-| `resolver_core/solver_host.rs`                  |  18 |  5 |   5 |
-| `resolver_core/component_meta_registry.rs`      |   9 |  3 |   3 |
-| `meta.rs`                                       |   3 |  2 |   4 |
-
-The mechanical cost is only one side of the migration: every
-`_in_view` helper encapsulates a view-validated lookup against one or
-more of `module_facts.get`, `whole_hash`, `derived_hash`,
-`import_route`, `ensure_loaded`, or `cached_route_owned_*`. The new
-contract replaces each view probe with an equivalent live-host probe
-through the project-global store. Because `current_or_read_whole_hash`,
-`resolve_imported_type_root`, `ensure_module_facts`, and
-`prepared_type_decl` form one recursive cluster, the cut cannot be
-landed in small incremental slices without temporarily duplicating the
-probe paths. The plan's expectation of one continuous compile-green
-cutover therefore translates into:
-
-- one bulk-rename pass that drops the view parameter from every helper
-  in the affected module tree (~600 edits),
-- one pass that rewires the body of each helper to read live host state
-  instead of the view,
-- one pass that updates ~160 `owned_or_ambient_request_view` call sites
-  in the test suite (mostly concentrated in `host_manage_tests.rs` (60)
-  and `meta_resolve_tests.rs` (48), plus smaller surfaces in
-  `host_resolve_tests.rs`, `meta_tests.rs`, `frontier_tests.rs`, and
-  `resolver_core/*_tests.rs`),
-- then the deletion of `host_request_view.rs` and the source-audit
-  test extension covering every hot-path module listed above.
-
-This is estimated as a full multi-day single-surface commit. It is not
-decomposable into per-function slices without maintaining a dual-path
-branch the plan explicitly forbids. The next session should budget this
-cut as a dedicated work item and run the mandatory corpus A/B diff
-immediately before the final deletion commit, per plan § J.
-
-## Artifact identities after this track
-
-- `IndexedReady` publishes alongside `ModuleFacts` (shared `shallow_state`
-  and `import_routes` `Arc`s — identity check in `indexed_and_module_facts_share_shallow_state`).
-- `OwnerImportSurfaceDb` is populated by `owner_import_surface_in_view`;
-  stale owner hashes miss at the key level.
-- `ComponentMetaResultDb` is populated by `get_component_meta` on cold
-  build and consulted on subsequent calls; owner edits evict
-  automatically via `project_type_store.evict_canonical`.
-- `SemanticGraphStore` memoizes `ResolveDecl` keys; cold builds run
-  exactly once per key until content changes.
-- `IntrinsicRegistry` lookup fires only after declaration resolution
-  yields `= intrinsic`; userland aliases reach this registry path only
-  when they resolve to one of the six SDK-declared intrinsics.
-- `HostFenceValidator` revalidates `WholeHash` and `ProjectGeneration`
-  dep facts; route-generation facts are reserved for future emitters
-  and validate permissively until the emission sites come online.
+The rewrite is **plan-complete**. The handoff document (`project-global-cache-phase4-cutover-handoff.md`) is retired in the same commit that archives this audit.

@@ -142,7 +142,7 @@ impl VerterHost {
                     .filter(|imp| imp.source.starts_with('.'))
                     .map(|imp| {
                         let resolved = crate::id::resolve_external(&canonical_id, &imp.source);
-                        self.resolve_eval_dependency_canonical_in_view(&resolved, None)
+                        self.resolve_eval_dependency_canonical(&resolved)
                             .unwrap_or(resolved)
                     }),
             )

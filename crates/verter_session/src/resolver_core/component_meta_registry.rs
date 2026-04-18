@@ -130,9 +130,8 @@ pub(crate) fn owner_component_meta_registry_import_root(
     owner_canonical: &str,
     _snapshot: &FileAnalysisSnapshot,
     local_name: &str,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
 ) -> Option<(String, String)> {
-    host.resolve_owner_direct_import_in_view(owner_canonical, local_name, store_view)
+    host.resolve_owner_direct_import(owner_canonical, local_name)
 }
 
 pub(crate) fn enqueue_component_meta_registry_ref(
@@ -1507,7 +1506,6 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
     field: &verter_semantic::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -1527,7 +1525,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
                 .is_some_and(|(_, route)| {
                     matches!(
                         route,
-                        RouteDemand::MemberPath(ref path) if path.len() > 1
+                        RouteDemand::MemberPath(ref path) if path.len() > 1,
                     )
                 });
             !deep_indexed_path || component_meta_registry_has_explicit_object_surface(&field.r#type)
@@ -1535,107 +1533,68 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let expr = parsed_raw.as_ref().unwrap_or(&field.r#type);
 
     let skip_direct_plain_ref = component_meta_registry_ref_name(expr).is_some_and(|name| {
-        host.prepared_type_decl_in_view(owner_canonical, name, store_view)
+        host.prepared_type_decl(owner_canonical, name)
             .is_some_and(|prepared| {
                 matches!(
                     prepared.body,
-                    verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_)
+                    verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
                 )
             })
-            || owner_component_meta_registry_import_root(
-                host,
-                owner_canonical,
-                snapshot,
-                name,
-                store_view,
-            )
-            .and_then(|(canonical_id, exported_name)| {
-                (!canonical_id.is_empty() && !canonical_id.contains("/node_modules/")).then(|| {
-                    host.prepared_type_decl_in_view(
-                        canonical_id.as_str(),
-                        exported_name.as_str(),
-                        store_view,
+            || owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+                .and_then(|(canonical_id, exported_name)| {
+                    (!canonical_id.is_empty() && !canonical_id.contains("/node_modules/")).then(
+                        || host.prepared_type_decl(canonical_id.as_str(), exported_name.as_str()),
                     )
                 })
-            })
-            .flatten()
-            .is_some_and(|prepared| {
-                component_meta_registry_has_non_object_top_level_surface(&prepared.body)
-                    && !component_meta_registry_has_explicit_object_surface(&prepared.body)
-            })
-            || owner_component_meta_registry_import_root(
-                host,
-                owner_canonical,
-                snapshot,
-                name,
-                store_view,
-            )
-            .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-            || crate::meta_resolve::resolve_type_declaration_in_view(
-                host,
-                owner_canonical,
-                name,
-                store_view,
-            )
-            .canonical_source
-            .contains("/node_modules/")
+                .flatten()
+                .is_some_and(|prepared| {
+                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
+                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
+                })
+            || owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+                .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
+            || crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name)
+                .canonical_source
+                .contains("/node_modules/")
     });
     let skip_imported_generic_non_object_ref = component_meta_registry_direct_public_ref(expr)
         .is_some_and(|(name, type_arguments)| {
             if type_arguments.is_empty() {
                 return false;
             }
-            let Some((canonical_id, exported_name)) = owner_component_meta_registry_import_root(
-                host,
-                owner_canonical,
-                snapshot,
-                name,
-                store_view,
-            ) else {
+            let Some((canonical_id, exported_name)) =
+                owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name)
+            else {
                 return false;
             };
             if canonical_id.is_empty() || canonical_id.contains("/node_modules/") {
                 return false;
             }
-            host.prepared_type_decl_in_view(
-                canonical_id.as_str(),
-                exported_name.as_str(),
-                store_view,
-            )
-            .is_some_and(|prepared| {
-                component_meta_registry_has_non_object_top_level_surface(&prepared.body)
-                    && !component_meta_registry_has_explicit_object_surface(&prepared.body)
-            })
+            host.prepared_type_decl(canonical_id.as_str(), exported_name.as_str())
+                .is_some_and(|prepared| {
+                    component_meta_registry_has_non_object_top_level_surface(&prepared.body)
+                        && !component_meta_registry_has_explicit_object_surface(&prepared.body)
+                })
         });
     let direct_ref = component_meta_registry_direct_public_ref(expr);
     if (skip_direct_plain_ref || skip_imported_generic_non_object_ref)
         && direct_ref.is_some_and(|(name, _)| {
-            let local_type_parameter = host
-                .prepared_type_decl_in_view(owner_canonical, name, store_view)
-                .is_some_and(|prepared| {
-                    matches!(
-                        prepared.body,
-                        verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_)
-                    )
-                });
-            let import_root = owner_component_meta_registry_import_root(
-                host,
-                owner_canonical,
-                snapshot,
-                name,
-                store_view,
-            );
+            let local_type_parameter =
+                host.prepared_type_decl(owner_canonical, name)
+                    .is_some_and(|prepared| {
+                        matches!(
+                            prepared.body,
+                            verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
+                        )
+                    });
+            let import_root =
+                owner_component_meta_registry_import_root(host, owner_canonical, snapshot, name);
             let package_backed = import_root
                 .as_ref()
                 .is_some_and(|(canonical_id, _)| canonical_id.contains("/node_modules/"))
-                || crate::meta_resolve::resolve_type_declaration_in_view(
-                    host,
-                    owner_canonical,
-                    name,
-                    store_view,
-                )
-                .canonical_source
-                .contains("/node_modules/");
+                || crate::meta_resolve::resolve_type_declaration(host, owner_canonical, name)
+                    .canonical_source
+                    .contains("/node_modules/");
             !local_type_parameter && !package_backed
         })
     {
@@ -1664,7 +1623,6 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     collect_component_meta_registry_public_indexed_access_roots(
         host,
         owner_canonical,
-        store_view,
         expr,
         published_names,
         queued_names,
@@ -1851,7 +1809,6 @@ pub(crate) fn collect_component_meta_registry_public_surface_refs(
 pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     host: &VerterHost,
     owner_canonical: &str,
-    store_view: Option<&crate::host_request_view::RequestStoreView>,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut rustc_hash::FxHashSet<String>,
@@ -1861,14 +1818,12 @@ pub(crate) fn collect_component_meta_registry_public_indexed_access_roots(
     let Some((root_name, route)) = component_meta_registry_public_indexed_access_route(expr) else {
         return;
     };
-    let Some(prepared) =
-        host.prepared_type_decl_in_view(owner_canonical, root_name.as_str(), store_view)
-    else {
+    let Some(prepared) = host.prepared_type_decl(owner_canonical, root_name.as_str()) else {
         return;
     };
     if matches!(
         prepared.body,
-        verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_)
+        verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_),
     ) {
         return;
     }
@@ -2273,11 +2228,11 @@ mod tests {
         );
         assert_eq!(
             output[0].route,
-            RouteDemand::Pick(vec!["slots".to_string()])
+            RouteDemand::Pick(vec!["slots".to_string()]),
         );
         assert_eq!(
             output[1].route,
-            RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()])
+            RouteDemand::MemberPath(vec!["variants".to_string(), "color".to_string()]),
         );
     }
 
@@ -2449,7 +2404,7 @@ export interface AvatarProps {
         );
 
         let snapshot = host
-            .get_raw_analysis_snapshot_in_view("/src/App.vue", None)
+            .get_raw_analysis_snapshot("/src/App.vue")
             .expect("app snapshot should exist");
 
         let resolved = owner_component_meta_registry_import_root(
@@ -2457,7 +2412,6 @@ export interface AvatarProps {
             "/src/App.vue",
             &snapshot,
             "AvatarProps",
-            None,
         );
 
         assert_eq!(

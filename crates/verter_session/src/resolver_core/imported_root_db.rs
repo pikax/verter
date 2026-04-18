@@ -142,7 +142,10 @@ impl ImportedRootDb {
         }
     }
 
-    /// Insert a pre-resolved root proof.
+    /// Insert a pre-resolved root proof. **Test-only**: the empty-facts
+    /// variant admits entries that would warm under any [`StoreView`] —
+    /// production paths must use [`Self::insert_with_facts`].
+    #[cfg(test)]
     pub fn insert(
         &self,
         provider_canonical: String,

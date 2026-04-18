@@ -1042,13 +1042,13 @@ defineProps<Props>()
     assert!(live_result.is_some(), "live path should resolve Props");
 
     // Resolve via the store-view/graph path
-    let view = host.owned_or_ambient_request_view();
+    let _view = host.resolver_store_view();
     let mut tracked = BTreeSet::new();
     let mut resolution = BTreeSet::new();
     let mut cache = crate::resolver_core::ExternalTypeBodyCache::default();
     let mut visiting = FxHashSet::default();
     let graph_result = host
-        .resolve_external_type_from_loaded_files_in_view(
+        .resolve_external_type_from_loaded_files(
             "/src/Consumer.vue",
             "./barrel",
             "Props",
@@ -1061,7 +1061,6 @@ defineProps<Props>()
             true,
             None,
             0,
-            Some(&*view),
         )
         .expect("graph path should not error");
     assert!(graph_result.is_some(), "graph path should resolve Props");
@@ -1395,7 +1394,7 @@ defineProps<Props>()
     let _result = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     // The shallow type state should now be available from the host
-    let shallow = host.shallow_file_state_in_view("/src/types.ts", None);
+    let shallow = host.shallow_file_state("/src/types.ts");
     assert!(
         shallow.is_some(),
         "shallow type state should be populated after imported dependency load"
@@ -1460,7 +1459,7 @@ defineProps<Props>()
     // Trigger resolution to load the barrel
     let _result = resolve_type(&host, "/src/Consumer.vue", "./barrel", "Props");
 
-    let shallow = host.shallow_file_state_in_view("/src/barrel.ts", None);
+    let shallow = host.shallow_file_state("/src/barrel.ts");
     assert!(
         shallow.is_some(),
         "barrel shallow state should be populated"
@@ -1521,7 +1520,7 @@ defineProps<Props>()
     let _result = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     let state1 = host
-        .shallow_file_state_in_view("/src/types.ts", None)
+        .shallow_file_state("/src/types.ts")
         .expect("state should exist");
     let hash1 = state1.whole_hash;
 
@@ -1535,7 +1534,7 @@ defineProps<Props>()
     let _result2 = resolve_type(&host, "/src/Consumer.vue", "./types", "Props");
 
     let state2 = host
-        .shallow_file_state_in_view("/src/types.ts", None)
+        .shallow_file_state("/src/types.ts")
         .expect("state should exist after update");
 
     // The hash should have changed
@@ -1557,7 +1556,7 @@ import type { Alpha } from './alpha'
 import type { Beta } from './beta'
 
 interface InternalProps {
-  a: Alpha
+  a: Alpha,
   b: Beta
 }
 
@@ -1575,20 +1574,18 @@ export { InternalProps as PublicProps }
         "export interface Beta { value: number }\n",
     );
 
-    let _ = host.shallow_file_state_in_view("/src/types.ts", None);
+    let _ = host.shallow_file_state("/src/types.ts");
 
     let member_route = crate::resolver_core::RouteDemand::MemberPath(vec!["a".into()]);
-    let member_required = host.required_import_names_for_exported_route_in_view(
+    let member_required = host.required_import_names_for_exported_route(
         "/src/types.ts",
         "PublicProps",
         &member_route,
-        None,
     );
-    let whole_required = host.required_import_names_for_exported_route_in_view(
+    let whole_required = host.required_import_names_for_exported_route(
         "/src/types.ts",
         "PublicProps",
         &crate::resolver_core::RouteDemand::Whole,
-        None,
     );
 
     assert!(
@@ -1649,7 +1646,6 @@ defineProps<Props>()
     // Now use the frontier adapter
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
-        store_view: None,
         materialize_symbols: true,
         route_exports_only: false,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1711,7 +1707,6 @@ defineProps<Props>()
 
     let adapter = crate::host_resolve::HostFrontierAdapter {
         host: &host,
-        store_view: None,
         materialize_symbols: true,
         route_exports_only: false,
         route_shallow_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -2216,7 +2211,7 @@ defineEmits<AccordionRootEmits>()
         "Accordion component-meta should resolve without hanging"
     );
     let reka_entry = host
-        .ensure_module_facts_in_view("/node_modules/reka-ui/types.d.ts", None)
+        .ensure_indexed_ready("/node_modules/reka-ui/types.d.ts")
         .expect("Accordion resolution should keep the imported reka-ui entry cached");
     assert!(
         reka_entry.shallow_state.has_resolvable_surface(),

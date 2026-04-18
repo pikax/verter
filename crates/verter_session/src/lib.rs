@@ -60,7 +60,6 @@ mod deps;
 mod hash;
 pub mod host_executor;
 mod host_manage;
-pub mod host_request_view;
 mod host_resolve;
 mod host_upsert;
 mod id;
@@ -279,20 +278,6 @@ pub struct VerterHost {
             crate::host_resolve::RouteOwnedShallowStateCacheEntry,
         >,
     >,
-    /// Host-owned fully-resolved named local symbols (migrated from the per-context
-    /// `Rc<RefCell<FxHashMap>>` cache in `TypeResolutionContext`). Keyed by the
-    /// full `(canonical_id, whole_hash, name, surface, companion_cache_key,
-    /// type_param_bindings)` identity — same shape the context cache used,
-    /// plus `(canonical_id, whole_hash)` scoping so entries are valid across
-    /// requests that share the same workspace content generation.
-    ///
-    /// Cleared on epoch bump (see `clear_thread_local_parsed_eval_program_cache`).
-    pub(crate) host_owned_resolved_named_types: std::sync::Arc<
-        dashmap::DashMap<
-            crate::host_manage::HostResolvedNamedTypeKey,
-            std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
-    >,
     /// Project-global type-resolution cache root (Phase 1+ of the cache
     /// overhaul). Owns `IndexedReady`, `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
@@ -363,7 +348,6 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            host_owned_resolved_named_types: std::sync::Arc::new(dashmap::DashMap::new()),
             project_type_store: Arc::new(crate::project_type_store::ProjectTypeStore::new()),
         }
     }
@@ -768,64 +752,6 @@ impl VerterHost {
 
             let snap = self.scheduler.try_get_source(canonical_id)?;
             let hd = snap.downcast_data::<HostSourceData>()?;
-
-            if let Some(profile_hash) = profile {
-                if let Some(cc) = self.compile_cache.get(canonical_id) {
-                    if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
-                        return Some(EffectiveFileState {
-                            source: ovr.source.clone(),
-                            meta: ovr.parse.meta.clone(),
-                            script_analysis: ovr.parse.script_analysis.clone(),
-                            cached_parse: ovr.cached_parse.clone(),
-                            whole_hash: ovr.parse.whole_hash,
-                        });
-                    }
-                }
-            }
-
-            Some(EffectiveFileState {
-                source: snap.source.clone(),
-                meta: hd.parse.meta.clone(),
-                script_analysis: hd.parse.script_analysis.clone(),
-                cached_parse: hd.cached_parse.clone(),
-                whole_hash: hd.parse.whole_hash,
-            })
-        }
-    }
-
-    /// View-aware variant of [`effective_file_state`]. Gates every successful
-    /// scheduler / files-map read on `view.accepts_whole_hash(canonical_id,
-    /// scheduler.whole_hash)`. Returns `None` when the scheduler / files-map
-    /// has advanced past the view's snapshot (route resolution handles
-    /// staleness separately) or when the file isn't loaded even after an
-    /// `ensure_loaded` attempt.
-    ///
-    /// This is the request-path replacement for `effective_file_state(.., None)`
-    /// — resolver helpers must use this variant to avoid bypassing the request
-    /// view.
-    pub(crate) fn effective_file_state_in_view(
-        &self,
-        canonical_id: &str,
-        profile: Option<u64>,
-        view: &crate::host_request_view::RequestStoreView,
-    ) -> Option<EffectiveFileState> {
-        {
-            use crate::host_executor::HostSourceData;
-
-            // Inside a request, the view governs. If the scheduler doesn't
-            // have the canonical, return None — callers must `ensure_loaded`
-            // first (which extends the view via thread-local hook). Do NOT
-            // auto-load here: that would seed imported dependencies the view
-            // hasn't promised to track.
-            let snap = self.scheduler.try_get_source(canonical_id)?;
-            let hd = snap.downcast_data::<HostSourceData>()?;
-
-            // View-acceptance gate: the scheduler may have advanced past the
-            // view's snapshot. Reject on mismatch so the request stays on its
-            // captured frame.
-            if !view.accepts_whole_hash(canonical_id, hd.parse.whole_hash) {
-                return None;
-            }
 
             if let Some(profile_hash) = profile {
                 if let Some(cc) = self.compile_cache.get(canonical_id) {
@@ -1262,7 +1188,7 @@ impl VerterHost {
     /// materializes native-side lifecycle state from the committed scheduler
     /// snapshots without re-submitting the source.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
-        let normalized_canonical = self.normalized_analysis_canonical_in_view(canonical_id, None);
+        let normalized_canonical = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical.as_ref();
         // Fast path: already in host and not evicted. Also verify the
         // scheduler still has the source — `set_import_dependencies` may
@@ -1337,13 +1263,6 @@ impl VerterHost {
                 if !hash_unchanged {
                     self.bump_store_view_epoch();
                 }
-            }
-            // §4.2 RequestStoreView hook: if a request is currently installed
-            // on this thread, record the just-loaded canonical into its
-            // extension store so route-DB `validates` accepts facts that
-            // reference this file.
-            if loaded {
-                self.record_current_request_extension_for(canonical_id);
             }
             loaded
         }
@@ -1452,7 +1371,7 @@ impl VerterHost {
 
             // When a genuinely new dependency arrives (old signatures empty,
             // new non-empty), dependents may have cached "miss" import routes
-            // for this dep. Evict their ModuleFactsDb entries unconditionally
+            // for this dep. Evict their project-store entries unconditionally
             // so fresh accesses re-resolve import routes. For existing deps
             // where only the export surface changed, scope eviction to the
             // owners that were actually invalidated.
@@ -1518,8 +1437,8 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 
 #[cfg(test)]
 impl VerterHost {
-    /// Seed ModuleFactsDb with pre-built data for tests.
-    pub(crate) fn seed_module_facts_for_test(
+    /// Seed `IndexedReadyDb` with pre-built data for tests.
+    pub(crate) fn seed_indexed_ready_for_test(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
@@ -1596,34 +1515,21 @@ impl VerterHost {
             .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
         let import_routes_arc = Arc::new(import_routes.clone());
 
-        let facts = crate::resolver_core::module_facts_db::ModuleFacts {
-            whole_hash: effective_whole_hash,
-            import_route_hash,
-            import_routes: Arc::clone(&import_routes_arc),
-            raw_source,
-            cached_parse,
-            script_analysis,
-            export_signatures,
-            snapshot,
-            eval_source,
-            external_type_analysis,
-            shallow_state: Arc::clone(&shallow_state),
-        };
-        self.resolver
-            .runtime
-            .module_facts
-            .insert(canonical_id.to_owned(), facts);
-
-        // Publish the matching IndexedReady into the project-global store so
-        // downstream Phase 1+ consumers can read the canonical post-parse
-        // artifact without going through ModuleFactsDb. The two caches agree
-        // on whole_hash by construction; the legacy ModuleFactsDb stays live
-        // during the rewrite until consumers finish migrating.
+        // Publish the canonical post-parse artifact into IndexedReadyDb. This
+        // is the single authoritative cache consumers read from; the retired
+        // `IndexedReadyDb` no longer exists.
         let indexed = crate::project_type_store::IndexedReady {
             whole_hash: effective_whole_hash,
             shallow_state: Arc::clone(&shallow_state),
             import_routes: Arc::clone(&import_routes_arc),
             import_route_hash,
+            raw_source,
+            eval_source,
+            cached_parse,
+            script_analysis,
+            export_signatures,
+            snapshot,
+            external_type_analysis,
         };
         self.project_type_store
             .indexed()

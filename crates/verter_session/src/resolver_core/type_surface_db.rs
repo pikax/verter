@@ -181,15 +181,18 @@ impl TypeSurfaceDb {
         }
     }
 
-    /// Publish a stable projection result directly.
-    ///
-    /// Only call this for stable, completed results. Never publish
-    /// fuse-tripped or degraded results.
+    /// Publish a stable projection result directly. **Test-only**: the
+    /// empty-facts variant admits entries that would warm under any
+    /// [`StoreView`] — production paths must use
+    /// [`Self::publish_with_facts`].
+    #[cfg(test)]
     pub fn publish(&self, op_key: TypeSurfaceOpKey, result: TypeSurfaceOpResult) {
         self.ops.insert(op_key, result, Vec::new());
     }
 
-    /// Publish a stable projection result as Arc.
+    /// Publish a stable projection result as Arc. **Test-only**: see
+    /// [`Self::publish`] for the production constraint.
+    #[cfg(test)]
     pub fn publish_arc(&self, op_key: TypeSurfaceOpKey, result: Arc<TypeSurfaceOpResult>) {
         self.ops.insert_arc(op_key, result, Vec::new());
     }

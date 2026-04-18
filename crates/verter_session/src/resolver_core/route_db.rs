@@ -164,7 +164,10 @@ impl RouteDb {
         }
     }
 
-    /// Insert a pre-resolved route.
+    /// Insert a pre-resolved route. **Test-only**: the empty-facts variant
+    /// admits entries that would warm under any [`StoreView`] — production
+    /// paths must use [`Self::insert_route_with_facts`].
+    #[cfg(test)]
     pub fn insert_route(
         &self,
         provider_canonical: String,
