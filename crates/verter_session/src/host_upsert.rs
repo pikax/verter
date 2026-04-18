@@ -170,6 +170,7 @@ impl VerterHost {
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
             self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
             self.resolver.runtime.evict_canonical(&canonical_id);
+            self.project_type_store.evict_canonical(&canonical_id);
             self.resolved_type_cache.lock().clear();
             self.eval_env_cache.lock().clear();
             self.semantic_invalidate(&canonical_id);
@@ -277,6 +278,7 @@ impl VerterHost {
         // Hard-evict module facts so stale store views can't see the
         // prior generation after a content change.
         self.resolver.runtime.evict_canonical(&canonical_id);
+        self.project_type_store.evict_canonical(&canonical_id);
         self.resolved_type_cache.lock().clear();
         self.semantic_invalidate(&canonical_id);
 

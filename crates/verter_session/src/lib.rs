@@ -1480,6 +1480,7 @@ impl VerterHost {
                 }
                 for owner in evict_targets {
                     self.resolver.runtime.invalidate_canonical(owner);
+                    self.project_type_store.evict_canonical(owner);
                 }
             }
         }

@@ -98,6 +98,94 @@ impl InflightEntry {
     }
 }
 
+/// RAII guard that pops a key off [`IN_FLIGHT_ON_THIS_THREAD`] when dropped.
+///
+/// Ensures the recursion stack stays consistent even if the cold build
+/// panics — otherwise a caught panic or unwind could leave a key on the
+/// stack and future unrelated queries for that key from the same thread
+/// would be misclassified as same-path recursion.
+struct RecursionStackGuard {
+    key: Option<SemanticQueryKey>,
+}
+
+impl RecursionStackGuard {
+    fn push(key: SemanticQueryKey) -> Self {
+        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow_mut().push(key.clone()));
+        Self { key: Some(key) }
+    }
+}
+
+impl Drop for RecursionStackGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            IN_FLIGHT_ON_THIS_THREAD.with(|slot| {
+                let mut v = slot.borrow_mut();
+                if let Some(pos) = v.iter().rposition(|k| k == &key) {
+                    v.remove(pos);
+                }
+            });
+        }
+    }
+}
+
+/// RAII guard that fails the in-flight entry if the cold build panics.
+///
+/// Without this guard, a panic inside the winner's build closure would
+/// leave `state.claimed == true` with `state.completed == None`. Any
+/// subsequent caller for the same key would block on the condvar forever
+/// because no publish ever wakes it. The guard detects the abnormal drop
+/// via a `completed` flag, marks the entry with an error sentinel, wakes
+/// joiners, and removes the entry from the in-flight table so fresh
+/// callers start a new build.
+struct InflightPanicGuard<'a> {
+    inflight: Arc<InflightEntry>,
+    inflight_table: &'a Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
+    key: SemanticQueryKey,
+    finished: bool,
+}
+
+impl<'a> InflightPanicGuard<'a> {
+    fn new(
+        inflight: Arc<InflightEntry>,
+        inflight_table: &'a Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
+        key: SemanticQueryKey,
+    ) -> Self {
+        Self {
+            inflight,
+            inflight_table,
+            key,
+            finished: false,
+        }
+    }
+
+    fn mark_finished(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl<'a> Drop for InflightPanicGuard<'a> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Panic / early-return path — mark the entry completed with an
+        // error sentinel so joiners can wake and fail fresh rather than
+        // wait forever on a condvar that will never be signalled.
+        {
+            let mut state = self.inflight.state.lock();
+            if state.completed.is_none() {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "cold build aborted (panic or early return)",
+                ))));
+                state.dep_signature = Some(empty_signature());
+            }
+        }
+        self.inflight.ready.notify_all();
+        let mut table = self.inflight_table.lock();
+        table.remove(&self.key);
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Semantic graph store
 // ──────────────────────────────────────────────────────────────────────────
@@ -130,33 +218,72 @@ thread_local! {
 }
 
 impl SemanticGraphStore {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
         self.arena.push(data)
     }
 
     /// Read the resolved payload for a semantic node id. Returns `None` if
     /// the id has not been interned.
+    #[must_use]
     pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         self.arena.get(id)
     }
 
     /// Number of interned semantic nodes. Useful for tests and counters.
+    #[must_use]
     pub fn node_count(&self) -> usize {
         self.arena.len()
     }
 
     /// Number of warm memo entries. Useful for tests and counters.
+    #[must_use]
     pub fn memo_entry_count(&self) -> usize {
         self.entries.lock().len()
     }
 
+    /// Invalidate every warm memo entry whose [`SemanticQueryKey`]
+    /// references `canonical_id` in its scope. Called on file-content
+    /// changes so subsequent queries for `ResolveDecl(a.ts::Foo)` recompute
+    /// under the new file version instead of returning a stale node.
+    ///
+    /// Semantic node ids remain stable (the arena is append-only); only
+    /// memo entries are cleared. Returns the number of entries evicted.
+    ///
+    /// Does not touch in-flight admission: an in-flight build for the
+    /// stale canonical will still complete and publish; the next query
+    /// after this call re-runs the build under the new version. This is
+    /// acceptable because the plan's contract says "semantic memo caches
+    /// are rooted in versioned semantic identities, so a change to `C.ts`
+    /// creates new semantic nodes under `C@new_hash` while unrelated files
+    /// stay warm" — the new semantic node is produced by the re-run, not
+    /// by mutating the existing entry.
+    pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
+        let mut entries = self.entries.lock();
+        let before = entries.len();
+        entries.retain(|key, _| !key_references_canonical(key, canonical_id));
+        before - entries.len()
+    }
+
+    /// Clear every warm memo entry. Used on project-generation bumps
+    /// (`tsconfig` changes, active-TS-SDK swaps, workspace-folder changes)
+    /// per plan § A0. Returns the number of entries cleared.
+    pub fn invalidate_all(&self) -> usize {
+        let mut entries = self.entries.lock();
+        let removed = entries.len();
+        entries.clear();
+        removed
+    }
+
     /// Warm-lookup a key. Returns the memoized result + its recorded
     /// dependency signature when present.
+    #[must_use]
     pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let entries = self.entries.lock();
         entries.get(key).cloned().map(|entry| CacheRead {
@@ -179,6 +306,7 @@ impl SemanticGraphStore {
     ///
     /// `recursion_sentinel` produces a fallback [`SemanticNodeId`] when
     /// same-path recursion is detected.
+    #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
     pub fn execute_cooperative<F, R>(
         &self,
         key: SemanticQueryKey,
@@ -234,16 +362,16 @@ impl SemanticGraphStore {
         };
         debug_assert!(should_build);
 
-        // 4. Execute the cold build with this key pushed onto the
-        //    per-thread recursion stack so descendants see us.
-        IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow_mut().push(key.clone()));
+        // 4. Execute the cold build. Both the recursion stack entry and
+        //    the in-flight admission are protected by RAII guards so a
+        //    panic inside `build()` cannot deadlock future callers.
+        let _recursion_guard = RecursionStackGuard::push(key.clone());
+        let mut panic_guard =
+            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, key.clone());
         let (result, dep_signature) = build();
-        IN_FLIGHT_ON_THIS_THREAD.with(|slot| {
-            let mut v = slot.borrow_mut();
-            if let Some(pos) = v.iter().rposition(|k| k == &key) {
-                v.remove(pos);
-            }
-        });
+        panic_guard.mark_finished();
+        drop(panic_guard);
+        drop(_recursion_guard);
 
         // 5. Warm-publish only successful values; errors and recursion
         //    sentinels never become shared-cache entries.
@@ -299,6 +427,32 @@ impl SemanticGraphRead for SemanticGraphStore {
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// Returns `true` iff `key`'s scope (for declaration-rooted keys) references
+/// `canonical_id`. Non-declaration keys are rooted in semantic-node ids
+/// instead of scopes; their invalidation follows the declaration keys they
+/// depend on, so this helper only matches `ResolveDecl` and `TypeOf`
+/// directly.
+///
+/// This is a conservative implementation — it deliberately skips
+/// `Instantiate`, `ProjectMember`, and similar derived keys because their
+/// base `SemanticNodeId` may still be valid (from an unrelated canonical)
+/// even after `canonical_id` changes. If invariants drift and derived keys
+/// leak into the stale set, a broader invalidation pass via
+/// [`SemanticGraphStore::invalidate_all`] is the safe fallback.
+fn key_references_canonical(key: &SemanticQueryKey, canonical_id: &str) -> bool {
+    match key {
+        SemanticQueryKey::ResolveDecl(decl_key) => {
+            decl_key.scope.canonical_id.as_ref() == canonical_id
+        }
+        SemanticQueryKey::TypeOf { value_root } => {
+            value_root.scope.canonical_id.as_ref() == canonical_id
+        }
+        // Node-id-rooted keys survive this targeted pass. Callers that
+        // need whole-graph invalidation use `invalidate_all` instead.
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +627,134 @@ mod tests {
         let warm = store.get(&key).unwrap();
         assert_eq!(warm.dep_signature.len(), 1);
         assert_eq!(warm.dep_signature[0].0.as_ref(), "/w/a.ts");
+    }
+
+    /// A panic inside the cold build must not leave the in-flight entry
+    /// in a `claimed=true, completed=None` state — otherwise the next
+    /// caller for the same key would wait on the condvar forever.
+    ///
+    /// The `InflightPanicGuard` catches the drop and marks the entry with
+    /// an `Error(Other)` sentinel so joiners fail fast and subsequent
+    /// callers start a fresh build.
+    #[test]
+    fn panic_in_cold_build_does_not_deadlock_future_callers() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/a.ts"),
+            name: Arc::from("Explodes"),
+        });
+
+        // Cold build panics; `catch_unwind` turns it into an `Err`.
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            store.execute_cooperative(
+                key.clone(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    panic!("simulated build panic");
+                },
+            )
+        }));
+        assert!(panicked.is_err(), "build must have unwound via panic");
+
+        // The thread-local recursion stack must be empty (RAII guard) so
+        // the same thread can query the same key without being flagged as
+        // same-path recursion.
+        let is_empty = IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().is_empty());
+        assert!(is_empty, "recursion stack must be empty after panic");
+
+        // A subsequent call for the same key must not deadlock. It must
+        // be free to start a fresh cold build (the in-flight entry was
+        // retired by the panic guard).
+        let mut re_ran = false;
+        let second = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                re_ran = true;
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+        assert!(
+            re_ran,
+            "post-panic call must run a fresh cold build, not wait on the retired entry"
+        );
+        assert!(matches!(second.value, QueryResult::Value(_)));
+    }
+
+    /// `invalidate_canonical` removes every memo entry whose scope
+    /// references the canonical — future queries compute fresh node ids
+    /// under the new file version. Unrelated keys stay warm.
+    #[test]
+    fn invalidate_canonical_removes_only_matching_scope_keys() {
+        let store = SemanticGraphStore::new();
+
+        // Warm up `ResolveDecl(a.ts::Foo)`.
+        let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/a.ts"),
+            name: Arc::from("Foo"),
+        });
+        let _ = store.execute_cooperative(
+            a_key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+
+        // Warm up `ResolveDecl(b.ts::Foo)` — same name, different canonical.
+        let b_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/b.ts"),
+            name: Arc::from("Foo"),
+        });
+        let _ = store.execute_cooperative(
+            b_key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+
+        assert_eq!(store.memo_entry_count(), 2);
+
+        // Invalidate only a.ts.
+        let removed = store.invalidate_canonical("/w/a.ts");
+        assert_eq!(removed, 1);
+        assert_eq!(store.memo_entry_count(), 1);
+
+        // b.ts still warm.
+        assert!(store.get(&b_key).is_some());
+        // a.ts gone — next call re-runs build.
+        assert!(store.get(&a_key).is_none());
+    }
+
+    /// `invalidate_all` clears every memo entry — used on project-generation
+    /// bumps per plan § A0 (tsconfig / SDK / workspace-folder changes).
+    #[test]
+    fn invalidate_all_clears_every_memo_entry() {
+        let store = SemanticGraphStore::new();
+        for name in ["X", "Y", "Z"] {
+            let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: scope("/w/a.ts"),
+                name: Arc::from(name),
+            });
+            let _ = store.execute_cooperative(
+                key,
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (QueryResult::Value(id), empty_signature())
+                },
+            );
+        }
+        assert_eq!(store.memo_entry_count(), 3);
+        let cleared = store.invalidate_all();
+        assert_eq!(cleared, 3);
+        assert_eq!(store.memo_entry_count(), 0);
     }
 
     #[test]

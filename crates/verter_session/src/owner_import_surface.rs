@@ -23,6 +23,7 @@
 //!   caller merges into the active
 //!   [`CompletionFence`](crate::completion_fence::CompletionFence).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -63,19 +64,31 @@ pub struct OwnerImportSurface {
 /// Host-owned cache of owner import surfaces. Keyed by owner canonical;
 /// the entry carries the owner whole-hash so stale versions are rejected
 /// at lookup time.
-#[derive(Default)]
 pub struct OwnerImportSurfaceDb {
     entries: DashMap<Arc<str>, Arc<OwnerImportSurface>>,
+    live_counter: Arc<AtomicU64>,
 }
 
 impl OwnerImportSurfaceDb {
+    #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Construct with an externally-shared `live_counter` so the
+    /// [`ProjectTypeStoreCounters`](crate::project_type_store::ProjectTypeStoreCounters)
+    /// snapshot reflects live-entry changes without a second read.
+    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            live_counter,
+        }
     }
 
     /// Look up the owner surface for `owner_canonical` if the cached entry
     /// matches `expected_owner_whole_hash`. Stale entries are rejected at
     /// the key level so no callers observe a mixed-version surface.
+    #[must_use]
     pub fn get(
         &self,
         owner_canonical: &str,
@@ -89,23 +102,47 @@ impl OwnerImportSurfaceDb {
         }
     }
 
-    /// Insert or replace the surface for `owner_canonical`.
+    /// Insert or replace the surface for `owner_canonical`. A replacement
+    /// does not change the live-entry count.
     pub fn insert(&self, owner_canonical: Arc<str>, surface: Arc<OwnerImportSurface>) {
-        self.entries.insert(owner_canonical, surface);
+        let prev = self.entries.insert(owner_canonical, surface);
+        if prev.is_none() {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Remove the surface outright — used on file-close / hard evict.
     pub fn remove(&self, owner_canonical: &str) {
-        self.entries.remove(owner_canonical);
+        if self.entries.remove(owner_canonical).is_some() {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Drop every cached surface. Called on project-generation bumps
+    /// (tsconfig / SDK / workspace-folder changes) per plan § A0 — owner
+    /// surfaces depend on resolved routes, which project-shape changes
+    /// may shift, so nothing is safe to keep warm.
+    pub fn entries_drain_for_generation_bump(&self) {
+        let count = self.entries.len();
+        self.entries.clear();
+        self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
     }
 
     /// Number of live owner surfaces. Primarily for debug counters.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+impl Default for OwnerImportSurfaceDb {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

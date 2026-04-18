@@ -51,8 +51,10 @@ struct CompletionFenceInner {
 }
 
 /// Small normalized key over the shape of [`DepVersion`] so hash/eq works
-/// without cloning the full variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// without cloning the full variant. `Ord` is derived so
+/// [`CompletionFence::observed_signature`] produces deterministic output
+/// even when one canonical carries multiple kinds of facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum DepKindKey {
     WholeHash,
     RouteGeneration,
@@ -99,6 +101,7 @@ pub trait FenceValidator {
 impl CompletionFence {
     pub const MAX_ATTEMPTS: u8 = 3;
 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(CompletionFenceInner {
@@ -109,6 +112,7 @@ impl CompletionFence {
     }
 
     /// Current attempt count (1-indexed after the first attempt starts).
+    #[must_use]
     pub fn attempts(&self) -> u8 {
         self.inner.lock().attempts
     }
@@ -139,21 +143,32 @@ impl CompletionFence {
     /// Snapshot the currently-observed signature into a stable ordered
     /// array. Primarily used when publishing a cache entry so the stored
     /// dep-signature reflects what the builder actually touched.
+    ///
+    /// Output is sorted by `(canonical, DepKindKey)` so two fences that
+    /// observe the same facts produce byte-identical signatures — this
+    /// matters for cache-key-equivalent dep-signatures and for stable
+    /// test snapshots.
+    #[must_use]
     pub fn observed_signature(&self) -> DepSignature {
         let inner = self.inner.lock();
-        let mut entries: Vec<(Arc<str>, DepVersion)> = inner
+        let mut entries: Vec<(Arc<str>, DepKindKey, DepVersion)> = inner
             .observed
             .iter()
-            .map(|((canonical, _), version)| (canonical.clone(), version.clone()))
+            .map(|((canonical, kind), version)| (canonical.clone(), *kind, version.clone()))
             .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Arc::from(entries.into_boxed_slice())
+        // Secondary sort on DepKindKey ensures determinism when one
+        // canonical carries both a WholeHash and a RouteGeneration fact.
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let out: Vec<(Arc<str>, DepVersion)> =
+            entries.into_iter().map(|(c, _, v)| (c, v)).collect();
+        Arc::from(out.into_boxed_slice())
     }
 
     /// Drive a top-level query through up to [`Self::MAX_ATTEMPTS`]
     /// attempts. On each attempt, `build` runs a fresh solve; the observed
     /// dep-signature is revalidated against `validator` before the result
     /// is accepted.
+    #[must_use = "the FenceOutcome must be checked — Unstable means the final result was not published"]
     pub fn run<T, V, F>(&self, validator: &V, mut build: F) -> FenceOutcome<T>
     where
         V: FenceValidator,
@@ -305,5 +320,40 @@ mod tests {
         let observed = fence.observed_signature();
         assert_eq!(observed[0].0.as_ref(), "/w/a.ts");
         assert_eq!(observed[1].0.as_ref(), "/w/z.ts");
+    }
+
+    /// Two fences that observed the same set of facts in different
+    /// insertion orders produce byte-identical signatures. This matters
+    /// because ComponentMetaResultDb's dep-signature participates in
+    /// revalidation comparisons; non-deterministic ordering would turn
+    /// equivalent signatures into false mismatches.
+    #[test]
+    fn observed_signature_is_deterministic_across_insertion_orders() {
+        let fence_a = CompletionFence::new();
+        fence_a.observe(Arc::from("/w/z.ts"), DepVersion::WholeHash([1u8; 16]));
+        fence_a.observe(Arc::from("/w/a.ts"), DepVersion::RouteGeneration(3));
+        fence_a.observe(Arc::from("/w/a.ts"), DepVersion::WholeHash([2u8; 16]));
+        fence_a.observe(Arc::from("/w/m.ts"), DepVersion::ProjectGeneration(7));
+
+        let fence_b = CompletionFence::new();
+        fence_b.observe(Arc::from("/w/m.ts"), DepVersion::ProjectGeneration(7));
+        fence_b.observe(Arc::from("/w/a.ts"), DepVersion::WholeHash([2u8; 16]));
+        fence_b.observe(Arc::from("/w/z.ts"), DepVersion::WholeHash([1u8; 16]));
+        fence_b.observe(Arc::from("/w/a.ts"), DepVersion::RouteGeneration(3));
+
+        let sig_a = fence_a.observed_signature();
+        let sig_b = fence_b.observed_signature();
+        assert_eq!(sig_a.len(), sig_b.len());
+        for (a, b) in sig_a.iter().zip(sig_b.iter()) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.1, b.1);
+        }
+
+        // Within `/w/a.ts`, WholeHash must come before RouteGeneration
+        // because DepKindKey::WholeHash < DepKindKey::RouteGeneration.
+        assert_eq!(sig_a[0].0.as_ref(), "/w/a.ts");
+        assert!(matches!(sig_a[0].1, DepVersion::WholeHash(_)));
+        assert_eq!(sig_a[1].0.as_ref(), "/w/a.ts");
+        assert!(matches!(sig_a[1].1, DepVersion::RouteGeneration(3)));
     }
 }

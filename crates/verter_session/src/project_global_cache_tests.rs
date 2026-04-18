@@ -183,6 +183,38 @@ fn edit_replaces_entry_without_in_place_mutation() {
     assert!(live.is_some(), "live entry under new hash must be present");
 }
 
+/// Upsert with content change calls `project_type_store.evict_canonical`
+/// alongside the legacy resolver-runtime eviction. This keeps the new
+/// caches from accumulating stale entries and is the hook Phase 2+ will
+/// rely on to guarantee lookup-time freshness without whole-hash filters.
+#[test]
+fn content_change_evicts_project_type_store_entry() {
+    let host = host();
+    upsert_ts(&host, "/w/t.ts", "export type T = { x: number }");
+    let hash_v1 = indexed_whole_hash(&host, "/w/t.ts").expect("v1 IndexedReady must exist");
+
+    // After content change, ensure_facts re-materializes a fresh entry.
+    // The old entry should have been actively evicted (not just shadowed
+    // by hash mismatch) before the new materialization ran.
+    upsert_ts(&host, "/w/t.ts", "export type T = { x: string }");
+
+    // Old hash lookup misses (active eviction + new insert).
+    assert!(host
+        .project_type_store()
+        .indexed()
+        .get("/w/t.ts", hash_v1)
+        .is_none());
+
+    // Re-materialize under v2 and verify the entry is present.
+    let hash_v2 = indexed_whole_hash(&host, "/w/t.ts").expect("v2 IndexedReady must exist");
+    assert_ne!(hash_v1, hash_v2);
+    assert!(host
+        .project_type_store()
+        .indexed()
+        .get("/w/t.ts", hash_v2)
+        .is_some());
+}
+
 /// E. `ProjectTypeStore::bump_project_generation` is monotonic — the host
 /// and the project-global store agree on a single generation counter.
 #[test]

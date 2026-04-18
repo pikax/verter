@@ -21,6 +21,7 @@
 //!   into the cache. They must surface as `QueryError` variants to the
 //!   caller.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -81,6 +82,8 @@ pub struct ComponentMetaResultDb<P> {
     /// top-level query exit path (plan § A1.8). Cleanup in Phase 3 is
     /// `stale-first, LRU next`; precise policy lives with the dispatcher.
     capacity: usize,
+    live_counter: Arc<AtomicU64>,
+    stale_sweeps: Arc<AtomicU64>,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -90,18 +93,35 @@ impl<P> ComponentMetaResultDb<P> {
     /// called out in the plan's memory budget.
     pub const DEFAULT_CAPACITY: usize = 512;
 
+    #[must_use]
     pub fn new() -> Self {
         Self::with_capacity(Self::DEFAULT_CAPACITY)
     }
 
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_counters(
+            capacity,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
+    pub(crate) fn with_counters(
+        capacity: usize,
+        live_counter: Arc<AtomicU64>,
+        stale_sweeps: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             capacity,
+            live_counter,
+            stale_sweeps,
         }
     }
 
     /// Cache size target. Exceeding it triggers bounded stale cleanup.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -109,6 +129,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// Strict lookup — returns the cached entry when present. The caller
     /// is responsible for revalidating the dep signature before publishing
     /// the result; this split keeps the cache decoupled from the live host.
+    #[must_use]
     pub fn get(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
         self.entries.get(key).map(|v| v.clone())
     }
@@ -117,24 +138,73 @@ impl<P> ComponentMetaResultDb<P> {
     /// results must **not** be passed here — callers are responsible for
     /// filtering. The cache does not inspect the payload.
     pub fn insert(&self, key: ComponentMetaResultKey, entry: ComponentMetaResultEntry<P>) {
-        self.entries.insert(key, entry);
+        let prev = self.entries.insert(key, entry);
+        if prev.is_some() {
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Remove a key outright.
     pub fn remove(&self, key: &ComponentMetaResultKey) -> Option<ComponentMetaResultEntry<P>> {
-        self.entries.remove(key).map(|(_, v)| v)
+        let removed = self.entries.remove(key).map(|(_, v)| v);
+        if removed.is_some() {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
+        removed
     }
 
+    /// Drop every cached entry. Called on project-generation bumps
+    /// (tsconfig / SDK / workspace-folder changes) per plan § A0 — final
+    /// results depend on routes and intrinsic resolution, which
+    /// project-shape changes may shift.
+    pub fn invalidate_all(&self) {
+        let count = self.entries.len();
+        self.entries.clear();
+        if count > 0 {
+            self.live_counter.fetch_sub(count as u64, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Invalidate every cached entry whose owner canonical matches
+    /// `owner_canonical`, across all owner whole-hashes, query kinds, and
+    /// options fingerprints. Called on owner-file content changes. Returns
+    /// the number of entries evicted.
+    pub fn invalidate_owner(&self, owner_canonical: &str) -> usize {
+        let mut removed = 0usize;
+        self.entries.retain(|key, _| {
+            if key.owner_canonical.as_ref() == owner_canonical {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if removed > 0 {
+            self.live_counter
+                .fetch_sub(removed as u64, Ordering::Relaxed);
+            self.stale_sweeps
+                .fetch_add(removed as u64, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Iterate through keys present in the cache. Primarily used by the
     /// bounded cleanup helper below.
+    #[must_use]
     pub fn keys(&self) -> Vec<ComponentMetaResultKey> {
         self.entries
             .iter()
@@ -296,5 +366,61 @@ mod tests {
             ComponentMetaResultDb::<u32>::DEFAULT_CAPACITY
         );
         assert_eq!(ComponentMetaResultDb::<u32>::DEFAULT_CAPACITY, 512);
+    }
+
+    /// `invalidate_owner` drops every entry whose owner canonical matches,
+    /// regardless of owner whole-hash / query kind / options. Unrelated
+    /// owners stay warm.
+    #[test]
+    fn invalidate_owner_removes_all_keys_for_one_canonical() {
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let mk_key =
+            |owner: &str, hash: [u8; 16], kind: ComponentMetaQueryKind| ComponentMetaResultKey {
+                owner_canonical: Arc::from(owner),
+                owner_whole_hash: hash,
+                query_kind: kind,
+                options_fingerprint: [0u8; 16],
+            };
+        let mk_entry = || ComponentMetaResultEntry {
+            payload: Arc::new(1u32),
+            dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+        };
+
+        // Two entries for /w/a.vue (different hashes + kinds), one for /w/b.vue.
+        db.insert(
+            mk_key("/w/a.vue", [1u8; 16], ComponentMetaQueryKind::Native),
+            mk_entry(),
+        );
+        db.insert(
+            mk_key("/w/a.vue", [1u8; 16], ComponentMetaQueryKind::Compat),
+            mk_entry(),
+        );
+        db.insert(
+            mk_key("/w/a.vue", [2u8; 16], ComponentMetaQueryKind::Native),
+            mk_entry(),
+        );
+        db.insert(
+            mk_key("/w/b.vue", [1u8; 16], ComponentMetaQueryKind::Native),
+            mk_entry(),
+        );
+
+        let removed = db.invalidate_owner("/w/a.vue");
+        assert_eq!(removed, 3);
+        // /w/b.vue stays.
+        assert!(db
+            .get(&mk_key(
+                "/w/b.vue",
+                [1u8; 16],
+                ComponentMetaQueryKind::Native
+            ))
+            .is_some());
+        // /w/a.vue is fully gone.
+        assert!(db
+            .get(&mk_key(
+                "/w/a.vue",
+                [1u8; 16],
+                ComponentMetaQueryKind::Native
+            ))
+            .is_none());
     }
 }

@@ -100,6 +100,7 @@ impl IntrinsicRegistry {
     /// declaration's body has resolved to `= intrinsic`; userland
     /// shadowing is handled upstream by normal declaration resolution and
     /// never reaches this table.
+    #[must_use]
     pub fn lookup(&self, name: &str) -> IntrinsicLookup {
         let entries = self.entries.read();
         if let Some(impl_id) = entries.get(name).copied() {

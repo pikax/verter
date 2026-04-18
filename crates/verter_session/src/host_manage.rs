@@ -7458,6 +7458,7 @@ impl VerterHost {
             // the store view's `validates` method does not return stale facts
             // for a deleted file.
             self.resolver.runtime.hard_evict_canonical(&canonical);
+            self.project_type_store.evict_canonical(&canonical);
             // Also evict component_meta results keyed by this canonical.
             self.resolver
                 .runtime
@@ -7628,6 +7629,7 @@ impl VerterHost {
         // Module facts are archived for stale store views.
         self.invalidate_route_owned_shallow_cache(&canonical);
         self.resolver.runtime.invalidate_canonical(&canonical);
+        self.project_type_store.evict_canonical(&canonical);
         self.resolved_type_cache.lock().clear();
         self.semantic_invalidate(&canonical);
         self.bump_store_view_epoch();

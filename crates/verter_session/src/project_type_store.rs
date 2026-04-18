@@ -149,19 +149,34 @@ pub struct AnalysisReady {
 /// Host-owned cache of canonical [`IndexedReady`] artifacts. Keyed by
 /// canonical file id; the entry carries the whole-hash so stale keys can be
 /// rejected without rerunning a live lookup.
-#[derive(Default)]
 pub struct IndexedReadyDb {
     entries: DashMap<Arc<str>, Arc<IndexedReady>>,
+    /// Live entry counter — bumped on insert of a new canonical key,
+    /// decremented on remove. Replacement (insert with existing key) does
+    /// not change the count.
+    live_counter: Arc<AtomicU64>,
+    /// Stale-sweep counter — bumped when [`Self::remove`] evicts an
+    /// existing entry or a replacement supersedes a prior whole-hash.
+    stale_sweeps: Arc<AtomicU64>,
 }
 
 impl IndexedReadyDb {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_counters(Default::default(), Default::default())
+    }
+
+    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            live_counter: live,
+            stale_sweeps: stale,
+        }
     }
 
     /// Look up the indexed artifact for `canonical_id` if the cached entry
     /// matches `expected_whole_hash`. Stale entries are ignored; callers
     /// materialize through the scheduler and re-populate.
+    #[must_use]
     pub fn get(
         &self,
         canonical_id: &str,
@@ -177,39 +192,67 @@ impl IndexedReadyDb {
 
     /// Insert or replace the entry for `canonical_id`. Older versions for the
     /// same canonical are overwritten — strong-consistency lookup is the
-    /// responsibility of the caller via `expected_whole_hash`.
+    /// responsibility of the caller via `expected_whole_hash`. A replacement
+    /// increments the stale-sweep counter so downstream telemetry can see
+    /// how often stale entries are superseded.
     pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
-        self.entries.insert(canonical_id, indexed);
+        let prev = self.entries.insert(canonical_id, indexed);
+        if prev.is_some() {
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Remove an entry outright (e.g. from an explicit file close).
     pub fn remove(&self, canonical_id: &str) {
-        self.entries.remove(canonical_id);
+        if self.entries.remove(canonical_id).is_some() {
+            self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Number of live entries. Primarily intended for per-layer debug
     /// counters / cache stats.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }
 
+impl Default for IndexedReadyDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Host-owned cache of per-file [`AnalysisReady`] artifacts.
-#[derive(Default)]
 pub struct AnalysisReadyDb {
     entries: DashMap<AnalysisArtifactKey, Arc<AnalysisReady>>,
+    live_counter: Arc<AtomicU64>,
+    stale_sweeps: Arc<AtomicU64>,
 }
 
 impl AnalysisReadyDb {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_counters(Default::default(), Default::default())
+    }
+
+    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            live_counter: live,
+            stale_sweeps: stale,
+        }
     }
 
     /// Strict lookup by full key.
+    #[must_use]
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
         self.entries.get(key).map(|v| v.clone())
     }
@@ -218,6 +261,7 @@ impl AnalysisReadyDb {
     /// `(canonical_id, whole_hash)` matches and whose cached scope contains
     /// the requested scope. This is the bitflag-based containment rule
     /// called out in the project-global overhaul plan.
+    #[must_use]
     pub fn find_satisfying(
         &self,
         canonical_id: &str,
@@ -237,15 +281,51 @@ impl AnalysisReadyDb {
     }
 
     pub fn insert(&self, key: AnalysisArtifactKey, analysis: Arc<AnalysisReady>) {
-        self.entries.insert(key, analysis);
+        let prev = self.entries.insert(key, analysis);
+        if prev.is_some() {
+            self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.live_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
+    /// Invalidate every cached entry for `canonical_id`, regardless of
+    /// `(whole_hash, scope)`. Called on file-content changes so a new
+    /// whole-hash does not keep stale analysis alive. Returns the number
+    /// of entries evicted.
+    pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        self.entries.retain(|key, _| {
+            if key.canonical_id.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if removed > 0 {
+            self.live_counter
+                .fetch_sub(removed as u64, Ordering::Relaxed);
+            self.stale_sweeps
+                .fetch_add(removed as u64, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+impl Default for AnalysisReadyDb {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -257,23 +337,27 @@ impl AnalysisReadyDb {
 ///
 /// The plan requires explicit counters for live entries, stale entries,
 /// sweeps, evictions, and in-flight waiters so memory and coherence behavior
-/// is measurable in tests and benchmarks.
-#[derive(Debug, Default)]
+/// is measurable in tests and benchmarks. Each counter is `Arc<AtomicU64>`
+/// so the owning DB can hold a handle and update it in-place; the
+/// [`ProjectTypeStoreCounters`] struct stays as a single observation
+/// surface for tests and telemetry.
+#[derive(Debug, Default, Clone)]
 pub struct ProjectTypeStoreCounters {
-    pub indexed_live: AtomicU64,
-    pub indexed_stale_sweeps: AtomicU64,
-    pub analysis_live: AtomicU64,
-    pub analysis_stale_sweeps: AtomicU64,
-    pub owner_import_live: AtomicU64,
-    pub component_meta_live: AtomicU64,
-    pub component_meta_stale_sweeps: AtomicU64,
-    pub inflight_waiters: AtomicU64,
+    pub indexed_live: Arc<AtomicU64>,
+    pub indexed_stale_sweeps: Arc<AtomicU64>,
+    pub analysis_live: Arc<AtomicU64>,
+    pub analysis_stale_sweeps: Arc<AtomicU64>,
+    pub owner_import_live: Arc<AtomicU64>,
+    pub component_meta_live: Arc<AtomicU64>,
+    pub component_meta_stale_sweeps: Arc<AtomicU64>,
+    pub inflight_waiters: Arc<AtomicU64>,
 }
 
 impl ProjectTypeStoreCounters {
     /// Snapshot numeric counters for test assertions and telemetry. Uses
     /// `Relaxed` ordering because these are diagnostic counters, not
     /// synchronization primitives.
+    #[must_use]
     pub fn snapshot(&self) -> ProjectTypeStoreCounterSnapshot {
         ProjectTypeStoreCounterSnapshot {
             indexed_live: self.indexed_live.load(Ordering::Relaxed),
@@ -363,18 +447,37 @@ impl std::fmt::Debug for ProjectTypeStore {
 }
 
 impl ProjectTypeStore {
+    #[must_use]
     pub fn new() -> Self {
+        let counters = ProjectTypeStoreCounters::default();
+        // Each backing DB holds the same `Arc<AtomicU64>` counters as
+        // `counters` so the `snapshot()` method sees in-place updates.
+        let indexed = IndexedReadyDb::with_counters(
+            Arc::clone(&counters.indexed_live),
+            Arc::clone(&counters.indexed_stale_sweeps),
+        );
+        let analysis = AnalysisReadyDb::with_counters(
+            Arc::clone(&counters.analysis_live),
+            Arc::clone(&counters.analysis_stale_sweeps),
+        );
+        let owner_import_surfaces =
+            OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
+        let component_meta_results = ComponentMetaResultDb::with_counters(
+            ComponentMetaResultDb::<crate::types::FinalComponentMetaPayloadPlaceholder>::DEFAULT_CAPACITY,
+            Arc::clone(&counters.component_meta_live),
+            Arc::clone(&counters.component_meta_stale_sweeps),
+        );
         Self {
             project_generation: AtomicU64::new(0),
-            indexed: IndexedReadyDb::new(),
-            analysis: AnalysisReadyDb::new(),
+            indexed,
+            analysis,
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph: Arc::new(SemanticGraphStore::new()),
-            owner_import_surfaces: OwnerImportSurfaceDb::new(),
-            component_meta_results: ComponentMetaResultDb::new(),
+            owner_import_surfaces,
+            component_meta_results,
             intrinsic_registry: IntrinsicRegistry::with_defaults(),
-            counters: ProjectTypeStoreCounters::default(),
+            counters,
         }
     }
 
@@ -437,6 +540,7 @@ impl ProjectTypeStore {
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
     /// downstream callers merge into their active
     /// [`CompletionFence`](crate::completion_fence::CompletionFence).
+    #[must_use]
     pub fn dep_version_for(&self, whole_hash: Hash16) -> DepVersion {
         // Callers merge file-version facts as `DepVersion::WholeHash` and add
         // the project-generation fact separately. This helper keeps the
@@ -444,6 +548,52 @@ impl ProjectTypeStore {
         // assert against.
         let _ = self.project_generation();
         DepVersion::WholeHash(whole_hash)
+    }
+
+    /// Targeted invalidation on file content / routing change.
+    ///
+    /// Called from the host's `evict_canonical` flow. Removes or
+    /// invalidates every entry in the project-global cache graph that
+    /// pertains to `canonical_id`:
+    /// - `IndexedReadyDb`: removes the entry (lookup would otherwise
+    ///   harmlessly miss via whole-hash mismatch, but the memory would
+    ///   leak until re-materialization overwrote it).
+    /// - `AnalysisReadyDb`: removes every `(hash, scope)` entry for the
+    ///   canonical.
+    /// - `OwnerImportSurfaceDb`: removes the owner surface.
+    /// - `ComponentMetaResultDb`: removes every result keyed on the owner.
+    /// - `SemanticGraphStore`: removes every memo entry whose scope
+    ///   references the canonical.
+    pub fn evict_canonical(&self, canonical_id: &str) {
+        self.indexed.remove(canonical_id);
+        self.analysis.invalidate_canonical(canonical_id);
+        self.owner_import_surfaces.remove(canonical_id);
+        self.component_meta_results.invalidate_owner(canonical_id);
+        self.semantic_graph.invalidate_canonical(canonical_id);
+    }
+
+    /// Targeted invalidation of a project-generation bump.
+    ///
+    /// Called when the host / workspace detects `tsconfig`,
+    /// active-TypeScript-SDK, workspace-folder, or other project-shape
+    /// changes. Bumps the project generation and wipes every cache layer
+    /// whose identity depends on project configuration rather than raw
+    /// file text. Per plan § A0, this is invoked atomically before new
+    /// queries are admitted.
+    pub fn bump_project_generation_and_evict(&self) -> u64 {
+        let generation = self.bump_project_generation();
+        // File-content identity stays (IndexedReady / AnalysisReady keyed
+        // by whole_hash are still correct for the same file content).
+        // What becomes stale is:
+        //   - route / barrel facts (config changes may shift resolution)
+        //   - owner import surfaces (routes they resolved may shift)
+        //   - component-meta results (depend on routes / intrinsic SDK)
+        //   - semantic query memo (derived from routes + intrinsics)
+        self.owner_import_surfaces
+            .entries_drain_for_generation_bump();
+        let _ = self.semantic_graph.invalidate_all();
+        self.component_meta_results.invalidate_all();
+        generation
     }
 }
 
@@ -547,5 +697,189 @@ mod tests {
         let g2 = store.bump_project_generation();
         assert_eq!(g2, 2);
         assert_eq!(store.project_generation(), 2);
+    }
+
+    /// The shared `Arc<AtomicU64>` counters on [`ProjectTypeStoreCounters`]
+    /// reflect in-place updates from the backing DBs. Inserting a new
+    /// canonical bumps `indexed_live`; replacing it under a new hash bumps
+    /// `indexed_stale_sweeps` without increasing `indexed_live`.
+    #[test]
+    fn indexed_counters_reflect_insertions_and_replacements() {
+        let store = ProjectTypeStore::new();
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let mk_indexed = |hash: Hash16| {
+            Arc::new(IndexedReady {
+                whole_hash: hash,
+                shallow_state: Arc::new(
+                    crate::resolver_core::shallow_file_state::ShallowFileState {
+                        whole_hash: hash,
+                        exports: FxHashMap::default(),
+                        wildcard_reexports: vec![],
+                        symbols: FxHashMap::default(),
+                        value_symbols: FxHashMap::default(),
+                        import_locals: rustc_hash::FxHashSet::default(),
+                        import_targets: FxHashMap::default(),
+                        analysis: Arc::clone(&analysis),
+                    },
+                ),
+                import_routes: Arc::new(FxHashMap::default()),
+                import_route_hash: None,
+            })
+        };
+
+        let snap0 = store.counters.snapshot();
+        assert_eq!(snap0.indexed_live, 0);
+        assert_eq!(snap0.indexed_stale_sweeps, 0);
+
+        store
+            .indexed()
+            .insert(Arc::from("/w/a.ts"), mk_indexed([1u8; 16]));
+        let snap1 = store.counters.snapshot();
+        assert_eq!(snap1.indexed_live, 1);
+        assert_eq!(snap1.indexed_stale_sweeps, 0);
+
+        // Replacement under the same canonical — live stays at 1; stale
+        // sweep bumps.
+        store
+            .indexed()
+            .insert(Arc::from("/w/a.ts"), mk_indexed([2u8; 16]));
+        let snap2 = store.counters.snapshot();
+        assert_eq!(snap2.indexed_live, 1);
+        assert_eq!(snap2.indexed_stale_sweeps, 1);
+
+        // Remove brings live to 0 and bumps stale sweep again.
+        store.indexed().remove("/w/a.ts");
+        let snap3 = store.counters.snapshot();
+        assert_eq!(snap3.indexed_live, 0);
+        assert_eq!(snap3.indexed_stale_sweeps, 2);
+    }
+
+    /// Calling `evict_canonical` on a canonical that has no entries across
+    /// any of the owned DBs must be a no-op — no counter underflow, no
+    /// panic, no dangling in-flight entries.
+    #[test]
+    fn evict_canonical_is_a_noop_for_unseen_canonical() {
+        let store = ProjectTypeStore::new();
+        store.evict_canonical("/w/never-seen.ts");
+        let snap = store.counters.snapshot();
+        assert_eq!(snap.indexed_live, 0);
+        assert_eq!(snap.indexed_stale_sweeps, 0);
+        assert_eq!(snap.analysis_live, 0);
+        assert_eq!(snap.owner_import_live, 0);
+        assert_eq!(snap.component_meta_live, 0);
+    }
+
+    /// `bump_project_generation_and_evict` clears every generation-sensitive
+    /// cache and bumps the project generation counter. Per plan § A0, this
+    /// is invoked atomically on tsconfig / SDK / workspace-folder changes.
+    #[test]
+    fn bump_project_generation_and_evict_clears_route_and_result_layers() {
+        let store = ProjectTypeStore::new();
+        let hash = [3u8; 16];
+
+        // Populate owner-import, component-meta, semantic-graph.
+        store.owner_import_surfaces().insert(
+            Arc::from("/w/o.vue"),
+            Arc::new(crate::owner_import_surface::OwnerImportSurface {
+                owner_canonical: Arc::from("/w/o.vue"),
+                owner_whole_hash: hash,
+                bindings: Arc::new(FxHashMap::default()),
+                dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+            }),
+        );
+        store.component_meta_results().insert(
+            crate::component_meta_result_db::ComponentMetaResultKey {
+                owner_canonical: Arc::from("/w/o.vue"),
+                owner_whole_hash: hash,
+                query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
+                options_fingerprint: [0u8; 16],
+            },
+            crate::component_meta_result_db::ComponentMetaResultEntry {
+                payload: Arc::new(crate::types::FinalComponentMetaPayloadPlaceholder),
+                dep_signature: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        );
+
+        assert_eq!(store.owner_import_surfaces().len(), 1);
+        assert_eq!(store.component_meta_results().len(), 1);
+
+        let g_before = store.project_generation();
+        let g_after = store.bump_project_generation_and_evict();
+        assert_eq!(g_after, g_before + 1);
+
+        // Route-sensitive layers cleared; hash-rooted IndexedReady /
+        // AnalysisReady survive (they key on whole_hash, not project gen).
+        assert_eq!(store.owner_import_surfaces().len(), 0);
+        assert_eq!(store.component_meta_results().len(), 0);
+    }
+
+    #[test]
+    fn analysis_invalidate_canonical_removes_all_scopes_and_updates_counters() {
+        let store = ProjectTypeStore::new();
+        let snapshot = Arc::new(crate::types::FileAnalysisSnapshot::default());
+        let hash = [1u8; 16];
+
+        store.analysis().insert(
+            AnalysisArtifactKey {
+                canonical_id: Arc::from("/w/a.ts"),
+                whole_hash: hash,
+                scope: AnalysisScope::BUILD,
+            },
+            Arc::new(AnalysisReady {
+                whole_hash: hash,
+                scope: AnalysisScope::BUILD,
+                script_analysis: None,
+                export_signatures: None,
+                snapshot: Arc::clone(&snapshot),
+            }),
+        );
+        store.analysis().insert(
+            AnalysisArtifactKey {
+                canonical_id: Arc::from("/w/a.ts"),
+                whole_hash: hash,
+                scope: AnalysisScope::LSP,
+            },
+            Arc::new(AnalysisReady {
+                whole_hash: hash,
+                scope: AnalysisScope::LSP,
+                script_analysis: None,
+                export_signatures: None,
+                snapshot: Arc::clone(&snapshot),
+            }),
+        );
+        // Unrelated canonical — stays after invalidation.
+        store.analysis().insert(
+            AnalysisArtifactKey {
+                canonical_id: Arc::from("/w/b.ts"),
+                whole_hash: hash,
+                scope: AnalysisScope::BUILD,
+            },
+            Arc::new(AnalysisReady {
+                whole_hash: hash,
+                scope: AnalysisScope::BUILD,
+                script_analysis: None,
+                export_signatures: None,
+                snapshot: Arc::clone(&snapshot),
+            }),
+        );
+        assert_eq!(store.counters.snapshot().analysis_live, 3);
+
+        let removed = store.analysis().invalidate_canonical("/w/a.ts");
+        assert_eq!(removed, 2);
+        let snap = store.counters.snapshot();
+        assert_eq!(snap.analysis_live, 1);
+        assert_eq!(snap.analysis_stale_sweeps, 2);
+
+        // b.ts still resolvable.
+        assert!(store
+            .analysis()
+            .get(&AnalysisArtifactKey {
+                canonical_id: Arc::from("/w/b.ts"),
+                whole_hash: hash,
+                scope: AnalysisScope::BUILD,
+            })
+            .is_some());
     }
 }
