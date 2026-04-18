@@ -71,6 +71,7 @@ pub mod owner_import_surface;
 mod parse;
 #[cfg(test)]
 mod project_global_cache_tests;
+pub mod project_semantic_dispatch;
 pub mod project_type_store;
 pub mod resolver_core;
 mod resolver_store;

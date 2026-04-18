@@ -283,18 +283,45 @@ fn repeated_indexed_lookups_return_same_arc() {
     assert!(Arc::ptr_eq(&a, &b), "warm lookups must share one Arc");
 }
 
-/// Placeholder: once Phase 2.2 lands, the same test must assert that
-/// `SemanticQueryApi::execute(ResolveDecl {..})` for `C` reached via
-/// `C['foo'] & C['bar']` collapses to one memoized semantic node.
-///
-/// Today the static invariant is covered by
-/// `semantic_query::tests::resolve_decl_keys_dedup_by_scope_and_name`
-/// (keys are equal), and the memoization implementation lands in Phase 2.2.
+/// Phase 2.2: repeated `SemanticQueryApi::execute(ResolveDecl {..})` for the
+/// same scope+name key memoizes to one semantic node id and the shared
+/// memo's warm entry count stays at one. Distinct `ResolveDecl` keys
+/// populate distinct entries without aliasing.
 #[test]
-#[ignore = "Phase 2.2 — pending semantic query memoization implementation"]
 fn semantic_subqueries_dedup_across_request_boundaries_phase22() {
-    // Intentionally ignored until the Phase 2.2 implementation wires the
-    // shared semantic query graph onto `ProjectTypeStore`.
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/types.ts",
+        "export type C = { foo: number; bar: string }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let before = host
+        .project_type_store()
+        .semantic_graph()
+        .memo_entry_count();
+    let key = resolve_decl_key("/w/types.ts", "C");
+    let first = dispatch.execute(SemanticQueryKey::ResolveDecl(key.clone()));
+    let second = dispatch.execute(SemanticQueryKey::ResolveDecl(key));
+
+    let (a, b) = match (first, second) {
+        (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+        other => panic!("expected two values from ResolveDecl, got {other:?}"),
+    };
+    assert_eq!(a, b, "same key must memoize to one node id");
+    let after = host
+        .project_type_store()
+        .semantic_graph()
+        .memo_entry_count();
+    assert_eq!(
+        after - before,
+        1,
+        "two identical queries must share one warm memo entry"
+    );
 }
 
 /// Placeholder: once Phase 3 lands, the same top-level owner/query request
