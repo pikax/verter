@@ -1,3 +1,4 @@
+#![allow(clippy::cloned_ref_to_slice_refs, clippy::type_complexity)]
 //! Shared test harness for server-level integration tests with real type providers.
 //!
 //! Provides `TestSessionBuilder` (fluent builder), `RealProviderTestSession` (convenience
@@ -282,6 +283,7 @@ impl RealProviderTestSession {
     }
 
     /// Which provider backend this session uses.
+    #[allow(dead_code)]
     pub(crate) fn provider_kind(&self) -> TestProviderKind {
         self.kind
     }

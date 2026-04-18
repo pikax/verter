@@ -690,6 +690,97 @@ fn phase4_request_view_memo_retirement_source_audit() {
     );
 }
 
+/// Phase 4 progress ratchet: tracks the shrinking `_in_view` /
+/// `RequestStoreView` surface across the hot-path modules listed in
+/// plan § G1. The assertion is intentionally a **ceiling, not a
+/// target** — each session that lands a slice of the signature cut
+/// should lower these counts rather than preserve them. If the count
+/// drops below the ceiling the test still passes; if a regression
+/// *adds* new `_in_view` plumbing to any hot-path module the test
+/// fails and the author must justify why that is the correct
+/// direction (or lower the ceiling in the same commit).
+///
+/// When the cut completes the ceilings below reach zero and this
+/// whole test deletes in the same commit that deletes
+/// `host_request_view.rs`.
+#[test]
+fn phase4_in_view_surface_ratchet() {
+    struct Budget {
+        path: &'static str,
+        src: &'static str,
+        max_in_view: usize,
+        max_request_store_view: usize,
+    }
+
+    let budgets = [
+        Budget {
+            path: "host_manage.rs",
+            src: include_str!("host_manage.rs"),
+            max_in_view: 230,
+            max_request_store_view: 85,
+        },
+        Budget {
+            path: "host_resolve.rs",
+            src: include_str!("host_resolve.rs"),
+            max_in_view: 155,
+            max_request_store_view: 45,
+        },
+        Budget {
+            path: "meta_resolve.rs",
+            src: include_str!("meta_resolve.rs"),
+            max_in_view: 60,
+            max_request_store_view: 25,
+        },
+        Budget {
+            path: "resolver_core/component_meta_query_engine.rs",
+            src: include_str!("resolver_core/component_meta_query_engine.rs"),
+            max_in_view: 25,
+            max_request_store_view: 15,
+        },
+        Budget {
+            path: "resolver_core/solver_host.rs",
+            src: include_str!("resolver_core/solver_host.rs"),
+            max_in_view: 20,
+            max_request_store_view: 10,
+        },
+        Budget {
+            path: "resolver_core/component_meta_registry.rs",
+            src: include_str!("resolver_core/component_meta_registry.rs"),
+            max_in_view: 15,
+            max_request_store_view: 5,
+        },
+        Budget {
+            path: "meta.rs",
+            src: include_str!("meta.rs"),
+            max_in_view: 5,
+            max_request_store_view: 5,
+        },
+    ];
+
+    for b in &budgets {
+        let in_view = b.src.matches("_in_view").count();
+        let request_store_view = b.src.matches("RequestStoreView").count();
+        assert!(
+            in_view <= b.max_in_view,
+            "{}: `_in_view` count regressed (actual={}, ceiling={}). \
+             Lower the ceiling in the same commit that lowers the count, or \
+             justify the regression if you intentionally added new plumbing.",
+            b.path,
+            in_view,
+            b.max_in_view,
+        );
+        assert!(
+            request_store_view <= b.max_request_store_view,
+            "{}: `RequestStoreView` count regressed (actual={}, ceiling={}). \
+             Lower the ceiling in the same commit that lowers the count, or \
+             justify the regression if you intentionally added new plumbing.",
+            b.path,
+            request_store_view,
+            b.max_request_store_view,
+        );
+    }
+}
+
 /// Sanity: the project-global store is reachable from the public
 /// `VerterHost` accessor so consumers can read it without reaching into
 /// private fields.

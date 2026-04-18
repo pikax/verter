@@ -22,6 +22,12 @@ mod resilient_provider;
 mod uri;
 
 #[cfg(test)]
+#[allow(
+    unused_must_use,
+    clippy::unused_enumerate_index,
+    clippy::unnecessary_to_owned,
+    clippy::redundant_iter_cloned
+)]
 mod integration_tests;
 #[cfg(test)]
 mod real_provider_tests;

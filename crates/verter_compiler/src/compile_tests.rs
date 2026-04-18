@@ -5917,8 +5917,8 @@ fn template_heavy_vue_full_css_scoping() {
                 .imports
                 .iter()
                 .map(|name| {
-                    if name.starts_with('_') {
-                        format!("{} as {}", &name[1..], name)
+                    if let Some(stripped) = name.strip_prefix('_') {
+                        format!("{stripped} as {name}")
                     } else {
                         name.to_string()
                     }

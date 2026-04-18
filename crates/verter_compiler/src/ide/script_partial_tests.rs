@@ -110,6 +110,7 @@ fn assert_has_template_binding_fn(code: &str, test_name: &str) {
 }
 
 /// Assert that the output does NOT have TemplateBindingFN (error recovery mode).
+#[allow(dead_code)]
 fn assert_no_template_binding_fn(code: &str, test_name: &str) {
     assert!(
         !code.contains("___VERTER___TemplateBindingFN"),

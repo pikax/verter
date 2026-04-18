@@ -123,6 +123,7 @@ where
 }
 
 /// Run a file rule with SSR mode enabled.
+#[allow(dead_code)]
 pub(crate) fn run_file_rule_ssr<R>(rule: R, file: &FileContext<'_>) -> Vec<LintDiagnostic>
 where
     R: LintRule + 'static,

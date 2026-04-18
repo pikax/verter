@@ -59,6 +59,7 @@ pub fn analyze_class_flow(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use verter_span::Span;

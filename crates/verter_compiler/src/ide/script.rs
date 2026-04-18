@@ -139,6 +139,7 @@ pub use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
 // version starts producing partial ASTs, this code can be promoted to production.
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PartialAstStrategy {
     Normal,
@@ -147,6 +148,7 @@ enum PartialAstStrategy {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PartialAstAssessment {
     clean_stmt_count: usize,
@@ -159,6 +161,7 @@ struct PartialAstAssessment {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn assess_partial_ast(
     program: &oxc_ast::ast::Program<'_>,
     errors: &[oxc_diagnostics::OxcDiagnostic],
@@ -240,6 +243,7 @@ fn assess_partial_ast(
 
 /// Check if a span [start, end) overlaps with any error range.
 #[cfg(test)]
+#[allow(dead_code)]
 fn overlaps_any(error_ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
     error_ranges
         .iter()

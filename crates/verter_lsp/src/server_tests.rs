@@ -5758,7 +5758,7 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
         &ctx.tsx_line_index,
     )
     .expect("fixture member access position should map to tsx");
-    let expr_context =
+    let _expr_context =
         classify_expression_context_with_trigger(&ctx.tsx_content, tsx_offset as usize, None);
     let Ok(direct_result) = provider
         .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
@@ -6293,15 +6293,15 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                 })
                 .map_err(|error| (error.to_string(), tsx_path))
         });
-    let parent_state = server
+    let _parent_state = server
         .provider_sync_states
         .get(&parent_path)
         .map(|state| state.clone());
-    let child_state = server
+    let _child_state = server
         .provider_sync_states
         .get(&child_path)
         .map(|state| state.clone());
-    let (direct_labels, tsx_path, direct_error) = if let Some(fut) = direct_debug {
+    let (_direct_labels, _tsx_path, _direct_error) = if let Some(fut) = direct_debug {
         match fut.await {
             Ok((labels, tsx_path)) => (Some(labels), Some(tsx_path), None),
             Err((error, tsx_path)) => (None, Some(tsx_path), Some(error)),
@@ -6313,7 +6313,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
             Some("missing type provider context".to_string()),
         )
     };
-    let (literal_labels, literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
+    let (_literal_labels, _literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
         match provider
             .get_completions(&tsx_path, tsx_offset, Some("."))
             .await
@@ -7024,12 +7024,11 @@ defineProps<{ msg: string }>()
     let child_id = format!("{workspace_id}/src/components/Child.vue");
 
     // App.vue imports Child via alias
-    let app_source = format!(
-        r#"<script setup lang="ts">
+    let app_source = r#"<script setup lang="ts">
 import Child from '@/components/Child.vue'
 </script>
 <template><Child msg="hello" /></template>"#
-    );
+        .to_string();
 
     let vfs_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = Arc::new(
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()),

@@ -32,6 +32,7 @@ fn assert_has_error(result: &VerterCompileResult, code_str: &str) {
 }
 
 /// Assert that exactly `n` diagnostics have the given code string.
+#[allow(dead_code)]
 fn assert_error_count(result: &VerterCompileResult, code_str: &str, n: usize) {
     let count = result.errors.iter().filter(|e| e.code == code_str).count();
     assert_eq!(
@@ -69,6 +70,7 @@ fn assert_no_errors(result: &VerterCompileResult) {
 }
 
 /// Assert that the error with the given code has a span covering the expected substring.
+#[allow(dead_code)]
 fn assert_error_span_contains(
     result: &VerterCompileResult,
     source: &str,

@@ -5859,7 +5859,7 @@ mod tests {
         // Create a wide union with distinct literal members to prevent dedup,
         // ensuring enough resolve steps to exceed the low limit.
         let members: Vec<TypeExpr> = (0..100)
-            .map(|i| TypeExpr::string_literal(&format!("v{}", i)))
+            .map(|i| TypeExpr::string_literal(format!("v{i}")))
             .collect();
         let expr = TypeExpr::Union(Arc::from(members));
 

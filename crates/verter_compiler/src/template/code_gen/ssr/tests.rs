@@ -4809,7 +4809,7 @@ const val = ref('')
     );
 }
 
-/// @ai-generated — v-if with single child component should not have extra fragment.
+// @ai-generated — v-if with single child component should not have extra fragment.
 // ── VDOM fallback: <template> element should be transparent (unwrapped) ──
 
 /// @ai-generated — <template v-if> should NOT produce _createVNode("template")

@@ -242,8 +242,10 @@ mod tests {
     ) -> Vec<crate::diagnostic::LintDiagnostic> {
         let rules: Vec<Box<dyn LintRule>> = vec![Box::new(ConditionalRootComplex)];
         let visitor = LintVisitor::new(&rules);
-        let mut config = LintConfig::default();
-        config.conditional_root_narrowing = narrowing_enabled;
+        let config = LintConfig {
+            conditional_root_narrowing: narrowing_enabled,
+            ..LintConfig::default()
+        };
         let mut ctx = LintContext::new(&config);
         let file = crate::rules::FileContext {
             template: Some(template),

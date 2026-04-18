@@ -693,6 +693,7 @@ fn parse_virtual_uri(uri: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 

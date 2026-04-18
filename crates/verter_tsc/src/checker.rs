@@ -2158,7 +2158,7 @@ import type { Foo } from './types'"#;
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let results = generate_all_tsx(&[vue_path.clone()], &out_dir);
+        let results = generate_all_tsx(std::slice::from_ref(&vue_path), &out_dir);
         let (_vue, tsx_code, _tsx_path) = &results[0];
 
         // Find the line of `a = {}` in the generated TSX.
@@ -2547,20 +2547,21 @@ defineProps<{ msg: string }>()
         let host = VerterHost::new_standalone(HostConfig::default());
         let canonical_id = child_vue.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&child_vue).unwrap();
-        host.upsert(UpsertRequest {
-            canonical_id: Some(canonical_id.clone()),
-            input_id: canonical_id.clone(),
-            source: std::sync::Arc::<str>::from(source),
-            file_kind: FileKind::VueSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id.clone(),
+                source: std::sync::Arc::<str>::from(source),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
 
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
         let (vue_ts_paths, vue_ts_map) =
-            generate_public_api_stubs(&host, &[child_vue.clone()], &out_dir);
+            generate_public_api_stubs(&host, std::slice::from_ref(&child_vue), &out_dir);
 
         // Positive: should create at least one .vue.ts stub
         assert_eq!(vue_ts_paths.len(), 1, "should generate one stub file");
@@ -2680,14 +2681,15 @@ defineProps<{ msg: string }>()
         let host = VerterHost::new_standalone(HostConfig::default());
         let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&vue_path).unwrap();
-        host.upsert(UpsertRequest {
-            canonical_id: Some(canonical_id.clone()),
-            input_id: canonical_id,
-            source: std::sync::Arc::<str>::from(source),
-            file_kind: FileKind::VueSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_kind: FileKind::VueSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
 
         let out_dir = temp.path().join("tsc_out");
         fs::create_dir_all(&out_dir).unwrap();

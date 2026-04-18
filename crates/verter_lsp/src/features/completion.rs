@@ -1539,5 +1539,6 @@ pub(crate) fn is_member_access_in_tsx(tsx_content: &str, tsx_offset: u32) -> boo
 }
 
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 #[path = "completion_tests.rs"]
 mod completion_tests;

@@ -779,6 +779,7 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
 

@@ -451,6 +451,7 @@ pub fn compute_prop_constness_for_child(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::input::{

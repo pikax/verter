@@ -823,14 +823,12 @@ fn member_on_call_expression_degrades_to_any() {
     let decl = &env.value_symbols["value"];
 
     // Should not produce a broken partial path like ["prop"] without the root
-    match decl.type_annotation.as_ref() {
-        Some(TypeExpr::TypeOf(vr)) => {
-            panic!(
-                "call-rooted member path should not produce TypeOf, got path {:?}",
-                vr.path
-            );
-        }
-        _ => {} // Any or None is acceptable — the key assertion is no broken partial path
+    // Any or None is acceptable — the key assertion is no broken partial path.
+    if let Some(TypeExpr::TypeOf(vr)) = decl.type_annotation.as_ref() {
+        panic!(
+            "call-rooted member path should not produce TypeOf, got path {:?}",
+            vr.path
+        );
     }
 }
 
@@ -1368,19 +1366,16 @@ defineProps<Partial<Config>>()
     let snapshot = build_script_analysis(source, oxc_span::SourceType::tsx(), &allocator);
     let result = evaluate_macro_types(&snapshot.macros, source);
 
-    // Props from Partial<Config> should have all fields optional
+    // Props from Partial<Config> should have all fields optional.
+    // If the evaluator resolved via the snapshot type_annotation strings, the
+    // result might be a flat resolved form — we only assert against objects.
     for field in &result.props {
-        match &field.r#type {
-            TypeExpr::Object(obj) => {
-                for member in &obj.properties {
-                    if let ObjectMember::Property(p) = member {
-                        assert!(p.optional, "Partial should make {} optional", p.name);
-                    }
+        if let TypeExpr::Object(obj) = &field.r#type {
+            for member in &obj.properties {
+                if let ObjectMember::Property(p) = member {
+                    assert!(p.optional, "Partial should make {} optional", p.name);
                 }
             }
-            // If the evaluator resolved via the snapshot type_annotation strings,
-            // the result might be a flat resolved form
-            _ => {}
         }
     }
 }
