@@ -90,7 +90,9 @@ Architectural target for the project-global cache cutover:
 - final payload caches should hand out immutable `Arc` values and may use any backend that preserves concurrency, size bounds, and validation semantics
 - cancelled, superseded, interrupted, budget-exceeded, or partial semantic results must not be promoted as warm shared cache entries
 
-**Legacy request-view note:** Existing `RequestStoreView` / `CURRENT_REQUEST_VIEW` mechanics are legacy implementation details and must not be extended in this rewrite. The target hot path is project-global host-owned caching with no ambient request-view authority and no new request-local lookup memos layered over the same resolver work. See `/host-session` for current mechanics until the cutover lands.
+**Project-global cache status (Phase 2-4 landed):** `VerterHost` owns a single `ProjectTypeStore` accessed via `.project_type_store()`. The store owns `IndexedReadyDb`, `AnalysisReadyDb`, the rehomed `RouteDb`, `OwnerImportSurfaceDb`, `ComponentMetaResultDb<ComponentMetaAnalysis>`, `SemanticGraphStore`, and the `IntrinsicRegistry`. `get_component_meta` consults the final-result cache first (with `HostFenceValidator` dep-signature revalidation) before falling back to the cold resolver. Direct owner imports resolve through `resolve_owner_direct_import_in_view` once per `(owner, whole_hash)`. Semantic subqueries dedup through `SemanticGraphStore::execute_cooperative` via `ProjectSemanticDispatch`. Intrinsic dispatch routes through `IntrinsicRegistry::lookup` — the SDK audit test asserts every `= intrinsic` declaration in `lib*.d.ts` has a registry entry.
+
+**Legacy request-view note:** The per-request `external_inputs_memo` and `eval_state_memo` on `RequestStoreView` have been retired (Phase 4). The remaining `_in_view` signature surface on the resolver hot path is the large mechanical cut that Phase 4 continues through subsequent sessions; `RequestStoreView` / `CURRENT_REQUEST_VIEW` must not be extended. See `/host-session` for current mechanics.
 
 ### Canonical Dependency Cache Rule (CRITICAL)
 

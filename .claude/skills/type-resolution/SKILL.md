@@ -5,6 +5,20 @@ description: "Cross-file type resolution: type solver, ShallowFileState, Externa
 
 # Type Resolution
 
+## Project-Global Cache Authority (post-rewrite)
+
+`VerterHost` owns one `ProjectTypeStore` accessed via `.project_type_store()`. The store holds:
+
+- `IndexedReadyDb` — the canonical post-parse artifact per `(canonical_id, whole_hash)`. Publishes alongside `ModuleFactsDb` during the transitional window (they share `shallow_state` / `import_routes` `Arc`s by construction).
+- `AnalysisReadyDb` — scope-parameterised analysis augmentation with bitflag-based satisfaction (`find_satisfying`).
+- `RouteDb` — rehomed barrel/route surface cache, validated against live host facts.
+- `OwnerImportSurfaceDb` — direct-owner-imports cache keyed by `(owner_canonical, owner_whole_hash)`. `VerterHost::owner_import_surface_in_view(...)` builds-or-fetches the surface; `resolve_owner_direct_import_in_view(owner, local_name)` is the single-call lookup that every direct-owner-import caller now uses.
+- `SemanticGraphStore` — host-owned memo table + node arena for the `SemanticQueryKey` / `ProjectSemanticDispatch` layer. Same-path recursion returns a sentinel instead of self-awaiting; cross-thread joiners block cooperatively on a per-entry `Condvar`.
+- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final payload cache for `get_component_meta`. Warm hits revalidate the recorded `DepSignature` via `HostFenceValidator` before returning.
+- `IntrinsicRegistry` — authoritative table for `= intrinsic` declarations. `SessionSolverHost::utility_source` consults it before the `BuiltinUtility` fallback.
+
+Dep-signature semantics: every reusable cache read returns a `CacheRead<T>` carrying the touched fact fragment. Callers merge those fragments into the active `CompletionFence`, which bounds retries at 3 and publishes `UnstableState` when mid-flight invalidation persists.
+
 ## Canonical Dependency Cache Rule
 
 Host-backed type/import resolution must treat the canonical file ID as the cache identity. The cache contract is:

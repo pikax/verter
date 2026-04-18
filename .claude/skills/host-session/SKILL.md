@@ -5,6 +5,23 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 
 # Host & Session
 
+## Project-Global Cache on `VerterHost` (post-rewrite)
+
+`VerterHost` owns one `Arc<ProjectTypeStore>` per loaded project, exposed via `.project_type_store()`. The store is the single shared cache graph for component-meta and cross-file type resolution:
+
+- `IndexedReadyDb` — canonical post-parse artifacts.
+- `AnalysisReadyDb` — scope-parameterised analysis augmentation.
+- `RouteDb` (rehomed) — barrel / route surface cache.
+- `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface_in_view` / `resolve_owner_direct_import_in_view`.
+- `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache (Phase 3 wiring in `get_component_meta`).
+- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch` / `SemanticQueryApi`.
+- `IntrinsicRegistry` — SDK-intrinsic dispatch table.
+- `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
+
+Eviction hooks run on every `upsert`: `resolver.runtime.evict_canonical` + `project_type_store.evict_canonical` — both run atomically so a file-content change cannot leave one cache authority stale. Workspace-shape changes (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict` which clears route-sensitive layers (`OwnerImportSurfaceDb`, `ComponentMetaResultDb`, `SemanticGraphStore`) atomically.
+
+Request-view state: `RequestStoreView` retains `captured` + `extensions` during the transitional window so mid-request `ensure_loaded` can extend visibility. The per-request `external_inputs_memo` and `eval_state_memo` were retired in Phase 4 — repeated in-request probes hit `ModuleFactsDb` / `IndexedReadyDb` directly. Remaining Phase 4 work (the full `_in_view` signature cut) is tracked in `.claude/audits/project-global-type-rewrite-correctness-audit.md`.
+
 ## Language Server Architecture
 
 The LSP is a standalone Rust binary (`verter-lsp`) that communicates with VS Code over stdio.
