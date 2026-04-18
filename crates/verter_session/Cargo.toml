@@ -33,6 +33,7 @@ verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 verter_workspace = { path = "../verter_workspace" }
 verter_scheduler = { path = "../verter_scheduler" }
+bitflags = "2"
 dashmap = "6"
 hotpath = { version = "0.13", optional = true }
 oxc_allocator = { workspace = true }

@@ -51,6 +51,7 @@
 
 mod cache;
 mod compile;
+pub mod completion_fence;
 pub mod component_meta_audit;
 pub mod component_meta_host;
 pub mod cross_file;
@@ -65,9 +66,11 @@ mod id;
 mod meta;
 pub mod meta_resolve;
 mod parse;
+pub mod project_type_store;
 pub mod resolver_core;
 mod resolver_store;
 pub mod scheduler_shim;
+pub mod semantic_query;
 mod shared;
 pub(crate) mod source_map_remap;
 pub mod template_convert;

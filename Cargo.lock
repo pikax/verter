@@ -3804,6 +3804,7 @@ dependencies = [
 name = "verter_session"
 version = "0.0.1-beta.1"
 dependencies = [
+ "bitflags",
  "criterion",
  "dashmap 6.1.0",
  "hotpath",
