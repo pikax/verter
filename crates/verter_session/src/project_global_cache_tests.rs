@@ -400,9 +400,10 @@ fn empty_host_has_empty_project_type_store() {
 fn dep_signature_construction_is_caller_local() {
     use crate::semantic_query::{DepSignature, DepVersion};
 
-    let mut entries: Vec<(Arc<str>, DepVersion)> = Vec::new();
-    entries.push((Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16])));
-    entries.push((Arc::from("/w/b.ts"), DepVersion::RouteGeneration(7)));
+    let entries: Vec<(Arc<str>, DepVersion)> = vec![
+        (Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16])),
+        (Arc::from("/w/b.ts"), DepVersion::RouteGeneration(7)),
+    ];
     let sig: DepSignature = Arc::from(entries.into_boxed_slice());
     assert_eq!(sig.len(), 2);
 }

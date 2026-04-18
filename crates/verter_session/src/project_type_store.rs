@@ -27,9 +27,13 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
+use crate::component_meta_result_db::ComponentMetaResultDb;
+use crate::intrinsic_registry::IntrinsicRegistry;
+use crate::owner_import_surface::OwnerImportSurfaceDb;
 use crate::resolver_core::imported_root_db::ImportedRootDb;
 use crate::resolver_core::route_db::RouteDb;
 use crate::semantic_query::DepVersion;
+use crate::semantic_query_memo::SemanticGraphStore;
 
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
@@ -319,6 +323,27 @@ pub struct ProjectTypeStore {
     /// transitive-only use; by Phase 5 it folds into the shared route /
     /// semantic-query layer.
     imported_roots: Arc<ImportedRootDb>,
+    /// Host-owned semantic-query memo table + node arena. Shared across
+    /// every consumer that resolves a `SemanticQueryKey` through the
+    /// shared query API.
+    semantic_graph: Arc<SemanticGraphStore>,
+    /// Owner direct-import surface cache (Phase 2). Direct owner imports
+    /// resolve exactly once per owner version and every downstream stage
+    /// reads the same entry.
+    owner_import_surfaces: OwnerImportSurfaceDb,
+    /// Final component-meta result cache (Phase 3). Keyed by
+    /// `(owner_canonical, owner_whole_hash, query_kind, options_fingerprint)`.
+    /// The payload type is erased at this layer; concrete callers hold a
+    /// typed handle through the `ComponentMetaResultDb<P>` API. In Phase 3
+    /// this is wired onto the native component-meta payload shape.
+    component_meta_results:
+        ComponentMetaResultDb<crate::types::FinalComponentMetaPayloadPlaceholder>,
+    /// TypeScript `intrinsic` registry (Phase 2.1). Maps resolved
+    /// declaration names that have `= intrinsic` bodies to their
+    /// implementation arms. Userland aliases like `Pick` / `Omit` never
+    /// reach this registry — it is consulted only after the normal
+    /// declaration path resolves to `= intrinsic`.
+    intrinsic_registry: IntrinsicRegistry,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -345,6 +370,10 @@ impl ProjectTypeStore {
             analysis: AnalysisReadyDb::new(),
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
+            semantic_graph: Arc::new(SemanticGraphStore::new()),
+            owner_import_surfaces: OwnerImportSurfaceDb::new(),
+            component_meta_results: ComponentMetaResultDb::new(),
+            intrinsic_registry: IntrinsicRegistry::with_defaults(),
             counters: ProjectTypeStoreCounters::default(),
         }
     }
@@ -377,6 +406,32 @@ impl ProjectTypeStore {
 
     pub fn imported_roots(&self) -> &Arc<ImportedRootDb> {
         &self.imported_roots
+    }
+
+    /// Host-owned semantic-query memo table. Shared across every consumer
+    /// that dispatches through the semantic-query API.
+    pub fn semantic_graph(&self) -> &Arc<SemanticGraphStore> {
+        &self.semantic_graph
+    }
+
+    /// Owner direct-import surface cache (Phase 2). Direct owner imports
+    /// resolve exactly once per owner version through this cache.
+    pub fn owner_import_surfaces(&self) -> &OwnerImportSurfaceDb {
+        &self.owner_import_surfaces
+    }
+
+    /// Final component-meta result cache (Phase 3).
+    pub fn component_meta_results(
+        &self,
+    ) -> &ComponentMetaResultDb<crate::types::FinalComponentMetaPayloadPlaceholder> {
+        &self.component_meta_results
+    }
+
+    /// TypeScript `intrinsic` registry (Phase 2.1). Read-only from the
+    /// resolver hot path; the host may re-register entries at boot when
+    /// the active TS SDK is swapped.
+    pub fn intrinsic_registry(&self) -> &IntrinsicRegistry {
+        &self.intrinsic_registry
     }
 
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
