@@ -978,6 +978,7 @@ fn macro_kind_needed_for_fallthrough(kind: AnalyzedMacroKind) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::resolver_core::declaration_metadata::ResolvedExportTarget;

@@ -634,7 +634,7 @@ fn build_from_workspace_roots_discovers_tsconfigs() {
 
     let result = build_workspace_snapshot(
         &ws,
-        &[workspace_str.clone()],
+        std::slice::from_ref(&workspace_str),
         SnapshotGeneration(1),
         &vite_opts,
     );
@@ -697,7 +697,7 @@ fn build_workspace_snapshot_materializes_files_from_disk() {
 
     let result = build_workspace_snapshot(
         &ws,
-        &[workspace_str.clone()],
+        std::slice::from_ref(&workspace_str),
         SnapshotGeneration(1),
         &vite_opts,
     );

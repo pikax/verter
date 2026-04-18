@@ -310,7 +310,7 @@ mod tests {
         });
         materialize_imported_runtime_values_into_env(
             &imports,
-            &FxHashSet::from_iter(["theme".to_string()].into_iter()),
+            &FxHashSet::from_iter(["theme".to_string()]),
             None,
             &mut env,
             &resolver,
@@ -378,7 +378,7 @@ mod tests {
             .insert("/src/dep.ts".to_string(), Arc::new(dep_env));
 
         let mut env = EvalEnv::new();
-        let required = FxHashSet::from_iter(["theme".to_string()].into_iter());
+        let required = FxHashSet::from_iter(["theme".to_string()]);
         materialize_imported_runtime_values_into_env(
             &imports,
             &FxHashSet::default(),
@@ -455,7 +455,7 @@ mod tests {
             .insert("/src/unused.ts".to_string(), Arc::new(unused_env));
 
         let mut env = EvalEnv::new();
-        let required = FxHashSet::from_iter(["theme".to_string()].into_iter());
+        let required = FxHashSet::from_iter(["theme".to_string()]);
         materialize_imported_runtime_values_into_env(
             &imports,
             &FxHashSet::default(),

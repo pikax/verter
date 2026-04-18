@@ -209,14 +209,15 @@ mod tests {
     }
 
     fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
-        host.upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: id.to_string(),
-            source: Arc::from(source),
-            file_kind: FileKind::NonSfc,
-            aliases: Vec::new(),
-        })
-        .unwrap();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: id.to_string(),
+                source: Arc::from(source),
+                file_kind: FileKind::NonSfc,
+                aliases: Vec::new(),
+            })
+            .unwrap();
     }
 
     /// `ResolveDecl` for a known top-level type returns a value node. The

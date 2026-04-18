@@ -174,9 +174,10 @@ mod tests {
         false
     }
 
+    #[allow(dead_code)]
     fn resolves_source(import: &str, dep: &str) -> bool {
         // Simple: import "./types" resolves to "/src/types.ts" if dep ends with types.ts
-        dep.contains(&import.trim_start_matches("./"))
+        dep.contains(import.trim_start_matches("./"))
     }
 
     // ── compute_changed_exports ──

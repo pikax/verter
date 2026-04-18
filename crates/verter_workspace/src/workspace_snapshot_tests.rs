@@ -422,7 +422,7 @@ fn generation_default_is_zero() {
 
 #[test]
 fn precedence_sort_is_stable() {
-    let mut projects = vec![
+    let mut projects = [
         fallback_project(2, "d:/project"),
         configured_project(1, "d:/project", "d:/project/tsconfig.vitest.json", &[]),
         configured_project(0, "d:/project", "d:/project/tsconfig.app.json", &[]),

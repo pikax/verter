@@ -710,19 +710,16 @@ mod tests {
 
     #[test]
     fn object_does_not_contain_raw_braces_in_keys() {
-        match parse_type_text("{ msg: string }") {
-            TypeExpr::Object(obj) => {
-                for member in &obj.properties {
-                    if let ObjectMember::Property(p) = member {
-                        assert!(
-                            !p.name.contains('{'),
-                            "name should not contain braces: {}",
-                            p.name
-                        );
-                    }
+        if let TypeExpr::Object(obj) = parse_type_text("{ msg: string }") {
+            for member in &obj.properties {
+                if let ObjectMember::Property(p) = member {
+                    assert!(
+                        !p.name.contains('{'),
+                        "name should not contain braces: {}",
+                        p.name
+                    );
                 }
             }
-            _ => {}
         }
     }
 }

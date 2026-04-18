@@ -9647,14 +9647,17 @@ fn resolved_type_cache_is_bounded() {
 
     // The eviction happens inside resolve_external_type_from_loaded_files,
     // but we can verify the cap constant is reasonable.
-    assert!(
-        crate::types::RESOLVED_TYPE_CACHE_CAP >= 1024,
-        "cache cap should be at least 1024"
-    );
-    assert!(
-        crate::types::RESOLVED_TYPE_CACHE_CAP <= 16384,
-        "cache cap should not exceed 16384"
-    );
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(
+            crate::types::RESOLVED_TYPE_CACHE_CAP >= 1024,
+            "cache cap should be at least 1024"
+        );
+        assert!(
+            crate::types::RESOLVED_TYPE_CACHE_CAP <= 16384,
+            "cache cap should not exceed 16384"
+        );
+    }
 }
 
 // ===========================================================================
@@ -14974,11 +14977,10 @@ fn get_meta(
     canonical_id: &str,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
     let session = project.open_session().unwrap();
-    let meta = session
+    session
         .get_component_meta(canonical_id)
         .unwrap()
-        .expect("get_component_meta should return metadata");
-    meta
+        .expect("get_component_meta should return metadata")
 }
 
 #[test]

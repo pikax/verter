@@ -126,6 +126,49 @@ state. To be considered plan-complete, the following must hold:
 Until those gates all pass, the rewrite is feature-landing-only; the
 legacy path has **not** been deleted yet.
 
+## Scope estimate for the remaining signature cut
+
+A pre-work audit (2026-04-18) measured the exact size of the remaining
+`_in_view` / `RequestStoreView` surface in the hot-path production
+modules:
+
+| File | `_in_view` | `RequestStoreView` | `request_view` |
+| ---- | ---------: | -----------------: | -------------: |
+| `host_manage.rs`                                | 228 | 83 | 110 |
+| `host_resolve.rs`                               | 150 | 41 |  44 |
+| `meta_resolve.rs`                               |  56 | 22 |  23 |
+| `resolver_core/component_meta_query_engine.rs`  |  20 | 10 |  39 |
+| `resolver_core/solver_host.rs`                  |  18 |  5 |   5 |
+| `resolver_core/component_meta_registry.rs`      |   9 |  3 |   3 |
+| `meta.rs`                                       |   3 |  2 |   4 |
+
+The mechanical cost is only one side of the migration: every
+`_in_view` helper encapsulates a view-validated lookup against one or
+more of `module_facts.get`, `whole_hash`, `derived_hash`,
+`import_route`, `ensure_loaded`, or `cached_route_owned_*`. The new
+contract replaces each view probe with an equivalent live-host probe
+through the project-global store. Because `current_or_read_whole_hash`,
+`resolve_imported_type_root`, `ensure_module_facts`, and
+`prepared_type_decl` form one recursive cluster, the cut cannot be
+landed in small incremental slices without temporarily duplicating the
+probe paths. The plan's expectation of one continuous compile-green
+cutover therefore translates into:
+
+- one bulk-rename pass that drops the view parameter from every helper
+  in the affected module tree (~600 edits),
+- one pass that rewires the body of each helper to read live host state
+  instead of the view,
+- one pass that updates ~200 `owned_or_ambient_request_view` call sites
+  in the test suite,
+- then the deletion of `host_request_view.rs` and the source-audit
+  test extension covering every hot-path module listed above.
+
+This is estimated as a full multi-day single-surface commit. It is not
+decomposable into per-function slices without maintaining a dual-path
+branch the plan explicitly forbids. The next session should budget this
+cut as a dedicated work item and run the mandatory corpus A/B diff
+immediately before the final deletion commit, per plan § J.
+
 ## Artifact identities after this track
 
 - `IndexedReady` publishes alongside `ModuleFacts` (shared `shallow_state`

@@ -4242,7 +4242,7 @@ mod phase2a_upsert_tests {
             .unwrap();
 
         // Recompile with profile B — should still have red (raw), not green
-        let _ = host.invalidate_compile_slots("/src/App.vue");
+        host.invalidate_compile_slots("/src/App.vue");
         let b_result = host
             .get_virtual_file(VirtualQuery {
                 canonical_id: Some("/src/App.vue".to_string()),

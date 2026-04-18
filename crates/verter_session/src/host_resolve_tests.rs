@@ -2504,11 +2504,11 @@ defineProps<Props>()
         .filter_map(|prop| prop.key_name.as_deref())
         .collect();
     assert!(
-        names.iter().any(|name| *name == "old"),
+        names.contains(&"old"),
         "captured store view must keep the original external type route: {names:?}"
     );
     assert!(
-        names.iter().all(|name| *name != "fresh"),
+        !names.contains(&"fresh"),
         "captured store view must not switch to the newer live route: {names:?}"
     );
 }

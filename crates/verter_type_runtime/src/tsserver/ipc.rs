@@ -531,7 +531,7 @@ async fn configure_tsserver_session(
     Ok(ws_root)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "__lsp_tests"))]
 fn tsserver_plugin_args(plugin_path: Option<&str>) -> Vec<String> {
     let Some(plugin_path) = plugin_path.filter(|path| !path.is_empty()) else {
         return Vec::new();
