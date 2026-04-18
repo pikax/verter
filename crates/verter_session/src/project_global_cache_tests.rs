@@ -712,48 +712,53 @@ fn phase4_in_view_surface_ratchet() {
         max_request_store_view: usize,
     }
 
+    // Ceilings match the actual count at the time this ratchet lands so
+    // any regression — even +1 — fails the test immediately. Lowering
+    // requires editing this table in the same commit that lowers the
+    // count. Raising requires justifying the new plumbing in the commit
+    // message (or, preferably, not adding it).
     let budgets = [
         Budget {
             path: "host_manage.rs",
             src: include_str!("host_manage.rs"),
-            max_in_view: 230,
-            max_request_store_view: 85,
+            max_in_view: 228,
+            max_request_store_view: 83,
         },
         Budget {
             path: "host_resolve.rs",
             src: include_str!("host_resolve.rs"),
-            max_in_view: 155,
-            max_request_store_view: 45,
+            max_in_view: 150,
+            max_request_store_view: 41,
         },
         Budget {
             path: "meta_resolve.rs",
             src: include_str!("meta_resolve.rs"),
-            max_in_view: 60,
-            max_request_store_view: 25,
+            max_in_view: 56,
+            max_request_store_view: 22,
         },
         Budget {
             path: "resolver_core/component_meta_query_engine.rs",
             src: include_str!("resolver_core/component_meta_query_engine.rs"),
-            max_in_view: 25,
-            max_request_store_view: 15,
-        },
-        Budget {
-            path: "resolver_core/solver_host.rs",
-            src: include_str!("resolver_core/solver_host.rs"),
             max_in_view: 20,
             max_request_store_view: 10,
         },
         Budget {
+            path: "resolver_core/solver_host.rs",
+            src: include_str!("resolver_core/solver_host.rs"),
+            max_in_view: 18,
+            max_request_store_view: 5,
+        },
+        Budget {
             path: "resolver_core/component_meta_registry.rs",
             src: include_str!("resolver_core/component_meta_registry.rs"),
-            max_in_view: 15,
-            max_request_store_view: 5,
+            max_in_view: 9,
+            max_request_store_view: 3,
         },
         Budget {
             path: "meta.rs",
             src: include_str!("meta.rs"),
-            max_in_view: 5,
-            max_request_store_view: 5,
+            max_in_view: 3,
+            max_request_store_view: 2,
         },
     ];
 

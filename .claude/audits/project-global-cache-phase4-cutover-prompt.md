@@ -52,8 +52,11 @@ architecture. By the end of your run:
   in the final slice
 
 EXECUTION RULES:
-- Work through §3 slices 2 → 7 in that order (bottom-up mechanical cut).
-  Then slice 1 (meta.rs), then 8 (tests), then 9–16.
+- Work through §3 slices 2 → 14 in strict order. Slices 2–4 are
+  independent leaf cuts. Slice 5 is the atomic cut across the mutually-
+  recursive host_resolve + host_manage + meta_resolve + meta cluster —
+  it is one commit because the call graph cannot be split into smaller
+  green commits without maintaining a dual-path the plan forbids.
 - Each phase-final commit must pass the §5 gates:
   `cargo test --workspace --tests --verbose` and
   `cargo clippy --workspace --lib --tests -- -D warnings`

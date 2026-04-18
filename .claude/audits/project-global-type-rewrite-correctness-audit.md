@@ -158,8 +158,11 @@ cutover therefore translates into:
   in the affected module tree (~600 edits),
 - one pass that rewires the body of each helper to read live host state
   instead of the view,
-- one pass that updates ~200 `owned_or_ambient_request_view` call sites
-  in the test suite,
+- one pass that updates ~160 `owned_or_ambient_request_view` call sites
+  in the test suite (mostly concentrated in `host_manage_tests.rs` (60)
+  and `meta_resolve_tests.rs` (48), plus smaller surfaces in
+  `host_resolve_tests.rs`, `meta_tests.rs`, `frontier_tests.rs`, and
+  `resolver_core/*_tests.rs`),
 - then the deletion of `host_request_view.rs` and the source-audit
   test extension covering every hot-path module listed above.
 

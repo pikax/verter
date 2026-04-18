@@ -6805,7 +6805,6 @@ impl LanguageServer for VerterLanguageServer {
 #[allow(
     unused_must_use,
     clippy::unused_enumerate_index,
-    clippy::if_same_then_else,
     clippy::too_many_arguments,
     clippy::cloned_ref_to_slice_refs
 )]

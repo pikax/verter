@@ -121,16 +121,21 @@ through `HostFenceValidator` + `CompletionFence`. Do not preserve the
 view's "point-in-time captured snapshot" semantics anywhere in the cut.
 
 Every probe that today reads through `RequestStoreView` has a live-host
-equivalent already in the tree:
+equivalent already in the tree. Note that some host-side helpers
+(`cached_import_route_resolution_in_view`, `resolve_owner_direct_import_in_view`,
+`current_eval_state_in_view`, etc.) are themselves `_in_view` today and
+must be cut in the same pass; when the table below points at a host
+method, use its post-cut signature (no view parameter):
 
-| Old (view probe)                          | New (live host probe)                                               |
+| Old (view probe)                          | New (live host probe, post-cut)                                     |
 | ----------------------------------------- | ------------------------------------------------------------------- |
-| `view.whole_hash(canonical)`              | `host.get_whole_hash(canonical)`                                    |
-| `view.derived_hash(canonical, kind)`      | `host.derived_hash(canonical, kind)` (add accessor if missing)      |
-| `view.import_route(canonical, specifier)` | `host.cached_import_route_resolution(canonical, specifier)` or `OwnerImportSurfaceDb::get` |
-| `module_facts.get(canonical, view)`       | `module_facts.get_any(canonical)` (the view-gated flavor disappears) |
-| `view.is_evalable(canonical)`             | `host.get_whole_hash(canonical).is_some()`                          |
-| `view.tracks_whole_hash(canonical)`       | same                                                                |
+| `view.whole_hash(canonical)`              | `host.get_whole_hash(canonical)` — already live-host                |
+| `view.is_evalable(canonical)`             | `host.get_whole_hash(canonical).is_some()` — `VerterHost::is_evalable` already falls back to this when no ambient view is installed; after the cut the fallback becomes the only path |
+| `view.derived_hash(canonical, kind)`      | inline the fact lookup: pull the fact out of `module_facts.get_any(canonical)` (which carries `derived_hashes`), or add a thin `host.derived_hash(canonical, kind)` accessor that delegates to `module_facts.get_any` if a call site needs it on the hot path |
+| `view.import_route(canonical, specifier)` | for **direct owner imports**, use the post-cut `resolve_owner_direct_import(owner, name)` backed by `OwnerImportSurfaceDb` (currently `_in_view`, dropping that parameter). For **transitive routes**, read from `project_type_store.route_db().get_any(...)` equivalents — these already exist but are validated through `HostFenceValidator` rather than view compatibility |
+| `module_facts.get(canonical, view)`       | `module_facts.get_any(canonical)` — the view-gated flavor on `ModuleFactsDb` disappears during slice 9 |
+| `view.tracks_whole_hash(canonical)`       | `host.get_whole_hash(canonical).is_some()` — no direct `host.tracks_whole_hash` accessor; fold into the `get_whole_hash` probe |
+| `view.accepts_whole_hash(canonical, h)`   | `host.get_whole_hash(canonical) == Some(h)` (or omit entirely if the caller was only protecting against an ambient-view-snapshot mismatch — post-cut there is no snapshot to drift from) |
 
 The `effective_request_view` / `EffectiveView` helpers and the
 `current_request_view()` / `CURRENT_REQUEST_VIEW` thread-local all delete
@@ -171,75 +176,99 @@ See plan §C1 for the full test-disposition list.
 
 ## 3. Execution plan (ordered slices)
 
-Work bottom-up: leaf helpers first, then their callers, then the public
-entry points. Each numbered slice below is a phase-final checkpoint that
-must pass `cargo test --workspace --tests --verbose` and
+**Important dependency note**: `host_manage.rs`, `host_resolve.rs`, and
+`meta_resolve.rs` form a mutually-recursive call cluster that cannot be
+cut in separate green commits — cutting one file's `_in_view` parameters
+breaks the callers in the other files at compile time. Those three files
+plus `meta.rs` (which calls into `meta_resolve` / `host_manage` through
+`with_overlay_target_context_view`) must be cut in one atomic commit
+(slice 5 below). The leaf slices 2–4 can land separately because their
+callers accept the post-cut signature through explicit migration at the
+call sites.
+
+Each numbered slice is a phase-final checkpoint that must pass
+`cargo test --workspace --tests --verbose` and
 `cargo clippy --workspace --lib --tests -- -D warnings` before moving on.
-
-### Slice 1 — `meta.rs` (3 / 2)
-
-Smallest file, only `with_overlay_target_context_view` threads the view
-through. Convert `with_overlay_target_context_view` to not create or
-pass a `RequestStoreView`. The callers in `get_declared_component_meta_with_resolution`,
-`get_declared_component_meta_payload`, `get_component_meta_payload` stop
-receiving the view parameter; their downstream calls
-(`host.resolve_component_meta_in_view`, `host.try_get_cached_meta_payload`,
-`host.store_meta_payload`, `host_manage::extract_component_meta_from_resolved*`)
-have already been prepared to accept live-host-probe flow — but those
-flows don't exist yet, so slice 1 depends on slices 2–8. Do slice 1 last
-of the production-code slices.
 
 ### Slice 2 — `resolver_core/component_meta_registry.rs` (9 / 3)
 
-Second smallest. Migrate its `_in_view` helpers to live-host probes.
-Cross-check every call site in `host_manage.rs` / `host_resolve.rs` that
-calls into this module — update the parameter list there.
+Smallest leaf. Migrate its `_in_view` helpers to live-host probes.
+Cross-check every call site in `host_manage.rs` / `host_resolve.rs` /
+`meta_resolve.rs` that calls into this module — those callers still
+pass their own ambient view today, so update them to stop passing it to
+this module while keeping their own `_in_view` parameter intact.
 
 ### Slice 3 — `resolver_core/solver_host.rs` (18 / 5)
 
-`SessionSolverHost` methods. All internal. Drop the view parameter and
-replace view probes with `host.*` equivalents.
+`SessionSolverHost` methods. All internal to the solver wiring. Drop the
+view parameter and replace view probes with `host.*` equivalents. Solver
+callers already accept non-view results, so the only migration is at the
+`SessionSolverHost` construction site and its few `host.*_in_view`
+callees (which still exist at this point — pull the view from the caller
+and pass it through to the still-legacy helpers).
 
 ### Slice 4 — `resolver_core/component_meta_query_engine.rs` (20 / 10)
 
-`TypeQueryEngine` owns a `store_view` field today. That field is removed.
-The `solve_scoped` path similarly loses its view plumbing. Test coverage
-in `component_meta_query_engine` tests (via `owned_or_ambient_request_view()`)
-rewrites to the live-host variant.
+`TypeQueryEngine` owns a `store_view` field today that is plumbed through
+`solve_scoped`. Remove the field. Tests inside this module that capture
+via `owned_or_ambient_request_view()` either rewrite against the new
+signature or delete per plan §C1. The engine's callers (primarily
+`meta_resolve.rs`) still hold a `store_view` at this stage; change the
+`TypeQueryEngine::new(...)` / `solve_scoped(...)` call sites to not pass
+one.
 
-### Slice 5 — `meta_resolve.rs` (56 / 22)
+### Slice 5 — Atomic host_resolve + host_manage + meta_resolve + meta.rs cut (150 + 228 + 56 + 3 / 41 + 83 + 22 + 2)
 
-Resolver step. Migrate in one pass — calls into `host_resolve.rs` and
-`host_manage.rs` will be broken temporarily because slice 6/7 haven't
-run yet. This slice's commit may leave the tree red; the phase-final
-commit is after slice 7.
+The big one. One commit. Removes every remaining `_in_view` parameter
+from all four files together, because:
 
-### Slice 6 — `host_resolve.rs` (150 / 41)
+- `host_manage.rs` → `host_resolve.rs` mutual recursion
+  (`resolve_imported_type_root_in_view` etc. span both files)
+- `meta_resolve.rs` → `host_manage.rs` + `host_resolve.rs` (tight
+  consumer)
+- `meta.rs::with_overlay_target_context_view` → `host.*_in_view` entries
+  on `host_manage`
 
-Large. `HostFrontierAdapter`, `resolve_external_type_from_loaded_files_in_view`,
-the whole `resolve_component_meta_*_in_view` surface, `resolve_route_type_edge_in_view`,
-`cached_route_owned_*_in_view`, `route_owned_shallow_state_in_view`,
-`build_named_type_export_route_entry_in_view`, `read_dep_source_for_type_resolution_in_view`.
+Inside the commit:
 
-### Slice 7 — `host_manage.rs` (228 / 83)
+- Drop every `store_view: Option<&RequestStoreView>` parameter
+- Rewire body: `effective_request_view(store_view) → as_view() →
+  view.foo()` collapses to the live-host probe from the table in §2
+- Delete `with_overlay_target_context_view` or rewrite it to call the
+  non-view `f(host)` closure; delete the `request_view.install()`
+  guard at the bottom of that function
+- Update every test file's `owned_or_ambient_request_view()` capture
+  site — drop the capture line and the view argument from every call
+  (the tests accept the live-host behavior because the host entries
+  are validated through `HostFenceValidator`)
+- Keep `RequestStoreView` / `CURRENT_REQUEST_VIEW` / `RequestViewGuard`
+  intact in `host_request_view.rs` — they delete in slice 9
 
-The bulk. Every `prepared_type_decl_in_view`, `shallow_file_state_in_view`,
-`ensure_module_facts_in_view`, `current_eval_state_in_view`,
-`resolve_imported_type_root_in_view`, `owner_import_surface_in_view`,
-`resolve_owner_direct_import_in_view`, `external_type_analysis_in_view`, etc.
+After slice 5 the tree compiles and all production tests pass. Test
+files are in the same commit because the signature cut forces them.
 
-After slice 7 the tree must compile and tests must pass. This is the
-first phase-final commit that can publish cleanly.
+### Slice 6 — Test migration (cleanup slice)
 
-### Slice 8 — Test migration
+Review the tests touched in slice 5. Per plan §C1:
 
-Rewrite or delete the tests per plan §C1 and §3 (tests section) above.
-The `host_manage_tests.rs` 60 call sites and `meta_resolve_tests.rs` 48
-call sites drop their view captures.
+- Delete tests that assert view-staleness semantics that the new
+  architecture intentionally abandons:
+  - `stale_store_view_keeps_owner_import_route_when_workspace_candidates_change`
+  - `stale_store_view_does_not_fallback_to_live_import_route_when_route_was_missing`
+  - `stale_store_view_keeps_resolved_exports_on_captured_reexport_graph`
+- Rewrite around `HostFenceValidator` the tests that formerly asserted
+  the captured view rejects stale deps:
+  - `stale_store_view_rejects_changed_dependency_eval_state`
+  - `stale_store_view_rejects_changed_import_routes_and_reexports`
+  - `prepared_type_decl_lookup_rejects_stale_cache_entries`
+  - `regression_stale_prepared_decls_after_dep_resolution_change`
 
-### Slice 9 — G1 deletions
+See plan §C1 for the full test-disposition list. Slice 5 can do this
+inline if the commit stays legible.
 
-Only after slice 8 lands:
+### Slice 7 — G1 deletions
+
+Only after slice 6 lands (no `_in_view` on any hot-path signature):
 
 - Delete `RequestStoreView`, `RequestViewGuard`, `TouchOutcome`,
   `RequestExtension`, `EffectiveView` from `host_request_view.rs`
@@ -251,11 +280,13 @@ Only after slice 8 lands:
 - Fold `host_owned_resolved_named_types` into `SemanticGraphStore`
   (cf. §4 below) — or if that is too large a scope, leave it for a
   follow-up slice with its own test coverage
-- Delete scheduler-freshness probes in `base_eval_env_arc_in_view` /
-  `current_eval_state_in_view` once those helpers lose their view
-  parameter in slice 6/7
+- Delete scheduler-freshness probes formerly in
+  `base_eval_env_arc_in_view` / `current_eval_state_in_view`; after
+  slice 5 these functions have no view parameter, but the probe logic
+  tied to `RequestStoreView::extension_store` needs to be removed
+  explicitly
 
-### Slice 10 — delete `host_request_view.rs`
+### Slice 8 — delete `host_request_view.rs`
 
 After all code that references types from that module is gone, remove
 the file. Remove its `mod` declaration from `lib.rs`. The
@@ -263,7 +294,7 @@ the file. Remove its `mod` declaration from `lib.rs`. The
 `phase4_request_view_memo_retirement_source_audit` test both delete in
 the same commit.
 
-### Slice 11 — ModuleFactsDb retirement
+### Slice 9 — ModuleFactsDb retirement
 
 Per plan §Phase 5:
 
@@ -279,7 +310,7 @@ must return zero hits. Migrate every consumer to
 - The `transitional_module_facts_db_coexists_with_indexed_ready` test
 - Any `ModuleFactsDb` field on `VerterHost` / resolver runtime
 
-### Slice 12 — Full SemanticQueryApi dispatch
+### Slice 10 — Full SemanticQueryApi dispatch
 
 Today `ProjectSemanticDispatch::execute` only wires `ResolveDecl`
 meaningfully (and returns an `Alias(Opaque(Miss))` placeholder at that).
@@ -297,7 +328,7 @@ Each variant must populate dep-signature fragments observed during the
 build so warm hits contribute transitive deps to the active
 `CompletionFence`.
 
-### Slice 13 — Dep-signature propagation
+### Slice 11 — Dep-signature propagation
 
 Per plan §C ("Dependency-signature propagation rule — mandatory"): wire
 every `ValidatedFactCache` write site to also publish into the
@@ -305,7 +336,7 @@ semantic-graph memo and component-meta result-cache dep-signatures.
 Without this, `ComponentMetaResultDb` serves stale warm-hit composites
 even though each entry looked valid in isolation.
 
-### Slice 14 — Old-vs-new correctness audit (plan §J)
+### Slice 12 — Old-vs-new correctness audit (plan §J)
 
 Immediately before the final `host_request_view.rs` deletion commit (or
 after it if the legacy path was already deleted — in which case the
@@ -331,7 +362,7 @@ npx tsx packages/benchmark/src/trace-check.ts tmp/cm-trace-new \
 Diff native payloads byte-for-byte. Record intentional deltas in the
 audit file. Delete the transient baseline worktree.
 
-### Slice 15 — Skill + CLAUDE.md updates
+### Slice 13 — Skill + CLAUDE.md updates
 
 Update:
 - `CLAUDE.md` — drop the "Project-global cache status (Phase 2-4 landed)"
@@ -345,7 +376,7 @@ Update:
 - `.claude/skills/component-meta/SKILL.md` — drop the "install a
   RequestStoreView" wording in the final-result-cache section
 
-### Slice 16 — Final audit archive
+### Slice 14 — Final audit archive
 
 Update `.claude/audits/project-global-type-rewrite-correctness-audit.md`
 to the "**COMPLETE**" state. Delete this handoff file (`.claude/audits/project-global-cache-phase4-cutover-handoff.md`)
@@ -396,10 +427,10 @@ cargo fmt --all --check
 # TS side:
 pnpm test
 
-# Integration (slow — run once at slice 14, not at every checkpoint):
+# Integration (slow — run once at slice 12, not at every checkpoint):
 pnpm integration-test --skip-baseline --no-clone nuxt-ui element-plus coreui vuetify
 
-# Component-meta corpus (also at slice 14):
+# Component-meta corpus (also at slice 12):
 node scripts/benchmark/trace-component-corpus.mjs --output-dir=tmp/cm-trace
 npx tsx packages/benchmark/src/trace-check.ts tmp/cm-trace \
   --batch "Accordion,Alert,App" --strict --check-expected
@@ -440,19 +471,16 @@ slice may temporarily break tests. Suggested structure:
 - `refactor(session): cut _in_view from component_meta_registry (slice 2)`
 - `refactor(session): cut _in_view from solver_host (slice 3)`
 - `refactor(session): cut _in_view from component_meta_query_engine (slice 4)`
-- `refactor(session): cut _in_view from meta_resolve (slice 5) [wip]`
-- `refactor(session): cut _in_view from host_resolve (slice 6) [wip]`
-- `refactor(session): cut _in_view from host_manage (slice 7) — tree green`
-- `refactor(session): cut meta.rs overlay view plumbing (slice 1)`
-- `test(session): rewrite/delete request-view-era tests (slice 8)`
-- `refactor(session): delete RequestStoreView and friends (slice 9)`
-- `refactor(session): delete host_request_view.rs (slice 10)`
-- `refactor(session): retire ModuleFactsDb (slice 11)`
-- `feat(session): wire full SemanticQueryApi dispatch (slice 12)`
-- `feat(session): propagate dep-signatures through every ValidatedFactCache write (slice 13)`
-- `test(session): old-vs-new corpus correctness audit (slice 14)`
-- `docs: sync CLAUDE.md + skills to final architecture (slice 15)`
-- `docs(session): archive final audit, retire cutover handoff (slice 16)`
+- `refactor(session): cut _in_view from host_resolve + host_manage + meta_resolve + meta (slice 5)`
+- `test(session): rewrite/delete request-view-era tests (slice 6)`
+- `refactor(session): delete RequestStoreView and friends (slice 7)`
+- `refactor(session): delete host_request_view.rs (slice 8)`
+- `refactor(session): retire ModuleFactsDb (slice 9)`
+- `feat(session): wire full SemanticQueryApi dispatch (slice 10)`
+- `feat(session): propagate dep-signatures through every ValidatedFactCache write (slice 11)`
+- `test(session): old-vs-new corpus correctness audit (slice 12)`
+- `docs: sync CLAUDE.md + skills to final architecture (slice 13)`
+- `docs(session): archive final audit, retire cutover handoff (slice 14)`
 
 Do not skip hooks (`--no-verify`) or amend previous commits. Create new
 commits for every fix after a hook failure.

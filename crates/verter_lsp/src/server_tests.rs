@@ -460,15 +460,11 @@ impl TypeProvider for LostContentCompletionProvider {
         let path = path.to_string();
         let content = content.to_string();
         Box::pin(async move {
-            self.calls.lock().unwrap().push(MockCall::UpdateFile {
-                path: path.clone(),
-                content,
-            });
-            if self.open_paths.lock().unwrap().contains(&path) {
-                Ok(())
-            } else {
-                Ok(())
-            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::UpdateFile { path, content });
+            Ok(())
         })
     }
 
