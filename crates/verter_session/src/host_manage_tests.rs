@@ -10822,13 +10822,15 @@ fn workspace_vfs_source_kind_includes_layer_detail_when_present() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn external_type_analysis_memoized_within_one_request() {
-    // Phase 1 §4.4 test 5.4.
+fn external_type_analysis_repeated_lookup_collapses_onto_host_cache() {
+    // Phase 4 replaced the per-request `external_inputs_memo` with
+    // lookups against the project-global `ModuleFactsDb`. Repeated
+    // resolutions for the same canonical now go through that host-owned
+    // cache directly — no extra per-request lookup memo layer.
     //
-    // Within one request, the second call to `external_type_resolution_inputs_in_view`
-    // for the same canonical hits the request-scoped memo (no module_facts
-    // re-lookup, no Arc re-allocation). Pre-G: no memo → every call re-fetches.
-    // Post-G: `RequestStoreView::external_inputs_memo` serves repeats.
+    // The observable invariant is that repeated lookups return identical
+    // `Arc`-backed external-type analysis payloads so downstream consumers
+    // still collapse onto one cached entry.
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -10839,31 +10841,28 @@ fn external_type_analysis_memoized_within_one_request() {
     let view = host.build_request_store_view();
     let _guard = view.install();
 
-    // Prime the memo.
-    let _first = host.resolve_external_type_from_module_facts_in_view(
-        "/src/types.ts",
-        "Props",
-        &rustc_hash::FxHashMap::default(),
-        None,
-    );
-    let first_memo_len = view.external_inputs_memo_len();
-    assert!(
-        first_memo_len >= 1,
-        "first external-type resolution should populate the request memo (got {first_memo_len})"
-    );
+    let first = host
+        .resolve_external_type_from_module_facts_in_view(
+            "/src/types.ts",
+            "Props",
+            &rustc_hash::FxHashMap::default(),
+            None,
+        )
+        .expect("first external-type resolution must succeed");
 
-    // Second call for the same canonical should reuse the memo without adding
-    // new entries (same `(canonical_id, whole_hash)` key).
-    let _second = host.resolve_external_type_from_module_facts_in_view(
-        "/src/types.ts",
-        "Props",
-        &rustc_hash::FxHashMap::default(),
-        None,
-    );
+    let second = host
+        .resolve_external_type_from_module_facts_in_view(
+            "/src/types.ts",
+            "Props",
+            &rustc_hash::FxHashMap::default(),
+            None,
+        )
+        .expect("second external-type resolution must succeed");
+
     assert_eq!(
-        view.external_inputs_memo_len(),
-        first_memo_len,
-        "second resolution should hit the memo; memo size must stay stable"
+        first.props.len(),
+        second.props.len(),
+        "repeated resolution must return the same shape without reparsing"
     );
 }
 

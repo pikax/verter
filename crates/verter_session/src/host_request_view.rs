@@ -66,66 +66,27 @@ pub(crate) struct RequestExtension {
     pub(crate) import_routes: FxHashMap<String, DependencyResolution>,
 }
 
-/// Shared map of request-scoped external-type-resolution inputs. Keyed by
-/// `(canonical_id, whole_hash)` so content-version collisions within a
-/// request (e.g. from archived vs current facts) produce distinct entries.
-type ExternalInputsMemoMap =
-    FxHashMap<(String, Hash16), Arc<crate::host_manage::ExternalTypeResolutionInputs>>;
-
-/// Shared map of request-scoped `current_eval_state_in_view` results. Keyed
-/// by normalized canonical; the outer `Option` distinguishes "never seen"
-/// (entry absent) from "seen and returned `None`" (entry present, value
-/// `None`).
-type EvalStateMemoMap = FxHashMap<String, Option<EvalStateMemoEntry>>;
-
-/// Request-scoped view: one captured `HostStoreView` plus an additive extension
-/// store. Held via `Arc` so the thread-local [`CURRENT_REQUEST_VIEW`] can hold
-/// a `Weak` without extending the lifetime of the view.
+/// Request-scoped view: one captured `HostStoreView` plus an additive
+/// extension store. Held via `Arc` so the thread-local
+/// [`CURRENT_REQUEST_VIEW`] can hold a `Weak` without extending the
+/// lifetime of the view.
 ///
 /// `#[derive(Clone)]` because `ComponentMetaRequestHost::View` and
 /// `FallthroughRequestHost::View` require `StoreView + Clone`. The internal
-/// `extensions` / `external_inputs_memo` are `Arc<RwLock<...>>`-wrapped so
-/// cloning shares state cheaply — clones of a `RequestStoreView` see the
-/// same request extension + memo, which matches the request-scoped
-/// semantics (a fixed view passed through `with_fixed_view()` is the same
-/// request's view).
+/// `extensions` is `Arc<RwLock<...>>`-wrapped so cloning shares state
+/// cheaply — clones of a `RequestStoreView` see the same request
+/// extension, which matches the request-scoped semantics (a fixed view
+/// passed through `with_fixed_view()` is the same request's view).
+///
+/// Phase 4 retired the per-request `external_inputs_memo` and
+/// `eval_state_memo` fields: both were lookup memos layered above the
+/// project-global [`ModuleFactsDb`](crate::resolver_core::ModuleFactsDb)
+/// and introduced a second cache authority. The host-owned cache is now
+/// the single lookup-memo surface for repeated in-request probes.
 #[derive(Debug, Clone)]
 pub struct RequestStoreView {
     pub(crate) captured: Arc<HostStoreView>,
     extensions: Arc<RwLock<FxHashMap<String, RequestExtension>>>,
-    /// Per-request memo over host-scoped analysis results. Keyed by
-    /// `(canonical_id, whole_hash)` — the content identity of the analysis.
-    ///
-    /// This is a lookup memo over the host cache
-    /// (`external_type_analysis_cache` and `module_facts`), NOT a parallel
-    /// hydration path. It caches the result of *fetching from the host cache*
-    /// so repeat callers within one request don't re-pay canonical
-    /// normalization, the `module_facts` lock acquire, and the multiple
-    /// `Arc::clone`s that the raw fetch costs. The underlying host-scoped
-    /// analysis cache remains the single source of truth for the
-    /// `Arc<AnalyzedExternalTypeSource>` data.
-    external_inputs_memo: Arc<RwLock<ExternalInputsMemoMap>>,
-    /// Per-request memo for `current_eval_state_in_view` results. Keyed by
-    /// canonical only — the raw source + parse + whole_hash tuple returned
-    /// from the host is stable for the lifetime of a request, so a single
-    /// entry per canonical is safe.
-    ///
-    /// Reduces the per-query redundancy observed on SFC self-walks (nuxt-ui
-    /// Accordion: 128 probes of its own `current_eval_state`; expected once
-    /// per unique canonical per query). The memo is consulted at function
-    /// entry and populated on first miss — subsequent probes return the
-    /// cached tuple with only a request-view lock + hashmap lookup.
-    eval_state_memo: Arc<RwLock<EvalStateMemoMap>>,
-}
-
-/// Cached value of `VerterHost::current_eval_state_in_view` shared via the
-/// request view's per-canonical memo. Carries the exact tuple returned by
-/// the slow path so memo hits are observationally identical to a fresh call.
-#[derive(Debug, Clone)]
-pub(crate) struct EvalStateMemoEntry {
-    pub(crate) raw_source: Arc<str>,
-    pub(crate) cached_parse: Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
-    pub(crate) whole_hash: Hash16,
 }
 
 /// Outcome of [`RequestStoreView::touched`] — used by the debug-mode
@@ -159,71 +120,7 @@ impl RequestStoreView {
         Arc::new(Self {
             captured,
             extensions: Arc::new(RwLock::new(FxHashMap::default())),
-            external_inputs_memo: Arc::new(RwLock::new(FxHashMap::default())),
-            eval_state_memo: Arc::new(RwLock::new(FxHashMap::default())),
         })
-    }
-
-    /// Look up a memoized `current_eval_state_in_view` tuple for
-    /// `canonical_id`. Returns `Some(Some(entry))` for a previously-resolved
-    /// successful lookup, `Some(None)` for a memoized missing file, and
-    /// `None` when the canonical has not been probed yet this request.
-    ///
-    /// The two-level `Option` distinguishes "never seen" from "seen and
-    /// returned None" so callers can negative-cache missing files within
-    /// one request without re-walking the slow path.
-    pub(crate) fn eval_state_memo_get(
-        &self,
-        canonical_id: &str,
-    ) -> Option<Option<EvalStateMemoEntry>> {
-        self.eval_state_memo.read().get(canonical_id).cloned()
-    }
-
-    /// Record the outcome of a `current_eval_state_in_view` call. Safe to
-    /// call with `None` — negative caching avoids redundant fallback walks
-    /// for files the host cannot resolve within a single request.
-    pub(crate) fn record_eval_state(
-        &self,
-        canonical_id: impl Into<String>,
-        entry: Option<EvalStateMemoEntry>,
-    ) {
-        self.eval_state_memo
-            .write()
-            .insert(canonical_id.into(), entry);
-    }
-
-    /// Look up a previously-memoized `ExternalTypeResolutionInputs` for
-    /// `(canonical_id, whole_hash)`. Returns `None` when no memo entry exists
-    /// for the exact content version — callers materialize and
-    /// [`record_external_inputs`] on miss.
-    pub(crate) fn external_inputs_memo_get(
-        &self,
-        canonical_id: &str,
-        whole_hash: Hash16,
-    ) -> Option<Arc<crate::host_manage::ExternalTypeResolutionInputs>> {
-        self.external_inputs_memo
-            .read()
-            .get(&(canonical_id.to_string(), whole_hash))
-            .cloned()
-    }
-
-    /// Store the materialized inputs keyed by `(canonical_id, whole_hash)`.
-    /// Subsequent callers within this request short-circuit via
-    /// [`external_inputs_memo_get`].
-    pub(crate) fn record_external_inputs(
-        &self,
-        canonical_id: impl Into<String>,
-        whole_hash: Hash16,
-        inputs: Arc<crate::host_manage::ExternalTypeResolutionInputs>,
-    ) {
-        self.external_inputs_memo
-            .write()
-            .insert((canonical_id.into(), whole_hash), inputs);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn external_inputs_memo_len(&self) -> usize {
-        self.external_inputs_memo.read().len()
     }
 
     /// Return the `whole_hash` for `canonical`, consulting the captured view

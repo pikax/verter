@@ -2242,21 +2242,10 @@ impl VerterHost {
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
         let canonical_id = normalized_canonical_id.as_ref();
 
-        // §4.4 Request-scoped lookup memo. When a request view is installed
-        // AND we can cheaply read the current whole_hash for this canonical,
-        // short-circuit on memo hit. This avoids the per-call canonical
-        // normalization (already done above), module_facts lock acquire, and
-        // multiple Arc::clones that the raw fetch path pays on every
-        // invocation.
-        let request_view = crate::host_request_view::current_request_view();
-        if let Some(view) = request_view.as_ref() {
-            if let Some(current_hash) = view.whole_hash(canonical_id) {
-                if let Some(memoized) = view.external_inputs_memo_get(canonical_id, current_hash) {
-                    return Some((*memoized).clone());
-                }
-            }
-        }
-
+        // The per-request `external_inputs_memo` was retired in Phase 4.
+        // `module_facts_in_request_view` already returns cached state from
+        // the project-global `ModuleFactsDb`, so the old memo was just a
+        // redundant lookup memo layered over a host-owned cache.
         let cached_facts = self.module_facts_in_request_view(canonical_id, store_view);
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
@@ -2267,13 +2256,6 @@ impl VerterHost {
                 analysis: Arc::clone(&facts.external_type_analysis),
                 analysis_cache_hit: true,
             };
-            if let Some(view) = request_view.as_ref() {
-                view.record_external_inputs(
-                    canonical_id,
-                    inputs.whole_hash,
-                    Arc::new(inputs.clone()),
-                );
-            }
             return Some(inputs);
         }
 
@@ -2290,13 +2272,6 @@ impl VerterHost {
                 analysis: Arc::clone(&facts.external_type_analysis),
                 analysis_cache_hit: true,
             };
-            if let Some(view) = request_view.as_ref() {
-                view.record_external_inputs(
-                    canonical_id,
-                    inputs.whole_hash,
-                    Arc::new(inputs.clone()),
-                );
-            }
             return Some(inputs);
         }
 
@@ -2319,9 +2294,6 @@ impl VerterHost {
             analysis,
             analysis_cache_hit,
         };
-        if let Some(view) = request_view.as_ref() {
-            view.record_external_inputs(canonical_id, inputs.whole_hash, Arc::new(inputs.clone()));
-        }
         Some(inputs)
     }
 
@@ -5088,57 +5060,10 @@ impl VerterHost {
 
         let normalized_canonical_id =
             self.normalized_analysis_canonical_in_view(canonical_id, store_view);
-        let memo_canonical = normalized_canonical_id.as_ref().to_string();
-
-        // Request-scoped memo: the `(raw_source, cached_parse, whole_hash)`
-        // tuple returned by the slow path is stable for the lifetime of one
-        // request. Re-probes for the same canonical within that window
-        // (SFC self-walk being the worst case — 128× on nuxt-ui Accordion)
-        // collapse onto a single host-cache trip.
-        //
-        // Memoization is gated on either (a) no explicit store_view at all, or
-        // (b) the caller-supplied store_view matching the current ambient
-        // request view. Callers that pass an *explicit* different view (e.g.
-        // stale-view rejection tests that construct a captured view, upsert
-        // new content, and re-probe) must go through the slow path so the
-        // view's per-request validation can still reject changed sources.
-        let ambient_view = crate::host_request_view::current_request_view();
-        let memo_view: Option<&crate::host_request_view::RequestStoreView> = match store_view {
-            None => ambient_view.as_deref(),
-            Some(explicit) => {
-                let ambient_ptr = ambient_view
-                    .as_ref()
-                    .map(|arc| std::sync::Arc::as_ptr(arc) as usize);
-                let explicit_ptr = explicit as *const _ as usize;
-                if ambient_ptr == Some(explicit_ptr) {
-                    Some(explicit)
-                } else {
-                    None
-                }
-            }
-        };
-
-        if let Some(view) = memo_view {
-            if let Some(memoized) = view.eval_state_memo_get(memo_canonical.as_str()) {
-                return memoized
-                    .map(|entry| (entry.raw_source, entry.cached_parse, entry.whole_hash));
-            }
-        }
-
-        let result = self.current_eval_state_in_view_uncached(memo_canonical.as_str(), store_view);
-        if let Some(view) = memo_view {
-            let entry = result
-                .as_ref()
-                .map(|(raw_source, cached_parse, whole_hash)| {
-                    crate::host_request_view::EvalStateMemoEntry {
-                        raw_source: Arc::clone(raw_source),
-                        cached_parse: cached_parse.clone(),
-                        whole_hash: *whole_hash,
-                    }
-                });
-            view.record_eval_state(memo_canonical, entry);
-        }
-        result
+        // Phase 4 retired `RequestStoreView::eval_state_memo`: the uncached
+        // path already hits the project-global `ModuleFactsDb` for repeated
+        // probes, so the per-request memo layer was redundant.
+        self.current_eval_state_in_view_uncached(normalized_canonical_id.as_ref(), store_view)
     }
 
     fn current_eval_state_in_view_uncached(

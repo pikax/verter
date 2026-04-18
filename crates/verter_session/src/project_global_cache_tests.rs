@@ -539,6 +539,63 @@ fn owner_import_surface_rebuilds_after_owner_edit_phase2() {
         .is_none());
 }
 
+/// Phase 4 progress audit: `RequestStoreView` retired its per-request
+/// `external_inputs_memo` and `eval_state_memo` — the project-global
+/// `ModuleFactsDb` is now the single lookup-memo authority for
+/// canonical external-type resolution inputs and `current_eval_state`
+/// tuples. This test documents the retirement by asserting the
+/// corresponding accessor methods are gone from the source.
+///
+/// The full `_in_view` signature cut is the large remaining Phase 4
+/// deliverable; it lands as a dedicated signature-rewrite pass that
+/// touches the component-meta engine (~9k lines) atomically. Until
+/// then, the assertions here cover the concrete pieces of Phase 4 that
+/// landed in this track: memo retirement + cache authority convergence.
+#[test]
+fn phase4_request_view_memo_retirement_source_audit() {
+    let host_request_view_src = include_str!("host_request_view.rs");
+    // Field declaration marker — the struct no longer carries these fields.
+    assert!(
+        !host_request_view_src.contains("external_inputs_memo:"),
+        "Phase 4 retired the RequestStoreView::external_inputs_memo field"
+    );
+    assert!(
+        !host_request_view_src.contains("eval_state_memo:"),
+        "Phase 4 retired the RequestStoreView::eval_state_memo field"
+    );
+    // Access methods must not exist anywhere in the source.
+    assert!(
+        !host_request_view_src.contains("fn external_inputs_memo_get"),
+        "Phase 4 retired external_inputs_memo_get"
+    );
+    assert!(
+        !host_request_view_src.contains("fn eval_state_memo_get"),
+        "Phase 4 retired eval_state_memo_get"
+    );
+    assert!(
+        !host_request_view_src.contains("fn record_external_inputs"),
+        "Phase 4 retired record_external_inputs"
+    );
+    assert!(
+        !host_request_view_src.contains("fn record_eval_state"),
+        "Phase 4 retired record_eval_state"
+    );
+    assert!(
+        !host_request_view_src.contains("struct EvalStateMemoEntry"),
+        "Phase 4 retired EvalStateMemoEntry"
+    );
+
+    let host_manage_src = include_str!("host_manage.rs");
+    assert!(
+        !host_manage_src.contains("external_inputs_memo_get"),
+        "host_manage must not probe the retired external_inputs_memo"
+    );
+    assert!(
+        !host_manage_src.contains("eval_state_memo_get"),
+        "host_manage must not probe the retired eval_state_memo"
+    );
+}
+
 /// Sanity: the project-global store is reachable from the public
 /// `VerterHost` accessor so consumers can read it without reaching into
 /// private fields.
