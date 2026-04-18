@@ -71,7 +71,26 @@ Performance consequence:
 
 - very high performance comes from targeted demand after broad shallow indexing, not from repeated partial reparsing
 
-**Request-scoped view contract:** Resolver-path helpers taking `Option<&RequestStoreView>` resolve the effective view at entry via `current_request_view().or(store_view)` (see `host_request_view::effective_request_view`). Ambient view takes precedence; live host probes (`scheduler.try_get_source`, `module_facts.get_any`, `get_whole_hash`, `read_analysis_source`) are reserved for outside-request paths. See `/host-session` for details.
+Architectural target for the project-global cache cutover:
+
+- the canonical post-parse artifact is `IndexedReady`
+- `IndexedReady` owns canonical imports/exports plus compact owned symbol indexes, spans, operator tags, interned names, and shallow bodies that are safe for host-owned `Send + Sync` caches
+- parse each live file version once through the scheduler, then lower only the shallow syntax needed by later passes into the long-lived shared representation
+- transient OXC parse arenas are per-file and per-version only; they may be dropped after lowering completes and must not leak into host-owned shared caches
+- component-meta and later analysis layers must both build from `IndexedReady`
+- if analysis or component-meta expands a symbol, they must populate and reuse the same shared resolver caches rather than introducing separate expansion paths
+- type navigation must stay narrower than expansion: walking `A['c']['full']['bar']` should navigate intermediate hops and expand only the terminal requested projection unless limited normalization is required to continue
+- generic substitutions are part of semantic meaning; navigation and expansion must operate on instantiated types and cache keys must include the relevant substitutions/type arguments
+- navigators must stay non-owning: they may choose the next hop and perform non-owning normalization, but any reusable semantic work must enter through the shared query API rather than a private drill-down path
+- the shared semantic layer should be keyed by semantic query identity and store immutable semantic data or ids, not borrowed AST pointers or retained parser arenas
+- top-level live-host results must publish through a completion fence: record touched dependency facts, revalidate before publish, retry at most 3 times on mid-flight changes, and never warm shared caches with torn provisional results
+- distinct top-level waiters on in-flight semantic/artifact work must block cooperatively on completion rather than busy-spinning; same-path recursion must never self-await
+- reusable cache population must be path-independent: if the same semantic result is computed from different entry points, it must populate the same shared cache entry
+- broader successful results may backfill narrower cache entries they actually satisfied, but narrower results must not pretend broader work is cached
+- final payload caches should hand out immutable `Arc` values and may use any backend that preserves concurrency, size bounds, and validation semantics
+- cancelled, superseded, interrupted, budget-exceeded, or partial semantic results must not be promoted as warm shared cache entries
+
+**Legacy request-view note:** Existing `RequestStoreView` / `CURRENT_REQUEST_VIEW` mechanics are legacy implementation details and must not be extended in this rewrite. The target hot path is project-global host-owned caching with no ambient request-view authority and no new request-local lookup memos layered over the same resolver work. See `/host-session` for current mechanics until the cutover lands.
 
 ### Canonical Dependency Cache Rule (CRITICAL)
 

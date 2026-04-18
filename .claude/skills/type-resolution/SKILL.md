@@ -48,7 +48,7 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - Architectural cache/resolver changes must land as one clean cutover. Do not leave temporary shims, compatibility wrappers, feature flags, or duplicated old/new paths behind. Delete the superseded path in the same change, or upgrade the surviving path to first-class shared ownership with the same invariants and tests.
 - Imported dependency loading, type-resolution source materialization, and dependency canonical resolution should be host-owned single entry points. Do not add request-local cache layers or alternative parser/import paths on top of the host cache for the same work.
 - Imported type root/declaration resolution and prepared imported-type alias caching should also be host-owned single entry points keyed by canonical ID plus current file version/hash. Do not rebuild the same imported symbol route or prepared alias body per request when the host cache already has it.
-- A request-scoped lookup memo over the host cache (e.g. `RequestStoreView::external_inputs_memo`) is permitted because it does not introduce a parallel parser/import path; it only memoizes the result of fetching from the host cache. New caches that do underlying work (parse, analyze, route walk) must remain host-owned.
+- Do not add new request-scoped lookup memos over host-owned resolver work in the final architecture. Existing request-view-era memos are legacy and must be removed as part of the project-global cache cutover.
 - `source_type` for downstream cache keys is authoritative from the scheduler: `HostSourceData::source_type` is computed once at `execute_source` time with full access to the parsed SFC, and readers consume via `VerterHost::authoritative_source_type_for(canonical)`. Recomputing from `(canonical_id, raw_source, cached_parse)` is unstable when `cached_parse` is dropped mid-resolution (pre-Phase-1 hazard).
 
 **Concrete performance contract:**
@@ -56,6 +56,119 @@ Host-backed type/import resolution must treat the canonical file ID as the cache
 - If `MetaA`, `MetaB`, and `MetaC` all depend on `type.ts`, the first query batch may process each owner file once and `type.ts` once.
 - If a later batch requests `MetaB` and `MetaC` again with no file changes, that later batch must reuse the warm cached state for both the owner files and `type.ts`.
 - If `type.ts` changes between batches, `MetaB` and `MetaC` may keep their own-file caches, while `type.ts` is processed exactly once for the new hash and then shared by both later requests.
+
+## IndexedReady Target Contract
+
+Architectural target for the project-global cache cutover:
+
+- `IndexedReady` is the canonical post-parse per-file artifact.
+- Scheduler remains the sole source and parse authority. `IndexedReady` is built from scheduler-owned parsed snapshots.
+- `IndexedReady` stores canonical imports and exports for the file.
+- `IndexedReady` owns all top-level symbols through compact owned symbol indexes, spans, operator tags, interned names, and shallow bodies that are safe for host-owned `Send + Sync` caches.
+- Parse once through OXC, then lower only the shallow syntax needed by later passes into the long-lived owned `IndexedReady` representation.
+- The temporary OXC parse arena is per-file and per-version only. It may be dropped after lowering completes and must not leak into long-lived shared caches.
+- `IndexedReady` is the authoritative source of type-facing symbol bodies, shallow declaration structure, import edges, and export edges for later type walking.
+- `AnalysisReady` is an additive layer built from `IndexedReady`; it must not rediscover the same file structure through a second path.
+- If analysis or component-meta expands a shallow symbol, both paths must populate and reuse the same host-owned route, prepared-declaration, owner-import, and projection caches.
+- Shared symbol expansion helpers should be the default. Do not add consumer-specific shallow expansion paths when the existing shared resolver can serve the work.
+- New architecture work in this area should move the codebase toward `SourceReady -> IndexedReady -> optional higher layers`, not further toward request-local or duplicate parser/resolver paths.
+
+## Semantic Query Identity Target Contract
+
+Architectural target for the project-global cache cutover:
+
+- Type expansion should have one authoritative semantic query path.
+- Query memoization keys must be semantic and scope-aware, not request-local and not raw-text-based.
+- Request ids are not query ids. They must not be the primary dedup key for reusable type work.
+- Reusable semantic operations such as resolved declaration lookup, indexed access, member projection, instantiation, mapped-type application, and conditional-type branches should enter through shared query-key types.
+- Bare-name lookups must include the declaration scope or resolved root identity needed to avoid cross-scope poisoning.
+- Semantic query identity must be version-rooted. Resolved declaration or route identities should carry the canonical whole hash / export-surface generation needed to distinguish old and new source versions.
+- Semantic nodes are immutable. File changes create new identities rather than mutating old ones in place.
+- The shared semantic layer should be a host-owned memo table keyed by semantic query identity. Any ID-backed semantic graph behind it is secondary and must store immutable AST-free semantic data rather than borrowed OXC pointers.
+- Same-file shallow closure may run inside the winning query, but reusable cross-file and projection work should be represented as dedupable semantic subqueries.
+- Recursive and mutually-recursive expansion must use an explicit in-flight table so one winning query computes each cold semantic node and recursive re-entry dedups cleanly.
+- Same-path recursion must never self-await. If the same execution path sees a `Running` semantic node again, it should return the solver's normal recursion sentinel / unresolved recursive form instead of blocking on itself.
+- Distinct top-level callers encountering a `Running` semantic node should wait cooperatively on a completion primitive rather than spin-retrying.
+- Nested semantic builders may also wait cooperatively after releasing short-lived memo guards or locks. Do not busy-spin, and do not make whole-stack unwind a required waiting strategy for ordinary DAG dependencies.
+
+Concrete expectation:
+
+- If one larger expression references `C`, `C['foo']`, `C['bar']`, and `B`, and `B` itself references `C` again, the resolver should converge those onto one shared semantic query graph rather than recomputing each path ad hoc.
+
+## Cache Population Target Contract
+
+Architectural target for the project-global cache cutover:
+
+- Cache ownership is split into three reusable layers:
+  - file artifact caches (`IndexedReady`, prepared declarations, route surfaces, owner import surfaces, optional analysis)
+  - semantic query caches (resolved declaration identity, instantiated meaning, indexed access, projected members, mapped or conditional results, normalized reusable intermediates)
+  - final result caches (for example final component-meta payloads)
+- Final payload caches should hand out immutable `Arc` values. Cache backend choice is an implementation detail as long as concurrency, size bounds, and validation rules are preserved.
+- Reusable semantic cache population must be path-independent. If the same semantic result is reached through different entry paths, a successful computation must populate the same shared cache entry.
+- Broader successful results may backfill narrower reusable entries they actually satisfied.
+- Narrower successful results must not claim that broader work is cached.
+- An `Expanded` result may satisfy and backfill `Shallow` or `Identity` for the same semantic key.
+- A `Shallow` result may satisfy and backfill `Identity` for the same semantic key.
+- A whole-surface projection may backfill per-member or per-indexed-access caches for the members or accesses it actually materialized.
+- A narrow member or indexed-access result must not pretend sibling members or whole-surface projection are cached.
+- Cancelled, superseded, interrupted, budget-exceeded, or partial results must not be promoted as warm shared cache entries.
+- Versioned semantic nodes and final-result entries must also be sweepable. Project-global caching may be aggressive, but old identities must not accumulate forever across long editing sessions.
+- Top-level live-host results must publish through a completion fence: record the touched dependency signature, revalidate it before publish, retry at most 3 times on mid-flight changes, and never warm shared caches with torn provisional or unstable results.
+
+Concrete expectation:
+
+- If `ProjectSurface(C, Expanded)` materializes member `"foo"`, a later `ProjectMember(C, "foo", Expanded)` should reuse that work.
+- If `ProjectMember(C, "foo", Expanded)` ran first, that must not imply `ProjectSurface(C, Expanded)` is cached.
+
+## Navigation Vs Expansion Target Contract
+
+Architectural target for the project-global cache cutover:
+
+- Type navigation must stay narrower than expansion.
+- Intermediate hops should use a navigation or shallow projection mode rather than eagerly materializing full surfaces.
+- For a path such as `A['c']['full']['bar']`, the resolver should navigate through `A`, `"c"`, and `"full"` with the minimum normalization required to continue, and only expand the terminal requested projection `C['bar']`.
+- Navigation may normalize unions, intersections, aliases, mapped types, or indexed-access intermediates only enough to keep walking the requested path. It must not widen into unrelated sibling members or whole-surface expansion by default.
+- If a whole-surface expansion does happen for another reason, it should backfill the narrower member or indexed-access caches. Narrow navigation must not pretend to have populated unrelated siblings.
+
+## Navigator Boundary Contract
+
+Architectural target for the project-global cache cutover:
+
+- Navigators are not a second resolver. They are thin path-walkers over the shared semantic query system.
+- Navigators may perform only non-owning normalization:
+  - unwrap already-resolved aliases
+  - apply already-known substitutions
+  - inspect already-materialized member or keyspace shape
+  - choose the next hop in the requested path
+- Navigators must not privately perform reusable semantic work such as:
+  - recursively resolving a new declaration identity
+  - crossing imports or barrel routes
+  - instantiating a new generic body outside the query system
+  - expanding a mapped, conditional, or indexed-access type through an ad hoc path
+  - populating shared caches from outside the shared semantic query API
+- Boundary rule: same semantic node may continue inline; a new semantic node must enter through the shared query API.
+- Any operation that can recurse, cross files, instantiate meaning, or produce a reusable cached result must be represented as a semantic subquery.
+- Prefer enforcing this boundary as a Rust API/trait split, not only as prose. Navigators should not receive owning semantic query operations directly.
+
+Concrete expectation:
+
+- While navigating `A['c']['full']['bar']`, the navigator may determine that the next hop after `"full"` points at instantiated `C`, but resolving or expanding that instantiated `C` must occur through the shared semantic query layer rather than by private navigator recursion.
+
+## Generic Navigation And Expansion Contract
+
+Architectural target for the project-global cache cutover:
+
+- Generic substitutions are part of semantic meaning and therefore part of semantic query identity.
+- Navigation and expansion must operate on instantiated meaning, not on the raw generic declaration body alone.
+- Query keys for reusable semantic work must include the relevant type arguments or substitution environment.
+- Member projection and indexed access against generic aliases, instantiated types, or mapped helpers must apply substitutions before deciding what member or keyspace is visible.
+- If two callers reach the same instantiated semantic node through different entry paths, they must converge onto the same cache entry.
+- If two callers reach the same declaration name with different type arguments, they must not alias to the same cache entry.
+
+Concrete expectation:
+
+- Navigating `Box<C>['full']['bar']` should resolve `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
+- If `ProjectMember(ResolveDecl(Box), "full", [C])` was already computed from one path, a later path reaching the same instantiated query should reuse it.
 
 ## Shallow File State and Frontier Engine
 

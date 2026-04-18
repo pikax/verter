@@ -230,6 +230,14 @@ Feature-gated (`scheduler`): `VerterHost` holds an `Arc<Scheduler>`. During `ups
 2. **compile_cache** (`DashMap`) = profile state authority (compile_slots, overrides, diagnostics, deps, resolved_type_hashes). `CompileCacheEntry.evicted_whole_hash: Option<Hash16>` carries the pre-evict hash; `ensure_loaded` compares it to the post-reload hash and skips `bump_store_view_epoch` on no-op reloads so thread-local caches stay warm.
 3. **files** (`Shared<FxHashMap>`) = WASM-only primary store. Not used on native (scheduler) path. Gated `#[cfg(target_arch = "wasm32")]` / `#[cfg(any(target_arch = "wasm32", test))]` after the Phase 1 cleanup.
 
+Architectural target for the project-global cache overhaul:
+
+- scheduler remains the sole source and parse authority
+- the canonical post-parse artifact above scheduler is `IndexedReady`
+- `IndexedReady` owns canonical imports/exports and the owned lowered shallow symbol representation needed by later resolver work
+- `AnalysisReady` should build on and enhance `IndexedReady`, not replace it with a parallel file-understanding path
+- component-meta and analysis-triggered symbol expansion should populate the same host-owned resolver caches
+
 ### Request-Scoped View Contract
 
 `RequestStoreView` (`crates/verter_session/src/host_request_view.rs`) is the single per-request view captured at request entry. It wraps the host-owned `HostStoreView` snapshot plus a request-private `RequestExtension` map covering `whole_hash`, derived hashes (`Route`, `ImportRoute`), and `import_route` resolutions for canonicals discovered mid-request via `ensure_loaded`.

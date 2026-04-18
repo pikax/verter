@@ -81,6 +81,20 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 **Resolver ownership rule:** host-backed component-meta and analysis must share one cross-file resolver. Do not build separate resolver logic for script-setup macros, Options API metadata, compat wrappers, or consumer-specific adapters.
 
+**IndexedReady target rule:** the foundational per-file input for component-meta is the post-parse `IndexedReady` artifact, not a separate request-local type-ready layer. Component-meta should start from canonical imports/exports and the owned lowered shallow symbol representation stored in that artifact, then deepen only on demand for the active symbol route.
+
+**Shared-expansion rule:** when component-meta expands a shallow symbol, it must populate the same host-owned route, prepared-declaration, owner-import, and projection caches used by other resolver consumers. Do not create a component-meta-only expansion cache or helper path when the shared resolver can own the work.
+
+**Path-independent cache rule:** component-meta must benefit from and contribute to the same shared semantic caches regardless of entry path. If a projected member or expanded symbol was already computed from another consumer path, component-meta should reuse it. If component-meta computes a reusable result successfully, it should populate the shared cache for later callers.
+
+**Backfill rule:** broader successful results may backfill narrower caches they actually satisfied, but narrower results must not pretend broader work is cached. Cancelled, partial, or budget-exceeded work must not be promoted as warm shared cache entries.
+
+**Navigation-not-expansion rule:** component-meta should navigate intermediate type paths as narrowly as possible. When resolving a path like `A['c']['full']['bar']`, the intermediate hops should stay in navigation or shallow projection mode; only the terminal requested projection should expand unless limited normalization is required to continue.
+
+**Generic-instantiation rule:** component-meta navigation and expansion must respect generic substitutions. Member projection or indexed access on instantiated generic types must operate on the substituted meaning, and the shared cache keys must include the relevant type arguments or substitution environment.
+
+**Navigator-boundary rule:** component-meta path walkers are not allowed to become a private resolver. They may do non-owning normalization and choose the next hop, but any operation that could recurse, cross files, instantiate a new semantic node, or populate reusable caches must enter through the shared semantic query API.
+
 **Component-meta rule:** all metadata-producing macro and Options API surfaces must go through the shared resolver in `Expanded` mode. That includes props, emits, slots, data, computed, and expose-style members.
 
 **Traversal rule:** only follow the import graph reachable from the requested type's declaration graph. Unrelated imports in the same file are out of scope.
@@ -94,6 +108,8 @@ These are the canonical component-meta resolver rules. They govern how the share
 **Component-meta target-selection rule:** keep runtime/declaration companion selection shallow. Canonicalization may probe cached raw source existence, but must not build export analysis, snapshots, or eval envs just to choose a target file.
 
 **Component-meta imported-state rule:** after shallow imported dependency seeding, resolver stages must consume only the imported dependency cache for imported file snapshots/envs/analysis. Do not bounce from alias or registry hydration back into raw snapshot/source builders for imported files.
+
+**Component-meta analysis interop rule:** LSP or other consumers that request richer analysis but still need shallow type retrieval should build on the same `IndexedReady` and shared resolver artifacts. Analysis is an additive layer over the indexed base; it must not bypass the component-meta/type cache path for shallow symbol expansion.
 
 **Component-meta deepening rule:** resolve one requested symbol/query path at a time. Do not let a file-level resolver widen into unrelated sibling symbols/files while chasing a single metadata request.
 
