@@ -417,11 +417,12 @@ pub struct ProjectTypeStore {
     owner_import_surfaces: OwnerImportSurfaceDb,
     /// Final component-meta result cache (Phase 3). Keyed by
     /// `(owner_canonical, owner_whole_hash, query_kind, options_fingerprint)`.
-    /// The payload type is erased at this layer; concrete callers hold a
-    /// typed handle through the `ComponentMetaResultDb<P>` API. In Phase 3
-    /// this is wired onto the native component-meta payload shape.
+    /// Payload is the native `ComponentMetaAnalysis` shape returned by
+    /// `get_component_meta`; Phase 3 wires `get_component_meta` to consult
+    /// the cache with completion-fence dep-signature validation before
+    /// falling back to the cold resolver path.
     component_meta_results:
-        ComponentMetaResultDb<crate::types::FinalComponentMetaPayloadPlaceholder>,
+        ComponentMetaResultDb<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
     /// TypeScript `intrinsic` registry (Phase 2.1). Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
@@ -462,11 +463,14 @@ impl ProjectTypeStore {
         );
         let owner_import_surfaces =
             OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
-        let component_meta_results = ComponentMetaResultDb::with_counters(
-            ComponentMetaResultDb::<crate::types::FinalComponentMetaPayloadPlaceholder>::DEFAULT_CAPACITY,
-            Arc::clone(&counters.component_meta_live),
-            Arc::clone(&counters.component_meta_stale_sweeps),
-        );
+        let component_meta_results =
+            ComponentMetaResultDb::with_counters(
+                ComponentMetaResultDb::<
+                    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+                >::DEFAULT_CAPACITY,
+                Arc::clone(&counters.component_meta_live),
+                Arc::clone(&counters.component_meta_stale_sweeps),
+            );
         Self {
             project_generation: AtomicU64::new(0),
             indexed,
@@ -526,7 +530,8 @@ impl ProjectTypeStore {
     /// Final component-meta result cache (Phase 3).
     pub fn component_meta_results(
         &self,
-    ) -> &ComponentMetaResultDb<crate::types::FinalComponentMetaPayloadPlaceholder> {
+    ) -> &ComponentMetaResultDb<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>
+    {
         &self.component_meta_results
     }
 
@@ -606,6 +611,46 @@ impl Default for ProjectTypeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Construct a minimal `ComponentMetaAnalysis` for tests that only care
+    /// about cache-key behaviour. Keeps the test surface decoupled from the
+    /// real resolver's analysis output.
+    fn empty_component_meta_analysis(
+    ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+        use verter_semantic::analysis::component_meta::{
+            AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags,
+            FallthroughSurface, NoFallthroughReason, RootReachability,
+        };
+        ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
+            type_registry: Vec::new(),
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: ComponentMetaFlags::default(),
+            root_reachability: RootReachability::NoFallthrough {
+                reason: NoFallthroughReason::NoTemplate,
+            },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface: FallthroughSurface::None {
+                reason: NoFallthroughReason::NoTemplate,
+            },
+            macro_expansion_diagnostics: Vec::new(),
+            options_api: false,
+            file_path: String::new(),
+        }
+    }
 
     #[test]
     fn artifact_requirements_bitflags_round_trip() {
@@ -797,7 +842,7 @@ mod tests {
                 options_fingerprint: [0u8; 16],
             },
             crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(crate::types::FinalComponentMetaPayloadPlaceholder),
+                payload: Arc::new(empty_component_meta_analysis()),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
             },
         );

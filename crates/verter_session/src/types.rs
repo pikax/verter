@@ -11,16 +11,6 @@ use thiserror::Error;
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
 
-/// Placeholder payload for the Phase 3 final component-meta result cache.
-///
-/// The real payload type lands in Phase 3 when the native `get_component_meta`
-/// path moves behind the [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb)
-/// cache. Until then the store keeps the cache wired up with a zero-sized
-/// placeholder so its key space and lookup semantics can be exercised by
-/// tests without coupling to the component-meta engine's internal schema.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct FinalComponentMetaPayloadPlaceholder;
-
 /// Discriminates between Vue Single File Components and other file types
 /// (e.g. `.ts` files tracked for cross-file type resolution).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

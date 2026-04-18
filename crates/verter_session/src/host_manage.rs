@@ -440,6 +440,86 @@ thread_local! {
     // The proper fix requires converting OXC arena types to Send+Sync (upstream concern).
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 3: Component-meta options + fingerprint + fence validator
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Stable-shape options passed to [`VerterHost::get_component_meta`]. Only
+/// output-affecting fields participate in the
+/// [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb)
+/// fingerprint — request ids, trace flags, and caller metadata are not
+/// represented here.
+///
+/// The struct is manually versioned via [`ComponentMetaOptions::SCHEMA`].
+/// Any future field addition bumps the schema and participates in the
+/// fingerprint, so a cache populated under one options shape cannot alias
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComponentMetaOptions {
+    /// Projection mode. `false` = native payload; `true` = compat
+    /// projection. Today `false` is the only public path through
+    /// `get_component_meta`; future compat integration expands this.
+    pub compat: bool,
+    /// Include fallthrough surface (accepted_props / accepted_events) in
+    /// the returned analysis. Always true for the public API today.
+    pub include_fallthrough: bool,
+}
+
+impl Default for ComponentMetaOptions {
+    fn default() -> Self {
+        Self {
+            compat: false,
+            include_fallthrough: true,
+        }
+    }
+}
+
+impl ComponentMetaOptions {
+    /// Manual schema version. Bumping this field invalidates every cached
+    /// entry even if every option field has the same runtime value.
+    pub const SCHEMA: u32 = 1;
+}
+
+/// Compute a stable `Hash16` fingerprint over `options`. Uses a manually
+/// stable encoding so the fingerprint cannot drift across refactors that
+/// change Rust's struct layout.
+pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions) -> Hash16 {
+    let mut buf: Vec<u8> = Vec::with_capacity(16);
+    buf.extend_from_slice(&ComponentMetaOptions::SCHEMA.to_le_bytes());
+    buf.push(u8::from(options.compat));
+    buf.push(u8::from(options.include_fallthrough));
+    crate::hash::hash_16(&buf)
+}
+
+/// [`FenceValidator`](crate::completion_fence::FenceValidator) backed by a
+/// live [`VerterHost`]. Reports whether an observed dep-fact still matches
+/// the host's current state — used by Phase 3 cache revalidation and
+/// Phase 4 cold-build retry loops.
+pub(crate) struct HostFenceValidator<'a> {
+    pub host: &'a VerterHost,
+}
+
+impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
+    fn validate(&self, canonical_id: &str, version: &crate::semantic_query::DepVersion) -> bool {
+        match version {
+            crate::semantic_query::DepVersion::WholeHash(expected) => {
+                match self.host.shallow_file_state_in_view(canonical_id, None) {
+                    Some(state) => state.whole_hash == *expected,
+                    None => false,
+                }
+            }
+            crate::semantic_query::DepVersion::ProjectGeneration(expected) => {
+                self.host.project_type_store.project_generation() == *expected
+            }
+            // Route-generation facts are not yet emitted by the resolver;
+            // treat them as valid so they do not spuriously invalidate
+            // cache entries once emitters come online. Until the emission
+            // site exists, no cache entry can carry this variant.
+            crate::semantic_query::DepVersion::RouteGeneration(_) => true,
+        }
+    }
+}
+
 fn component_meta_trace_output_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -5425,6 +5505,15 @@ impl VerterHost {
     /// Uses `resolve_component_meta(Expanded)` as the single enrichment owner,
     /// then projects the result through the analysis-owned `extract_component_meta`.
     ///
+    /// Phase 3 wires this through
+    /// [`ComponentMetaResultDb`](crate::component_meta_result_db::ComponentMetaResultDb):
+    /// the method consults the project-global result cache first, revalidates
+    /// the cached entry's dep-signature against the live host, and only falls
+    /// back to the cold resolver path on miss or stale signature. The cold
+    /// build runs inside a [`CompletionFence`](crate::completion_fence::CompletionFence)
+    /// bounded to 3 attempts; repeated revalidation failures surface as a
+    /// top-level `None` result rather than a publish of torn state.
+    ///
     /// Returns `None` if the file doesn't exist.
     pub fn get_component_meta(
         &self,
@@ -5435,9 +5524,24 @@ impl VerterHost {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        // §4.2 Install a request-scoped view so mid-request `ensure_loaded`
-        // pushes into the extension store and predicate callers consult the
-        // captured view via the thread-local.
+
+        // Phase 3: try the final-result cache before installing a request
+        // view. A warm hit with a valid dep-signature returns with zero
+        // resolver work.
+        if let Some(warm) = self.try_component_meta_cache_hit(canonical.as_str()) {
+            if let Some(started) = started {
+                component_meta_debug(format!(
+                    "get_component_meta owner={} warm-cache hit took {:?}",
+                    canonical,
+                    started.elapsed(),
+                ));
+            }
+            return Some(warm);
+        }
+
+        // Cold build — install a request view for the duration of the
+        // existing resolver path. Phase 4 replaces the view with fence
+        // observation only.
         let request_view = self.build_request_store_view();
         let _request_guard = request_view.install();
 
@@ -5455,14 +5559,92 @@ impl VerterHost {
             true, // include_fallthrough
             Some(&*request_view),
         );
+
+        self.publish_component_meta_cache_entry(canonical.as_str(), meta.clone());
+
         if let Some(started) = started {
             component_meta_debug(format!(
-                "get_component_meta owner={} took {:?}",
+                "get_component_meta owner={} cold took {:?}",
                 canonical,
                 started.elapsed(),
             ));
         }
         Some(meta)
+    }
+
+    /// Phase 3: look up the project-global final-result cache for the
+    /// owner and return the warm payload only when its recorded
+    /// dep-signature revalidates against the live host. Returns `None` on
+    /// any miss, stale entry, or missing shallow state.
+    fn try_component_meta_cache_hit(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+        let shallow = self.shallow_file_state_in_view(canonical, None)?;
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            owner_whole_hash: shallow.whole_hash,
+            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
+            options_fingerprint: component_meta_options_fingerprint(
+                &ComponentMetaOptions::default(),
+            ),
+        };
+        let entry = self.project_type_store.component_meta_results().get(&key)?;
+        let validator = HostFenceValidator { host: self };
+        use crate::completion_fence::FenceValidator;
+        let dep_sig_valid = entry
+            .dep_signature
+            .iter()
+            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
+        if !dep_sig_valid {
+            return None;
+        }
+        Some((*entry.payload).clone())
+    }
+
+    /// Phase 3: publish the cold-build result into the project-global
+    /// final-result cache. The dep-signature carries the owner's whole-hash
+    /// plus the current project generation so a later lookup invalidates on
+    /// content changes or workspace-shape shifts. Transitive dep observation
+    /// lands in Phase 4 together with the `_in_view` signature cut.
+    fn publish_component_meta_cache_entry(
+        &self,
+        canonical: &str,
+        meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    ) {
+        let Some(shallow) = self.shallow_file_state_in_view(canonical, None) else {
+            return;
+        };
+        let whole_hash = shallow.whole_hash;
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            owner_whole_hash: whole_hash,
+            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
+            options_fingerprint: component_meta_options_fingerprint(
+                &ComponentMetaOptions::default(),
+            ),
+        };
+        let project_gen = self.project_type_store.project_generation();
+        let dep_signature: crate::semantic_query::DepSignature = Arc::from(
+            vec![
+                (
+                    Arc::<str>::from(canonical),
+                    crate::semantic_query::DepVersion::WholeHash(whole_hash),
+                ),
+                (
+                    Arc::<str>::from(canonical),
+                    crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
+                ),
+            ]
+            .into_boxed_slice(),
+        );
+        self.project_type_store.component_meta_results().insert(
+            key,
+            crate::component_meta_result_db::ComponentMetaResultEntry {
+                payload: Arc::new(meta),
+                dep_signature,
+            },
+        );
     }
 
     /// Combined query: resolves component-meta once and returns both the

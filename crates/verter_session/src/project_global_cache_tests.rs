@@ -324,13 +324,107 @@ fn semantic_subqueries_dedup_across_request_boundaries_phase22() {
     );
 }
 
-/// Placeholder: once Phase 3 lands, the same top-level owner/query request
-/// repeated against the same host hits `ComponentMetaResultDb` with no new
-/// canonical_bundle or owner_import cold misses.
+/// Phase 3: a second `get_component_meta` call against the same owner
+/// version hits `ComponentMetaResultDb` — the cache's live-entry counter
+/// stays at one and the payload is returned without re-running the
+/// resolver pipeline.
 #[test]
-#[ignore = "Phase 3 — pending ComponentMetaResultDb warm-rerun harness"]
 fn component_meta_warm_rerun_hits_final_result_cache_phase3() {
-    // Intentionally ignored until Phase 3 introduces the result cache.
+    let host = host();
+    upsert_vue(
+        &host,
+        "/w/App.vue",
+        "<script setup lang=\"ts\">defineProps<{ title: string }>()</script>\n<template><div /></template>\n",
+    );
+
+    let before = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+
+    let first = host
+        .get_component_meta("/w/App.vue")
+        .expect("first query must return component meta");
+    let after_first = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+    assert_eq!(
+        after_first - before,
+        1,
+        "cold build must publish exactly one cache entry"
+    );
+
+    // Second call: warm hit — no new cache entries.
+    let second = host
+        .get_component_meta("/w/App.vue")
+        .expect("second query must return the cached meta");
+    let after_second = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+    assert_eq!(
+        after_second, after_first,
+        "warm rerun must not publish a new cache entry"
+    );
+    assert_eq!(
+        first.props.len(),
+        second.props.len(),
+        "warm result payload must match cold build"
+    );
+}
+
+/// Phase 3: editing the owner file bumps its whole-hash; a subsequent
+/// `get_component_meta` call misses at the key level, runs a cold build,
+/// and publishes under the new hash.
+#[test]
+fn component_meta_cache_invalidates_on_owner_edit_phase3() {
+    let host = host();
+    upsert_vue(
+        &host,
+        "/w/App.vue",
+        "<script setup lang=\"ts\">defineProps<{ title: string }>()</script>\n<template><div /></template>\n",
+    );
+    let _ = host
+        .get_component_meta("/w/App.vue")
+        .expect("initial cold build");
+    let initial_live = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+    assert_eq!(initial_live, 1);
+
+    // Edit the owner — upsert evicts the cache entry for the old hash.
+    upsert_vue(
+        &host,
+        "/w/App.vue",
+        "<script setup lang=\"ts\">defineProps<{ title: string; disabled?: boolean }>()</script>\n<template><div /></template>\n",
+    );
+    let after_edit_live = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+    assert_eq!(
+        after_edit_live, 0,
+        "upsert must evict the owner's cache entries"
+    );
+
+    // Next query repopulates under the new hash.
+    let refreshed = host
+        .get_component_meta("/w/App.vue")
+        .expect("post-edit cold build");
+    assert_eq!(refreshed.props.len(), 2);
+    let final_live = host
+        .project_type_store()
+        .counters
+        .snapshot()
+        .component_meta_live;
+    assert_eq!(final_live, 1, "new hash publishes one entry");
 }
 
 /// Phase 2: direct owner imports are resolved once per owner version and
