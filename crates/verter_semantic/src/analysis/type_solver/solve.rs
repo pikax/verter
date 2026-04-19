@@ -3548,6 +3548,22 @@ fn node_contains_infer(arena: &QueryArena, node: NodeId) -> bool {
 // resolve_conditional
 // ---------------------------------------------------------------------------
 
+// TODO(D2): dispatch-handoff cutover — per plan §3 D2, this function
+// will substitute any enclosing `SubstitutionEnv` bindings into the
+// check / extends / true_branch / false_branch node ids eagerly and
+// hand off to `SemanticQueryApi::execute(SemanticQueryKey::Conditional { .. })`.
+// Substitution is baked into the four ids before the call; no env
+// crosses the key boundary (plan §7.14 + §3 D2).
+//
+// Prerequisites (shared with D1): solver NodeId ↔ SemanticNodeId
+// translation layer; `SolveState.conditional_context_stack` retained
+// as per-request scratch only (the dispatcher owns ConditionalSelect
+// edge provenance via the origin layer).
+//
+// D2's solver tests in `generic_navigation_solver_tests.rs` are
+// `#[ignore = "pending D2 conditional solver handoff"]` pending this
+// implementation.
+
 /// `T extends U ? A : B` — resolve using the relation engine.
 ///
 /// Handles:
