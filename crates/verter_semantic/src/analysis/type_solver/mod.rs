@@ -48,6 +48,9 @@ pub mod result;
 pub mod solve;
 pub mod substitution;
 
+#[cfg(test)]
+mod generic_navigation_solver_tests;
+
 // ---------------------------------------------------------------------------
 // Re-exports for ergonomic access
 // ---------------------------------------------------------------------------

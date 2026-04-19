@@ -2132,6 +2132,23 @@ fn arg_has_concrete_signal(arena: &QueryArena, node: NodeId) -> bool {
 /// Look up a prepared type declaration from the host, lower its body into the
 /// arena, bind type parameters to the resolved arguments, and resolve the
 /// body recursively.
+// TODO(D1): dispatch-handoff cutover — per plan §3 D1, this function
+// will delegate body lowering to `SemanticQueryApi::execute(SemanticQueryKey::Instantiate { base, args })`
+// instead of walking `prepared.body` with `resolve_node` directly. The
+// cutover requires:
+//
+// 1. A solver `NodeId` ↔ dispatch `SemanticNodeId` translation layer
+//    (today the two node systems are disjoint — solver has Function,
+//    Tuple, Template, RecursiveRef, etc. variants absent from the
+//    dispatch node model).
+// 2. Retirement of `SolveState.instantiation_cache` (reusable identity
+//    moves to the shared `SemanticGraphStore` memo).
+// 3. Single-in-flight-authority enforcement: solver RecursionTracker
+//    demotes to a scratch marker; cooperative-wait becomes dispatch's
+//    responsibility exclusively (plan §7.7).
+//
+// D1's solver tests in `generic_navigation_solver_tests.rs` lock the
+// contract; they are `#[ignore]` pending the full implementation.
 fn resolve_prepared_ref(
     arena: &mut QueryArena,
     host: &dyn TypeSolverHost,
