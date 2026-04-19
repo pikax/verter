@@ -54,29 +54,27 @@ Net test count: **1394 passing** (pre-cut baseline was 1396/1402; the deltas are
 
 ## Old-vs-new corpus audit (slice 12)
 
-**Status: not run against a pre-cut baseline.**
+**Status: run. 172/173 components byte-identical.**
 
-Rationale: unit-test coverage across slices 2-11 was workspace-wide-clean
-(1394 session tests + full workspace suite + clippy + fmt), plus slice 11
-added dep-signature invalidation tests that gate future regressions. The
-corpus A/B diff against commit `5d92dae6` would have required a parallel
-worktree with its own `pnpm install` + native rebuild — roughly a 15-30
-minute round trip for marginal additional assurance beyond what the
-existing cargo-level gates provide.
+Setup:
+- Baseline: commit `dc192049` (the exact parent of the first cut commit `023cc9c8`). The handoff originally named `5d92dae6` but three pre-cut chore commits landed between that and the first semantic cut, including a real `if_same_then_else` dead-branch fix in `server_tests.rs`. `dc192049` is the apples-to-apples pre-cut state.
+- Corpus: the full `nuxt-ui` component set under `.integration-tests/repos/nuxt-ui/src/runtime/components/` — 177 components enumerated, 173 completed (4 dropped via timeout/crash symmetrically on both sides).
+- Harness: `scripts/benchmark/trace-component-corpus.mjs --timeout-ms=15000` against each tree's own native binary. The pre-cut worktree was set up with `pnpm install` + `pnpm run build:native` + `pnpm run build:ts`, with a symlink to the main tree's `.integration-tests/repos/nuxt-ui` fixture directory so both runs analyzed the same source files.
 
-If a subsequent maintainer wants to run the diff, the recipe is unchanged
-from the handoff:
+Results (via `python D:\tmp\corpus-diff.py`):
 
-```bash
-git worktree add /tmp/verter-pre-cut 5d92dae6
-pushd /tmp/verter-pre-cut
-pnpm install && pnpm run build:native
-node scripts/benchmark/trace-component-corpus.mjs --output-dir=tmp/cm-trace-pre
-popd
-node scripts/benchmark/trace-component-corpus.mjs --output-dir=tmp/cm-trace-new
-npx tsx packages/benchmark/src/trace-check.ts tmp/cm-trace-new \
-  --batch "Accordion,Alert,App" --strict --check-expected
-```
+| Bucket | Count |
+| ------ | ----- |
+| Total components processed | 173 |
+| Byte-identical payloads | **172** |
+| Differing payloads (semantic) | **0** |
+| Differing payloads (cosmetic path-string only) | 1 |
+| Pre-only (missing in post) | 0 |
+| Post-only (missing in pre) | 0 |
+
+The one "differing" component (`prose/CodeTree.vue`) has three `missing: <absolute-path>::TreeItem` strings embedded in its `schema.schema` / `propsJsonSchema.items.enum` payloads. The prefix differs between `d:/tmp/verter-pre-cut/.integration-tests/...` and `d:/dev/personal/verter/.integration-tests/...` — a direct consequence of running the two corpora from two different worktree roots. The component-meta content itself is identical modulo that path prefix; no semantic drift in the resolver output. Future runs against a single-tree-mirrored corpus would report zero diffs.
+
+**Conclusion:** the Phase 4/5 cutover produces byte-identical component-meta payloads against the representative `nuxt-ui` corpus. Zero semantic regressions.
 
 ## Final architecture
 
