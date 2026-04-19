@@ -869,19 +869,25 @@ impl SemanticGraphStore {
         // warm slot was just evicted. Joiners waiting on the condvar
         // observe `aborted = true` on wake and re-enter dispatch from
         // step 1 of `execute_cooperative`. The completed sentinel wakes
-        // any joiner whose wait predicate checks only `completed`.
+        // any joiner whose wait predicate only checks `completed`.
+        //
+        // Single-pass `retain` — the closure runs once per in-flight
+        // entry. Matching entries abort their state + notify joiners and
+        // are removed; non-matching entries stay.
+        //
+        // The `affected_pairs.is_empty()` guard short-circuits the whole
+        // phase when the warm sweep evicted nothing, avoiding an
+        // unnecessary `self.inflight.lock()` acquisition + full-table
+        // walk in the common "no matches" case (e.g. invalidating a
+        // canonical that wasn't read by any warm entry).
         if !affected_pairs.is_empty() {
             let mut table = self.inflight.lock();
-            let keys_to_abort: Vec<SemanticQueryKey> = table
-                .keys()
-                .filter(|key| {
-                    let (family, slot) = family_and_slot(key);
-                    affected_pairs.contains(&(family, slot))
-                })
-                .cloned()
-                .collect();
-            for key in keys_to_abort {
-                if let Some(inflight) = table.remove(&key) {
+            table.retain(|key, inflight| {
+                let (family, slot) = family_and_slot(key);
+                if !affected_pairs.contains(&(family, slot)) {
+                    return true; // keep
+                }
+                {
                     let mut state = inflight.state.lock();
                     state.aborted = true;
                     if state.completed.is_none() {
@@ -890,10 +896,10 @@ impl SemanticGraphStore {
                         ))));
                         state.dep_signature = Some(empty_signature());
                     }
-                    drop(state);
-                    inflight.ready.notify_all();
                 }
-            }
+                inflight.ready.notify_all();
+                false // remove
+            });
         }
 
         evicted
@@ -1373,9 +1379,25 @@ impl SemanticGraphStore {
         //    cache monotonic under invalidation: once the sweep removes a
         //    slot, no in-flight build from the pre-sweep epoch is allowed
         //    to resurrect it.
+        //
+        //    **TOCTOU guard.** We acquire `self.entries.lock()` FIRST and
+        //    then re-check `inflight.state.aborted` under the entries
+        //    lock before calling `publish`. Invalidation's phase 1 also
+        //    acquires `self.entries.lock()`; acquiring it here
+        //    serialises us against invalidation. If invalidation got the
+        //    entries lock first and aborted our in-flight via phase 2,
+        //    our re-check sees `aborted = true` and we skip publish. If
+        //    we got the entries lock first, we publish and release;
+        //    invalidation then evicts our fresh publish in its phase 1.
+        //    Either interleaving leaves the slot empty post-invalidation.
+        //    A pre-lock check alone would leave a gap where a build
+        //    result from a thread that checked `aborted=false` before
+        //    acquiring `entries` could land AFTER invalidation's phase 1
+        //    completed but BEFORE phase 2 set `aborted=true` — a stale
+        //    slot whose dep-sig does NOT reference the invalidated
+        //    canonical (so even HostFenceValidator does not catch it).
         let publishable = matches!(&result, QueryResult::Value(_));
-        let aborted_during_build = inflight.state.lock().aborted;
-        if publishable && !aborted_during_build {
+        if publishable {
             let (family, slot) = family_and_slot(&key);
             // ResolvedNamedType bypasses the family memo entirely
             // (§7.16) — its DashMap-backed identity map is the cache.
@@ -1385,7 +1407,14 @@ impl SemanticGraphStore {
                     dep_signature: dep_signature.clone(),
                 };
                 let mut entries = self.entries.lock();
-                entries.entry(family).or_default().publish(slot, entry);
+                // Atomic re-check under the entries lock — see the
+                // TOCTOU comment above. `state` is briefly locked nested
+                // inside `entries`; no AB-BA deadlock risk because no
+                // path holds `state` then acquires `entries`.
+                let aborted = inflight.state.lock().aborted;
+                if !aborted {
+                    entries.entry(family).or_default().publish(slot, entry);
+                }
             }
         }
 
@@ -2051,6 +2080,136 @@ mod tests {
         assert!(
             store.get(&key_navigate).is_some(),
             "narrower independent build survives unrelated invalidation",
+        );
+    }
+
+    /// A cold winner whose `(family, slot)` was aborted mid-build by a
+    /// canonical invalidation MUST NOT warm-publish its now-stale result.
+    /// Otherwise the post-invalidation cache re-populates with a dep-sig
+    /// that may not reference the invalidated canonical (because the
+    /// winner's own reads never touched it) — stale data that even
+    /// `HostFenceValidator` cannot catch, because the stored dep-sig is
+    /// technically valid against the new state.
+    ///
+    /// Scenario (exercises the winner-side `aborted` guard at step 5
+    /// AND the TOCTOU re-check under the entries lock):
+    ///   1. Thread A starts a cold build for `(F, Identity)`. It blocks
+    ///      on a barrier inside the build closure so the main thread can
+    ///      orchestrate the race.
+    ///   2. Main publishes `(F, Expanded)` with dep-sig `[/w/target.ts]`.
+    ///      Expanded backfills the empty Identity slot (A has the claim
+    ///      but `FamilySlots::publish` writes the slot field directly,
+    ///      not gated on in-flight ownership). Identity is now warm with
+    ///      Expanded's result + dep-sig.
+    ///   3. Main calls `invalidate_canonical("/w/target.ts")`. Phase 1
+    ///      evicts Identity + Expanded (both reference the canonical).
+    ///      Phase 2 aborts A's in-flight at `(F, Identity)`: sets
+    ///      `state.aborted = true`, plants a completed sentinel, notifies.
+    ///   4. Main releases the barrier. A finishes its build and returns
+    ///      a (would-be) `Value` result with a dep-sig that does NOT
+    ///      reference `/w/target.ts`.
+    ///   5. A's step 5 enters the warm-publish block, acquires the
+    ///      entries lock, re-checks `state.aborted` under the lock, sees
+    ///      `true`, and skips the publish.
+    ///
+    /// Assertion: after A completes, the Identity slot stays empty.
+    /// Without the guard, Identity would re-warm with A's stale result.
+    #[test]
+    fn winner_skips_warm_publish_when_aborted_by_invalidation_during_build() {
+        use std::sync::Barrier;
+        use std::thread;
+        let store = Arc::new(SemanticGraphStore::new());
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+
+        let key_identity = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Identity,
+        };
+        let key_expanded = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Expanded,
+        };
+
+        // Barrier 1: A signals it has entered the build closure; main
+        // uses this to know A's in-flight entry is registered.
+        // Barrier 2: main signals A to proceed after publish + invalidate.
+        let a_in_build = Arc::new(Barrier::new(2));
+        let main_done = Arc::new(Barrier::new(2));
+
+        let a_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let store_a = Arc::clone(&store);
+        let a_in_build_owner = Arc::clone(&a_in_build);
+        let main_done_owner = Arc::clone(&main_done);
+        let a_key_owner = key_identity.clone();
+
+        let a_thread = thread::spawn(move || {
+            store_a.execute_cooperative(
+                a_key_owner,
+                || store_a.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    // Signal main: A is inside the cold build closure.
+                    a_in_build_owner.wait();
+                    // Wait for main to finish publish + invalidate.
+                    main_done_owner.wait();
+                    // Return a result whose dep-sig does NOT reference
+                    // /w/target.ts — so even HostFenceValidator would
+                    // NOT catch a stale publish of this result.
+                    (
+                        QueryResult::Value(a_result),
+                        dep_sig_for("/w/unrelated.ts", 9),
+                    )
+                },
+            )
+        });
+
+        // Wait for A to enter its build closure.
+        a_in_build.wait();
+
+        // Publish Expanded. Its backfill fills the currently-empty
+        // Identity slot despite A holding the in-flight claim, because
+        // `FamilySlots::publish` writes the slot field directly.
+        let exp_result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key_expanded,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(exp_result),
+                    dep_sig_for("/w/target.ts", 2),
+                )
+            },
+        );
+        assert!(
+            store.get(&key_identity).is_some(),
+            "Expanded's backfill must populate Identity before invalidation runs",
+        );
+
+        // Invalidate /w/target.ts. Phase 1 evicts all four slots:
+        // Expanded's publish fills its target slot + backfills Shallow,
+        // Navigate, and the empty Identity (writing the slot field
+        // directly without gating on A's in-flight claim). All four
+        // carry Expanded's dep-sig. Phase 2 aborts A's in-flight at
+        // (F, Identity) because `(F, Identity)` is now in
+        // `affected_pairs`.
+        let removed = store.invalidate_canonical("/w/target.ts");
+        assert_eq!(
+            removed, 4,
+            "phase 1 evicts all four slots (Expanded publish + 3 backfilled narrower slots)",
+        );
+
+        // Release A. It returns from the build closure and enters step 5.
+        // Under the TOCTOU guard, A's re-check sees aborted=true and
+        // skips warm publish; Identity stays empty.
+        main_done.wait();
+        let _ = a_thread.join().expect("A thread must not panic");
+
+        assert!(
+            store.get(&key_identity).is_none(),
+            "aborted winner must skip warm publish — Identity slot stays evicted",
         );
     }
 
