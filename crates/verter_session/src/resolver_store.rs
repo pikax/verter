@@ -1,4 +1,3 @@
-use crate::resolver_core::StoreView;
 use crate::types::Hash16;
 use crate::VerterHost;
 use rustc_hash::FxHashMap;
@@ -169,19 +168,6 @@ impl HostStoreView {
         self.mutation_epoch
     }
 
-    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover but kept for symmetry with other accessors.
-    pub(crate) fn accepts_whole_hash(&self, canonical_id: &str, hash: Hash16) -> bool {
-        self.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
-            hash,
-        })
-    }
-
-    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover.
-    pub(crate) fn tracks_whole_hash(&self, canonical_id: &str) -> bool {
-        self.whole_hashes.contains_key(canonical_id)
-    }
-
     pub(crate) fn whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
         self.whole_hashes.get(canonical_id).copied()
     }
@@ -194,24 +180,6 @@ impl HostStoreView {
         self.derived_hashes
             .get(&(canonical_id.to_string(), kind))
             .copied()
-    }
-
-    #[allow(dead_code)] // Part of the HostStoreView API; currently unused after Phase 4/5 cutover.
-    pub(crate) fn import_route(
-        &self,
-        canonical_id: &str,
-        import_source: &str,
-    ) -> Option<crate::types::DependencyResolution> {
-        self.import_routes
-            .get(&(canonical_id.to_string(), import_source.to_string()))
-            .cloned()
-    }
-
-    /// Returns true if ALL fact versions are still valid in this view.
-    #[allow(dead_code)] // Retained for fact-list validation call sites.
-    pub(crate) fn validates_all(&self, facts: &[crate::resolver_core::FactVersionRef]) -> bool {
-        use crate::resolver_core::StoreView;
-        facts.iter().all(|fact| self.validates(fact))
     }
 
     pub(crate) fn invalid_fact_details(

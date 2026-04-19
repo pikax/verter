@@ -514,7 +514,7 @@ fn store_view_epoch_advances_on_clear_compile_cache() {
 }
 
 #[test]
-fn clear_compile_cache_preserves_module_facts_db() {
+fn clear_compile_cache_preserves_indexed_ready_db() {
     let project = make_project();
     project
         .upsert_base("/index.ts", "export interface Props { label: string }")

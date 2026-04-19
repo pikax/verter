@@ -1042,7 +1042,7 @@ export interface Props { child: Inner }"#;
 }
 
 #[test]
-fn dep_edges_track_canonical_dependencies_from_module_facts() {
+fn dep_edges_track_canonical_dependencies_from_indexed_ready() {
     let host = VerterHost::new_standalone(Default::default());
 
     let source = r#"import type { A } from "./a"

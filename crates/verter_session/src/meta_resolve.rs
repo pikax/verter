@@ -6626,7 +6626,7 @@ impl VerterHost {
         component_meta_trace_event!(
             "get_raw_analysis_snapshot_result",
             format!(
-                "owner={} imports={} macros={} bindings={} has_template={} source=module_facts",
+                "owner={} imports={} macros={} bindings={} has_template={} source=indexed_ready",
                 canonical,
                 snapshot.imports.len(),
                 snapshot.macros.len(),

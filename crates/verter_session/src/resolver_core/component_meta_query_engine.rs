@@ -5361,7 +5361,7 @@ export interface Props {
     }
 
     #[test]
-    fn project_prepared_type_surface_shape_keeps_imported_package_projection_off_module_facts() {
+    fn project_prepared_type_surface_shape_keeps_imported_package_projection_off_indexed_ready() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));

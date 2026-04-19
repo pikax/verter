@@ -639,6 +639,9 @@ fn request_view_is_retired_from_crate_sources() {
         "host_request_view::",
         "current_request_view(",
         "owned_or_ambient_request_view(",
+        // `_in_view` is the retired signature-surface convention — zero
+        // references may survive in non-comment production or test source.
+        "_in_view",
     ];
 
     for (path, src) in sources {

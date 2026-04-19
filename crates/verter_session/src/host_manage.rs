@@ -2038,9 +2038,9 @@ impl VerterHost {
         let canonical_id = normalized_canonical_id.as_ref();
 
         // The per-request `external_inputs_memo` was retired in Phase 4.
-        // `module_facts_in_request_view` already returns cached state from
-        // the project-global `IndexedReadyDb`, so the old memo was just a
-        // redundant lookup memo layered over a host-owned cache.
+        // The project-global `IndexedReadyDb` already returns cached state,
+        // so the old memo was just a redundant lookup memo layered over a
+        // host-owned cache.
         let cached_facts = self.project_type_store.indexed().get_any(canonical_id);
         if let Some(facts) = cached_facts {
             let inputs = ExternalTypeResolutionInputs {
@@ -3452,7 +3452,7 @@ impl VerterHost {
                 let snapshot =
                     if let Some(snapshot) = self.build_snapshot_from_scheduler(canonical_id) {
                         self.provenance
-                            .module_facts_scheduler_snapshot_reuse
+                            .indexed_ready_scheduler_snapshot_reuse
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         snapshot
                     } else {
@@ -3735,7 +3735,7 @@ impl VerterHost {
             source_type,
         ) else {
             component_meta_trace_event!(
-                "resolve_external_type_from_indexed_ready_in_view_result",
+                "resolve_external_type_from_indexed_ready_result",
                 format!(
                     "owner={} type={} hit=false local_symbol_target={} parse_failed_or_missing_type_context=true",
                     dep_canonical,
@@ -3756,7 +3756,7 @@ impl VerterHost {
             imported_companions,
         );
         component_meta_trace_event!(
-            "resolve_external_type_from_indexed_ready_in_view_result",
+            "resolve_external_type_from_indexed_ready_result",
             format!(
                 "owner={} type={} hit={} local_symbol_target={} parse_failed=false",
                 dep_canonical,
@@ -3793,7 +3793,7 @@ impl VerterHost {
             canonical_id.clone()
         };
         component_meta_trace_event!(
-            "resolve_direct_type_reexport_target_in_view_result",
+            "resolve_direct_type_reexport_target_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
                 dep_canonical, requested_name, source_specifier, next_canonical, original_name
@@ -3965,7 +3965,7 @@ impl VerterHost {
             import_target.canonical_id.clone()
         };
         component_meta_trace_event!(
-            "resolve_local_import_symbol_target_in_view_result",
+            "resolve_local_import_symbol_target_result",
             format!(
                 "owner={} requested={} import_source={} target={} exported={}",
                 dep_canonical,
@@ -3993,7 +3993,7 @@ impl VerterHost {
             .map(str::to_string);
         if let Some(target) = target.as_deref() {
             component_meta_trace_event!(
-                "resolve_local_export_symbol_target_in_view_result",
+                "resolve_local_export_symbol_target_result",
                 format!(
                     "owner={} requested={} target={}",
                     canonical_source, exported_name, target
@@ -4548,10 +4548,10 @@ impl VerterHost {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         // The uncached path already hits the project-global `IndexedReadyDb`
         // for repeated probes, so no per-request memo layer is needed.
-        self.current_eval_state_in_view_uncached(normalized_canonical_id.as_ref())
+        self.current_eval_state_uncached(normalized_canonical_id.as_ref())
     }
 
-    fn current_eval_state_in_view_uncached(
+    fn current_eval_state_uncached(
         &self,
         canonical_id: &str,
     ) -> Option<(
@@ -4559,10 +4559,8 @@ impl VerterHost {
         Option<Arc<verter_compiler::parser::types::ParsedSfc>>,
         Hash16,
     )> {
-        let _trace = component_meta_trace_scope!(
-            "current_eval_state",
-            format!("owner={} store_view={}", canonical_id, false),
-        );
+        let _trace =
+            component_meta_trace_scope!("current_eval_state", format!("owner={}", canonical_id),);
 
         // IndexedReadyDb fast path — live-host probe.
         let cached_facts = self.project_type_store.indexed().get_any(canonical_id);
@@ -6507,7 +6505,7 @@ impl VerterHost {
     /// Replaces the pattern `current_eval_state(&candidate).is_some()`
     /// — which materialized raw source + parse + eval state to answer the
     /// predicate — with a live-host `get_whole_hash` lookup (itself a cheap
-    /// `compile_cache` + `module_facts` lookup, no parse, no disk read).
+    /// `compile_cache` + `IndexedReadyDb` lookup, no parse, no disk read).
     ///
     /// Per §4.3 Sub-task B this is the canonical shallow-probe API. Candidate
     /// paths that are not already loaded return `false`; probing does not

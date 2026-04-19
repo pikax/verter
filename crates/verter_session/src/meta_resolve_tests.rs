@@ -9570,7 +9570,7 @@ defineProps<{ x: string }>()
 }
 
 #[test]
-fn local_type_declaration_id_ignores_import_bindings_from_module_facts() {
+fn local_type_declaration_id_ignores_import_bindings_from_indexed_ready() {
     let project = make_project();
     project
         .upsert_base("/src/types.ts", "export interface Props { msg: string }")

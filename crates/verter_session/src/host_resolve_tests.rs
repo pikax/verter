@@ -3740,7 +3740,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
 }
 
 #[test]
-fn type_import_route_in_view_prefers_package_declaration_entrypoint_over_cached_runtime_target() {
+fn type_import_route_prefers_package_declaration_entrypoint_over_cached_runtime_target() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -3807,7 +3807,7 @@ defineProps<FancyProps>()
 }
 
 #[test]
-fn type_import_route_in_view_does_not_trust_imported_cache_miss_for_untracked_package_file() {
+fn type_import_route_does_not_trust_imported_cache_miss_for_untracked_package_file() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));

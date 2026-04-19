@@ -494,7 +494,7 @@ export interface ButtonProps extends UseComponentIconsProps, LinkProps {
 }
 
 #[test]
-fn prepared_type_decl_in_view_resolves_plain_declaration_import_helpers() {
+fn prepared_type_decl_resolves_plain_declaration_import_helpers() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -544,7 +544,7 @@ export type FancyProps = Prettify<{ open: boolean }>
 }
 
 #[test]
-fn prepared_type_decl_in_view_rebuilds_name_resolution_after_import_route_upgrade() {
+fn prepared_type_decl_rebuilds_name_resolution_after_import_route_upgrade() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -883,7 +883,7 @@ fn resolve_imported_type_root_caches_stable_miss_in_imported_root_db() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materialization() {
+fn prepared_type_decl_does_not_require_import_route_shadow_materialization() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -920,7 +920,7 @@ fn prepared_type_decl_in_view_does_not_require_import_route_shadow_materializati
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_in_view_reuses_route_owned_package_shallow_state_without_module_facts() {
+fn prepared_type_decl_reuses_route_owned_package_shallow_state_without_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/node_modules/pkg/dist/index.d.ts",
@@ -1006,7 +1006,7 @@ fn prepared_type_decl_in_view_reuses_route_owned_package_shallow_state_without_m
 }
 
 #[test]
-fn prepared_type_decl_in_view_backfills_missing_local_symbol_when_cache_is_partial() {
+fn prepared_type_decl_backfills_missing_local_symbol_when_cache_is_partial() {
     let host = make_host();
     let canonical_id = "/workspace/node_modules/lib/dist/index.d.ts";
     let source = r#"
@@ -1085,7 +1085,7 @@ defineProps<Props>()
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolver_store_view_does_not_materialize_tracked_module_facts() {
+fn resolver_store_view_does_not_materialize_tracked_indexed_ready() {
     let host = strict_host();
 
     upsert_vue(
@@ -1138,7 +1138,7 @@ defineProps<Props>()
     let provenance = host.provenance_snapshot();
 
     assert_eq!(
-        provenance.module_facts_scheduler_snapshot_reuse, 0,
+        provenance.indexed_ready_scheduler_snapshot_reuse, 0,
         "capturing a store view should not eagerly materialize tracked module facts; the view should snapshot known whole/import-route hashes without paying scheduler-backed module-facts loads",
     );
     assert!(
@@ -1732,7 +1732,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn store_view_external_type_analysis_keeps_tracked_imported_dependency_off_module_facts() {
+fn store_view_external_type_analysis_keeps_tracked_imported_dependency_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -1905,7 +1905,7 @@ const answer: string = '42'
 }
 
 #[test]
-fn ensure_module_facts_reuses_cached_vue_entry_arc() {
+fn ensure_indexed_ready_reuses_cached_vue_entry_arc() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -1957,7 +1957,7 @@ export interface Props extends Base {
 }
 
 #[test]
-fn ensure_module_facts_populates_external_type_analysis_for_non_sfc() {
+fn ensure_indexed_ready_populates_external_type_analysis_for_non_sfc() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -2460,7 +2460,7 @@ defineProps<{ label?: string }>()
 }
 
 #[test]
-fn prepared_type_decl_lookup_resolves_barrel_reexport_through_module_facts() {
+fn prepared_type_decl_lookup_resolves_barrel_reexport_through_indexed_ready() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -4704,7 +4704,7 @@ fn resolved_dependency_targets_uses_effective_target() {
 }
 
 #[test]
-fn external_type_analysis_in_view_reuses_cached_analysis_for_same_dependency() {
+fn external_type_analysis_reuses_cached_analysis_for_same_dependency() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -4740,7 +4740,7 @@ fn external_type_analysis_in_view_reuses_cached_analysis_for_same_dependency() {
 }
 
 #[test]
-fn external_type_analysis_in_view_prefers_declaration_companion_for_runtime_js_dependencies() {
+fn external_type_analysis_prefers_declaration_companion_for_runtime_js_dependencies() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -4782,7 +4782,7 @@ fn external_type_analysis_in_view_prefers_declaration_companion_for_runtime_js_d
 }
 
 #[test]
-fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shallowly() {
+fn resolve_eval_dependency_canonical_prefers_declaration_companion_shallowly() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/node_modules/pkg/dist/index.js",
@@ -4816,14 +4816,14 @@ fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shall
     );
 
     // In the new IndexedReady DB, ensure_indexed_ready eagerly materializes.
-    // Verify that the module_facts DB was NOT populated by the shallow
+    // Verify that the IndexedReadyDb was NOT populated by the shallow
     // resolve_eval_dependency_canonical call itself.
     assert!(
         host.project_type_store
             .indexed()
             .get_any("/workspace/node_modules/pkg/dist/index.js")
             .is_none(),
-        "shallow companion selection should not cache .js facts in the module_facts DB",
+        "shallow companion selection should not cache .js facts in the IndexedReadyDb",
     );
     assert!(
         host.project_type_store.indexed().get_any("/workspace/node_modules/pkg/dist/index.d.ts").is_none(),
@@ -4832,7 +4832,7 @@ fn resolve_eval_dependency_canonical_in_view_prefers_declaration_companion_shall
 }
 
 #[test]
-fn resolve_eval_dependency_canonical_in_view_ignores_empty_candidate_without_reads() {
+fn resolve_eval_dependency_canonical_ignores_empty_candidate_without_reads() {
     let ws = Arc::new(CountingWorkspace::new());
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
@@ -4855,8 +4855,7 @@ fn resolve_eval_dependency_canonical_in_view_ignores_empty_candidate_without_rea
 }
 
 #[test]
-fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before_raw_extensionless_probe(
-) {
+fn resolve_eval_dependency_canonical_prefers_extension_candidates_before_raw_extensionless_probe() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/runtime/types/html.ts",
@@ -4887,8 +4886,7 @@ fn resolve_eval_dependency_canonical_in_view_prefers_extension_candidates_before
 }
 
 #[test]
-fn resolve_eval_dependency_canonical_in_view_prefers_bundle_entry_declaration_companion_shallowly()
-{
+fn resolve_eval_dependency_canonical_prefers_bundle_entry_declaration_companion_shallowly() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/node_modules/@vue/runtime-core/dist/runtime-core.esm-bundler.js",
@@ -4924,7 +4922,7 @@ fn resolve_eval_dependency_canonical_in_view_prefers_bundle_entry_declaration_co
 }
 
 #[test]
-fn current_eval_state_in_view_normalizes_extensionless_canonical_before_fallback_load() {
+fn current_eval_state_normalizes_extensionless_canonical_before_fallback_load() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/runtime/types/html.ts",
@@ -4954,7 +4952,7 @@ fn current_eval_state_in_view_normalizes_extensionless_canonical_before_fallback
 }
 
 #[test]
-fn get_raw_analysis_snapshot_in_view_normalizes_extensionless_canonical_before_building_snapshot() {
+fn get_raw_analysis_snapshot_normalizes_extensionless_canonical_before_building_snapshot() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/runtime/types/html.ts",
@@ -4984,7 +4982,7 @@ fn get_raw_analysis_snapshot_in_view_normalizes_extensionless_canonical_before_b
 }
 
 #[test]
-fn prepared_type_decl_in_view_normalizes_extensionless_canonical_before_shallow_backfill() {
+fn prepared_type_decl_normalizes_extensionless_canonical_before_shallow_backfill() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/runtime/types/html.ts",
@@ -5156,7 +5154,7 @@ fn read_analysis_source_and_current_eval_state_ignore_raw_import_specifiers() {
 }
 
 #[test]
-fn external_type_analysis_in_view_uses_eval_source_for_vue_dependencies() {
+fn external_type_analysis_uses_eval_source_for_vue_dependencies() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -5200,7 +5198,7 @@ export interface Props extends Base {
 }
 
 #[test]
-fn resolve_external_type_from_indexed_ready_in_view_keeps_local_type_resolution_shallow() {
+fn resolve_external_type_from_indexed_ready_keeps_local_type_resolution_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -5255,7 +5253,7 @@ fn resolve_external_type_from_indexed_ready_in_view_keeps_local_type_resolution_
 }
 
 #[test]
-fn external_type_analysis_in_view_preserves_vue_tsx_source_type() {
+fn external_type_analysis_preserves_vue_tsx_source_type() {
     let host = make_host();
     upsert_vue(
         &host,
@@ -5433,7 +5431,7 @@ export interface ChipProps {
 }
 
 #[test]
-fn base_eval_env_in_view_prefers_declaration_companion_for_runtime_js_dependencies() {
+fn base_eval_env_prefers_declaration_companion_for_runtime_js_dependencies() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -5603,7 +5601,7 @@ fn route_and_root_resolution_do_not_fall_back_through_frontier() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn ensure_module_facts_for_vue_exports_stays_local() {
+fn ensure_indexed_ready_for_vue_exports_stays_local() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -5667,7 +5665,7 @@ export interface UnusedProps {
 }
 
 #[test]
-fn ensure_module_facts_defers_prepared_decl_materialization_until_lookup() {
+fn ensure_indexed_ready_defers_prepared_decl_materialization_until_lookup() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -6315,7 +6313,7 @@ export type TargetEmits = { change: [value: string] }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn prepared_type_decl_in_view_keeps_export_only_barrels_shallow_for_missing_local_symbols() {
+fn prepared_type_decl_keeps_export_only_barrels_shallow_for_missing_local_symbols() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types/index.ts",
@@ -6647,7 +6645,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn current_dependency_fact_versions_in_view_keeps_imported_barrel_route_facts_shallow() {
+fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types/index.ts",
@@ -6968,7 +6966,7 @@ export interface LinkProps extends SharedProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn import_route_lookup_reuses_module_facts_without_live_owner_state() {
+fn import_route_lookup_reuses_indexed_ready_without_live_owner_state() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -7241,7 +7239,7 @@ export interface UnusedProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_imported_type_root_unseeded_late_match_keeps_earlier_vue_siblings_off_module_facts() {
+fn resolve_imported_type_root_unseeded_late_match_keeps_earlier_vue_siblings_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -7422,7 +7420,7 @@ export interface AccordionEmits {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn get_component_meta_reuses_scheduler_snapshot_when_materializing_owner_module_facts() {
+fn get_component_meta_reuses_scheduler_snapshot_when_materializing_owner_indexed_ready() {
     let host = VerterHost::new_standalone(HostConfig {
         analysis_level: AnalysisLevel::Full,
         ..HostConfig::default()
@@ -7450,7 +7448,7 @@ const props = defineProps<AccordionRootProps>()
         "module-facts materialization should succeed for the scheduler-tracked owner",
     );
     assert!(
-        provenance.module_facts_scheduler_snapshot_reuse > 0,
+        provenance.indexed_ready_scheduler_snapshot_reuse > 0,
         "owner module-facts materialization should reuse the scheduler snapshot instead of rebuilding it from cached parse; saw {:?}",
         provenance,
     );
@@ -7506,8 +7504,7 @@ export interface CheckboxGroupProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn current_dependency_fact_versions_in_view_keeps_shallow_tracked_barrel_siblings_off_module_facts()
-{
+fn current_dependency_fact_versions_keeps_shallow_tracked_barrel_siblings_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/Consumer.vue",
@@ -8221,7 +8218,7 @@ export interface ButtonProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_elements_keeps_active_package_target_off_module_facts() {
+fn resolve_component_meta_macro_elements_keeps_active_package_target_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -8308,7 +8305,7 @@ const emit = defineEmits<PackageEmits>()
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_component_meta_macro_surface_keeps_active_package_target_off_module_facts() {
+fn resolve_component_meta_macro_surface_keeps_active_package_target_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/workspace/src/Consumer.vue",
@@ -8570,7 +8567,7 @@ export interface UnusedProps {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn resolve_imported_type_root_nested_barrel_alias_keeps_unrelated_vue_siblings_off_module_facts() {
+fn resolve_imported_type_root_nested_barrel_alias_keeps_unrelated_vue_siblings_off_indexed_ready() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file(
         "/src/types.ts",
@@ -9428,7 +9425,7 @@ fn bundle_fact_validation_round_trip() {
 }
 
 #[test]
-fn prepared_type_decl_in_view_only_prepares_requested_symbol_on_first_lookup() {
+fn prepared_type_decl_only_prepares_requested_symbol_on_first_lookup() {
     let host = make_host();
     upsert_non_sfc(
         &host,
@@ -10233,7 +10230,7 @@ fn regression_barrel_reexport_returns_none_for_prepared_decl() {
 /// 4. A new store view is created — still doesn't track the dependency
 /// 5. module_facts.get(dep, view) must NOT return stale archived facts
 #[test]
-fn archived_module_facts_rejected_when_workspace_dep_changes_content() {
+fn archived_indexed_ready_rejected_when_workspace_dep_changes_content() {
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/src/dep.ts", "export interface DepType { version: 1 }\n");
 
@@ -10280,7 +10277,7 @@ fn archived_module_facts_rejected_when_workspace_dep_changes_content() {
         .expect("dep should re-materialize with current workspace content");
     assert_ne!(
         facts_after.whole_hash, hash_v1,
-        "module_facts via store-view-validated cache must reflect the current \
+        "IndexedReady via fence-validated cache must reflect the current \
          workspace content (V2), not stale archived V1 facts. The untracked-file \
          acceptance in validates() should not allow archived entries with a \
          mismatched content hash to pass validation.",

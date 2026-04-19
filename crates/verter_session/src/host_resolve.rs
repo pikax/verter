@@ -616,12 +616,12 @@ impl VerterHost {
                     .import_routes
                     .get(import_source)
                     .cloned(),
-                "module_facts",
+                "indexed_ready",
             )
         };
 
         component_meta_trace_event!(
-            "authoritative_import_route_in_view_result",
+            "authoritative_import_route_result",
             format!(
                 "owner={} import={} source={} target={}",
                 owner_canonical,
@@ -2452,7 +2452,7 @@ impl VerterHost {
         let result =
             self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
         component_meta_trace_event!(
-            "resolve_named_type_export_target_in_view_result",
+            "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=false",
                 dep_canonical, requested_name, result.0, result.1
@@ -2470,7 +2470,7 @@ impl VerterHost {
             self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
         let _ = self.ensure_indexed_ready(result.0.as_str());
         component_meta_trace_event!(
-            "resolve_named_type_export_target_in_view_result",
+            "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=true",
                 dep_canonical, requested_name, result.0, result.1
