@@ -484,23 +484,72 @@ impl DerivationStore {
     fn edge_count(&self) -> usize {
         self.edges.values().map(Vec::len).sum()
     }
+}
 
-    fn max_edges_per_node(&self) -> usize {
-        let mut by_node: FxHashMap<SemanticNodeId, usize> = FxHashMap::default();
-        for ((node, _kind), edges) in &self.edges {
-            *by_node.entry(*node).or_insert(0) += edges.len();
-        }
-        by_node.values().copied().max().unwrap_or(0)
+/// Pick the percentile-`p` value out of an already-sorted ascending
+/// slice. Returns 0 for an empty slice. Index rounding matches the
+/// nearest-rank method (R-3 / SAS / Excel `PERCENTILE.INC`).
+fn sorted_percentile(sorted_ascending: &[u32], p: f64) -> u32 {
+    if sorted_ascending.is_empty() {
+        return 0;
     }
+    let last = sorted_ascending.len() - 1;
+    let idx = ((last as f64) * p).round() as usize;
+    sorted_ascending[idx.min(last)]
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // Telemetry — atomic counters (plan B2 + §7.4)
 // ──────────────────────────────────────────────────────────────────────────
 
+/// Bounded sample reservoir for histogram-style metrics (path length /
+/// projection depth). Cap = 8192 samples per metric; once full, new
+/// samples replace at a round-robin index so later samples have a chance
+/// to land in the reservoir without unbounded memory growth.
+///
+/// Percentiles are computed at snapshot time by sorting a clone of the
+/// reservoir — O(N log N) per snapshot where N <= cap, which is fine for
+/// observational reads.
+struct SampleCollector {
+    samples: Vec<u32>,
+    cap: usize,
+    inserts: u64,
+}
+
+impl SampleCollector {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            samples: Vec::new(),
+            cap,
+            inserts: 0,
+        }
+    }
+
+    fn push(&mut self, value: u32) {
+        self.inserts = self.inserts.saturating_add(1);
+        if self.samples.len() < self.cap {
+            self.samples.push(value);
+        } else if self.cap > 0 {
+            let idx = (self.inserts as usize) % self.cap;
+            self.samples[idx] = value;
+        }
+    }
+
+    fn percentile(&self, p: f64) -> u32 {
+        if self.samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        let idx = (((sorted.len() - 1) as f64) * p).round() as usize;
+        sorted[idx]
+    }
+}
+
+const SAMPLE_RESERVOIR_CAP: usize = 8192;
+
 /// Lock-free counter set updated on the hot path. Read into the immutable
 /// [`SemanticGraphStats`] snapshot via [`SemanticGraphStore::stats_snapshot`].
-#[derive(Default)]
 struct AtomicSemanticGraphStats {
     hits: AtomicU64,
     misses: AtomicU64,
@@ -515,8 +564,30 @@ struct AtomicSemanticGraphStats {
     branch_selections_true: AtomicU64,
     branch_selections_false: AtomicU64,
     budget_fallback_count: AtomicU64,
-    max_path_length: AtomicU32,
-    max_projection_depth: AtomicU32,
+    path_length_samples: Mutex<SampleCollector>,
+    projection_depth_samples: Mutex<SampleCollector>,
+}
+
+impl Default for AtomicSemanticGraphStats {
+    fn default() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            same_path_sentinel_returns: AtomicU64::new(0),
+            in_flight_current: AtomicU32::new(0),
+            in_flight_peak: AtomicU32::new(0),
+            waits_ms: AtomicU64::new(0),
+            origin_edges_emitted: AtomicU64::new(0),
+            instantiate_count: AtomicU64::new(0),
+            conditional_decided_count: AtomicU64::new(0),
+            conditional_deferred_count: AtomicU64::new(0),
+            branch_selections_true: AtomicU64::new(0),
+            branch_selections_false: AtomicU64::new(0),
+            budget_fallback_count: AtomicU64::new(0),
+            path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
+            projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
+        }
+    }
 }
 
 impl AtomicSemanticGraphStats {
@@ -540,6 +611,21 @@ impl AtomicSemanticGraphStats {
 
     fn record_in_flight_exit(&self) {
         self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// RAII guard that decrements the in-flight presence counter on drop —
+/// fires whether the cold-build closure returns normally or panics.
+/// Without this guard a panic in the build closure would leak the
+/// in-flight counter, biasing `in_flight_peak` upward across the
+/// remaining lifetime of the store.
+struct InFlightStatsGuard<'a> {
+    stats: &'a AtomicSemanticGraphStats,
+}
+
+impl Drop for InFlightStatsGuard<'_> {
+    fn drop(&mut self) {
+        self.stats.record_in_flight_exit();
     }
 }
 
@@ -886,15 +972,23 @@ impl SemanticGraphStore {
     }
 
     /// Convenience helper: invoke `visitor` for every origin edge on
-    /// `node`. Useful for callers that want to walk without materialising
-    /// the full Vec.
+    /// `node`. The derivation lock is released before any visitor
+    /// callback fires so visitors that recursively walk the chain
+    /// (e.g. transitively via `origins_of_kind`) cannot deadlock against
+    /// the same lock.
     pub fn walk_origin_chain<F>(&self, node: SemanticNodeId, mut visitor: F)
     where
         F: FnMut(OriginEdgeKind, &OriginEdge),
     {
-        let store = self.derivation.lock();
-        for (kind, edge) in store.origins(node) {
-            visitor(kind, edge);
+        let edges = {
+            let store = self.derivation.lock();
+            store
+                .origins(node)
+                .map(|(kind, edge)| (kind, edge.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (kind, edge) in &edges {
+            visitor(*kind, edge);
         }
     }
 
@@ -937,13 +1031,36 @@ impl SemanticGraphStore {
     // ──────────────────────────────────────────────────────────────────
 
     /// Read an immutable snapshot of every counter the store maintains.
-    /// Safe to call mid-request; counters are atomic so no torn reads.
+    /// Safe to call mid-request; counters are atomic and percentile
+    /// computation locks-and-clones the sample reservoir so no torn
+    /// reads.
     #[must_use]
     pub fn stats_snapshot(&self) -> SemanticGraphStats {
         let derivation = self.derivation.lock();
         let origin_edge_count = derivation.edge_count() as u64;
-        let max_origin_edges_per_node = derivation.max_edges_per_node() as u32;
+        // origin_edges_per_node percentiles are derived from the
+        // derivation store directly (no separate sample reservoir
+        // needed — the store already records the full edge layout).
+        let mut by_node: FxHashMap<SemanticNodeId, u32> = FxHashMap::default();
+        for ((node, _kind), edges) in &derivation.edges {
+            let cell = by_node.entry(*node).or_insert(0);
+            *cell = cell.saturating_add(edges.len() as u32);
+        }
         drop(derivation);
+        let mut per_node_counts: Vec<u32> = by_node.into_values().collect();
+        per_node_counts.sort_unstable();
+        let origin_edges_per_node_p50 = sorted_percentile(&per_node_counts, 0.5);
+        let origin_edges_per_node_p95 = sorted_percentile(&per_node_counts, 0.95);
+
+        let path_samples = self.stats.path_length_samples.lock();
+        let path_length_p50 = path_samples.percentile(0.5);
+        let path_length_p95 = path_samples.percentile(0.95);
+        drop(path_samples);
+        let proj_samples = self.stats.projection_depth_samples.lock();
+        let projection_depth_p50 = proj_samples.percentile(0.5);
+        let projection_depth_p95 = proj_samples.percentile(0.95);
+        drop(proj_samples);
+
         SemanticGraphStats {
             hits: self.stats.hits.load(Ordering::Relaxed),
             misses: self.stats.misses.load(Ordering::Relaxed),
@@ -956,7 +1073,8 @@ impl SemanticGraphStore {
             memo_entry_count: self.memo_entry_count() as u64,
             origin_edge_count,
             origin_edges_emitted: self.stats.origin_edges_emitted.load(Ordering::Relaxed),
-            max_origin_edges_per_node,
+            origin_edges_per_node_p50,
+            origin_edges_per_node_p95,
             instantiate_count: self.stats.instantiate_count.load(Ordering::Relaxed),
             conditional_decided_count: self.stats.conditional_decided_count.load(Ordering::Relaxed),
             conditional_deferred_count: self
@@ -966,8 +1084,10 @@ impl SemanticGraphStore {
             branch_selections_true: self.stats.branch_selections_true.load(Ordering::Relaxed),
             branch_selections_false: self.stats.branch_selections_false.load(Ordering::Relaxed),
             budget_fallback_count: self.stats.budget_fallback_count.load(Ordering::Relaxed),
-            max_path_length: self.stats.max_path_length.load(Ordering::Relaxed),
-            max_projection_depth: self.stats.max_projection_depth.load(Ordering::Relaxed),
+            path_length_p50,
+            path_length_p95,
+            projection_depth_p50,
+            projection_depth_p95,
         }
     }
 
@@ -1002,33 +1122,16 @@ impl SemanticGraphStore {
             .budget_fallback_count
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Record one path-length sample into the bounded reservoir.
+    /// Builders call this once per `ProjectPath` invocation in C-phase.
     pub fn record_path_length(&self, length: u32) {
-        let mut current = self.stats.max_path_length.load(Ordering::Relaxed);
-        while length > current {
-            match self.stats.max_path_length.compare_exchange_weak(
-                current,
-                length,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
-        }
+        self.stats.path_length_samples.lock().push(length);
     }
+    /// Record one projection-depth sample into the bounded reservoir.
+    /// Builders call this once per recursive projection descent in
+    /// C-phase.
     pub fn record_projection_depth(&self, depth: u32) {
-        let mut current = self.stats.max_projection_depth.load(Ordering::Relaxed);
-        while depth > current {
-            match self.stats.max_projection_depth.compare_exchange_weak(
-                current,
-                depth,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
-        }
+        self.stats.projection_depth_samples.lock().push(depth);
     }
 
     /// Warm-lookup a key. Returns the memoized result + its recorded
@@ -1129,10 +1232,11 @@ impl SemanticGraphStore {
             true
         };
         debug_assert!(should_build);
-        // Cold winner — record the in-flight presence for peak tracking
-        // and ensure the exit decrement runs even on panic via the
-        // existing InflightPanicGuard (extended below to cover this).
+        // Cold winner — record the in-flight presence for peak tracking.
+        // The `InFlightStatsGuard` decrements `in_flight_current` on
+        // drop so a panic in the cold build cannot leak the counter.
         self.stats.record_in_flight_enter();
+        let _inflight_stats_guard = InFlightStatsGuard { stats: &self.stats };
 
         // 4. Execute the cold build. Both the recursion stack entry and
         //    the in-flight admission are protected by RAII guards so a
@@ -1187,9 +1291,9 @@ impl SemanticGraphStore {
             let mut table = self.inflight.lock();
             table.remove(&key);
         }
-        // Decrement the in-flight presence counter. The peak counter is
-        // monotonic; this only updates the current count.
-        self.stats.record_in_flight_exit();
+        // `_inflight_stats_guard` decrements `in_flight_current` on
+        // scope exit (here on the normal-return path, also on panic
+        // before this point thanks to the Drop impl).
 
         CacheRead {
             value: result,
@@ -2357,6 +2461,143 @@ mod tests {
         assert_eq!(s1, s2, "two consecutive snapshots must be identical");
         assert_eq!(s1.misses, 1);
         assert_eq!(s1.memo_entry_count, 1);
+    }
+
+    /// `record_path_length` and `record_projection_depth` push samples
+    /// into reservoirs whose p50 / p95 surface on the next snapshot.
+    #[test]
+    fn record_path_length_and_projection_depth_drive_percentiles() {
+        let store = SemanticGraphStore::new();
+        // Path lengths 1..=100 → p50 ≈ 50, p95 ≈ 95.
+        for n in 1..=100u32 {
+            store.record_path_length(n);
+            store.record_projection_depth(n * 2);
+        }
+        let stats = store.stats_snapshot();
+        // Nearest-rank percentile (R-3 / PERCENTILE.INC):
+        //   idx = round((N-1) * p)
+        // For N=100 samples sorted 1..=100:
+        //   p50 → round(99 * 0.5) = round(49.5) = 50 → sorted[50] = 51
+        //   p95 → round(99 * 0.95) = round(94.05) = 94 → sorted[94] = 95
+        assert_eq!(stats.path_length_p50, 51);
+        assert_eq!(stats.path_length_p95, 95);
+        // projection_depth samples are 2..=200 step 2 (100 samples):
+        //   sorted[50] = 2 * 51 = 102; sorted[94] = 2 * 95 = 190.
+        assert_eq!(stats.projection_depth_p50, 102);
+        assert_eq!(stats.projection_depth_p95, 190);
+    }
+
+    /// `origin_edges_per_node_p50/p95` are computed at snapshot time
+    /// from the derivation store directly — no separate sample
+    /// reservoir is needed because the store already records the full
+    /// per-node edge layout.
+    #[test]
+    fn origin_edges_per_node_percentiles_derive_from_derivation_store() {
+        let store = SemanticGraphStore::new();
+        let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        // 10 result nodes each with a different number of origin edges:
+        // node[i] gets (i + 1) edges. After insertion the per-node
+        // counts sorted ascending are [1, 2, 3, …, 10] → p50 = 6, p95 = 10.
+        for i in 0..10u32 {
+            let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+            for _ in 0..=i {
+                store.record_origin_edge(
+                    result,
+                    OriginEdgeKind::Instantiate,
+                    Arc::from(vec![src].into_boxed_slice()),
+                    crate::semantic_query::OriginMeta::None,
+                    dep_sig_for("/w/x.ts", 1),
+                );
+            }
+        }
+        let stats = store.stats_snapshot();
+        // Counts ascending = [1,2,3,4,5,6,7,8,9,10]; nearest-rank
+        // p50 → idx round(9 * 0.5) = 5 → 6; p95 → idx round(9 * 0.95) = 9 → 10.
+        assert_eq!(stats.origin_edges_per_node_p50, 6);
+        assert_eq!(stats.origin_edges_per_node_p95, 10);
+    }
+
+    /// `walk_origin_chain` must release the derivation lock before
+    /// invoking the visitor — otherwise a visitor that walks the chain
+    /// transitively (e.g. by calling `origins_of_kind` to follow
+    /// sources) would deadlock on the non-reentrant `parking_lot::Mutex`.
+    /// The test materialises edges, then has the visitor call back into
+    /// the store; if the lock is still held when the visitor runs, the
+    /// re-entry hangs and the test times out.
+    #[test]
+    fn walk_origin_chain_releases_derivation_lock_before_visitor() {
+        let store = SemanticGraphStore::new();
+        let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let alias_decl = store.intern_node(SemanticNodeData::Alias(target));
+        store.record_origin_edge(
+            target,
+            OriginEdgeKind::AliasResolve,
+            Arc::from(vec![alias_decl].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/x.ts", 1),
+        );
+
+        let mut visited_count = 0usize;
+        store.walk_origin_chain(target, |_kind, _edge| {
+            // Recursive call back into the store from inside the
+            // visitor — would deadlock if the visitor still held the
+            // derivation lock.
+            let _ = store.origins(target);
+            let _ = store.origins_of_kind(target, OriginEdgeKind::AliasResolve);
+            visited_count += 1;
+        });
+        assert_eq!(visited_count, 1, "the single recorded edge was visited");
+    }
+
+    /// A panic inside the cold-build closure must NOT leak the
+    /// `in_flight_current` counter. The `InFlightStatsGuard`'s Drop impl
+    /// fires on the unwind path so the next non-panicking call sees a
+    /// fresh `in_flight_peak` baseline.
+    #[test]
+    fn panic_in_cold_build_does_not_leak_in_flight_stats_counter() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/leak.ts"),
+            name: Arc::from("Boom"),
+        });
+
+        // First call panics inside build — guard must drop and
+        // decrement in_flight_current back to 0.
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            store.execute_cooperative(
+                key.clone(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    panic!("simulated build panic");
+                },
+            )
+        }));
+        // Peak observed = 1 (the panicking caller's own enter).
+        assert_eq!(store.stats_snapshot().in_flight_peak, 1);
+
+        // Second call (different key, same store) — peak should still
+        // be 1 because the prior panic decremented the counter via the
+        // Drop guard. If the counter had leaked, the new caller's enter
+        // would observe `current = 1` and bump peak to 2.
+        let key2 = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/leak.ts"),
+            name: Arc::from("Foo"),
+        });
+        let _ = store.execute_cooperative(
+            key2,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+        assert_eq!(
+            store.stats_snapshot().in_flight_peak,
+            1,
+            "in_flight_peak must not bump after a prior panic"
+        );
     }
 
     #[test]

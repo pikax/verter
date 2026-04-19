@@ -337,9 +337,14 @@ pub struct OriginEdge {
 /// Public snapshot of the semantic graph store's telemetry counters. Read
 /// from `SemanticGraphStore::stats_snapshot()`. Per `SemanticGraphKey`
 /// variant counters are aggregated; per-builder counters are aggregated;
-/// path / projection / origin-edge histograms are reduced to running max
-/// for B2 (p50/p95 percentile reduction is permitted follow-up work, not a
-/// semantics-changing addition — the raw counts are already exposed).
+/// path / projection / origin-edge metrics are reduced to p50 / p95 from
+/// host-side reservoir-sampled histograms (cap 8192 samples per metric).
+///
+/// Field set is normative against plan §6.3 — every field listed there
+/// (expected-to-fire + exceptional-path) must appear here, and every
+/// field here must appear in one of those lists. F2's
+/// `counter_taxonomy_matches_plan` test enforces the bidirectional
+/// equality.
 ///
 /// Snapshots are immutable and safe to read mid-request. The trace-check
 /// harness, the benchmark pipeline, and the F3 corpus benchmark consume
@@ -356,7 +361,8 @@ pub struct SemanticGraphStats {
     // ── Derivation / origin counters ─────────────────────────────────
     pub origin_edge_count: u64,
     pub origin_edges_emitted: u64,
-    pub max_origin_edges_per_node: u32,
+    pub origin_edges_per_node_p50: u32,
+    pub origin_edges_per_node_p95: u32,
     // ── Per-builder counters (incremented by builders in C-phase) ───
     pub instantiate_count: u64,
     pub conditional_decided_count: u64,
@@ -364,9 +370,12 @@ pub struct SemanticGraphStats {
     pub branch_selections_true: u64,
     pub branch_selections_false: u64,
     pub budget_fallback_count: u64,
-    // ── Path / projection histogram running max ─────────────────────
-    pub max_path_length: u32,
-    pub max_projection_depth: u32,
+    // ── Path / projection histogram percentiles (B2 baseline:
+    // reservoir-sampled by C-phase builders; F3 corpus consumes p50/p95).
+    pub path_length_p50: u32,
+    pub path_length_p95: u32,
+    pub projection_depth_p50: u32,
+    pub projection_depth_p95: u32,
 }
 
 /// Structured query-level failure. Distinct from panics — callers decide
