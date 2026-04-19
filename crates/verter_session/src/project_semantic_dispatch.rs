@@ -57,8 +57,8 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, PathSegment,
-    PrimitiveKind, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, NodeScopeId,
+    PathSegment, PrimitiveKind, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
@@ -166,9 +166,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // payload (surface members, union shape, intrinsic bodies, etc.)
         // is produced on-demand by the later navigation variants that
         // memoize against this anchor.
+        //
+        // Record the declaration's origin scope in the sidecar (plan §7.10
+        // + C1) so dispatch builders reached from this anchor can route
+        // per-base-scope lookups through the correct `SessionSolverHost`.
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&key.scope.canonical_id),
+            whole_hash: shallow.whole_hash,
+            local_scope: key.scope.local_scope,
+        };
         let node_id = self
             .graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+            .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Never), scope);
         let signature = self.dep_signature_for(&key.scope.canonical_id, shallow.whole_hash);
         (QueryResult::Value(node_id), signature)
     }
@@ -198,9 +207,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature());
         }
 
+        // Same scope-recording rule as `build_resolve_decl` — the value
+        // binding's origin scope is the owning canonical so dispatch
+        // builders downstream can reach the correct declaration file.
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&value_root.scope.canonical_id),
+            whole_hash: shallow.whole_hash,
+            local_scope: value_root.scope.local_scope,
+        };
         let node_id = self
             .graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+            .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Never), scope);
         let signature = self.dep_signature_for(&value_root.scope.canonical_id, shallow.whole_hash);
         (QueryResult::Value(node_id), signature)
     }
@@ -616,6 +633,164 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
         .iter()
         .find(|m| m.name.as_ref() == needle)
         .map(|m| m.value)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// DispatchHost trait + session-owned adapter (plan §7.9 + §7.10 + C1)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// `DispatchHost` is the scope-free minimum-surface host seam dispatch
+// builders use to reach host-owned prepared declarations, root identities,
+// utility classification, and bare-reference origin classification. It is
+// **not** the solver's `TypeSolverHost` — `SessionSolverHost` stays the
+// solver-internal host for `TypeQueryEngine`.
+//
+// The session-owned adapter [`SessionDispatchHost`] implements the trait
+// by consulting [`SemanticGraphStore::node_scope`] for each base node to
+// reconstruct the originating scope and construct the correct
+// [`SessionSolverHost`] per-base. Dispatch builders take `&dyn DispatchHost`
+// rather than `&VerterHost`, so they never know about `SessionSolverHost`
+// directly (plan §7.9).
+//
+// C1 lands the scaffolding; the consuming builders (real `build_instantiate`
+// etc.) pull `&dyn DispatchHost` in a later structural increment within the
+// C1 commit band. Until then, the adapter is complete but only directly
+// tested via the routing assertion.
+
+use verter_semantic::analysis::type_solver::host::{
+    BareRefOrigin, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
+};
+use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+
+use crate::resolver_core::solver_host::SessionSolverHost;
+
+/// Scope-free, minimum-surface host seam for dispatch builders (plan §7.9 +
+/// §7.10 + C1).
+///
+/// Builders that need to reach host-owned prepared declarations, classify
+/// utility names, resolve root identities, or classify bare references take
+/// `&dyn DispatchHost`. The adapter internally queries
+/// [`SemanticGraphStore::node_scope`](crate::semantic_query_memo::SemanticGraphStore::node_scope)
+/// on the `base` id to route each lookup through the correct per-base
+/// scope — builders are scope-free and never construct a
+/// [`SessionSolverHost`] themselves.
+///
+/// **Contract:** every method takes the base [`SemanticNodeId`] whose scope
+/// informs the lookup. Implementations must return the same answer the
+/// scope-specific [`SessionSolverHost`] would for that base's origin scope.
+///
+/// Implementations: [`SessionDispatchHost`] routes per-base via the
+/// node-scope sidecar.
+pub trait DispatchHost {
+    /// Look up a prepared type declaration by its canonical root identity,
+    /// using the scope recorded in `base`'s sidecar to select the correct
+    /// per-scope [`SessionSolverHost`].
+    fn resolve_prepared_type_decl(
+        &self,
+        base: SemanticNodeId,
+        root_identity: &ResolvedRootIdentity,
+    ) -> Option<Arc<PreparedTypeDecl>>;
+
+    /// Resolve a `(canonical_id, symbol_name)` pair into a stable root
+    /// declaration identity, following re-exports and barrel hops through
+    /// `base`'s scope.
+    fn root_identity(
+        &self,
+        base: SemanticNodeId,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ResolvedRootIdentity>;
+
+    /// Classify whether `name` is a built-in TS utility, user-shadowed, or
+    /// unknown in `base`'s scope. Scope matters because a local binding in
+    /// scope A can shadow a built-in that is not shadowed in scope B.
+    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource;
+
+    /// Classify whether `name` resolves locally or through an import in
+    /// `base`'s scope. Used by lazy field expansion to keep imported
+    /// object-like refs symbolic until a deeper route is requested.
+    fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin;
+}
+
+/// Session-owned [`DispatchHost`] implementation (plan §7.10).
+///
+/// Given a base [`SemanticNodeId`], consults
+/// [`SemanticGraphStore::node_scope`] to reconstruct the originating
+/// [`NodeScopeId`]. Routes each method through a freshly-constructed
+/// [`SessionSolverHost`]:
+///
+/// - [`NodeScopeId::File { canonical_id, .. }`] → `SessionSolverHost::with_declaration_scope`
+/// - [`NodeScopeId::Global`] / exempt / missing → `SessionSolverHost::new` (unscoped)
+///
+/// The adapter holds only a host reference; scope is resolved fresh per
+/// call so the adapter stays `Send + Sync` and cheap to construct.
+pub struct SessionDispatchHost<'a> {
+    host: &'a VerterHost,
+}
+
+impl<'a> SessionDispatchHost<'a> {
+    /// Construct an adapter bound to `host`. The adapter does not retain a
+    /// base node or a scope payload — it re-resolves per-base scope on
+    /// every call via [`Self::base_scope`].
+    #[must_use]
+    pub fn new(host: &'a VerterHost) -> Self {
+        Self { host }
+    }
+
+    /// Public accessor for `base`'s recorded origin scope. Returns
+    /// [`NodeScopeId::Global`] for exempt or missing nodes so every base
+    /// has a well-defined routing decision.
+    ///
+    /// Exposed so tests can observe routing behaviour without setting up
+    /// a full `SessionSolverHost` fixture.
+    #[must_use]
+    pub fn base_scope(&self, base: SemanticNodeId) -> NodeScopeId {
+        self.host
+            .project_type_store()
+            .semantic_graph()
+            .node_scope(base)
+            .unwrap_or(NodeScopeId::Global)
+    }
+
+    /// Construct a [`SessionSolverHost`] scoped to `base`'s origin scope.
+    /// Called internally by every trait method.
+    fn solver_host_for_base(&self, base: SemanticNodeId) -> SessionSolverHost<'a> {
+        match self.base_scope(base) {
+            NodeScopeId::File { canonical_id, .. } => {
+                SessionSolverHost::with_declaration_scope(self.host, canonical_id.as_ref())
+            }
+            NodeScopeId::Global => SessionSolverHost::new(self.host),
+        }
+    }
+}
+
+impl<'a> DispatchHost for SessionDispatchHost<'a> {
+    fn resolve_prepared_type_decl(
+        &self,
+        base: SemanticNodeId,
+        root_identity: &ResolvedRootIdentity,
+    ) -> Option<Arc<PreparedTypeDecl>> {
+        self.solver_host_for_base(base)
+            .resolve_prepared_type_decl(root_identity)
+    }
+
+    fn root_identity(
+        &self,
+        base: SemanticNodeId,
+        canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        self.solver_host_for_base(base)
+            .root_identity(canonical_id, symbol_name)
+    }
+
+    fn utility_source(&self, base: SemanticNodeId, name: &str) -> UtilitySource {
+        self.solver_host_for_base(base).utility_source(name)
+    }
+
+    fn bare_ref_origin(&self, base: SemanticNodeId, name: &str) -> BareRefOrigin {
+        self.solver_host_for_base(base).bare_ref_origin(name)
+    }
 }
 
 #[cfg(test)]
@@ -1473,5 +1648,84 @@ mod tests {
             graph.get(&raw_sugar).is_none(),
             "raw ProjectMember key should not appear in the memo"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // DispatchHost adapter routing (plan §7.10 + C1)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The session-owned [`SessionDispatchHost`] adapter consults the
+    /// [`SemanticGraphStore`] sidecar to route each base node to its
+    /// origin scope. Two nodes interned under different scopes route to
+    /// different scopes; an exempt node routes to `Global`.
+    #[test]
+    fn dispatch_host_adapter_routes_per_base_scope() {
+        use crate::semantic_query::NodeScopeId;
+
+        let host = host();
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let scope_a = NodeScopeId::File {
+            canonical_id: Arc::from("/w/scope_a.ts"),
+            whole_hash: [1u8; 16],
+            local_scope: None,
+        };
+        let scope_b = NodeScopeId::File {
+            canonical_id: Arc::from("/w/scope_b.ts"),
+            whole_hash: [2u8; 16],
+            local_scope: Some(5),
+        };
+
+        let anchor_a = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Never),
+            scope_a.clone(),
+        );
+        let anchor_b = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+            scope_b.clone(),
+        );
+        // Global-origin helper intermediate.
+        let global_anchor = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let adapter = SessionDispatchHost::new(&host);
+
+        // Per-base routing: each base's scope comes back from the sidecar.
+        assert_eq!(adapter.base_scope(anchor_a), scope_a);
+        assert_eq!(adapter.base_scope(anchor_b), scope_b);
+        // Scope-less base routes to `Global`.
+        assert_eq!(adapter.base_scope(global_anchor), NodeScopeId::Global);
+
+        // The adapter reports the origin scope, not the caller's scope —
+        // two reads from two different "perspectives" always see the
+        // origin. We simulate this by making two calls in sequence; the
+        // sidecar is write-once, so the recorded scope stays stable
+        // regardless of the caller.
+        assert_eq!(adapter.base_scope(anchor_a), scope_a);
+        assert_eq!(adapter.base_scope(anchor_a), scope_a);
+
+        // Exempt nodes (VueMacroElements) route to `Global` because
+        // the sidecar has no entry for them — the fallback is `Global`
+        // so every base has a well-defined routing decision.
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+        let vue_id = graph.intern_node(SemanticNodeData::VueMacroElements(Arc::new(
+            ResolvedElements::default(),
+        )));
+        assert_eq!(adapter.base_scope(vue_id), NodeScopeId::Global);
+
+        // Trait methods route through `solver_host_for_base`. Without
+        // prepared decls set up, `resolve_prepared_type_decl` returns
+        // `None` but the call succeeds for all scopes (no panic, no
+        // stale state between calls).
+        let ri = ResolvedRootIdentity::new("/w/scope_a.ts", "Missing");
+        assert!(adapter.resolve_prepared_type_decl(anchor_a, &ri).is_none());
+        assert!(adapter.resolve_prepared_type_decl(anchor_b, &ri).is_none());
+        assert!(adapter
+            .resolve_prepared_type_decl(global_anchor, &ri)
+            .is_none());
+
+        // `utility_source` and `bare_ref_origin` behave per-scope; without
+        // user shadowings these return `Builtin` / `Unknown` respectively.
+        let _ = adapter.utility_source(anchor_a, "Partial");
+        let _ = adapter.bare_ref_origin(anchor_a, "Foo");
     }
 }

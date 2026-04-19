@@ -35,32 +35,89 @@ use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, OriginEdge,
-    OriginEdgeKind, PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey,
-    SemanticGraphRead, SemanticGraphStats, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    ValueRootKey,
+    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, NodeScopeId,
+    OriginEdge, OriginEdgeKind, PathSegment, ProjectionMode, QueryError, QueryResult,
+    ResolveDeclKey, SemanticGraphRead, SemanticGraphStats, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey, ValueRootKey,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
 // Node arena — append-only, stable ids
 // ──────────────────────────────────────────────────────────────────────────
+//
+// The arena pairs each interned [`SemanticNodeData`] with an **origin-scope
+// sidecar** (plan §7.10 + C1): a `Vec<Option<NodeScopeId>>` parallel to the
+// node vec, so `scopes[id]` answers "where was node `id` first interned?" in
+// one vector index. Dispatch builders query the sidecar via
+// [`SemanticGraphStore::node_scope`] to route per-base-scope lookups through
+// the correct [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
+// without threading scope through every call.
+//
+// **Exempt variants.** `SemanticNodeData::VueMacroElements` nodes store
+// `None` in the sidecar slot — they live on the parser's refcount-only hot
+// path and are never consumed by dispatch builders that walk `node_scope`.
+// The exemption is enforced structurally inside `push_impl` so callers can't
+// accidentally populate a sidecar entry for a vue-macro node.
+//
+// **Lock ordering.** Only `push_impl` acquires both `nodes` and `scopes`; it
+// always takes `nodes` first, then `scopes`. Readers grab one lock at a
+// time (either `nodes` or `scopes`, never both), so no AB-BA cycle can
+// exist.
 
 #[derive(Default)]
 struct NodeArena {
     nodes: Mutex<Vec<Arc<SemanticNodeData>>>,
+    /// Origin-scope sidecar (plan §7.10 + C1). Index-aligned with `nodes`.
+    /// `None` marks an exempt slot (`VueMacroElements`); `Some(scope)`
+    /// records the scope the node was first interned in (`Global` for
+    /// scope-less structural nodes, `File { .. }` for declaration-origin
+    /// nodes).
+    scopes: Mutex<Vec<Option<NodeScopeId>>>,
 }
 
 impl NodeArena {
+    /// Intern `data` with the `Global` scope tag. Helper intermediates and
+    /// purely structural nodes use this path — most existing interning
+    /// sites fall into this bucket.
     fn push(&self, data: SemanticNodeData) -> SemanticNodeId {
+        self.push_impl(data, NodeScopeId::Global)
+    }
+
+    /// Intern `data` and record `scope` in the origin sidecar. Called by
+    /// builders that know the declaration origin — `build_resolve_decl`,
+    /// `build_typeof`, C1's forthcoming `build_instantiate`, etc.
+    fn push_with_scope(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+        self.push_impl(data, scope)
+    }
+
+    fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+        // `VueMacroElements` is exempt per plan §7.10 — record `None` so
+        // `node_scope` returns `None` rather than `Some(Global)` for those
+        // nodes.
+        let sidecar_entry = match &data {
+            SemanticNodeData::VueMacroElements(_) => None,
+            _ => Some(scope),
+        };
+
         let mut nodes = self.nodes.lock();
+        let mut scopes = self.scopes.lock();
         let id = SemanticNodeId(nodes.len() as u64);
         nodes.push(Arc::new(data));
+        scopes.push(sidecar_entry);
         id
     }
 
     fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         let nodes = self.nodes.lock();
         nodes.get(id.0 as usize).cloned()
+    }
+
+    /// Return the recorded origin scope for `id` — `None` for exempt nodes
+    /// (or invalid ids), `Some(scope)` for everything else. Exempt slots
+    /// are `VueMacroElements` nodes (plan §7.10).
+    fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
+        let scopes = self.scopes.lock();
+        scopes.get(id.0 as usize).cloned().flatten()
     }
 
     fn len(&self) -> usize {
@@ -781,9 +838,56 @@ impl SemanticGraphStore {
     }
 
     /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
+    ///
+    /// The interned node records [`NodeScopeId::Global`] in the origin
+    /// sidecar (see [`Self::node_scope`]) — use
+    /// [`Self::intern_node_with_scope`] when the node's origin scope is
+    /// known (declaration anchors, instantiated shells, surface members
+    /// whose value carries a declaration identity, etc.).
+    ///
+    /// [`SemanticNodeData::VueMacroElements`] nodes are sidecar-exempt per
+    /// plan §7.10 — their sidecar slot is forced to `None` structurally,
+    /// regardless of which intern entry point is used.
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
         self.arena.push(data)
+    }
+
+    /// Intern `data` and record `scope` in the origin sidecar. Dispatch
+    /// builders that know the node's declaration origin (e.g.
+    /// `build_resolve_decl` / `build_typeof` / `build_instantiate`) use
+    /// this entry point so per-base-scope routing via [`Self::node_scope`]
+    /// returns the originating scope later.
+    ///
+    /// [`SemanticNodeData::VueMacroElements`] nodes are sidecar-exempt per
+    /// plan §7.10; passing a non-`Global` scope has no effect for that
+    /// variant — the sidecar slot is forced to `None` structurally.
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+    pub fn intern_node_with_scope(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        self.arena.push_with_scope(data, scope)
+    }
+
+    /// Return the recorded origin scope for `id`.
+    ///
+    /// Returns:
+    /// - `None` — `id` is an exempt [`SemanticNodeData::VueMacroElements`]
+    ///   node, or the id is out of bounds for the arena.
+    /// - `Some(NodeScopeId::Global)` — scope-less structural node
+    ///   (primitive, shared literal-union, helper intermediate).
+    /// - `Some(NodeScopeId::File { .. })` — declaration-bound node whose
+    ///   origin scope is the recorded `(canonical_id, whole_hash,
+    ///   local_scope)` triple.
+    ///
+    /// The sidecar records the scope at the moment of **first intern**; a
+    /// reader that calls `node_scope(id)` from a different scope observes
+    /// the origin scope, not their own (plan §7.10).
+    #[must_use]
+    pub fn node_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
+        self.arena.scope(id)
     }
 
     /// Read the resolved payload for a semantic node id. Returns `None` if
@@ -3263,5 +3367,140 @@ mod tests {
             store.get(&formal_key).is_none(),
             "store.get must return None for ResolvedNamedType — it is bypassed"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // NodeScopeId origin-scope sidecar (plan §7.10 + C1)
+    //
+    // The sidecar records where each non-exempt node was first interned.
+    // Dispatch builders query `node_scope(id)` to reconstruct the
+    // originating scope and route per-base-scope lookups through the
+    // correct `SessionSolverHost`.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Every non-exempt `intern_node_with_scope` call populates the
+    /// sidecar at intern time. Plain `intern_node` records `Global`.
+    #[test]
+    fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
+        let store = SemanticGraphStore::new();
+
+        // Non-exempt scope-bound origin (e.g. `build_resolve_decl` /
+        // `build_instantiate` result).
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::from("/w/decl.ts"),
+            whole_hash: [7u8; 16],
+            local_scope: None,
+        };
+        let decl_id = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+            scope.clone(),
+        );
+        assert_eq!(
+            store.node_scope(decl_id),
+            Some(scope.clone()),
+            "decl-origin node must record its scope in the sidecar",
+        );
+
+        // Helper intermediate / structural node (no scope-bound origin).
+        let global_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        assert_eq!(
+            store.node_scope(global_id),
+            Some(NodeScopeId::Global),
+            "scope-less intern_node must record Global",
+        );
+
+        // Multiple non-exempt nodes get independent sidecar slots.
+        let scope_b = NodeScopeId::File {
+            canonical_id: Arc::from("/w/other.ts"),
+            whole_hash: [8u8; 16],
+            local_scope: Some(3),
+        };
+        let decl_b_id = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Never),
+            scope_b.clone(),
+        );
+        assert_eq!(store.node_scope(decl_b_id), Some(scope_b));
+        // First node's scope is unchanged (the sidecar is per-id, not
+        // shared across interns).
+        assert_eq!(store.node_scope(decl_id), Some(scope));
+    }
+
+    /// `node_scope(id)` returns the **origin** scope (where the node was
+    /// first interned), not the reader's scope. Dispatch builders on
+    /// scope B who query a node interned in scope A observe scope A.
+    #[test]
+    fn node_scope_returns_origin_not_reader_scope() {
+        let store = SemanticGraphStore::new();
+        let scope_a = NodeScopeId::File {
+            canonical_id: Arc::from("/w/a.ts"),
+            whole_hash: [1u8; 16],
+            local_scope: None,
+        };
+        let scope_b = NodeScopeId::File {
+            canonical_id: Arc::from("/w/b.ts"),
+            whole_hash: [2u8; 16],
+            local_scope: None,
+        };
+
+        // Node interned from scope A.
+        let id = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+            scope_a.clone(),
+        );
+
+        // Reader from scope B queries the sidecar — the sidecar returns
+        // scope A, not scope B (plan §7.10: origin, not reader).
+        let observed = store.node_scope(id);
+        assert_eq!(observed, Some(scope_a));
+        assert_ne!(observed, Some(scope_b));
+    }
+
+    /// `SemanticNodeData::VueMacroElements` nodes are sidecar-exempt
+    /// (plan §7.10): they live on the parser's refcount-only hot path
+    /// and are never consumed by dispatch builders that walk
+    /// `node_scope`. The sidecar slot is forced to `None` structurally
+    /// so `node_scope(vue_id)` returns `None` rather than
+    /// `Some(Global)`.
+    #[test]
+    fn vue_macro_elements_nodes_do_not_populate_node_scope_sidecar() {
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+        let store = SemanticGraphStore::new();
+        let payload = Arc::new(ResolvedElements::default());
+        let vue_id = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
+        assert_eq!(
+            store.node_scope(vue_id),
+            None,
+            "VueMacroElements nodes must not populate the sidecar",
+        );
+
+        // Even passing a non-Global scope via `intern_node_with_scope`
+        // has no effect — the exemption is structural.
+        let vue_id_b = store.intern_node_with_scope(
+            SemanticNodeData::VueMacroElements(Arc::clone(&payload)),
+            NodeScopeId::File {
+                canonical_id: Arc::from("/w/caller.ts"),
+                whole_hash: [0u8; 16],
+                local_scope: None,
+            },
+        );
+        assert_eq!(
+            store.node_scope(vue_id_b),
+            None,
+            "VueMacroElements exemption must be structural, not opt-in",
+        );
+
+        // Meanwhile an adjacent non-exempt intern still records its
+        // scope — the exemption does not leak into neighbouring slots.
+        let primitive_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        assert_eq!(store.node_scope(primitive_id), Some(NodeScopeId::Global));
+
+        // Hot-path access via the resolved-named-type index is
+        // unchanged — the sidecar exemption does not affect payload
+        // retrieval.
+        let key = make_key("/w/named.ts", [9u8; 16], "Foo");
+        let inserted = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+        assert_eq!(store.node_scope(inserted), None);
+        assert!(store.get_resolved_named_type(&key).is_some());
     }
 }

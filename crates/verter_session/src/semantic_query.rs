@@ -62,6 +62,44 @@ pub struct ScopeId {
     pub local_scope: Option<u32>,
 }
 
+/// Source-scope sidecar tag for a [`SemanticNodeId`] (plan §7.10 + C1).
+///
+/// Every non-exempt interned node records the scope it was first interned in
+/// so dispatch builders that need per-base-scope resolution (e.g. selecting
+/// the correct [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
+/// for an `Instantiate` lookup) can reconstruct the originating scope without
+/// threading it through every call.
+///
+/// - `Global` — fully structural nodes (primitives, shared literal-unions,
+///   helper intermediates) that carry no scope-bound origin. The default
+///   when a non-exempt node is interned via the unscoped
+///   [`SemanticGraphStore::intern_node`](crate::semantic_query_memo::SemanticGraphStore::intern_node)
+///   overload.
+/// - `File { canonical_id, whole_hash, local_scope }` — declaration-origin
+///   nodes (declaration anchors, instantiated shells, surface members when
+///   their value carries a declaration identity, etc.).
+///
+/// **Exempt variants.** [`SemanticNodeData::VueMacroElements`] nodes do NOT
+/// populate the sidecar — they live on the parser's refcount-only hot path
+/// and are never consumed by dispatch builders that walk
+/// [`SemanticGraphStore::node_scope`](crate::semantic_query_memo::SemanticGraphStore::node_scope).
+/// For an exempt node id, `node_scope` returns `None` (no sidecar entry).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NodeScopeId {
+    /// Structural / scope-less origin. Primitives, shared literal-unions,
+    /// helper intermediates.
+    Global,
+    /// Declaration-bound origin. `canonical_id` names the owning file;
+    /// `whole_hash` pins the file's content generation; `local_scope`
+    /// optionally disambiguates inner scopes (block, lambda body,
+    /// type-param scope).
+    File {
+        canonical_id: Arc<str>,
+        whole_hash: HashValue,
+        local_scope: Option<u32>,
+    },
+}
+
 /// Resolved-declaration lookup key. Two callers from the same scope for the
 /// same name produce the same key and dedup automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

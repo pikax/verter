@@ -55,6 +55,28 @@ impl Default for SolveLimits {
     }
 }
 
+impl SolveLimits {
+    /// Small-budget fixture helper for tests that need to trip
+    /// [`BudgetExceededFailure`](crate::analysis::type_solver::BudgetExceededFailure)
+    /// without constructing pathological inputs (plan §3 C1 + §6.2 forcing
+    /// tests).
+    ///
+    /// `max_resolve_steps = 50` and `max_arena_nodes = 500` are small
+    /// enough that any non-trivial instantiation or conditional chain
+    /// trips the budget on a realistic workload, while `max_instantiation_depth`
+    /// and `max_diagnostics` stay generous so the trip domain is
+    /// unambiguous.
+    #[must_use]
+    pub fn for_test_small_budget() -> Self {
+        Self {
+            max_instantiation_depth: 50,
+            max_resolve_steps: 50,
+            max_arena_nodes: 500,
+            max_diagnostics: 50,
+        }
+    }
+}
+
 /// Mutable solver state for a single query.
 pub struct SolveState {
     pub depth: u32,
