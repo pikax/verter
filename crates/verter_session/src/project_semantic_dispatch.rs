@@ -566,35 +566,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the member names as `Primitive(String)` anchors — this matches the
     /// TS semantics that `keyof T` yields a union of string literals.
     /// For non-objects, returns `Opaque(Miss)`.
+    ///
+    /// Emits one `ProjectMember` edge per keyspace literal back to the
+    /// source object base, carrying the member name in
+    /// `OriginMeta::MemberName` (plan §3 C5). The edge lets walkers
+    /// reconstruct which source member each keyspace literal derives from.
     fn build_key_of(&self, base: SemanticNodeId) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let data = self.graph().node_data(base);
+        let fence = self.project_generation_signature();
         let node = match data.as_deref() {
             Some(SemanticNodeData::Object(surface)) => {
-                let member_ids: Vec<SemanticNodeId> = surface
+                let member_literals: Vec<(SemanticNodeId, Arc<str>)> = surface
                     .members
                     .iter()
-                    .map(|_member| {
-                        self.graph()
-                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))
+                    .map(|member| {
+                        let lit = self
+                            .graph()
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                        (lit, Arc::clone(&member.name))
                     })
                     .collect();
-                if member_ids.is_empty() {
+                // Emit per-literal ProjectMember edges so keyof's
+                // origin layer carries the source-member mapping (plan
+                // §3 C5).
+                for (lit_id, name) in &member_literals {
+                    self.graph().record_origin_edge(
+                        *lit_id,
+                        OriginEdgeKind::ProjectMember,
+                        Arc::from(vec![base].into_boxed_slice()),
+                        OriginMeta::MemberName(Arc::clone(name)),
+                        Arc::clone(&fence),
+                    );
+                }
+                let ids: Vec<SemanticNodeId> =
+                    member_literals.into_iter().map(|(id, _)| id).collect();
+                if ids.is_empty() {
                     self.graph()
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if member_ids.len() == 1 {
-                    member_ids[0]
+                } else if ids.len() == 1 {
+                    ids[0]
                 } else {
-                    self.graph().intern_node(SemanticNodeData::Union(Arc::from(
-                        member_ids.into_boxed_slice(),
-                    )))
+                    self.graph()
+                        .intern_node(SemanticNodeData::Union(Arc::from(ids.into_boxed_slice())))
                 }
             }
             _ => self.opaque(QueryError::Miss),
         };
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        (QueryResult::Value(node), fence)
     }
 
     /// Mapped-type rewrite. The shared-graph payload does not yet retain
@@ -742,28 +760,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Union normalization. Structurally sorts + dedups the supplied members
     /// and publishes the canonical union node. Singleton unions fold to
     /// their only member; empty unions fold to `Primitive(Never)`.
+    ///
+    /// Emits one `Normalize` origin edge from the result to each
+    /// contributing source member (plan §3 C5). The edge lets walkers
+    /// recover the pre-canonical input set even after dedup / sorting.
+    /// Single-member / empty folds emit no edge — the result IS one of
+    /// the inputs (or a fresh Never node) and there's no canonicalisation
+    /// fact to record.
     fn build_normalize_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ true);
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        let fence = self.project_generation_signature();
+        if members.len() > 1 {
+            self.graph().record_origin_edge(
+                node,
+                OriginEdgeKind::Normalize,
+                Arc::clone(members),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+        }
+        (QueryResult::Value(node), fence)
     }
 
     /// Intersection normalization. Structurally sorts + dedups; singleton
     /// folds to the only member; empty folds to `Primitive(Never)`.
+    ///
+    /// Emits one `Normalize` origin edge from the result to each
+    /// contributing source member (plan §3 C5).
     fn build_normalize_intersection(
         &self,
         members: &Arc<[SemanticNodeId]>,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let node = self.intern_normalized_union_or_intersection(members, /* is_union */ false);
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        let fence = self.project_generation_signature();
+        if members.len() > 1 {
+            self.graph().record_origin_edge(
+                node,
+                OriginEdgeKind::Normalize,
+                Arc::clone(members),
+                OriginMeta::None,
+                Arc::clone(&fence),
+            );
+        }
+        (QueryResult::Value(node), fence)
     }
 
     /// Vue macro resolution lookup.
@@ -3373,4 +3415,116 @@ mod tests {
             "mutual alias chain X→Y→X terminates with Opaque (no stack overflow)"
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // C5 — Normalize + KeyOf origin edges (plan §3 C5)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// `NormalizeUnion` / `NormalizeIntersection` emit one `Normalize`
+    /// origin edge from the result back to each pre-canonical source
+    /// member. Walkers can recover the original input set even after
+    /// dedup / sorting.
+    #[test]
+    fn normalize_records_sources() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let a = primitive(&graph, PrimitiveKind::String);
+        let b = primitive(&graph, PrimitiveKind::Number);
+        let c = primitive(&graph, PrimitiveKind::Boolean);
+        let members = Arc::from(vec![a, b, c].into_boxed_slice());
+        let result = match dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::clone(&members),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let edges = graph.origins_of_kind(result, OriginEdgeKind::Normalize);
+        assert!(
+            !edges.is_empty(),
+            "expected at least one Normalize edge on the result"
+        );
+        let edge = &edges[0];
+        // Sources include each contributing input (canonical order may
+        // sort them; check containment rather than exact order).
+        for m in members.iter() {
+            assert!(
+                edge.sources.iter().any(|id| id == m),
+                "Normalize edge sources must include each input member"
+            );
+        }
+
+        // Intersection records sources the same way.
+        let int_result = match dispatch.execute(SemanticQueryKey::NormalizeIntersection {
+            members: Arc::clone(&members),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let int_edges = graph.origins_of_kind(int_result, OriginEdgeKind::Normalize);
+        assert!(
+            !int_edges.is_empty(),
+            "expected at least one Normalize edge on the intersection result"
+        );
+    }
+
+    /// `keyof` emits one `ProjectMember` edge per keyspace literal,
+    /// sourcing the original object base and carrying the member name
+    /// in `OriginMeta::MemberName`.
+    #[test]
+    fn key_of_records_source_members() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let num = primitive(&graph, PrimitiveKind::Number);
+        let obj = simple_object(&graph, &[("a", num), ("b", num), ("c", num)]);
+
+        let result = match dispatch.execute(SemanticQueryKey::KeyOf { base: obj }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+
+        // Result should be a union of three string-primitive literals.
+        let data = graph.node_data(result).expect("result data");
+        let arms: Vec<SemanticNodeId> = match &*data {
+            SemanticNodeData::Union(ids) => ids.iter().copied().collect(),
+            SemanticNodeData::Primitive(PrimitiveKind::String) => vec![result],
+            other => panic!("expected Union / Primitive, got {other:?}"),
+        };
+        let mut found_names: Vec<String> = Vec::new();
+        for arm in &arms {
+            let edges = graph.origins_of_kind(*arm, OriginEdgeKind::ProjectMember);
+            for e in &edges {
+                if let OriginMeta::MemberName(name) = &e.meta {
+                    found_names.push(name.to_string());
+                    assert!(
+                        e.sources.iter().any(|id| *id == obj),
+                        "keyof ProjectMember edge must source the object base"
+                    );
+                }
+            }
+        }
+        found_names.sort();
+        assert_eq!(
+            found_names,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "keyof must emit one ProjectMember edge per source member name"
+        );
+    }
+
+    /// `ResolveDecl` on an aliased declaration (`type X = Y`) emits an
+    /// `AliasResolve` edge — requires unwrapping behaviour in
+    /// `build_resolve_decl` that the current `DeclAnchor`-only builder
+    /// intentionally does not provide. Deferred until C-phase follow-up
+    /// work adds alias unwrapping to declaration resolution.
+    #[test]
+    #[ignore = "pending alias unwrap in resolve_decl (C-phase follow-up)"]
+    fn resolve_decl_alias_emits_alias_resolve_edge() {}
+
+    /// Barrel alias chain (`barrel.ts` re-exports X from `types.ts`):
+    /// each hop emits its own `AliasResolve` edge. Requires resolve_decl
+    /// alias unwrap + per-hop emission (see previous test note).
+    #[test]
+    #[ignore = "pending alias unwrap in resolve_decl (C-phase follow-up)"]
+    fn barrel_alias_chain_emits_one_edge_per_hop() {}
 }
