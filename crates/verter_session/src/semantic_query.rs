@@ -134,16 +134,8 @@ pub enum ProjectionMode {
     Expanded,
 }
 
-/// Explicit expansion depth for [`SemanticQueryKey::Expand`]. Kept distinct
-/// from [`ProjectionMode`] because expansion is a standalone operation and
-/// projection is a per-hop choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExpandMode {
-    Shallow,
-    Expanded,
-}
-
-/// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`].
+/// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`]
+/// and as the segment list in [`SemanticQueryKey::ProjectPath`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathSegment {
     Member(Arc<str>),
@@ -163,23 +155,64 @@ pub enum HopDecision {
     Done,
 }
 
+/// One member of a [`SurfaceView`]. Members carry the full TypeScript
+/// member metadata that consumers downstream of dispatch need (component-meta,
+/// LSP hover, etc.) so no parallel "projected member" type has to exist.
+///
+/// `value` is a reference-style [`SemanticNodeId`] under the lazy-materialisation
+/// rule (plan §2): the member's body is **not** eagerly expanded when the
+/// owning surface is interned. A walker that needs the body issues
+/// [`SemanticQueryApi::execute`] with a [`SemanticQueryKey::ProjectPath`]
+/// rooted at `value`; the family memo dedups across distinct entry paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SurfaceMember {
+    pub name: Arc<str>,
+    pub value: SemanticNodeId,
+    pub optional: bool,
+    pub readonly: bool,
+    pub is_method: bool,
+}
+
+/// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)
+/// on a surface. Carried as structured metadata rather than an opaque
+/// [`SemanticNodeId`] so consumers downstream of dispatch can read the
+/// declared `key_type` / `value_type` shape directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexSignature {
+    pub key_type: SemanticNodeId,
+    pub value_type: SemanticNodeId,
+    pub readonly: bool,
+}
+
 /// One-level surface view of a semantic node. Members are ordered to keep
 /// hashing stable.
+///
+/// Extended in B1a (plan §2 lazy-materialisation block) to carry the full
+/// member + signature metadata previously held by the soon-to-be-retired
+/// `ProjectedMember` / `ProjectedSurface` / `ProjectedKeyspace` types in
+/// `verter_semantic::analysis::type_solver::query_engine`. Consumers should
+/// read these fields directly instead of going through the legacy projected
+/// types, which retire in D3 alongside `TypeSurfaceDb`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
-    pub members: Arc<[(Arc<str>, SemanticNodeId)]>,
-    pub index_signatures: Arc<[SemanticNodeId]>,
+    pub members: Arc<[SurfaceMember]>,
+    pub call_signatures: Arc<[SemanticNodeId]>,
+    pub construct_signatures: Arc<[SemanticNodeId]>,
+    pub index_signatures: Arc<[IndexSignature]>,
     pub keyspace: Option<SemanticNodeId>,
+    pub has_index_signature: bool,
 }
 
 impl std::hash::Hash for SurfaceView {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        for (name, id) in self.members.iter() {
-            name.hash(state);
-            id.hash(state);
+        for member in self.members.iter() {
+            member.hash(state);
         }
+        self.call_signatures.hash(state);
+        self.construct_signatures.hash(state);
         self.index_signatures.hash(state);
         self.keyspace.hash(state);
+        self.has_index_signature.hash(state);
     }
 }
 
@@ -282,9 +315,16 @@ pub enum SemanticQueryKey {
     NormalizeIntersection {
         members: Arc<[SemanticNodeId]>,
     },
-    Expand {
+    /// Path-precise projection rooted at `base` and walking each
+    /// [`PathSegment`] in `path`. The empty-path form (`path: Arc::from([])`)
+    /// is the canonical shape of "expand the whole surface" — the retired
+    /// `Expand` variant collapses into this. Single-hop `ProjectMember` /
+    /// `IndexedAccess` variants are admission-canonicalised to the equivalent
+    /// length-1 `ProjectPath` so sugar and canonical hit the same memo entry.
+    ProjectPath {
         base: SemanticNodeId,
-        mode: ExpandMode,
+        path: Arc<[PathSegment]>,
+        mode: ProjectionMode,
     },
     /// Identity for a Vue macro resolution artifact cached in the shared
     /// semantic graph under a [`HostResolvedNamedTypeKey`].
@@ -429,8 +469,13 @@ pub trait SemanticQueryApi {
     ) -> QueryResult<SemanticNodeId> {
         self.execute(SemanticQueryKey::IndexedAccess { base, index, mode })
     }
-    fn expand(&self, base: SemanticNodeId, mode: ExpandMode) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::Expand { base, mode })
+    fn project_path(
+        &self,
+        base: SemanticNodeId,
+        path: Arc<[PathSegment]>,
+        mode: ProjectionMode,
+    ) -> QueryResult<SemanticNodeId> {
+        self.execute(SemanticQueryKey::ProjectPath { base, path, mode })
     }
 }
 

@@ -18,11 +18,13 @@
 # Allowlist (whole-line scan; if any of these appear on the line, the line is exempt):
 #   - ProjectionMode::{Identity,Navigate,Shallow,Expanded}
 # Transitional allowlist (scope-bounded windows defined in the plan):
-#   - A1b → B1a:  ExpandMode::, SemanticQueryKey::Expand, build_expand
 #   - A1b → E1:   ResolverMode::Type, ResolverMode::Expanded
-# B1a removes the first set in the same commit it retires those identifiers
-# (§4 items 2 + 18). E1 removes the second set in the same commit it retires
-# the ResolverMode enum (§4 item 20).
+# E1 removes the transitional set in the same commit it retires the
+# ResolverMode enum (§4 item 20).
+#
+# B1a retired the A1b→B1a transitional set (ExpandMode::, SemanticQueryKey::Expand,
+# build_expand) by deleting those identifiers from the workspace, so this
+# allowlist no longer carries them.
 #
 # Adding a bare prose phrase like "Type mode" to the allowlist is forbidden by
 # the plan — rewrite the prose to backticked code form instead.
@@ -61,9 +63,6 @@ import sys
 
 ALLOWED_RX = re.compile(
     r'ProjectionMode::(?:Identity|Navigate|Shallow|Expanded)'
-    r'|ExpandMode::'
-    r'|SemanticQueryKey::Expand'
-    r'|build_expand'
     r'|ResolverMode::(?:Type|Expanded)'
 )
 
@@ -142,11 +141,6 @@ def main() -> None:
         )
         print(
             "Allowlist (always): ProjectionMode::{Identity,Navigate,Shallow,Expanded}.",
-            file=sys.stderr,
-        )
-        print(
-            "Transitional allowlist (A1b→B1a): "
-            "ExpandMode::, SemanticQueryKey::Expand, build_expand.",
             file=sys.stderr,
         )
         print(

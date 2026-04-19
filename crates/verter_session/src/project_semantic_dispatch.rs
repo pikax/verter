@@ -14,18 +14,25 @@
 //!   (an `Object` surface when the declaration carries member signatures,
 //!   otherwise a `Primitive(Never)` anchor that memoizes the declaration's
 //!   scope/name identity).
-//! - `Instantiate` / `Expand` — identity-preserving aliases anchored to the
-//!   base node. Memoizing these keys is itself the dedup guarantee; the
-//!   richer instantiation shape is produced on demand by the solver once
-//!   the caller walks into it.
+//! - `Instantiate` — identity-preserving alias anchored to the base node.
+//!   Memoizing the key is the dedup guarantee; the richer instantiation
+//!   shape is produced on demand by the solver once the caller walks into
+//!   it. Mode-free per the lazy-materialisation rule (plan §7.14).
+//! - `ProjectPath` — path-precise projection rooted at `base` walking each
+//!   [`PathSegment`]. The empty-path form is the canonical shape of
+//!   "expand the whole surface" and supersedes the retired `Expand`
+//!   variant. `ProjectMember { base, member, mode }` and
+//!   `IndexedAccess { base, index, mode }` admission-canonicalise to the
+//!   length-1 `ProjectPath` form **before** memo hashing so sugar and
+//!   canonical share one warm entry and one in-flight wait graph (plan
+//!   B1a).
 //! - `NormalizeUnion` / `NormalizeIntersection` — structural dedup over the
 //!   supplied members with stable ordering.
-//! - `ProjectMember` / `IndexedAccess` / `KeyOf` / `MappedType` /
-//!   `Conditional` — navigation operations that walk the base node's
-//!   shared-graph payload. Paths that do not reach a concrete node fall
-//!   through to a recorded `Opaque(Miss)` entry — this is distinct from a
-//!   dispatch miss because the warm entry observes the base node identity
-//!   and therefore dedups repeated asks.
+//! - `KeyOf` / `MappedType` / `Conditional` — navigation operations that
+//!   walk the base node's shared-graph payload. Paths that do not reach a
+//!   concrete node fall through to a recorded `Opaque(Miss)` entry — this
+//!   is distinct from a dispatch miss because the warm entry observes the
+//!   base node identity and therefore dedups repeated asks.
 //! - `TypeOf` — mirrors `ResolveDecl` but routes through the shallow
 //!   value-symbol space.
 //!
@@ -50,9 +57,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, PrimitiveKind,
-    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryApi, SemanticQueryKey, SurfaceView, ValueRootKey,
+    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, PathSegment,
+    PrimitiveKind, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -213,12 +220,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Expansion. Mirrors [`Self::build_instantiate`]: identity-preserving
-    /// alias anchored to the base so `expand(base)` memoizes.
-    fn build_expand(&self, base: SemanticNodeId) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let node = self.graph().intern_node(SemanticNodeData::Alias(base));
+    /// Path-precise projection. Walks each [`PathSegment`] from `base`,
+    /// hopping through [`SurfaceMember`] / index entries on object surfaces.
+    /// An empty path returns `base` directly — that is the canonical form of
+    /// "expand the whole surface" (the retired `Expand` variant).
+    ///
+    /// This implementation is the B1a baseline: it walks structural members
+    /// only and returns `Opaque(Miss)` on anything else (intersections,
+    /// unions, conditionals, instantiations). The lazy / path-distributing /
+    /// origin-emitting upgrade lands in C3 (`build_project_path` real
+    /// implementation per plan §3 Phase C).
+    fn build_project_path(
+        &self,
+        base: SemanticNodeId,
+        path: &Arc<[PathSegment]>,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let mut current = base;
+        for segment in path.iter() {
+            let data = self.graph().node_data(current);
+            current = match (data.as_deref(), segment) {
+                (Some(SemanticNodeData::Object(surface)), PathSegment::Member(name)) => surface
+                    .members
+                    .iter()
+                    .find(|m| m.name.as_ref() == name.as_ref())
+                    .map(|m| m.value)
+                    .unwrap_or_else(|| self.opaque(QueryError::Miss)),
+                (
+                    Some(SemanticNodeData::Object(surface)),
+                    PathSegment::Index(IndexKey::String(s)),
+                ) => surface
+                    .members
+                    .iter()
+                    .find(|m| m.name.as_ref() == s.as_ref())
+                    .map(|m| m.value)
+                    .unwrap_or_else(|| self.opaque(QueryError::Miss)),
+                (
+                    Some(SemanticNodeData::Object(surface)),
+                    PathSegment::Index(IndexKey::Number(n)),
+                ) => {
+                    let needle = n.to_string();
+                    surface
+                        .members
+                        .iter()
+                        .find(|m| m.name.as_ref() == needle.as_str())
+                        .map(|m| m.value)
+                        .unwrap_or_else(|| self.opaque(QueryError::Miss))
+                }
+                _ => self.opaque(QueryError::Miss),
+            };
+            if let Some(SemanticNodeData::Opaque(_)) = self.graph().node_data(current).as_deref() {
+                break;
+            }
+        }
         (
-            QueryResult::Value(node),
+            QueryResult::Value(current),
             self.project_generation_signature(),
         )
     }
@@ -238,8 +293,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::Object(surface)) => surface
                 .members
                 .iter()
-                .find(|(name, _)| name.as_ref() == member.as_ref())
-                .map(|(_, id)| *id)
+                .find(|m| m.name.as_ref() == member.as_ref())
+                .map(|m| m.value)
                 .unwrap_or_else(|| self.opaque(QueryError::Miss)),
             _ => self.opaque(QueryError::Miss),
         };
@@ -260,16 +315,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             (Some(SemanticNodeData::Object(surface)), IndexKey::String(s)) => surface
                 .members
                 .iter()
-                .find(|(name, _)| name.as_ref() == s.as_ref())
-                .map(|(_, id)| *id)
+                .find(|m| m.name.as_ref() == s.as_ref())
+                .map(|m| m.value)
                 .unwrap_or_else(|| self.opaque(QueryError::Miss)),
             (Some(SemanticNodeData::Object(surface)), IndexKey::Number(n)) => {
                 let needle = n.to_string();
                 surface
                     .members
                     .iter()
-                    .find(|(name, _)| name.as_ref() == needle.as_str())
-                    .map(|(_, id)| *id)
+                    .find(|m| m.name.as_ref() == needle.as_str())
+                    .map(|m| m.value)
                     .unwrap_or_else(|| self.opaque(QueryError::Miss))
             }
             _ => self.opaque(QueryError::Miss),
@@ -291,7 +346,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let member_ids: Vec<SemanticNodeId> = surface
                     .members
                     .iter()
-                    .map(|_| {
+                    .map(|_member| {
                         self.graph()
                             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))
                     })
@@ -452,11 +507,32 @@ fn canonicalize_node_list(members: &[SemanticNodeId]) -> Arc<[SemanticNodeId]> {
 
 impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
     fn execute(&self, key: SemanticQueryKey) -> QueryResult<SemanticNodeId> {
-        // Normalize structural-dedup variants at the dispatch boundary so
-        // `{A, B}` and `{B, A}` converge on the same memo entry. Other
-        // variants key off [`SemanticNodeId`]s that are already hashed
+        // Admission-time canonicalisation per plan B1a:
+        //   - `ProjectMember { base, member, mode }` rewrites to
+        //     `ProjectPath { base, path: [Member(member)], mode }` BEFORE the
+        //     key is hashed into the memo, so sugar and canonical share one
+        //     entry and one in-flight wait graph.
+        //   - `IndexedAccess { base, index, mode }` rewrites the same way to
+        //     `ProjectPath { base, path: [Index(index)], mode }`.
+        //   - `NormalizeUnion` / `NormalizeIntersection` get structural
+        //     member-list canonicalisation so `{A, B}` and `{B, A}` converge.
+        // Other variants key off [`SemanticNodeId`]s that are already hashed
         // verbatim.
         let key = match key {
+            SemanticQueryKey::ProjectMember { base, member, mode } => {
+                SemanticQueryKey::ProjectPath {
+                    base,
+                    path: Arc::from(vec![PathSegment::Member(member)].into_boxed_slice()),
+                    mode,
+                }
+            }
+            SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                SemanticQueryKey::ProjectPath {
+                    base,
+                    path: Arc::from(vec![PathSegment::Index(index)].into_boxed_slice()),
+                    mode,
+                }
+            }
             SemanticQueryKey::NormalizeUnion { members } => SemanticQueryKey::NormalizeUnion {
                 members: canonicalize_node_list(&members),
             },
@@ -475,11 +551,18 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
             SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
             SemanticQueryKey::Instantiate { base, args } => self.build_instantiate(*base, args),
+            // ProjectMember / IndexedAccess never reach the build closure once
+            // admission canonicalisation rewrites them to ProjectPath above —
+            // the arms remain to satisfy exhaustiveness; they retire in C4
+            // when the variants themselves are rewritten as thin wrappers.
             SemanticQueryKey::ProjectMember { base, member, .. } => {
                 self.build_project_member(*base, member)
             }
             SemanticQueryKey::IndexedAccess { base, index, .. } => {
                 self.build_indexed_access(*base, index)
+            }
+            SemanticQueryKey::ProjectPath { base, path, .. } => {
+                self.build_project_path(*base, path)
             }
             SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
             SemanticQueryKey::MappedType { source, .. } => self.build_mapped_type(*source),
@@ -490,7 +573,6 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             SemanticQueryKey::NormalizeIntersection { members } => {
                 self.build_normalize_intersection(members)
             }
-            SemanticQueryKey::Expand { base, .. } => self.build_expand(*base),
             SemanticQueryKey::ResolvedNamedType { key } => self.build_resolved_named_type(key),
         };
         let CacheRead { value, .. } = graph.execute_cooperative(key, sentinel, build);
@@ -532,15 +614,16 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
     surface
         .members
         .iter()
-        .find(|(name, _)| name.as_ref() == needle)
-        .map(|(_, id)| *id)
+        .find(|m| m.name.as_ref() == needle)
+        .map(|m| m.value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::semantic_query::{
-        ExpandMode, ProjectionMode, ScopeId, SemanticNodeData, SurfaceView,
+        IndexSignature, PathSegment, ProjectionMode, ScopeId, SemanticNodeData, SurfaceMember,
+        SurfaceView,
     };
     use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -783,9 +866,21 @@ mod tests {
 
         let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let surface = SurfaceView {
-            members: Arc::from(vec![(Arc::<str>::from("foo"), string_id)].into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            members: Arc::from(
+                vec![SurfaceMember {
+                    name: Arc::from("foo"),
+                    value: string_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
+            has_index_signature: false,
         };
         let obj = graph.intern_node(SemanticNodeData::Object(surface));
 
@@ -833,13 +928,28 @@ mod tests {
         let surface = SurfaceView {
             members: Arc::from(
                 vec![
-                    (Arc::<str>::from("a"), string_id),
-                    (Arc::<str>::from("b"), num_id),
+                    SurfaceMember {
+                        name: Arc::from("a"),
+                        value: string_id,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                    SurfaceMember {
+                        name: Arc::from("b"),
+                        value: num_id,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
                 ]
                 .into_boxed_slice(),
             ),
-            index_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
+            has_index_signature: false,
         };
         let obj = graph.intern_node(SemanticNodeData::Object(surface));
 
@@ -855,36 +965,318 @@ mod tests {
         }
     }
 
-    /// `Expand(base, mode)` memoizes: two repeated calls dedup onto the
-    /// same warm memo entry, and the warm entry records a dep signature.
+    /// B1a: `ProjectMember { base, member, mode }` and the equivalent
+    /// `ProjectPath { base, path: [Member(member)], mode }` admission-rewrite
+    /// to the same canonical key, so two repeated calls — sugar then
+    /// canonical — share one warm memo entry.
     #[test]
-    fn expand_dedups_and_records_dep_signature() {
+    fn project_path_of_length_one_dedups_with_project_member_at_memo() {
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let base = host
-            .project_type_store()
-            .semantic_graph()
-            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let key = SemanticQueryKey::Expand {
-            base,
-            mode: ExpandMode::Expanded,
+        let graph = host.project_type_store().semantic_graph();
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let surface = SurfaceView {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    name: Arc::from("foo"),
+                    value: string_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
         };
-        let first = dispatch.execute(key.clone());
-        let second = dispatch.execute(key.clone());
-        let (a, b) = match (first, second) {
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+        let via_sugar = dispatch.execute(SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from("foo"),
+            mode: ProjectionMode::Identity,
+        });
+        let via_canonical = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: obj,
+            path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
+            mode: ProjectionMode::Identity,
+        });
+        let (sugar_id, canonical_id) = match (via_sugar, via_canonical) {
             (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
             other => panic!("expected two values, got {other:?}"),
         };
-        assert_eq!(a, b);
+        assert_eq!(sugar_id, canonical_id, "sugar must dedup to canonical");
+        assert_eq!(sugar_id, string_id);
 
-        let warm = host
-            .project_type_store()
-            .semantic_graph()
-            .get(&key)
-            .expect("Expand must warm the memo");
+        // The warm memo entry is the canonical ProjectPath form, not the
+        // sugar variant — admission canonicalisation rewrote both before
+        // hashing.
+        let canonical_key = SemanticQueryKey::ProjectPath {
+            base: obj,
+            path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
+            mode: ProjectionMode::Identity,
+        };
+        let warm = graph
+            .get(&canonical_key)
+            .expect("canonical ProjectPath must be warm");
+        match &warm.value {
+            QueryResult::Value(id) => assert_eq!(*id, sugar_id),
+            other => panic!("warm entry value mismatch: {other:?}"),
+        }
+
+        // The sugar key admission-canonicalises to the same entry — there is
+        // no separate `ProjectMember` warm entry.
+        let sugar_key = SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from("foo"),
+            mode: ProjectionMode::Identity,
+        };
         assert!(
-            !warm.dep_signature.is_empty(),
-            "Expand must record at least a project-generation dep fact"
+            graph.get(&sugar_key).is_none(),
+            "raw ProjectMember key should not appear in the memo — admission rewrite folds it into ProjectPath"
+        );
+    }
+
+    /// B1a: `IndexedAccess { base, index, mode }` admission-canonicalises to
+    /// `ProjectPath { base, path: [Index(index)], mode }` BEFORE hashing.
+    #[test]
+    fn indexed_access_canonicalises_to_project_path_before_admission() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let surface = SurfaceView {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    name: Arc::from("k"),
+                    value: num_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+        let via_sugar = dispatch.execute(SemanticQueryKey::IndexedAccess {
+            base: obj,
+            index: IndexKey::String(Arc::from("k")),
+            mode: ProjectionMode::Identity,
+        });
+        let via_canonical = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: obj,
+            path: Arc::from(
+                vec![PathSegment::Index(IndexKey::String(Arc::from("k")))].into_boxed_slice(),
+            ),
+            mode: ProjectionMode::Identity,
+        });
+        let (sugar_id, canonical_id) = match (via_sugar, via_canonical) {
+            (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+            other => panic!("expected two values, got {other:?}"),
+        };
+        assert_eq!(sugar_id, canonical_id);
+        assert_eq!(sugar_id, num_id);
+
+        let raw_sugar_key = SemanticQueryKey::IndexedAccess {
+            base: obj,
+            index: IndexKey::String(Arc::from("k")),
+            mode: ProjectionMode::Identity,
+        };
+        assert!(
+            graph.get(&raw_sugar_key).is_none(),
+            "raw IndexedAccess key must not appear in the memo — admission rewrite folds it into ProjectPath"
+        );
+    }
+
+    /// B1a: `SurfaceView::members` carries the full TypeScript member
+    /// metadata via [`SurfaceMember`]. The struct's `optional`, `readonly`,
+    /// and `is_method` fields round-trip through interning unchanged so
+    /// downstream consumers (component-meta, LSP hover) can read them
+    /// without touching the deprecated `ProjectedMember` types.
+    #[test]
+    fn surface_view_carries_surface_member_optional_readonly_is_method() {
+        let host = host();
+        let graph = host.project_type_store().semantic_graph();
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let surface = SurfaceView {
+            members: Arc::from(
+                vec![
+                    SurfaceMember {
+                        name: Arc::from("optional_readonly_method"),
+                        value: string_id,
+                        optional: true,
+                        readonly: true,
+                        is_method: true,
+                    },
+                    SurfaceMember {
+                        name: Arc::from("plain"),
+                        value: string_id,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+        let data = graph.node_data(obj).expect("interned");
+        match &*data {
+            SemanticNodeData::Object(s) => {
+                let m0 = &s.members[0];
+                assert_eq!(m0.name.as_ref(), "optional_readonly_method");
+                assert!(m0.optional, "optional bit must persist");
+                assert!(m0.readonly, "readonly bit must persist");
+                assert!(m0.is_method, "is_method bit must persist");
+                let m1 = &s.members[1];
+                assert!(!m1.optional);
+                assert!(!m1.readonly);
+                assert!(!m1.is_method);
+            }
+            other => panic!("expected Object, got {other:?}"),
+        }
+    }
+
+    /// B1a: `SurfaceView` carries `call_signatures` and `construct_signatures`
+    /// arrays alongside `members` so callable / newable types' signatures
+    /// flow through interning.
+    #[test]
+    fn surface_view_carries_call_signatures_and_construct_signatures() {
+        let host = host();
+        let graph = host.project_type_store().semantic_graph();
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        let surface = SurfaceView {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(vec![string_id].into_boxed_slice()),
+            construct_signatures: Arc::from(vec![num_id].into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+        let data = graph.node_data(obj).expect("interned");
+        match &*data {
+            SemanticNodeData::Object(s) => {
+                assert_eq!(s.call_signatures.as_ref(), &[string_id]);
+                assert_eq!(s.construct_signatures.as_ref(), &[num_id]);
+            }
+            other => panic!("expected Object, got {other:?}"),
+        }
+    }
+
+    /// B1a: `SemanticQueryKey::Expand`, `ExpandMode`, `SemanticQueryApi::expand`,
+    /// `build_expand`, and `ExpandMode::` are absent across the workspace's
+    /// Rust crate sources and TypeScript packages. The B1a commit retires
+    /// these identifiers; this test fails loudly if any survive.
+    ///
+    /// The terminology script (`tools/check-four-mode-terminology.sh`) also
+    /// catches this at CI time, but the in-repo test surfaces the failure
+    /// inside `cargo test` on the same change that introduces a regression.
+    #[test]
+    fn expand_variant_and_expand_mode_absent_from_workspace() {
+        use std::path::{Path, PathBuf};
+        let workspace_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("Cargo.toml").exists() && p.join("crates").is_dir())
+            .expect("workspace root with crates/ dir")
+            .to_path_buf();
+
+        // Each needle is followed by a punctuation character so it cannot
+        // prefix-match an unrelated identifier like `build_expanded_type_text`
+        // or `SemanticQueryKey::Expanded` (a hypothetical future variant
+        // outside this track). `ExpandMode` is bare because Rust requires the
+        // `ExpandMode::Foo` prefix anywhere it surfaces — there is no
+        // identifier whose first characters are `ExpandMode` followed by
+        // anything other than `::` in this workspace.
+        let needles = [
+            "SemanticQueryKey::Expand ",
+            "SemanticQueryKey::Expand{",
+            "SemanticQueryKey::Expand,",
+            "ExpandMode::",
+            "SemanticQueryApi::expand(",
+            "fn expand(",
+            "build_expand(",
+            "fn build_expand(",
+        ];
+
+        let exclude_files = [
+            // The test itself contains the needle strings.
+            "project_semantic_dispatch.rs",
+            // The plan + the audit feedback file describe the retirement.
+            "generic-navigation-prep-plan.md",
+            "feedback-2026-04-19-gennav.md",
+            "tmp-plan.md",
+        ];
+
+        let mut violations: Vec<String> = Vec::new();
+        let mut visit = |path: &Path| {
+            let lossy = path.to_string_lossy();
+            if exclude_files.iter().any(|n| lossy.ends_with(n)) {
+                return;
+            }
+            // build_expanded_type_text / build_expanded_type_expr are
+            // unrelated text-construction helpers in
+            // verter_semantic::analysis::macros — the script's needles are
+            // tightened above (`build_expand(` and `fn build_expand`) to
+            // avoid colliding with them.
+            let Ok(content) = std::fs::read_to_string(path) else {
+                return;
+            };
+            for needle in &needles {
+                if content.contains(needle) {
+                    violations.push(format!("{}: contains `{}`", path.display(), needle));
+                }
+            }
+        };
+
+        fn walk(dir: &std::path::Path, exts: &[&str], visit: &mut dyn FnMut(&std::path::Path)) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = entry.file_name();
+                if p.is_dir() {
+                    if matches!(
+                        name.to_string_lossy().as_ref(),
+                        "target" | "node_modules" | ".git" | "dist" | "build" | "out"
+                    ) {
+                        continue;
+                    }
+                    walk(&p, exts, visit);
+                } else if exts.iter().any(|e| p.extension().is_some_and(|x| x == *e)) {
+                    visit(&p);
+                }
+            }
+        }
+
+        walk(&workspace_root.join("crates"), &["rs"], &mut visit);
+        walk(
+            &workspace_root.join("packages"),
+            &["ts", "tsx", "js", "mjs", "cjs"],
+            &mut visit,
+        );
+        assert!(
+            violations.is_empty(),
+            "Found Expand/ExpandMode/build_expand references after B1a retirement:\n{}",
+            violations.join("\n")
         );
     }
 
@@ -997,5 +1389,89 @@ mod tests {
             QueryResult::Value(id) => assert_eq!(id, expected_id),
             other => panic!("expected value after insert, got {other:?}"),
         }
+    }
+
+    /// B1a: two concurrent threads — one calling the `ProjectMember` sugar
+    /// form and one calling the canonical `ProjectPath` form for the
+    /// equivalent member — admission-rewrite to the same canonical key and
+    /// share one in-flight wait graph. Only one cold build runs, both
+    /// threads see the same node id, and the warm memo entry lives under
+    /// the canonical `ProjectPath` shape.
+    #[test]
+    fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
+        let host = host();
+        let graph = host.project_type_store().semantic_graph();
+        let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let surface = SurfaceView {
+            members: Arc::from(
+                vec![SurfaceMember {
+                    name: Arc::from("foo"),
+                    value: string_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let obj = graph.intern_node(SemanticNodeData::Object(surface));
+
+        let (r1, r2) = std::thread::scope(|s| {
+            let h = &host;
+            let t1 = s.spawn(move || {
+                let dispatch = ProjectSemanticDispatch::new(h);
+                dispatch.execute(SemanticQueryKey::ProjectMember {
+                    base: obj,
+                    member: Arc::from("foo"),
+                    mode: ProjectionMode::Identity,
+                })
+            });
+            let t2 = s.spawn(move || {
+                let dispatch = ProjectSemanticDispatch::new(h);
+                dispatch.execute(SemanticQueryKey::ProjectPath {
+                    base: obj,
+                    path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
+                    mode: ProjectionMode::Identity,
+                })
+            });
+            (t1.join().unwrap(), t2.join().unwrap())
+        });
+
+        let (id1, id2) = match (r1, r2) {
+            (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+            other => panic!("expected two values, got {other:?}"),
+        };
+        assert_eq!(id1, id2, "concurrent sugar + canonical must dedup");
+        assert_eq!(id1, string_id);
+
+        // The warm memo entry is on the canonical ProjectPath key only —
+        // both threads' admission canonicalisations folded onto the same
+        // entry.
+        let canonical_key = SemanticQueryKey::ProjectPath {
+            base: obj,
+            path: Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice()),
+            mode: ProjectionMode::Identity,
+        };
+        let warm = graph
+            .get(&canonical_key)
+            .expect("canonical ProjectPath warm after concurrent dispatch");
+        match &warm.value {
+            QueryResult::Value(id) => assert_eq!(*id, id1),
+            other => panic!("warm entry value mismatch: {other:?}"),
+        }
+        let raw_sugar = SemanticQueryKey::ProjectMember {
+            base: obj,
+            member: Arc::from("foo"),
+            mode: ProjectionMode::Identity,
+        };
+        assert!(
+            graph.get(&raw_sugar).is_none(),
+            "raw ProjectMember key should not appear in the memo"
+        );
     }
 }
