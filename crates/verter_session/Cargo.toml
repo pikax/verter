@@ -42,6 +42,7 @@ oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 self_cell = { workspace = true }
+smallvec = "1.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
 tracing = "0.1"
@@ -54,7 +55,6 @@ parking_lot = "0.12"
 web-time = "1"
 
 [dev-dependencies]
-smallvec = "1.13"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]

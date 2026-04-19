@@ -430,6 +430,10 @@ pub enum QueryError {
     BudgetExceeded(BudgetExceededFailure),
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
+    /// The path walker re-entered an alias it had already visited on the
+    /// same `build_project_path` invocation (plan §3 C3). Carries the
+    /// cycle participants so diagnostics can render the chain end-to-end.
+    AliasCycle { chain: Arc<[Arc<str>]> },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
 }
