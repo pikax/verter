@@ -527,13 +527,32 @@ pub enum SemanticQueryKey {
     },
 }
 
+/// One element of a [`SemanticNodeData::Tuple`] shell (plan §3 B4 + §7.14).
+///
+/// Preserves the declaration-site metadata the dispatcher needs to render
+/// tuples correctly: the optional label, whether the slot is optional (`?`),
+/// and whether the slot is a rest element (`...T`). `value` points at a
+/// regular [`SemanticNodeId`] under the lazy-materialisation rule — the
+/// element's body is not eagerly recursed into when the owning tuple shell
+/// is interned.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TupleElement {
+    pub label: Option<Arc<str>>,
+    pub value: SemanticNodeId,
+    pub optional: bool,
+    pub rest: bool,
+}
+
 /// Immutable semantic-node payload. Storage for this enum is owned by the
 /// shared semantic graph; node ids hand out views without copying.
 ///
-/// This is the minimum variant set the rewrite requires — arrays, tuples,
-/// call signatures, generic carriers, and other TS-flavored variants will
-/// grow inside this enum as the rewrite binds more of the existing resolver
-/// to the query API.
+/// **Publication boundary (plan §7.14).** Solver `Infer`, `Rest`, and
+/// `RecursiveRef` nodes are scratch-only and never enter this enum. Solver
+/// `Error` values publish at the boundary as [`SemanticNodeData::Opaque`]
+/// carrying the concrete [`QueryError`]. Functions publish through
+/// [`SemanticNodeData::Object`] with empty `members` and populated
+/// `call_signatures` / `construct_signatures` — there is no dedicated
+/// `Function` variant.
 #[derive(Debug, Clone)]
 pub enum SemanticNodeData {
     Alias(SemanticNodeId),
@@ -542,6 +561,35 @@ pub enum SemanticNodeData {
     Intersection(Arc<[SemanticNodeId]>),
     Primitive(PrimitiveKind),
     Opaque(QueryError),
+    /// Array shell (plan §3 B4 + §7.14). Publishes `T[]` / `Array<T>` /
+    /// `ReadonlyArray<T>` directly rather than routing through generic
+    /// `Array<T>` declaration instantiation — array indexed-access is
+    /// hot and must not pay generic-instantiation + prototype-surface
+    /// cost on every access. `element` is a regular [`SemanticNodeId`]
+    /// and may be lazily materialised (the element's body expands only
+    /// when a caller's path projects into it).
+    Array {
+        element: SemanticNodeId,
+        readonly: bool,
+    },
+    /// Tuple shell (plan §3 B4 + §7.14). Preserves per-element label /
+    /// optionality / rest metadata so consumers can render tuples without
+    /// going through a side channel. Each element's `value` is a regular
+    /// [`SemanticNodeId`] under the lazy-materialisation rule.
+    Tuple {
+        elements: Arc<[TupleElement]>,
+        readonly: bool,
+    },
+    /// Template-literal shell (plan §3 B4 + §7.14). Carries the
+    /// alternating quasi text spans and expression references verbatim
+    /// from the parser's [`TypeExpr::TemplateLiteral`] shape. Relation-
+    /// engine support for infer-heavy template matching remains a
+    /// separate follow-up (plan §1.4) — the shell carrier itself is not
+    /// deferred.
+    TemplateLiteral {
+        quasis: Arc<[Arc<str>]>,
+        expressions: Arc<[SemanticNodeId]>,
+    },
     /// Declaration-identity anchor (plan §2 Lazy block + C1).
     ///
     /// Produced by [`SemanticQueryKey::ResolveDecl`]. Carries enough

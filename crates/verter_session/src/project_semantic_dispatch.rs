@@ -69,7 +69,8 @@ use crate::semantic_query::{
     BranchSelection, CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey,
     IndexSignature, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
     ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, TupleElement,
+    ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -833,12 +834,100 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 };
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
-            // Conditionals, mapped types, indexed access, keyof, infer,
-            // template literals, and other non-shell-level constructs
-            // are deferred to later phases (C6-C7). For C1b we emit an
-            // opaque placeholder — the lazy-materialisation rule says
-            // member bodies expand on-demand via ProjectPath
-            // sub-queries (C3), which the caller drives.
+            // Arrays publish through the dedicated
+            // `SemanticNodeData::Array { element, readonly }` variant per
+            // plan §3 B4 + §7.14: array indexed-access is hot and must not
+            // pay generic `Array<T>` declaration-instantiation cost on
+            // every access.
+            TypeExpr::Array { element, readonly } => {
+                let element_id = self.shallow_lower_type_expr(
+                    element,
+                    env,
+                    scope,
+                    name_resolution,
+                    substitutions,
+                );
+                graph.intern_node_with_scope(
+                    SemanticNodeData::Array {
+                        element: element_id,
+                        readonly: *readonly,
+                    },
+                    scope.clone(),
+                )
+            }
+            // Tuples publish via `SemanticNodeData::Tuple` preserving
+            // label / optional / rest metadata for every element (plan
+            // §3 B4 + §7.14). Element bodies are lazily interned at
+            // shell level — deeper expansion happens through
+            // `ProjectPath` sub-queries when a caller reaches into a
+            // specific slot.
+            TypeExpr::Tuple { elements, readonly } => {
+                let mut lowered_elements: Vec<TupleElement> = Vec::with_capacity(elements.len());
+                for element in elements.iter() {
+                    let value = self.shallow_lower_type_expr(
+                        &element.ty,
+                        env,
+                        scope,
+                        name_resolution,
+                        substitutions,
+                    );
+                    lowered_elements.push(TupleElement {
+                        label: element.label.as_deref().map(Arc::<str>::from),
+                        value,
+                        optional: element.optional,
+                        rest: element.rest,
+                    });
+                }
+                graph.intern_node_with_scope(
+                    SemanticNodeData::Tuple {
+                        elements: Arc::from(lowered_elements.into_boxed_slice()),
+                        readonly: *readonly,
+                    },
+                    scope.clone(),
+                )
+            }
+            // Template-literal shells publish verbatim — the relation
+            // engine's infer-pattern support for template matching is a
+            // follow-up per plan §1.4, but the shell carrier itself is
+            // not deferred (plan §3 B4 + §7.14).
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                let lowered_quasis: Vec<Arc<str>> = quasis
+                    .iter()
+                    .map(|q| Arc::<str>::from(q.as_str()))
+                    .collect();
+                let lowered_expressions: Vec<SemanticNodeId> = expressions
+                    .iter()
+                    .map(|expr| {
+                        self.shallow_lower_type_expr(
+                            expr,
+                            env,
+                            scope,
+                            name_resolution,
+                            substitutions,
+                        )
+                    })
+                    .collect();
+                graph.intern_node_with_scope(
+                    SemanticNodeData::TemplateLiteral {
+                        quasis: Arc::from(lowered_quasis.into_boxed_slice()),
+                        expressions: Arc::from(lowered_expressions.into_boxed_slice()),
+                    },
+                    scope.clone(),
+                )
+            }
+            // Functions, conditionals, mapped types, indexed access,
+            // keyof, infer, rest, parenthesized, recursive-ref, and
+            // unknown constructs remain out of B4's scope — they route
+            // through their own dispatch builders (C2/C6/...) or stay
+            // solver-scratch-only per plan §7.14 / §7.18. Solver `Infer`,
+            // `Rest`, and `RecursiveRef` values MUST NOT enter the
+            // semantic graph; lowering them here would publish
+            // scratch-only identity and violate the publication
+            // boundary. An `Opaque(Miss)` at this layer keeps those
+            // shapes scratch-only while deeper builders take over.
             _ => self.opaque(QueryError::Miss),
         }
     }
@@ -1708,9 +1797,17 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 SemanticNodeData::DeclAnchor { .. }
                 | SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Opaque(_)
-                | SemanticNodeData::VueMacroElements(_) => {
-                    // Can't descend further — opaque / primitive /
-                    // anchor without shell. Return Opaque(Miss).
+                | SemanticNodeData::VueMacroElements(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::TemplateLiteral { .. } => {
+                    // Can't descend further through generic path-walk —
+                    // Array indexed-access, Tuple slot projection, and
+                    // template-literal relation matching are their own
+                    // semantic work (C3 path-walker + D-Cutover). The
+                    // shell carriers (B4) exist so the graph publishes
+                    // these shapes first-class; deeper projection lands
+                    // in later phases. Return Opaque(Miss) for now.
                     return self.opaque_miss();
                 }
             }
@@ -4861,6 +4958,346 @@ mod tests {
                 !inst_edges.is_empty(),
                 "{name} opaque shell must still emit Instantiate edge"
             );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // B4 — shell-carrier tests
+    //
+    // Array / Tuple / TemplateLiteral publication + solver-scratch
+    // publication-boundary rules (plan §3 B4 + §7.14 + §7.18).
+    // ------------------------------------------------------------------
+
+    /// `T[]` round-trips through dispatch as a
+    /// [`SemanticNodeData::Array`] carrying the element node and
+    /// `readonly: false`. A `readonly T[]` or `ReadonlyArray<T>`
+    /// publishes with `readonly: true`. The opaque-miss fallthrough
+    /// that treated arrays as unknown before B4 is gone.
+    #[test]
+    fn semantic_graph_array_variant_preserves_element_and_readonly() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/arr.ts",
+            "export type Mut<T> = T[]\nexport type Ro<T> = readonly T[]",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let mut_base = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Mut");
+        let mut_result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: mut_base,
+            args: Arc::clone(&args),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value for Mut<string>, got {other:?}"),
+        };
+        let mut_data = graph.node_data(mut_result).expect("Mut<string> node");
+        match &*mut_data {
+            SemanticNodeData::Array { element, readonly } => {
+                assert_eq!(*element, string_arg, "element must be the substituted T");
+                assert!(!*readonly, "Mut<T> is not readonly");
+            }
+            other => panic!("Mut<string> must publish as Array, got {other:?}"),
+        }
+
+        let ro_base = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Ro");
+        let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: ro_base,
+            args,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value for Ro<string>, got {other:?}"),
+        };
+        let ro_data = graph.node_data(ro_result).expect("Ro<string> node");
+        match &*ro_data {
+            SemanticNodeData::Array { element, readonly } => {
+                assert_eq!(*element, string_arg, "element must be the substituted T");
+                assert!(*readonly, "Ro<T> is readonly");
+            }
+            other => panic!("Ro<string> must publish as Array, got {other:?}"),
+        }
+    }
+
+    /// `[label: T, b?: number, ...rest: boolean[]]` round-trips through
+    /// dispatch as a [`SemanticNodeData::Tuple`] whose elements preserve
+    /// `label`, `optional`, `rest`, and the element value node. The
+    /// `readonly` flag propagates from the tuple expression.
+    #[test]
+    fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/tup.ts",
+            "export type Tup<T> = [a: T, b?: number, ...rest: boolean[]]\nexport type Ro<T> = readonly [T]",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Tup");
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base,
+            args: Arc::clone(&args),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("tuple result");
+        match &*data {
+            SemanticNodeData::Tuple { elements, readonly } => {
+                assert!(!*readonly, "Tup is not readonly");
+                assert_eq!(elements.len(), 3, "three tuple slots");
+
+                assert_eq!(elements[0].label.as_deref(), Some("a"), "first slot label");
+                assert_eq!(elements[0].value, string_arg, "first slot substitutes T");
+                assert!(!elements[0].optional);
+                assert!(!elements[0].rest);
+
+                assert_eq!(elements[1].label.as_deref(), Some("b"), "second slot label");
+                assert!(elements[1].optional, "second slot is optional");
+                assert!(!elements[1].rest);
+                let second_data = graph.node_data(elements[1].value).expect("slot 2 value");
+                assert!(
+                    matches!(
+                        &*second_data,
+                        SemanticNodeData::Primitive(PrimitiveKind::Number)
+                    ),
+                    "slot 2 must lower to Number primitive, got {second_data:?}"
+                );
+
+                // Parser lowers `...rest: T[]` as a `TSRestType` wrapper
+                // with `label: None` (the inner named-tuple-member label
+                // is dropped at the OXC → TypeExpr boundary). What B4
+                // pins is that the `rest: true` flag reaches publication
+                // intact; the label column is whatever the parser
+                // hands us.
+                assert!(elements[2].rest, "third slot is a rest element");
+                assert!(
+                    !elements[2].optional,
+                    "rest element is not marked optional here"
+                );
+            }
+            other => panic!("Tup<string> must publish as Tuple, got {other:?}"),
+        }
+
+        let ro_base = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Ro");
+        let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: ro_base,
+            args,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let ro_data = graph.node_data(ro_result).expect("ro tuple result");
+        match &*ro_data {
+            SemanticNodeData::Tuple { elements, readonly } => {
+                assert!(*readonly, "Ro tuple is readonly");
+                assert_eq!(elements.len(), 1);
+            }
+            other => panic!("Ro<string> must publish as Tuple, got {other:?}"),
+        }
+    }
+
+    /// A template-literal body round-trips through dispatch as a
+    /// [`SemanticNodeData::TemplateLiteral`] carrying the quasi text
+    /// spans verbatim and the expression nodes after substitution.
+    #[test]
+    fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/tl.ts",
+            "export type Greet<T extends string> = `hello ${T}!`",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/tl.ts", "Greet");
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("template literal result");
+        match &*data {
+            SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                assert_eq!(quasis.len(), 2, "hello ${{...}}! has two quasi spans");
+                assert_eq!(quasis[0].as_ref(), "hello ");
+                assert_eq!(quasis[1].as_ref(), "!");
+                assert_eq!(
+                    expressions.len(),
+                    1,
+                    "one expression between the quasi spans"
+                );
+                assert_eq!(
+                    expressions[0], string_arg,
+                    "expression[0] must be the substituted T (string)"
+                );
+            }
+            other => panic!("Greet<string> must publish as TemplateLiteral, got {other:?}"),
+        }
+    }
+
+    /// Function types publish through `SemanticNodeData::Object` with
+    /// empty `members` and populated `call_signatures` /
+    /// `construct_signatures` per plan §3 B4 + §7.14 — the final-state
+    /// publication shape. No separate `Function` semantic-node variant
+    /// exists. This test constructs such a view directly (the function
+    /// dispatch wiring is out of B4's scope — it lands when function
+    /// types need end-to-end resolution) to lock the shape contract.
+    #[test]
+    fn function_surface_publishes_as_object_with_call_signatures() {
+        let host = host();
+        let graph = host.project_type_store().semantic_graph();
+        let return_ty = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let call_sig = graph.intern_node(SemanticNodeData::Alias(return_ty));
+        let view = SurfaceView {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(vec![call_sig].into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let fn_node = graph.intern_node(SemanticNodeData::Object(view));
+        let data = graph.node_data(fn_node).expect("function surface");
+        match &*data {
+            SemanticNodeData::Object(v) => {
+                assert!(v.members.is_empty(), "function has no ordinary members");
+                assert_eq!(v.call_signatures.len(), 1, "one call signature");
+                assert_eq!(v.call_signatures[0], call_sig);
+                assert!(v.construct_signatures.is_empty());
+                assert!(v.index_signatures.is_empty());
+            }
+            other => panic!("function must publish as Object, got {other:?}"),
+        }
+    }
+
+    /// Solver scratch-only node kinds (`Infer`, `Rest`, `RecursiveRef`)
+    /// MUST NOT have dedicated [`SemanticNodeData`] variants per plan
+    /// §7.14 / §7.18. This is a build-level invariant: walking the
+    /// crate source and asserting the variants are absent lets a
+    /// future agent notice instantly if someone tries to promote a
+    /// scratch-only node into the publication graph.
+    ///
+    /// Each needle is followed by punctuation so it cannot prefix-
+    /// match an unrelated identifier (same discipline as
+    /// [`expand_variant_and_expand_mode_absent_from_workspace`]).
+    #[test]
+    fn solver_scratch_only_nodes_never_enter_semantic_graph_store() {
+        use std::path::{Path, PathBuf};
+        let workspace_root: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("Cargo.toml").exists() && p.join("crates").is_dir())
+            .expect("workspace root with crates/ dir")
+            .to_path_buf();
+
+        let needles = [
+            "SemanticNodeData::Infer{",
+            "SemanticNodeData::Infer ",
+            "SemanticNodeData::Infer(",
+            "SemanticNodeData::Rest(",
+            "SemanticNodeData::Rest{",
+            "SemanticNodeData::Rest ",
+            "SemanticNodeData::RecursiveRef{",
+            "SemanticNodeData::RecursiveRef(",
+            "SemanticNodeData::RecursiveRef ",
+        ];
+
+        let exclude_files = [
+            "project_semantic_dispatch.rs",
+            "generic-navigation-prep-plan.md",
+            "feedback-2026-04-19-gennav.md",
+            "tmp-plan.md",
+        ];
+
+        let mut violations: Vec<String> = Vec::new();
+        let mut visit = |path: &Path| {
+            let lossy = path.to_string_lossy();
+            if exclude_files.iter().any(|n| lossy.ends_with(n)) {
+                return;
+            }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                return;
+            };
+            for needle in &needles {
+                if content.contains(needle) {
+                    violations.push(format!("{}: contains `{}`", path.display(), needle));
+                }
+            }
+        };
+        fn walk(dir: &std::path::Path, exts: &[&str], visit: &mut dyn FnMut(&std::path::Path)) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let name = entry.file_name();
+                if p.is_dir() {
+                    if matches!(
+                        name.to_string_lossy().as_ref(),
+                        "target" | "node_modules" | ".git" | "dist" | "build" | "out"
+                    ) {
+                        continue;
+                    }
+                    walk(&p, exts, visit);
+                } else if exts.iter().any(|e| p.extension().is_some_and(|x| x == *e)) {
+                    visit(&p);
+                }
+            }
+        }
+        walk(&workspace_root.join("crates"), &["rs"], &mut visit);
+        walk(
+            &workspace_root.join("packages"),
+            &["ts", "tsx", "js", "mjs", "cjs"],
+            &mut visit,
+        );
+        assert!(
+            violations.is_empty(),
+            "Solver scratch-only nodes (Infer/Rest/RecursiveRef) must never appear as \
+             SemanticNodeData variants — they stay solver-scratch per plan §7.18.\nFound:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    /// Solver `Error` values publish at the boundary as
+    /// [`SemanticNodeData::Opaque`] carrying a concrete [`QueryError`]
+    /// per plan §3 B4 + §7.14 — there is no dedicated `Error`
+    /// semantic-node variant. `QueryError::Other(...)` is the
+    /// catch-all shape for text-bearing failures; `QueryError::Miss`
+    /// is the cache-miss shape. Both round-trip through `Opaque`
+    /// without losing their content.
+    #[test]
+    fn solver_error_publishes_as_opaque_query_error() {
+        let host = host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+        match &*graph.node_data(miss).expect("miss node") {
+            SemanticNodeData::Opaque(QueryError::Miss) => {}
+            other => panic!("QueryError::Miss must round-trip through Opaque, got {other:?}"),
+        }
+
+        let diagnostic: Arc<str> = Arc::from("synthetic solver error");
+        let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::clone(
+            &diagnostic,
+        ))));
+        match &*graph.node_data(other).expect("other node") {
+            SemanticNodeData::Opaque(QueryError::Other(text)) => {
+                assert_eq!(text.as_ref(), diagnostic.as_ref(), "error text preserved");
+            }
+            other => panic!("QueryError::Other must round-trip through Opaque, got {other:?}"),
         }
     }
 }
