@@ -538,6 +538,25 @@ pub enum SemanticNodeData {
     Intersection(Arc<[SemanticNodeId]>),
     Primitive(PrimitiveKind),
     Opaque(QueryError),
+    /// Declaration-identity anchor (plan §2 Lazy block + C1).
+    ///
+    /// Produced by [`SemanticQueryKey::ResolveDecl`]. Carries enough
+    /// identity (`canonical_id`, `name`, `whole_hash`) for
+    /// [`SemanticQueryKey::Instantiate`] to resolve the base to a
+    /// [`PreparedTypeDecl`](verter_semantic::analysis::type_solver::PreparedTypeDecl)
+    /// through `DispatchHost::resolve_prepared_type_decl` without a
+    /// side-table or reverse-lookup.
+    ///
+    /// `DeclAnchor` is not a "lazy subexpression reference" (§7.14 bans
+    /// those) — it is an explicit identity carrier for the decl dispatch
+    /// surface. Two calls to `ResolveDecl(same-key)` always produce the
+    /// same identity tuple, so structural interning converges on one
+    /// [`SemanticNodeId`] per `(canonical_id, name, whole_hash)`.
+    DeclAnchor {
+        canonical_id: Arc<str>,
+        name: Arc<str>,
+        whole_hash: HashValue,
+    },
     /// Pragmatic carrier for Vue macro resolution artifacts (spans, text,
     /// prop/emit metadata) produced by the parser's cross-file type resolver
     /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)

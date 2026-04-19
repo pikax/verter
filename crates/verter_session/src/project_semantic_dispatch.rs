@@ -61,11 +61,15 @@ use verter_semantic::analysis::type_solver::host::{
 };
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
+use rustc_hash::FxHashMap;
+use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
+
 use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, NodeScopeId,
-    PathSegment, PrimitiveKind, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceView, ValueRootKey,
+    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, IndexSignature,
+    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, QueryError, QueryResult,
+    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SurfaceMember, SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -138,13 +142,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
-    /// Returns a real semantic node keyed by the declaration's scope + name.
-    /// The node's structural shape is intentionally coarse — the dispatcher
-    /// uses `Primitive(Never)` as a dedup anchor for abstract declarations,
-    /// or an `Object` surface when the shallow state already carries the
-    /// member surface. Callers that need a richer shape walk the result
-    /// through `ProjectMember` / `IndexedAccess` etc. which this dispatcher
-    /// also memoizes.
+    /// Returns a [`SemanticNodeData::DeclAnchor`] carrying the declaration's
+    /// `(canonical_id, name, whole_hash)` identity (plan §2 Lazy block + C1).
+    /// `build_instantiate` inspects this variant directly to recover the
+    /// identity for a `DispatchHost::resolve_prepared_type_decl` lookup — no
+    /// side-table or reverse-lookup is needed.
+    ///
+    /// No origin edges are emitted: `DeclAnchor` is a terminal identity, not
+    /// a derived result. `AliasResolve` for declaration-level alias unwraps
+    /// lands in C5; path-walk `AliasResolve` lands in C3.
     fn build_resolve_decl(
         &self,
         key: &ResolveDeclKey,
@@ -166,13 +172,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return (QueryResult::Error(QueryError::Miss), empty_signature());
         }
 
-        // Each binding is distinct semantic identity: publish a fresh
-        // anchor node so the shared-cache identity for this `(scope, name)`
-        // pair is stable across repeated queries. The concrete structural
-        // payload (surface members, union shape, intrinsic bodies, etc.)
-        // is produced on-demand by the later navigation variants that
-        // memoize against this anchor.
-        //
         // Record the declaration's origin scope in the sidecar (plan §7.10
         // + C1) so dispatch builders reached from this anchor can route
         // per-base-scope lookups through the correct `SessionSolverHost`.
@@ -181,9 +180,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             whole_hash: shallow.whole_hash,
             local_scope: key.scope.local_scope,
         };
-        let node_id = self
-            .graph()
-            .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Never), scope);
+        let node_id = self.graph().intern_node_with_scope(
+            SemanticNodeData::DeclAnchor {
+                canonical_id: Arc::clone(&key.scope.canonical_id),
+                name: Arc::clone(&key.name),
+                whole_hash: shallow.whole_hash,
+            },
+            scope,
+        );
         let signature = self.dep_signature_for(&key.scope.canonical_id, shallow.whole_hash);
         (QueryResult::Value(node_id), signature)
     }
@@ -228,19 +232,299 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(node_id), signature)
     }
 
-    /// Generic instantiation. Identity-preserving: the memoized key is the
-    /// dedup guarantee. Returns an `Alias(base)` so repeated lookups share
-    /// one node id for the same `(base, args)` pair.
+    /// Generic instantiation (plan §3 C1 + §2 lazy materialisation + §7.14).
+    ///
+    /// Resolves `base` to a declaration identity by inspecting the
+    /// [`SemanticNodeData::DeclAnchor`] variant (unwrapping any `Alias`
+    /// chain), fetches the [`PreparedTypeDecl`] via [`DispatchHost`], and
+    /// produces **one shell level** of the declaration's structural shape
+    /// with `args` bound to the decl's type parameters.
+    ///
+    /// The result is mode-free: the caller issues a follow-up
+    /// [`SemanticQueryKey::ProjectPath`] if a specific mode / depth is
+    /// needed (§7.14). Member bodies are not recursively lowered —
+    /// nested references emit `DeclAnchor` / `Opaque(Miss)` placeholders
+    /// per the lazy-materialisation rule; deeper lowering is driven by
+    /// `ProjectPath` sub-queries through the family memo.
+    ///
+    /// Origin edges emitted:
+    /// - One [`OriginEdgeKind::Instantiate`] edge on the result, sourced
+    ///   from `[base, args...]`.
+    /// - One [`OriginEdgeKind::SubstituteTypeParam`] edge per type-parameter
+    ///   reference visited at the shell level, sourced from the bound arg.
+    ///
+    /// If `base` is not a `DeclAnchor` (and not an `Alias` chain ending in
+    /// one), or if the prepared decl cannot be fetched, returns
+    /// `Opaque(QueryError::Miss)` — a caller handing a non-anchor base to
+    /// `build_instantiate` has violated the dispatch contract.
     fn build_instantiate(
         &self,
         base: SemanticNodeId,
-        _args: &Arc<[SemanticNodeId]>,
+        args: &Arc<[SemanticNodeId]>,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let node = self.graph().intern_node(SemanticNodeData::Alias(base));
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        // 1. Unwrap Alias chains to find the DeclAnchor identity.
+        let (decl_canonical, decl_name, decl_whole_hash) = match self.resolve_decl_anchor(base) {
+            Some(triple) => triple,
+            None => {
+                return (
+                    QueryResult::Value(self.opaque(QueryError::Miss)),
+                    empty_signature(),
+                )
+            }
+        };
+
+        // 2. Resolve prepared type decl via `DispatchHost` — the adapter
+        // routes through the sidecar-recorded scope for `base`.
+        let adapter = SessionDispatchHost::new(self.host);
+        let ri = ResolvedRootIdentity::new(decl_canonical.as_ref(), decl_name.as_ref());
+        let prepared = match adapter.resolve_prepared_type_decl(base, &ri) {
+            Some(p) => p,
+            None => {
+                return (
+                    QueryResult::Value(self.opaque(QueryError::Miss)),
+                    empty_signature(),
+                )
+            }
+        };
+
+        // 3. Bind type parameters to args (positional).
+        let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        for (param, arg_id) in prepared.type_parameters.iter().zip(args.iter()) {
+            env.insert(param.name.clone(), *arg_id);
+        }
+
+        // 4. Shallow-lower the body. Collects substitution facts for
+        // origin-edge emission.
+        let scope = NodeScopeId::File {
+            canonical_id: Arc::clone(&decl_canonical),
+            whole_hash: decl_whole_hash,
+            local_scope: None,
+        };
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let result = self.shallow_lower_type_expr(&prepared.body, &env, &scope, &mut substitutions);
+
+        // 5. Emit origin edges.
+        self.graph().record_instantiate();
+        let fence = self.project_generation_signature();
+
+        // Instantiate edge: result <- [base, args...].
+        let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
+        inst_sources.push(base);
+        inst_sources.extend(args.iter().copied());
+        self.graph().record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(inst_sources.into_boxed_slice()),
+            OriginMeta::None,
+            Arc::clone(&fence),
+        );
+
+        // SubstituteTypeParam edges on the shell result: one per visited
+        // substituted occurrence (plan §3 C1 — edges emitted at
+        // substitution position; at shell level this aggregates on the
+        // result node per plan §2 lazy block).
+        for (param_name, arg_id) in substitutions {
+            self.graph().record_origin_edge(
+                result,
+                OriginEdgeKind::SubstituteTypeParam,
+                Arc::from(vec![arg_id].into_boxed_slice()),
+                OriginMeta::SubstitutedParam(param_name),
+                Arc::clone(&fence),
+            );
+        }
+
+        (QueryResult::Value(result), fence)
+    }
+
+    /// Unwrap an `Alias` chain to recover the `DeclAnchor` identity at the
+    /// tail. Returns `None` if the chain does not end in a `DeclAnchor`.
+    /// Bounded chain walk (16 hops) guards against pathological cycles.
+    fn resolve_decl_anchor(
+        &self,
+        base: SemanticNodeId,
+    ) -> Option<(Arc<str>, Arc<str>, crate::semantic_query::HashValue)> {
+        let mut current = base;
+        let graph = self.graph();
+        for _ in 0..16 {
+            let data = graph.node_data(current)?;
+            match &*data {
+                SemanticNodeData::DeclAnchor {
+                    canonical_id,
+                    name,
+                    whole_hash,
+                } => {
+                    return Some((Arc::clone(canonical_id), Arc::clone(name), *whole_hash));
+                }
+                SemanticNodeData::Alias(next) => {
+                    current = *next;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Shallow-lower a [`TypeExpr`] under `env` (type-parameter bindings)
+    /// into a [`SemanticNodeId`]. "Shallow" means one structural level:
+    /// object members, union/intersection arms, and function / conditional
+    /// sub-expressions are interned as references rather than recursively
+    /// expanded. Deeper lowering is the caller's responsibility via
+    /// [`SemanticQueryKey::ProjectPath`] sub-queries.
+    ///
+    /// `substitutions` accumulates `(param_name, arg_id)` facts for
+    /// `SubstituteTypeParam` origin-edge emission at the shell level.
+    fn shallow_lower_type_expr(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        match expr {
+            TypeExpr::Primitive(name) => graph.intern_node_with_scope(
+                SemanticNodeData::Primitive(map_primitive_name(*name)),
+                scope.clone(),
+            ),
+            TypeExpr::Literal(value) => graph.intern_node_with_scope(
+                SemanticNodeData::Primitive(primitive_for_literal(value)),
+                scope.clone(),
+            ),
+            TypeExpr::TypeParameter(param) => {
+                if let Some(arg_id) = env.get(&param.name) {
+                    substitutions.push((Arc::from(param.name.as_str()), *arg_id));
+                    *arg_id
+                } else {
+                    // Unbound parameter — opaque placeholder (bound
+                    // handling lives in the solver hand-off in D1).
+                    self.opaque(QueryError::Miss)
+                }
+            }
+            // `type Foo<T> = { x: T }` — the parser keeps bare `T` as
+            // `TypeExpr::Ref { name: "T", type_arguments: [] }` at top-level
+            // alias bodies (only function-type parameters are normalised
+            // via `normalize_type_parameter_refs`). Check the
+            // substitution env first; a named match means this is a
+            // parameter reference that should substitute.
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } if type_arguments.is_empty() && env.contains_key(name.as_ref()) => {
+                let arg_id = env.get(name.as_ref()).copied().unwrap();
+                substitutions.push((Arc::clone(name), arg_id));
+                arg_id
+            }
+            TypeExpr::Union(arms) => {
+                let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+                for arm in arms.iter() {
+                    arm_ids.push(self.shallow_lower_type_expr(arm, env, scope, substitutions));
+                }
+                if arm_ids.is_empty() {
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else if arm_ids.len() == 1 {
+                    arm_ids[0]
+                } else {
+                    graph.intern_node_with_scope(
+                        SemanticNodeData::Union(Arc::from(arm_ids.into_boxed_slice())),
+                        scope.clone(),
+                    )
+                }
+            }
+            TypeExpr::Intersection(arms) => {
+                let mut arm_ids: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+                for arm in arms.iter() {
+                    arm_ids.push(self.shallow_lower_type_expr(arm, env, scope, substitutions));
+                }
+                if arm_ids.is_empty() {
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else if arm_ids.len() == 1 {
+                    arm_ids[0]
+                } else {
+                    graph.intern_node_with_scope(
+                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
+                        scope.clone(),
+                    )
+                }
+            }
+            TypeExpr::Object(obj) => {
+                let mut members: Vec<SurfaceMember> = Vec::new();
+                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
+                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
+                let mut index_signatures: Vec<IndexSignature> = Vec::new();
+                for member in &obj.properties {
+                    match member {
+                        ObjectMember::Property(prop) => {
+                            let value =
+                                self.shallow_lower_type_expr(&prop.ty, env, scope, substitutions);
+                            members.push(SurfaceMember {
+                                name: Arc::from(prop.name.as_str()),
+                                value,
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                                is_method: false,
+                            });
+                        }
+                        ObjectMember::Method(method) => {
+                            // Methods are not fully lowered at shell
+                            // level; record the member slot with an
+                            // opaque value. Real function-signature
+                            // lowering lands when the function-semantic
+                            // variant is added post-C1.
+                            let value = self.opaque(QueryError::Miss);
+                            members.push(SurfaceMember {
+                                name: Arc::from(method.name.as_str()),
+                                value,
+                                optional: method.optional,
+                                readonly: false,
+                                is_method: true,
+                            });
+                        }
+                        ObjectMember::CallSignature(_) => {
+                            call_signatures.push(self.opaque(QueryError::Miss));
+                        }
+                        ObjectMember::ConstructSignature(_) => {
+                            construct_signatures.push(self.opaque(QueryError::Miss));
+                        }
+                        ObjectMember::IndexSignature(sig) => {
+                            let key_type = self.shallow_lower_type_expr(
+                                &sig.key_type,
+                                env,
+                                scope,
+                                substitutions,
+                            );
+                            let value_type = self.shallow_lower_type_expr(
+                                &sig.value_type,
+                                env,
+                                scope,
+                                substitutions,
+                            );
+                            index_signatures.push(IndexSignature {
+                                key_type,
+                                value_type,
+                                readonly: sig.readonly,
+                            });
+                        }
+                    }
+                }
+                let has_index_signature = !index_signatures.is_empty();
+                let view = SurfaceView {
+                    members: Arc::from(members.into_boxed_slice()),
+                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature,
+                };
+                graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
+            }
+            // References, conditionals, mapped types, indexed access,
+            // keyof, infer, template literals, and other non-shell-level
+            // constructs are deferred to later phases (C2-C7). For C1b
+            // we emit an opaque placeholder — the lazy-materialisation
+            // rule says member bodies expand on-demand via ProjectPath
+            // sub-queries (C3), which the caller drives.
+            _ => self.opaque(QueryError::Miss),
+        }
     }
 
     /// Path-precise projection. Walks each [`PathSegment`] from `base`,
@@ -515,6 +799,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
+/// [`PrimitiveKind`]. Kept colocated with `build_instantiate` because no
+/// other dispatch builder produces primitive nodes from `TypeExpr`.
+fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
+    match name {
+        PrimitiveName::String => PrimitiveKind::String,
+        PrimitiveName::Number => PrimitiveKind::Number,
+        PrimitiveName::Boolean => PrimitiveKind::Boolean,
+        PrimitiveName::Symbol => PrimitiveKind::Symbol,
+        PrimitiveName::BigInt => PrimitiveKind::BigInt,
+        PrimitiveName::Any => PrimitiveKind::Any,
+        PrimitiveName::Unknown => PrimitiveKind::Unknown,
+        PrimitiveName::Void => PrimitiveKind::Void,
+        PrimitiveName::Never => PrimitiveKind::Never,
+        PrimitiveName::Null => PrimitiveKind::Null,
+        PrimitiveName::Undefined => PrimitiveKind::Undefined,
+        PrimitiveName::Object => PrimitiveKind::Object,
+    }
+}
+
+/// Approximate a literal type as its underlying primitive. The semantic
+/// graph's `PrimitiveKind` does not yet carry literal-typed variants;
+/// literal-aware projection lands post-C1 alongside expanded primitive
+/// coverage.
+fn primitive_for_literal(value: &LiteralValue) -> PrimitiveKind {
+    match value {
+        LiteralValue::String(_) => PrimitiveKind::String,
+        LiteralValue::Number(_) => PrimitiveKind::Number,
+        LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+        LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+    }
 }
 
 /// Stable-sort + dedup a list of semantic node ids. Used to canonicalize
@@ -796,8 +1113,8 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 mod tests {
     use super::*;
     use crate::semantic_query::{
-        IndexSignature, NodeScopeId, PathSegment, ProjectionMode, ScopeId, SemanticNodeData,
-        SurfaceMember, SurfaceView,
+        IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode, ScopeId,
+        SemanticNodeData, SurfaceMember, SurfaceView,
     };
     use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -1769,5 +2086,401 @@ mod tests {
             }
             NodeScopeId::Global => panic!("adapter routed to Global instead of File scope"),
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // C1-Commit-B — real `build_instantiate` (plan §3 C1 + §2 lazy block)
+    // ──────────────────────────────────────────────────────────────────
+    //
+    // The tests below exercise the shallow + lazy + mode-free
+    // `build_instantiate` behaviour. They depend on:
+    //  - `SemanticNodeData::DeclAnchor` variant (added in C1-Commit-B).
+    //  - `build_resolve_decl` producing `DeclAnchor` instead of
+    //    `Primitive(Never)`.
+    //  - `build_instantiate` resolving the base via `DispatchHost` and
+    //    interning the shell-level object with member refs.
+    //  - `Instantiate` + `SubstituteTypeParam` origin edges.
+
+    fn resolve_decl_anchor(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        canonical_id: &str,
+        name: &str,
+    ) -> SemanticNodeId {
+        match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            canonical_id,
+            name,
+        ))) {
+            QueryResult::Value(id) => id,
+            other => {
+                panic!("expected Value from ResolveDecl({canonical_id}::{name}), got {other:?}")
+            }
+        }
+    }
+
+    /// `build_resolve_decl` now produces a [`SemanticNodeData::DeclAnchor`]
+    /// carrying the declaration's `(canonical_id, name, whole_hash)`. This
+    /// is the identity-carrier `build_instantiate` inspects.
+    #[test]
+    fn resolve_decl_produces_decl_anchor_variant() {
+        let host = host();
+        upsert_ts(&host, "/w/types.ts", "export type Foo<T> = { x: T }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let node = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let data = graph.node_data(node).expect("node interned");
+        match &*data {
+            SemanticNodeData::DeclAnchor {
+                canonical_id, name, ..
+            } => {
+                assert_eq!(canonical_id.as_ref(), "/w/types.ts");
+                assert_eq!(name.as_ref(), "Foo");
+            }
+            other => panic!("expected DeclAnchor variant, got {other:?}"),
+        }
+    }
+
+    /// `Instantiate(base, args)` is mode-free per plan §7.14. Executing
+    /// the key produces exactly **one** entry in the family memo,
+    /// regardless of how many follow-up `ProjectPath(result, [...], mode)`
+    /// queries are issued at different modes.
+    #[test]
+    fn instantiate_is_mode_free_one_entry_across_depth_requests() {
+        let host = host();
+        upsert_ts(&host, "/w/types.ts", "export type Foo<T> = { x: T }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let key = SemanticQueryKey::Instantiate {
+            base,
+            args: args.clone(),
+        };
+        let _ = dispatch.execute(key.clone());
+
+        // Follow-up path projections at two different modes.
+        let empty_path: Arc<[PathSegment]> =
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+        let result = match dispatch.execute(key.clone()) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: result,
+            path: empty_path.clone(),
+            mode: ProjectionMode::Identity,
+        });
+        let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: result,
+            path: empty_path,
+            mode: ProjectionMode::Expanded,
+        });
+
+        // The `Instantiate` family has exactly one warm entry regardless
+        // of the two different-mode ProjectPath queries on the result.
+        let warm = graph
+            .get(&key)
+            .expect("Instantiate entry must be warm after execute");
+        match warm.value {
+            QueryResult::Value(_) => {}
+            other => panic!("expected warm Value, got {other:?}"),
+        }
+        // A second Instantiate call with the same (base, args) returns
+        // the same node id — dedup through the memo (mode-free).
+        let again = match dispatch.execute(key) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        assert_eq!(result, again, "Instantiate must dedup across calls");
+    }
+
+    /// `Instantiate(base, args)` emits one `Instantiate` origin edge
+    /// (result ← [decl_anchor, args...]) and one `SubstituteTypeParam`
+    /// edge per substituted type-parameter occurrence visited at the
+    /// shell level.
+    #[test]
+    fn instantiate_with_concrete_args_emits_substitute_edges() {
+        let host = host();
+        upsert_ts(&host, "/w/types.ts", "export type Foo<T> = { x: T }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base,
+            args: args.clone(),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+
+        // `Instantiate` edge on the result.
+        let inst_edges = graph.origins_of_kind(result, OriginEdgeKind::Instantiate);
+        assert_eq!(
+            inst_edges.len(),
+            1,
+            "expected exactly one Instantiate edge, got {:?}",
+            inst_edges
+        );
+        let edge = &inst_edges[0];
+        // sources = [decl_anchor, args...].
+        assert!(
+            edge.sources.iter().any(|id| *id == base),
+            "Instantiate edge sources must include the decl anchor"
+        );
+        assert!(
+            edge.sources.iter().any(|id| *id == string_arg),
+            "Instantiate edge sources must include each arg"
+        );
+
+        // At least one `SubstituteTypeParam` edge for `T -> string` on the
+        // shell (the x: T substitution at member position).
+        // Walk all nodes the shell emits — the substitution may be
+        // recorded on a member's node or on the result itself.
+        let mut found_substitute = false;
+        for candidate in [result, string_arg].iter().copied() {
+            let subs = graph.origins_of_kind(candidate, OriginEdgeKind::SubstituteTypeParam);
+            if !subs.is_empty() {
+                found_substitute = true;
+                break;
+            }
+        }
+        // Also walk the result's object members (if any) for substitutes.
+        if let Some(data) = graph.node_data(result) {
+            if let SemanticNodeData::Object(view) = &*data {
+                for m in view.members.iter() {
+                    let subs = graph.origins_of_kind(m.value, OriginEdgeKind::SubstituteTypeParam);
+                    if !subs.is_empty() {
+                        found_substitute = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            found_substitute,
+            "expected at least one SubstituteTypeParam edge on the shell or a member/arg"
+        );
+    }
+
+    /// The shell's members point at reference nodes, NOT at recursively-
+    /// lowered concrete object shapes. A member whose body references
+    /// another declaration (e.g. `y: Other<T>`) yields a member `.value`
+    /// that is not itself an `Object` surface — it is a reference /
+    /// placeholder / sub-instantiation shell.
+    #[test]
+    fn shallow_instantiate_does_not_materialise_member_bodies() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/types.ts",
+            "export type Other<T> = { inner: T }\nexport type Foo<T> = { x: T; y: Other<T> }",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+
+        let data = graph.node_data(result).expect("result node");
+        let view = match &*data {
+            SemanticNodeData::Object(v) => v.clone(),
+            other => panic!("expected Object shell after Instantiate, got {other:?}"),
+        };
+        // Member `y` must not be recursively lowered into an `Object`
+        // that already carries `Other<T>`'s `inner` member. It must be a
+        // reference: an `Alias`, an `Opaque`, a `DeclAnchor`, another
+        // shell-level `Object` for the sub-instantiation, etc. — but
+        // crucially not pre-expanded past one level.
+        let y_member = view
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == "y")
+            .expect("y member must exist");
+        let y_data = graph.node_data(y_member.value).expect("y value node");
+        // If it's an Object (the sub-Instantiate shell), it must not
+        // carry `inner`'s own members recursively expanded — i.e., its
+        // members are themselves refs, not a full-body expansion.
+        match &*y_data {
+            SemanticNodeData::Object(_sub) => {
+                // Sub-instantiation shell is fine as long as it was
+                // reached via Instantiate (origin edge present).
+                let sub_inst = graph.origins_of_kind(y_member.value, OriginEdgeKind::Instantiate);
+                assert!(
+                    !sub_inst.is_empty(),
+                    "sub-object at `y` must have an Instantiate edge recording how it was produced"
+                );
+            }
+            SemanticNodeData::Alias(_)
+            | SemanticNodeData::Opaque(_)
+            | SemanticNodeData::DeclAnchor { .. }
+            | SemanticNodeData::Primitive(_) => {
+                // All acceptable — reference-level member, not a
+                // recursive full-body expansion.
+            }
+            other => panic!("unexpected y member body: {other:?}"),
+        }
+    }
+
+    /// Two separate `Instantiate(base, [string])` calls dedup to the same
+    /// `SemanticNodeId`. `stats.hits` increments on the second call —
+    /// evidence that the memo short-circuited the second build.
+    #[test]
+    fn same_args_different_callers_dedup_to_one_entry() {
+        let host = host();
+        upsert_ts(&host, "/w/types.ts", "export type Foo<T> = { x: T }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+
+        let stats_before = graph.stats_snapshot();
+        let first = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base,
+            args: args.clone(),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let second = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base,
+            args: args.clone(),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        assert_eq!(
+            first, second,
+            "two calls to Instantiate(base, same-args) must share one node id"
+        );
+        let stats_after = graph.stats_snapshot();
+        assert!(
+            stats_after.hits > stats_before.hits,
+            "second Instantiate call must hit the warm memo (hits before={}, after={})",
+            stats_before.hits,
+            stats_after.hits
+        );
+    }
+
+    /// Whole-surface expansion through `ProjectPath(result, [], Expanded)`
+    /// drives deeper lowering via [`SemanticQueryApi::execute`] re-entry
+    /// rather than a private walker. The real enforcement (per plan §3 C3)
+    /// lands alongside `build_project_path`'s lazy path-projection
+    /// rewrite; the test stays ignored until C3 so we do not assert on
+    /// behaviour that only becomes visible after the path walker
+    /// materialises sub-queries through dispatch.
+    #[test]
+    #[ignore = "pending C3 (build_project_path lazy path-projection rewrite)"]
+    fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/types.ts",
+            "export type Other<T> = { inner: T }\nexport type Foo<T> = { x: T; y: Other<T> }",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let empty_path: Arc<[PathSegment]> =
+            Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+        let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: result,
+            path: empty_path,
+            mode: ProjectionMode::Expanded,
+        });
+
+        // Each deeply-materialised member body must have been reached
+        // via an Instantiate edge (dispatch path). Private-walker
+        // production would leave the sub-body without such an edge.
+        let data = graph.node_data(result).expect("result node");
+        if let SemanticNodeData::Object(view) = &*data {
+            for m in view.members.iter() {
+                if let Some(member_data) = graph.node_data(m.value) {
+                    if matches!(&*member_data, SemanticNodeData::Object(_)) {
+                        let inst = graph.origins_of_kind(m.value, OriginEdgeKind::Instantiate);
+                        assert!(
+                            !inst.is_empty(),
+                            "Expanded-mode material member `{}` must have an Instantiate origin edge (dispatch path)",
+                            m.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two instantiations that walk the same shared sub-expression at a
+    /// common path share one family-memo entry at that sub-query. Full
+    /// enforcement requires C3's lazy path-projection rewrite.
+    #[test]
+    #[ignore = "pending C3 (ProjectPath lazy sub-query reuse across distinct instantiations)"]
+    fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/types.ts",
+            "export type Other<T> = { inner: T }\nexport type Foo<T> = { a: Other<T>; b: Other<T> }",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let base = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let args_s: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
+        let args_n: Arc<[SemanticNodeId]> = Arc::from(vec![number_arg].into_boxed_slice());
+
+        let inst_s = match dispatch.execute(SemanticQueryKey::Instantiate { base, args: args_s }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let inst_n = match dispatch.execute(SemanticQueryKey::Instantiate { base, args: args_n }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+
+        // Path projections at [a] for each instantiation.
+        let a_path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from("a"))].into_boxed_slice());
+        let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: inst_s,
+            path: a_path.clone(),
+            mode: ProjectionMode::Identity,
+        });
+        let before = graph.stats_snapshot().memo_entry_count;
+        let _ = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base: inst_n,
+            path: a_path,
+            mode: ProjectionMode::Identity,
+        });
+        let after = graph.stats_snapshot().memo_entry_count;
+        // Structurally-identical sub-queries across distinct
+        // instantiations should reach the same family entry after C3 —
+        // the second execute must not add entries beyond the path
+        // itself.
+        assert!(
+            after <= before + 2,
+            "distinct instantiations must share visited-subpath lowering (before={before}, after={after})"
+        );
     }
 }
