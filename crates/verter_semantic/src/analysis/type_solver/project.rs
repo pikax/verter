@@ -5,6 +5,14 @@
 //! - exact concrete
 //! - exact symbolic
 //! - incomplete
+//!
+//! TODO(D3): this module demotes to a crate-private helper used only
+//! inside `build_project_path` per plan §3 D3 + §4 item 10. No
+//! workspace code outside the dispatcher imports it post-D3. The
+//! `SurfaceShape` / `SurfaceProperty` / `SurfaceCallSignature` /
+//! `SurfaceParam` / `SurfaceIndexSignature` types survive as crate-
+//! private internal helpers (plan §4 item 19c) but are not publicly
+//! re-exported.
 
 use rustc_hash::FxHashMap;
 

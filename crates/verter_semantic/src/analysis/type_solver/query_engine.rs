@@ -1433,6 +1433,21 @@ impl<'a, A: AuditSink> TypeQueryEngine<'a, A> {
         self.subject_keys.get(id.0 as usize)
     }
 
+    // TODO(D3): projection-authority cutover — per plan §3 D3,
+    // `project_member` / `project_surface` / `project_keyspace` are
+    // rewritten as thin wrappers around
+    // `SemanticQueryApi::execute(SemanticQueryKey::ProjectPath { .. })`
+    // and the associated request-scoped projection cache
+    // (`self.op_cache`) is deleted. The `Projected*` return types die
+    // alongside `TypeSurfaceDb` in the same commit; the metadata they
+    // carry migrates to `SurfaceView` / `SurfaceMember` (landed in B1a).
+    //
+    // D3 is the plan's single largest commit (~1500 LOC across 52+
+    // call sites). Per the single-path rule it does not split; the old
+    // projection authority and the new `build_project_path` path cannot
+    // coexist. Corresponding tests in `generic_navigation_solver_tests.rs`
+    // are `#[ignore = "pending D3 projection-authority cutover"]`.
+
     /// Project a single member from a subject by name.
     ///
     /// For `SubjectKey::Decl`: resolves the declaration, then projects the named member.

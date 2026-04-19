@@ -7,6 +7,15 @@
 //! results must stay request-local and uncached.
 //!
 //! Concurrent cold requests for the same `TypeSurfaceOpKey` coalesce via singleflight.
+//!
+//! TODO(D3): deleted or reduced to an internal lookup table under
+//! `semantic_query_memo` per plan §3 D3 + §4 item 10. Consumers migrate
+//! to `SemanticQueryApi::execute(SemanticQueryKey::ProjectPath { .. })`.
+//! ~52 call sites across `component_meta_query_engine.rs`,
+//! `resolver_runtime.rs`, and `resolver_core/mod.rs` require coordinated
+//! cutover in the same commit per the single-path rule. Tracked in
+//! `generic_navigation_solver_tests.rs` as
+//! `#[ignore = "pending D3 projection-authority cutover"]`.
 
 use std::hash::Hash;
 use std::sync::Arc;
