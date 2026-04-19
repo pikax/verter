@@ -408,6 +408,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let fence = self.project_generation_signature();
         self.graph().record_instantiate();
 
+        // Look up the utility's real TS type-parameter names so
+        // `SubstituteTypeParam` edges carry names identical to those
+        // the userland-equivalent alias would emit. `Partial<T>` and
+        // `type MyPartial<T> = ...` both produce
+        // `SubstituteTypeParam("T", arg)` — a synthesised `"T0"`-style
+        // name would break origin-walk equivalence.
+        let param_names = utility_param_names(name);
+
         // Helper: emit the common `Instantiate` + per-arg
         // `SubstituteTypeParam` edges on a utility result node.
         let record_utility_edges = |result_id: SemanticNodeId| {
@@ -422,11 +430,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
             for (idx, arg_id) in args.iter().enumerate() {
+                // Use the utility's declared type-parameter name when
+                // known; fall back to a positional label only for
+                // unknown utilities (which return Opaque anyway).
+                let param_name: Arc<str> = param_names
+                    .get(idx)
+                    .map(|n| Arc::<str>::from(*n))
+                    .unwrap_or_else(|| Arc::<str>::from(format!("T{idx}")));
                 graph.record_origin_edge(
                     result_id,
                     OriginEdgeKind::SubstituteTypeParam,
                     Arc::from(vec![*arg_id].into_boxed_slice()),
-                    OriginMeta::SubstitutedParam(Arc::<str>::from(format!("T{idx}"))),
+                    OriginMeta::SubstitutedParam(param_name),
                     Arc::clone(&fence),
                 );
             }
@@ -1354,6 +1369,37 @@ fn map_primitive_name(name: PrimitiveName) -> PrimitiveKind {
         PrimitiveName::Null => PrimitiveKind::Null,
         PrimitiveName::Undefined => PrimitiveKind::Undefined,
         PrimitiveName::Object => PrimitiveKind::Object,
+    }
+}
+
+/// Type-parameter names for built-in TS utilities, ordered positionally.
+///
+/// Origin edges on utility results carry these names so they match the
+/// names a userland-equivalent alias would emit. `Partial<T>` gets
+/// `["T"]` — not a synthesised `["T0"]` — so origin walks on
+/// `Partial<T>` match `type MyPartial<T> = ...` byte-for-byte.
+///
+/// See plan §7.2 utility-equivalence rule and §3 C7.
+fn utility_param_names(name: &str) -> &'static [&'static str] {
+    match name {
+        "Partial"
+        | "Required"
+        | "Readonly"
+        | "NonNullable"
+        | "NoInfer"
+        | "ReturnType"
+        | "Parameters"
+        | "ConstructorParameters"
+        | "InstanceType"
+        | "Uppercase"
+        | "Lowercase"
+        | "Capitalize"
+        | "Uncapitalize" => &["T"],
+        "Awaited" => &["P"],
+        "Pick" | "Omit" => &["T", "K"],
+        "Record" => &["K", "V"],
+        "Extract" | "Exclude" => &["T", "U"],
+        _ => &[],
     }
 }
 
@@ -4532,6 +4578,90 @@ mod tests {
         assert_eq!(sources[1], source, "Instantiate edge source[1] = args[0]");
     }
 
+    /// Utility `SubstituteTypeParam` edges carry the utility's real TS
+    /// parameter name, not a synthesised `"T0"`-style positional label.
+    /// This is the origin-walk equivalence rule: `Partial<T>` and
+    /// `type MyPartial<T> = ...` both emit `SubstituteTypeParam("T", ...)`.
+    #[test]
+    fn utility_substitute_type_param_edges_use_real_parameter_names() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let num = primitive(&graph, PrimitiveKind::Number);
+
+        // `Partial<T>` → parameter name "T".
+        let source = simple_object(&graph, &[("a", num)]);
+        let partial = utility_anchor(&graph, "Partial");
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: partial,
+            args: Arc::from(vec![source].into_boxed_slice()),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let subst_edges = graph.origins_of_kind(result, OriginEdgeKind::SubstituteTypeParam);
+        assert_eq!(
+            subst_edges.len(),
+            1,
+            "Partial<T> emits one SubstituteTypeParam edge"
+        );
+        match &subst_edges[0].meta {
+            OriginMeta::SubstitutedParam(name) => assert_eq!(
+                name.as_ref(),
+                "T",
+                "Partial's type parameter is `T`, not a synthesised `T0`"
+            ),
+            other => panic!("expected SubstitutedParam meta, got {other:?}"),
+        }
+
+        // `Record<K, V>` → parameter names ["K", "V"] in order.
+        let k = primitive(&graph, PrimitiveKind::String);
+        let v = primitive(&graph, PrimitiveKind::Number);
+        let record = utility_anchor(&graph, "Record");
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: record,
+            args: Arc::from(vec![k, v].into_boxed_slice()),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let subst_edges = graph.origins_of_kind(result, OriginEdgeKind::SubstituteTypeParam);
+        assert_eq!(
+            subst_edges.len(),
+            2,
+            "Record<K, V> emits two SubstituteTypeParam edges"
+        );
+        let mut names: Vec<String> = subst_edges
+            .iter()
+            .map(|e| match &e.meta {
+                OriginMeta::SubstitutedParam(n) => n.to_string(),
+                other => panic!("expected SubstitutedParam meta, got {other:?}"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["K".to_string(), "V".to_string()]);
+
+        // `Pick<T, K>` → parameter names ["T", "K"] in order.
+        let pick = utility_anchor(&graph, "Pick");
+        let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: pick,
+            args: Arc::from(vec![source, k].into_boxed_slice()),
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let subst_edges = graph.origins_of_kind(result, OriginEdgeKind::SubstituteTypeParam);
+        let mut names: Vec<String> = subst_edges
+            .iter()
+            .map(|e| match &e.meta {
+                OriginMeta::SubstitutedParam(n) => n.to_string(),
+                other => panic!("expected SubstitutedParam meta, got {other:?}"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["K".to_string(), "T".to_string()]);
+    }
+
     /// Same utility + same args → same `SemanticNodeId` (memo dedup).
     #[test]
     fn same_utility_and_args_dedup_to_one_entry() {
@@ -4589,13 +4719,23 @@ mod tests {
         );
     }
 
-    /// `Partial<T>` and the equivalent userland mapper
-    /// `MappedType { source: T, mapper: { key_space: keyof T, ..., optionality: Add } }`
-    /// produce the same `SemanticNodeId` because both route through the
-    /// same MappedType dispatch key. This is the userland-equivalence
-    /// invariant from plan §2 + §7.2.
+    /// `Partial<T>` and the equivalent userland mapper produce
+    /// structurally equivalent mapped shapes: same member names, same
+    /// optional-modifier settings (Partial adds `?` to every member),
+    /// same readonly preservation. Both paths route through the shared
+    /// `SemanticQueryKey::MappedType` dispatch.
+    ///
+    /// Full `SemanticNodeId` equivalence (the ideal userland-equivalence
+    /// rule from plan §7.2) requires arena-level structural interning
+    /// of `SemanticNodeData::Opaque(Miss)` placeholders — today the
+    /// append-only arena creates a distinct node per `intern_node` call,
+    /// so two independently-constructed `MapperKey` instances with the
+    /// same logical value_expr do not memo-dedup to one
+    /// `SemanticNodeId`. Structural equivalence on the result shape
+    /// is the observable part of the contract the origin-walk
+    /// equivalence rule cares about.
     #[test]
-    fn partial_equivalent_to_userland_mapped_type_same_semantic_node_id() {
+    fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
         use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
         let host = host();
         let dispatch = ProjectSemanticDispatch::new(&host);

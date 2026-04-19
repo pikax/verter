@@ -799,8 +799,9 @@ mod tests {
     ///
     /// The assertion is structural: we construct a `SemanticGraphStats`
     /// with `Default::default()`, dump it via `{:?}`, and confirm every
-    /// expected field name appears in the debug output. This catches
-    /// field additions, renames, and removals without requiring
+    /// expected field name appears in the debug output AND the total
+    /// field count matches the plan's expected cardinality. This
+    /// catches additions, renames, and removals without requiring
     /// reflection.
     ///
     /// §6.3 source-of-truth field list (see plan §3 F2 + §6.3):
@@ -857,6 +858,26 @@ mod tests {
                  (plan §6.3)"
             );
         }
+
+        // Cardinality check: total field count on `SemanticGraphStats`
+        // equals expected-to-fire + exceptional-path. Catches a field
+        // added to the struct without a corresponding §6.3 entry —
+        // which would otherwise slip past the one-way `contains`
+        // checks above. Uses `": "` as the field delimiter in Debug
+        // output (every primitive field emits exactly one `: `
+        // separator between name and value).
+        let expected_total = expected_to_fire.len() + exceptional_path.len();
+        let field_count = debug.matches(": ").count();
+        assert_eq!(
+            field_count,
+            expected_total,
+            "SemanticGraphStats has {field_count} fields in Debug output but \
+             plan §6.3 specifies {expected_total} counters (expected_to_fire = {}, \
+             exceptional_path = {}). A field was added/removed without updating \
+             this test and plan §6.3; see debug output:\n{debug}",
+            expected_to_fire.len(),
+            exceptional_path.len(),
+        );
     }
 
     /// F2 — navigation-once invariant contract (plan §3 F2).
