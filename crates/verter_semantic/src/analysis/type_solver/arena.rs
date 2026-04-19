@@ -546,6 +546,21 @@ fn union_member_is_new(
 /// Query-local memoization caches, separate from the node store so that
 /// relation/projection code can hold `&QueryArena` and `&mut SolverCaches`
 /// simultaneously without cloning nodes.
+///
+/// TODO(D5): retire the reusable-identity cache fields per plan §3 D5 +
+/// §4 items 6-8:
+/// - `instantiation` → deleted (dispatch + `SemanticGraphStore` owns
+///   reusable identity).
+/// - `member` / `keyspace` → deleted (path-projection + keyspace
+///   projection live in dispatch post-D3).
+/// - `relation` → RETAINED as scratch (relation-engine inner loop; too
+///   tight for dispatcher round-trips). But scope is per
+///   dispatch-builder invocation — constructed fresh per builder call
+///   that needs it, dropped when the builder returns. Enforced by
+///   `solver_caches_relation_rebuilt_per_dispatch_builder_invocation`.
+/// - `root_identity` / `prepared_type_decl` / `prepared_value_decl` →
+///   RETAINED (solver-internal prepared-decl lookup cache; not
+///   reusable identity, not published through dispatch).
 #[derive(Default)]
 pub struct SolverCaches {
     pub relation: FxHashMap<(NodeId, NodeId, RelationMode), RelationResult>,

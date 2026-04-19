@@ -186,6 +186,15 @@ struct ResolvedSubjectEntry {
 /// and solver caches. All solves within one request share these resources.
 ///
 /// `TypeQueryEngine` is `&mut self` throughout — not `Send` or `Sync`.
+///
+/// TODO(D5): the parallel request-scoped query-identity subsystem
+/// (`SubjectKey`, `SubjectId`, `ResolvedSubjectKey`, `ResolvedSubjectEntry`,
+/// `OpKey`, `OpResult` + the associated fields here) is retired per
+/// plan §3 D5 + §4 item 7. Post-D1+D3 every call path goes through
+/// `SemanticQueryApi::execute`, and the dispatch family memo provides
+/// request-local dedup without a parallel layer. The
+/// `shallow_*_cache` fields die alongside because the semantic graph
+/// itself is the canonical shallow cache post-track.
 pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
     host: &'a dyn TypeSolverHost,
     op_cache: FxHashMap<OpKey, OpResult>,
@@ -217,6 +226,18 @@ pub struct TypeQueryEngine<'a, A: AuditSink = NoopAudit> {
 }
 
 /// Accumulated solver hot-path counters for tracing/profiling.
+///
+/// TODO(D5): the reusable-work fields retire per plan §3 D5 + §4 item
+/// 15. Benchmarks and trace-check consume `SemanticGraphStats` from B2
+/// onward — there is no double-authority window. Post-D5 this struct
+/// shrinks to cover only solver-scratch-only metrics (per-request
+/// lowering steps, scratch-arena peak size, relation-cache hits).
+/// Fields retiring:
+///   - `instantiation_cache_hits` / `instantiation_cache_misses`
+///   - `projection_cache_hits`
+///   - `resolve_conditional_count` (when describing reusable work)
+///   - `resolve_ref_count` (when describing reusable work)
+///   - `indexed_access_open_skips` (symbolic-stop retirement, D4)
 #[derive(Debug, Default, Clone)]
 pub struct SolverTraceSummary {
     pub resolve_ref_count: u32,

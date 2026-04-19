@@ -161,17 +161,31 @@ pub struct SolveState {
     ///
     /// One-shot callers allocate this per solve. Request-scoped callers move the
     /// cache into `SolveState` and take it back out after the solve completes.
+    ///
+    /// TODO(D5): deleted per plan §3 D5 + §4 item 4. Dispatch +
+    /// `SemanticGraphStore` own reusable instantiation identity
+    /// post-D1. Per-request acceleration inside one request is
+    /// provided by the dispatch family memo already.
     pub(crate) instantiation_cache: rustc_hash::FxHashMap<RecursionKey, NodeId>,
 
     /// Cache for member projection results. Keyed by
     /// `(canonical_id, symbol_name, args_hash, member_name)`.
     /// Prevents repeated projection of the same member from the same subject
     /// within a single request.
+    ///
+    /// TODO(D5): deleted per plan §3 D5 + §4 item 5. Dispatch owns
+    /// projection identity via `SemanticQueryKey::ProjectPath` post-D3.
+    /// `SemanticGraphStats::memo_entry_count` replaces
+    /// `projection_cache_size` as the observability metric.
     pub(crate) projection_cache: rustc_hash::FxHashMap<ProjectionCacheKey, NodeId>,
 
     /// Active projection keys currently being resolved. Guards forwarded alias
     /// cycles so chained projection can recurse without reopening an
     /// unbounded loop when aliases forward back to an in-flight subject.
+    ///
+    /// TODO(D5): deleted per plan §3 D5 + §4 item 5. Alias-cycle
+    /// detection moves to dispatch's `PathWalker.visited_aliases`
+    /// (landed in C3).
     pub(crate) active_projection_keys: rustc_hash::FxHashSet<ProjectionCacheKey>,
 
     /// Audit: total projection cache hits in this query.
