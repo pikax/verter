@@ -33,111 +33,11 @@ use crate::owner_import_surface::OwnerImportSurfaceDb;
 use crate::resolver_core::imported_root_db::ImportedRootDb;
 use crate::resolver_core::route_db::RouteDb;
 use crate::semantic_query::DepVersion;
+// `HostResolvedNamedTypeKey` lives in `semantic_query` alongside the
+// `ResolvedNamedType` query variant; the shared semantic graph owns both
+// the identity mapping and the stored payloads.
+pub use crate::semantic_query::HostResolvedNamedTypeKey;
 use crate::semantic_query_memo::SemanticGraphStore;
-
-// ──────────────────────────────────────────────────────────────────────────
-// ResolvedNamedTypesDb — host-owned fully-resolved named local symbols
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Host-owned cache key for fully-resolved named local symbols.
-///
-/// Promotes the per-context `ResolvedNamedTypeCacheKey` used by the parser's
-/// `TypeResolutionContext` into a cross-request identity: the original shape
-/// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
-/// plus `(canonical_id, whole_hash)` scoping so stored entries stay consistent
-/// with the owning file's content generation.
-///
-/// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
-/// construction is a refcount bump instead of a `String` heap allocation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HostResolvedNamedTypeKey {
-    pub canonical_id: Arc<str>,
-    pub whole_hash: Hash16,
-    pub inner:
-        verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
-}
-
-/// Host-owned cache of fully-resolved named local symbols. Keyed by the
-/// `(canonical_id, whole_hash, ResolvedNamedTypeCacheKey)` identity so entries
-/// are valid across requests that share the same workspace content generation.
-///
-/// Cleared on epoch bump (see `VerterHost::bump_store_view_epoch`) because
-/// entries are scoped by `(canonical_id, whole_hash)` and whole_hash reflects
-/// one workspace content generation — a bumped epoch means at least one
-/// canonical's facts changed, and dropping stale entries is cheaper than
-/// per-canonical validation.
-pub struct ResolvedNamedTypesDb {
-    entries: Arc<
-        DashMap<
-            HostResolvedNamedTypeKey,
-            Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
-    >,
-}
-
-impl ResolvedNamedTypesDb {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            entries: Arc::new(DashMap::new()),
-        }
-    }
-
-    #[must_use]
-    pub fn get(
-        &self,
-        key: &HostResolvedNamedTypeKey,
-    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>> {
-        self.entries.get(key).map(|entry| Arc::clone(entry.value()))
-    }
-
-    pub fn insert(
-        &self,
-        key: HostResolvedNamedTypeKey,
-        value: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-    ) {
-        self.entries.insert(key, value);
-    }
-
-    /// Drop every cached entry. Called on epoch bumps — entries are
-    /// `(canonical_id, whole_hash)`-scoped and a bumped epoch means at least
-    /// one canonical's facts changed.
-    pub fn clear(&self) {
-        self.entries.clear();
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Internal shared handle to the underlying `DashMap`. Used by the
-    /// host-side adapter that bridges `NamedTypeCache` onto this DB — it
-    /// clones the `Arc` once and performs `(canonical_id, whole_hash)`-scoped
-    /// lookups without going through this DB's methods for each hit, keeping
-    /// the hot path refcount-only.
-    pub(crate) fn shared_entries(
-        &self,
-    ) -> Arc<
-        DashMap<
-            HostResolvedNamedTypeKey,
-            Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
-    > {
-        Arc::clone(&self.entries)
-    }
-}
-
-impl Default for ResolvedNamedTypesDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
@@ -572,14 +472,6 @@ pub struct ProjectTypeStore {
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
     intrinsic_registry: IntrinsicRegistry,
-    /// Host-owned fully-resolved named local symbols (migrated from the
-    /// per-context `Rc<RefCell<FxHashMap>>` cache in `TypeResolutionContext`).
-    /// Keyed by the full `(canonical_id, whole_hash, name, surface,
-    /// companion_cache_key, type_param_bindings)` identity — same shape the
-    /// context cache used, plus `(canonical_id, whole_hash)` scoping so
-    /// entries are valid across requests that share the same workspace
-    /// content generation.
-    resolved_named_types: ResolvedNamedTypesDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -632,7 +524,6 @@ impl ProjectTypeStore {
             owner_import_surfaces,
             component_meta_results,
             intrinsic_registry: IntrinsicRegistry::with_defaults(),
-            resolved_named_types: ResolvedNamedTypesDb::new(),
             counters,
         }
     }
@@ -694,11 +585,6 @@ impl ProjectTypeStore {
         &self.intrinsic_registry
     }
 
-    /// Host-owned fully-resolved named local symbols cache.
-    pub fn resolved_named_types(&self) -> &ResolvedNamedTypesDb {
-        &self.resolved_named_types
-    }
-
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
     /// downstream callers merge into their active
     /// [`CompletionFence`](crate::completion_fence::CompletionFence).
@@ -725,13 +611,16 @@ impl ProjectTypeStore {
     /// - `OwnerImportSurfaceDb`: removes the owner surface.
     /// - `ComponentMetaResultDb`: removes every result keyed on the owner.
     /// - `SemanticGraphStore`: removes every memo entry whose scope
-    ///   references the canonical.
+    ///   references the canonical, and every Vue macro resolution entry
+    ///   keyed on the canonical.
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
         self.owner_import_surfaces.remove(canonical_id);
         self.component_meta_results.invalidate_owner(canonical_id);
         self.semantic_graph.invalidate_canonical(canonical_id);
+        self.semantic_graph
+            .invalidate_resolved_named_types_for_canonical(canonical_id);
     }
 
     /// Targeted invalidation of a project-generation bump.
@@ -751,9 +640,13 @@ impl ProjectTypeStore {
         //   - owner import surfaces (routes they resolved may shift)
         //   - component-meta results (depend on routes / intrinsic SDK)
         //   - semantic query memo (derived from routes + intrinsics)
+        //   - Vue macro resolution artifacts (route-sensitive cross-file
+        //     resolution: a tsconfig change can redirect the same name to
+        //     a different target file)
         self.owner_import_surfaces
             .entries_drain_for_generation_bump();
         let _ = self.semantic_graph.invalidate_all();
+        self.semantic_graph.clear_resolved_named_types();
         self.component_meta_results.invalidate_all();
         generation
     }

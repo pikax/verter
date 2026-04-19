@@ -29,12 +29,13 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, QueryError, QueryResult, SemanticGraphRead, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    CacheRead, DepSignature, HostResolvedNamedTypeKey, QueryError, QueryResult, SemanticGraphRead,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -196,11 +197,42 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 /// This store alone does not execute queries — it is the cache substrate.
 /// Concrete resolution happens inside a dispatcher that owns the solver /
 /// resolver knowledge.
+///
+/// ## Vue macro resolution identity map
+///
+/// The [`named_type_index`](Self::named_type_index) `DashMap` is a secondary
+/// identity table that lets the parser's
+/// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+/// adapter hit the shared graph in refcount-only time. Reads go
+/// `key → SemanticNodeId → SemanticNodeData::VueMacroElements(arc) →
+/// arc.clone()`: the hot path pays one `DashMap::get` + one arena read +
+/// one `Arc::clone`, matching the retired `ResolvedNamedTypesDb`'s
+/// cost profile.
+///
+/// Entries are whole-hash-scoped (the key carries `whole_hash`) so reads
+/// are self-validating within one workspace content generation. The
+/// formal `execute_cooperative` path is not in the read hot path — writes
+/// enter through [`SemanticGraphStore::insert_resolved_named_type`] from
+/// the adapter side.
 #[derive(Default)]
 pub struct SemanticGraphStore {
     arena: NodeArena,
     entries: Mutex<FxHashMap<SemanticQueryKey, MemoEntry>>,
     inflight: Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
+    /// Identity map for Vue macro resolution artifacts keyed by
+    /// [`HostResolvedNamedTypeKey`]. See the struct-level docs for the
+    /// read-path shape.
+    named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
+}
+
+impl std::fmt::Debug for SemanticGraphStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SemanticGraphStore")
+            .field("nodes", &self.arena.len())
+            .field("memo_entries", &self.memo_entry_count())
+            .field("named_type_entries", &self.named_type_index.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -279,6 +311,87 @@ impl SemanticGraphStore {
         let removed = entries.len();
         entries.clear();
         removed
+    }
+
+    /// Insert a Vue macro resolution artifact under `key`. Interns the
+    /// payload as a [`SemanticNodeData::VueMacroElements`] node in the
+    /// arena and records the identity mapping in
+    /// [`named_type_index`](Self::named_type_index). Subsequent reads via
+    /// [`Self::get_resolved_named_type`] are refcount-only.
+    pub fn insert_resolved_named_type(
+        &self,
+        key: HostResolvedNamedTypeKey,
+        elements: Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
+    ) -> SemanticNodeId {
+        let node_id = self.intern_node(SemanticNodeData::VueMacroElements(elements));
+        self.named_type_index.insert(key, node_id);
+        node_id
+    }
+
+    /// Fast-path read of a Vue macro resolution artifact. Walks
+    /// `key → SemanticNodeId → SemanticNodeData::VueMacroElements(arc) →
+    /// arc.clone()`. No dep-signature construction, no cooperative
+    /// admission — entries are whole-hash-scoped by construction and
+    /// reads are self-validating within one project generation.
+    #[must_use]
+    pub fn get_resolved_named_type(
+        &self,
+        key: &HostResolvedNamedTypeKey,
+    ) -> Option<Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>> {
+        let node_id = *self.named_type_index.get(key)?;
+        match &*self.arena.get(node_id)? {
+            SemanticNodeData::VueMacroElements(arc) => Some(Arc::clone(arc)),
+            _ => None,
+        }
+    }
+
+    /// Identity-only lookup: return the [`SemanticNodeId`] associated with
+    /// `key` without resolving the payload. Used by
+    /// [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
+    /// so the formal `execute` entry point can hand back a node id when
+    /// the entry is present, without paying for an `Arc::clone` of the
+    /// `ResolvedElements` payload on the dispatch hot path.
+    #[must_use]
+    pub fn resolved_named_type_node_id(
+        &self,
+        key: &HostResolvedNamedTypeKey,
+    ) -> Option<SemanticNodeId> {
+        self.named_type_index.get(key).map(|entry| *entry.value())
+    }
+
+    /// Drop every entry in the Vue macro resolution identity map. Invoked
+    /// on project-generation bumps / per-canonical evictions — the
+    /// append-only node arena keeps the interned
+    /// [`SemanticNodeData::VueMacroElements`] payloads alive only as long
+    /// as something else references their ids, which is fine because the
+    /// identity map was the only external reachability path to them.
+    pub fn clear_resolved_named_types(&self) {
+        self.named_type_index.clear();
+    }
+
+    /// Remove every entry in the Vue macro resolution identity map whose
+    /// key's `canonical_id` matches `canonical_id`. Called from
+    /// [`ProjectTypeStore::evict_canonical`](crate::project_type_store::ProjectTypeStore::evict_canonical)
+    /// so stale artifacts do not keep a retired file's spans alive.
+    /// Returns the number of entries evicted.
+    pub fn invalidate_resolved_named_types_for_canonical(&self, canonical_id: &str) -> usize {
+        let mut removed = 0usize;
+        self.named_type_index.retain(|key, _| {
+            if key.canonical_id.as_ref() == canonical_id {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Number of Vue macro resolution entries. Useful for tests and
+    /// debug/telemetry counters.
+    #[must_use]
+    pub fn resolved_named_type_count(&self) -> usize {
+        self.named_type_index.len()
     }
 
     /// Warm-lookup a key. Returns the memoized result + its recorded
@@ -844,5 +957,116 @@ mod tests {
             (QueryResult::Value(w), QueryResult::Value(j)) => assert_eq!(w, j),
             other => panic!("unexpected combined result: {other:?}"),
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Vue macro resolution identity map (former ResolvedNamedTypesDb)
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::semantic_query::HostResolvedNamedTypeKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+    fn make_key(canonical: &str, whole_hash: [u8; 16], name: &str) -> HostResolvedNamedTypeKey {
+        HostResolvedNamedTypeKey {
+            canonical_id: Arc::from(canonical),
+            whole_hash,
+            inner: ResolvedNamedTypeCacheKey {
+                name: name.as_bytes().to_vec().into_boxed_slice(),
+                surface: None,
+                base_offset: 0,
+                companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+                type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        }
+    }
+
+    /// Inserting a resolved-named-type entry stores the payload behind a
+    /// `VueMacroElements` node and returns a stable [`SemanticNodeId`].
+    /// Subsequent reads observe the same payload without rebuilding.
+    #[test]
+    fn resolved_named_type_insert_and_get_round_trip() {
+        let store = SemanticGraphStore::new();
+        let key = make_key("/w/a.ts", [1u8; 16], "Foo");
+        let payload = Arc::new(ResolvedElements::default());
+        let node_id = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+
+        // Identity lookup and payload lookup both succeed.
+        assert_eq!(store.resolved_named_type_node_id(&key), Some(node_id));
+        let round = store
+            .get_resolved_named_type(&key)
+            .expect("payload must be retrievable");
+        assert!(Arc::ptr_eq(&payload, &round));
+        assert_eq!(store.resolved_named_type_count(), 1);
+    }
+
+    /// Missing keys return `None` without allocating — the hot-path
+    /// miss is refcount-free.
+    #[test]
+    fn resolved_named_type_missing_key_returns_none() {
+        let store = SemanticGraphStore::new();
+        let key = make_key("/w/a.ts", [0u8; 16], "Absent");
+        assert!(store.get_resolved_named_type(&key).is_none());
+        assert!(store.resolved_named_type_node_id(&key).is_none());
+    }
+
+    /// Per-canonical invalidation removes only matching entries; entries
+    /// for unrelated canonicals stay warm.
+    #[test]
+    fn resolved_named_type_per_canonical_invalidation() {
+        let store = SemanticGraphStore::new();
+        let hash = [5u8; 16];
+        let key_a = make_key("/w/a.ts", hash, "Foo");
+        let key_b = make_key("/w/b.ts", hash, "Bar");
+        store.insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()));
+        store.insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()));
+        assert_eq!(store.resolved_named_type_count(), 2);
+
+        let removed = store.invalidate_resolved_named_types_for_canonical("/w/a.ts");
+        assert_eq!(removed, 1);
+        assert!(store.get_resolved_named_type(&key_a).is_none());
+        assert!(store.get_resolved_named_type(&key_b).is_some());
+    }
+
+    /// Global clear removes every entry (used on project-generation
+    /// bumps / epoch bumps).
+    #[test]
+    fn resolved_named_type_global_clear() {
+        let store = SemanticGraphStore::new();
+        let key = make_key("/w/a.ts", [1u8; 16], "Foo");
+        store.insert_resolved_named_type(key.clone(), Arc::new(ResolvedElements::default()));
+        assert_eq!(store.resolved_named_type_count(), 1);
+        store.clear_resolved_named_types();
+        assert_eq!(store.resolved_named_type_count(), 0);
+        assert!(store.get_resolved_named_type(&key).is_none());
+    }
+
+    /// Repeat writes under the same key overwrite the identity mapping —
+    /// two successive inserts leave one entry and the latest payload
+    /// becomes observable. This matches the `NamedTypeCache` trait's
+    /// "insert overwrites any prior entry under the same key" contract.
+    #[test]
+    fn resolved_named_type_repeated_insert_overwrites_identity_mapping() {
+        let store = SemanticGraphStore::new();
+        let key = make_key("/w/a.ts", [1u8; 16], "Foo");
+        let first = Arc::new(ResolvedElements::default());
+        let second = Arc::new(ResolvedElements {
+            has_call_signature: true,
+            ..ResolvedElements::default()
+        });
+
+        store.insert_resolved_named_type(key.clone(), Arc::clone(&first));
+        store.insert_resolved_named_type(key.clone(), Arc::clone(&second));
+
+        assert_eq!(
+            store.resolved_named_type_count(),
+            1,
+            "same key must not duplicate identity entries"
+        );
+        let observed = store.get_resolved_named_type(&key).unwrap();
+        assert!(
+            Arc::ptr_eq(&second, &observed),
+            "latest insert wins — identity map points at the second payload",
+        );
     }
 }

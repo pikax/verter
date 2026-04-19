@@ -14,8 +14,7 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 - `RouteDb` (rehomed) — barrel / route surface cache.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface` / `resolve_owner_direct_import`.
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache consulted by `get_component_meta` before any cold work.
-- `ResolvedNamedTypesDb` — host-owned resolved-named-type cache (folded in from the former `host_owned_resolved_named_types` DashMap).
-- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Every `SemanticQueryKey` variant dispatches through this memo.
+- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Every `SemanticQueryKey` variant dispatches through this memo. Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` has been folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
 

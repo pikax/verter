@@ -335,19 +335,25 @@ pub(crate) struct ExternalTypeAnalysisCacheKey {
 
 /// Thin adapter that implements
 /// [`verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache`]
-/// on top of the host-owned DashMap (via [`crate::project_type_store::ResolvedNamedTypesDb`]).
-/// Holds an `Arc<DashMap>` plus the `(canonical_id, whole_hash)` tuple for this
-/// context's entries. A new adapter is constructed per `build_type_context`
-/// call so child contexts created by `instantiate_type_params_ctx` share the
-/// same DashMap without re-building scoping metadata.
+/// on top of the project-global
+/// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
+/// via [`HostResolvedNamedTypeKey`](crate::project_type_store::HostResolvedNamedTypeKey).
+/// Holds an `Arc<SemanticGraphStore>` plus the `(canonical_id, whole_hash)`
+/// tuple for this context's entries. A new adapter is constructed per
+/// `build_type_context` call so child contexts created by
+/// `instantiate_type_params_ctx` share the same graph handle without
+/// re-building scoping metadata.
+///
+/// Read-path contract: `get` performs one `DashMap::get` on the graph's
+/// named-type identity map plus one node-arena read plus one `Arc::clone`.
+/// There is no `execute_cooperative` round-trip, no `DepSignature`
+/// allocation, and no `ProjectSemanticDispatch` dispatch on the hot path —
+/// entries are whole-hash-scoped so reads are self-validating within one
+/// project generation. Writes record the identity mapping and intern the
+/// payload node in the graph arena.
 #[derive(Debug)]
 struct HostNamedTypeCacheAdapter {
-    cache: std::sync::Arc<
-        dashmap::DashMap<
-            crate::project_type_store::HostResolvedNamedTypeKey,
-            std::sync::Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
-        >,
-    >,
+    graph: std::sync::Arc<crate::semantic_query_memo::SemanticGraphStore>,
     /// Shared `Arc<str>` so adapter clones (one per child type context from
     /// `instantiate_type_params_ctx`) don't each allocate a fresh `String`.
     canonical_id: Arc<str>,
@@ -371,9 +377,7 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
             whole_hash: self.whole_hash,
             inner: key.clone(),
         };
-        self.cache
-            .get(&host_key)
-            .map(|entry| std::sync::Arc::clone(entry.value()))
+        self.graph.get_resolved_named_type(&host_key)
     }
 
     fn insert(
@@ -386,7 +390,7 @@ impl verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache
             whole_hash: self.whole_hash,
             inner: key,
         };
-        self.cache.insert(host_key, value);
+        self.graph.insert_resolved_named_type(host_key, value);
     }
 }
 
@@ -1943,10 +1947,7 @@ impl VerterHost {
                     + Send
                     + Sync,
             > = std::sync::Arc::new(HostNamedTypeCacheAdapter {
-                cache: self
-                    .project_type_store
-                    .resolved_named_types()
-                    .shared_entries(),
+                graph: std::sync::Arc::clone(self.project_type_store.semantic_graph()),
                 canonical_id: Arc::<str>::from(canonical_id),
                 whole_hash,
             });
@@ -2172,13 +2173,16 @@ impl VerterHost {
                 .retain(|key, _| key.host_instance_id != host_instance_id);
         });
         self.external_type_analysis_cache.lock().clear();
-        // Clear host-owned named-type cache on epoch bump. Entries are scoped
-        // by `(canonical_id, whole_hash)`, and whole_hash reflects one
-        // workspace content generation. A bumped epoch means at least one
-        // canonical's facts changed, and we prefer to drop stale entries over
-        // validating each one lazily (which would require a per-canonical
-        // invalidation pass).
-        self.project_type_store.resolved_named_types().clear();
+        // Clear host-owned named-type cache on epoch bump. Entries live on
+        // the shared `SemanticGraphStore` under `HostResolvedNamedTypeKey`
+        // identities, scoped by `(canonical_id, whole_hash)`. Whole_hash
+        // reflects one workspace content generation, so a bumped epoch
+        // means at least one canonical's facts changed; we prefer to drop
+        // stale entries over validating each one lazily (which would
+        // require a per-canonical invalidation pass).
+        self.project_type_store
+            .semantic_graph()
+            .clear_resolved_named_types();
         // Note: route_owned_shallow_cache is NOT cleared here — it's invalidated
         // per-file by invalidate_route_owned_shallow_cache() and validated by
         // content-hash on lookup. Clearing it on every epoch bump would defeat
@@ -6493,7 +6497,9 @@ impl VerterHost {
     /// Test-only accessor for the host-owned named-type cache size.
     #[cfg(test)]
     pub(crate) fn host_owned_resolved_named_types_len_for_test(&self) -> usize {
-        self.project_type_store.resolved_named_types().len()
+        self.project_type_store
+            .semantic_graph()
+            .resolved_named_type_count()
     }
 
     /// Cheap feasibility predicate for candidate-path probing.

@@ -1093,3 +1093,78 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
     // Sanity: the query returned a warm union (not a miss).
     assert!(matches!(warm.value, QueryResult::Value(_)));
 }
+
+/// Vue macro resolution entries written into `SemanticGraphStore` under
+/// `HostResolvedNamedTypeKey` are per-canonical-scoped — evicting the
+/// canonical through `ProjectTypeStore::evict_canonical` drops every
+/// entry for that canonical while leaving entries for unrelated
+/// canonicals warm.
+#[test]
+fn evict_canonical_drops_resolved_named_types_for_that_canonical_only() {
+    use crate::semantic_query::HostResolvedNamedTypeKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+    let host = host();
+    let store = host.project_type_store();
+    let graph = store.semantic_graph();
+
+    let mk = |canonical: &str, name: &str| HostResolvedNamedTypeKey {
+        canonical_id: Arc::from(canonical),
+        whole_hash: [1u8; 16],
+        inner: ResolvedNamedTypeCacheKey {
+            name: name.as_bytes().to_vec().into_boxed_slice(),
+            surface: None,
+            base_offset: 0,
+            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    };
+
+    let key_a = mk("/w/a.ts", "Foo");
+    let key_b = mk("/w/b.ts", "Bar");
+    graph.insert_resolved_named_type(key_a.clone(), Arc::new(ResolvedElements::default()));
+    graph.insert_resolved_named_type(key_b.clone(), Arc::new(ResolvedElements::default()));
+    assert_eq!(graph.resolved_named_type_count(), 2);
+
+    store.evict_canonical("/w/a.ts");
+
+    assert!(graph.get_resolved_named_type(&key_a).is_none());
+    assert!(graph.get_resolved_named_type(&key_b).is_some());
+    assert_eq!(graph.resolved_named_type_count(), 1);
+}
+
+/// Project-generation bumps clear every Vue macro resolution entry — a
+/// tsconfig / SDK / workspace-folder change can shift cross-file
+/// resolution, so entries must not survive.
+#[test]
+fn bump_project_generation_clears_resolved_named_types() {
+    use crate::semantic_query::HostResolvedNamedTypeKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+    use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+    let host = host();
+    let store = host.project_type_store();
+    let graph = store.semantic_graph();
+    let key = HostResolvedNamedTypeKey {
+        canonical_id: Arc::from("/w/a.ts"),
+        whole_hash: [1u8; 16],
+        inner: ResolvedNamedTypeCacheKey {
+            name: b"Foo".to_vec().into_boxed_slice(),
+            surface: None,
+            base_offset: 0,
+            companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+            type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    };
+    graph.insert_resolved_named_type(key.clone(), Arc::new(ResolvedElements::default()));
+    assert_eq!(graph.resolved_named_type_count(), 1);
+
+    store.bump_project_generation_and_evict();
+    assert_eq!(
+        graph.resolved_named_type_count(),
+        0,
+        "project-generation bumps must drop every Vue macro resolution entry"
+    );
+    assert!(graph.get_resolved_named_type(&key).is_none());
+}

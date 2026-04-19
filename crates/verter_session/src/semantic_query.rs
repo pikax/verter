@@ -286,6 +286,24 @@ pub enum SemanticQueryKey {
         base: SemanticNodeId,
         mode: ExpandMode,
     },
+    /// Identity for a Vue macro resolution artifact cached in the shared
+    /// semantic graph under a [`HostResolvedNamedTypeKey`].
+    ///
+    /// This key is read-dominant: hot-path lookups go through
+    /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
+    /// directly so the parser's named-type cache stays refcount-only. The
+    /// formal [`SemanticQueryApi::execute`] entry point returns
+    /// [`QueryError::Miss`] when the key has not been written (writes come
+    /// from the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// adapter side, not from `execute`).
+    ///
+    /// Wrapping the key in `Arc` keeps equality / hashing cheap because the
+    /// inner key already carries `Arc<str>` and `Arc<[…]>` allocations — we
+    /// move the key behind one more refcount so clones during key
+    /// construction do not deep-copy the contained slices.
+    ResolvedNamedType {
+        key: Arc<HostResolvedNamedTypeKey>,
+    },
 }
 
 /// Immutable semantic-node payload. Storage for this enum is owned by the
@@ -303,6 +321,48 @@ pub enum SemanticNodeData {
     Intersection(Arc<[SemanticNodeId]>),
     Primitive(PrimitiveKind),
     Opaque(QueryError),
+    /// Pragmatic carrier for Vue macro resolution artifacts (spans, text,
+    /// prop/emit metadata) produced by the parser's cross-file type resolver
+    /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// trait.
+    ///
+    /// This variant is an **interim** shape: Vue codegen consumers (props /
+    /// emits / defineModel) still drive from the concrete `ResolvedElements`
+    /// struct rather than from a pure `SemanticNodeData` surface. Folding
+    /// `ResolvedElements` behind a `SemanticNodeId` keeps the shared semantic
+    /// graph as the single storage / identity backbone while we migrate
+    /// those consumers off the direct struct. The cache entries are
+    /// whole-hash-scoped (see
+    /// [`HostResolvedNamedTypeKey`]), so reads are self-validating within
+    /// one project generation.
+    VueMacroElements(Arc<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>),
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Vue macro resolution — host-owned cache identity
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Host-owned cache key for fully-resolved named local symbols.
+///
+/// Promotes the per-context `ResolvedNamedTypeCacheKey` used by the parser's
+/// `TypeResolutionContext` into a cross-request identity: the original shape
+/// `(name, surface, base_offset, companion_cache_key, type_param_bindings)`
+/// plus `(canonical_id, whole_hash)` scoping so stored entries stay
+/// consistent with the owning file's content generation.
+///
+/// `canonical_id` is `Arc<str>` so every adapter clone / `get`-time key
+/// construction is a refcount bump instead of a `String` heap allocation.
+///
+/// Entries keyed by this struct live inside
+/// [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore) via
+/// [`SemanticNodeData::VueMacroElements`]; the graph owns the identity map
+/// and backs reads with refcount-only lookups.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostResolvedNamedTypeKey {
+    pub canonical_id: Arc<str>,
+    pub whole_hash: Hash16,
+    pub inner:
+        verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey,
 }
 
 // ──────────────────────────────────────────────────────────────────────────

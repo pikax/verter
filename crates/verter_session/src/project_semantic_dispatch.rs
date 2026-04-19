@@ -50,9 +50,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, IndexKey, PrimitiveKind, QueryError, QueryResult,
-    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SurfaceView, ValueRootKey,
+    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, PrimitiveKind,
+    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -376,6 +376,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Vue macro resolution lookup.
+    ///
+    /// Hot-path reads go through
+    /// [`SemanticGraphStore::get_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::get_resolved_named_type)
+    /// directly from the parser's
+    /// [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
+    /// adapter — the formal `execute` path stays available as an entry
+    /// point for callers that want to check presence through the shared
+    /// query API but must not be relied on in the refcount-only hot
+    /// path. Writes enter from the adapter side via
+    /// [`SemanticGraphStore::insert_resolved_named_type`](crate::semantic_query_memo::SemanticGraphStore::insert_resolved_named_type).
+    ///
+    /// Returns a warm node id when the identity map has an entry, or
+    /// [`QueryError::Miss`] when the entry has not been written yet.
+    /// Carries a dep-signature fragment capturing
+    /// `(canonical_id, whole_hash, project_generation)` so
+    /// [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
+    /// catches stale warm hits if any downstream layer memoizes this
+    /// dispatch path.
+    fn build_resolved_named_type(
+        &self,
+        key: &HostResolvedNamedTypeKey,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        let graph = self.graph();
+        match graph.resolved_named_type_node_id(key) {
+            Some(node_id) => (
+                QueryResult::Value(node_id),
+                self.dep_signature_for(&key.canonical_id, key.whole_hash),
+            ),
+            None => (QueryResult::Error(QueryError::Miss), empty_signature()),
+        }
+    }
+
     fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -458,6 +491,7 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 self.build_normalize_intersection(members)
             }
             SemanticQueryKey::Expand { base, .. } => self.build_expand(*base),
+            SemanticQueryKey::ResolvedNamedType { key } => self.build_resolved_named_type(key),
         };
         let CacheRead { value, .. } = graph.execute_cooperative(key, sentinel, build);
         value
@@ -915,5 +949,53 @@ mod tests {
             1,
             "five identical asks must produce one warm memo entry"
         );
+    }
+
+    /// `ResolvedNamedType` dispatches through `execute` after the adapter
+    /// has written the entry: reads come back as `QueryResult::Value` and
+    /// carry the file's whole-hash + project generation in the dep
+    /// signature. The hot path still goes direct through
+    /// `get_resolved_named_type` (refcount-only) — this test exercises
+    /// the formal entry point so ad-hoc callers of the shared query API
+    /// see the warm entry too.
+    #[test]
+    fn resolved_named_type_dispatch_returns_value_after_insert() {
+        use crate::semantic_query::HostResolvedNamedTypeKey;
+        use verter_compiler::utils::oxc::vue::resolve_type::cache_keys::ResolvedNamedTypeCacheKey;
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+
+        let key = HostResolvedNamedTypeKey {
+            canonical_id: Arc::from("/w/a.ts"),
+            whole_hash: [7u8; 16],
+            inner: ResolvedNamedTypeCacheKey {
+                name: b"Foo".to_vec().into_boxed_slice(),
+                surface: None,
+                base_offset: 0,
+                companion_cache_key: Arc::from(Vec::<Box<[u8]>>::new().into_boxed_slice()),
+                type_param_bindings: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        };
+        let payload = Arc::new(ResolvedElements::default());
+
+        // Miss before insert: formal entry point returns `Error(Miss)`.
+        let miss = dispatch.execute(SemanticQueryKey::ResolvedNamedType {
+            key: Arc::new(key.clone()),
+        });
+        assert!(matches!(miss, QueryResult::Error(QueryError::Miss)));
+
+        // Write via the semantic graph (adapter-side path).
+        let expected_id = graph.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+
+        // Hit after insert: the formal entry point hands back the same
+        // interned node id.
+        let hit = dispatch.execute(SemanticQueryKey::ResolvedNamedType { key: Arc::new(key) });
+        match hit {
+            QueryResult::Value(id) => assert_eq!(id, expected_id),
+            other => panic!("expected value after insert, got {other:?}"),
+        }
     }
 }
