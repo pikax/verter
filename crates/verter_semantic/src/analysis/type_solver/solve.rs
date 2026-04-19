@@ -912,6 +912,12 @@ pub(crate) fn resolve_node(
         }
 
         // -- indexed access T[K] --
+        // TODO(D4): the four open-generic short-circuits in this
+        // branch retire per plan §3 D4 + §4 item 3. The path walker
+        // (build_project_path, C3) distributes paths into open
+        // conditionals without needing to short-circuit — unrelated
+        // siblings simply never materialise. `record_indexed_access_open_skip`
+        // and the `indexed_access_open_skips` counter retire alongside.
         Node::IndexedAccess { object, index } => {
             state.resolve_indexed_access_count += 1;
             if let Some(projected) =
@@ -2213,6 +2219,17 @@ fn resolve_prepared_ref(
     // Only apply at depth > 0: top-level entry types (defineProps<Props<T>>)
     // must expand; the stop targets nested helpers (depth 2+) where the
     // explosion happens (e.g. GetModelValue<T, VK, true> inside CheckboxProps).
+    //
+    // TODO(D4): this symbolic-stop short-circuit is retired per plan §3 D4
+    // + §4 item 3. Replaced by path-directed projection (path walker
+    // distributes into open conditionals, unrelated siblings never
+    // materialise) + a `BudgetExceededFailure` fallback when
+    // `SolveLimits.max_resolve_steps` / `max_arena_nodes` trips. The
+    // three indexed-access short-circuits at solve.rs:901-927 also
+    // retire in the same D4 commit; the `indexed_access_open_skips`
+    // counter and `record_indexed_access_open_skip` helper disappear
+    // alongside. Tests in `generic_navigation_solver_tests.rs` under
+    // the D4 block are `#[ignore = "pending D4 symbolic-stop retirement"]`.
     if state.depth > 0
         && !prepared.type_parameters.is_empty()
         && !effective_args.is_empty()
