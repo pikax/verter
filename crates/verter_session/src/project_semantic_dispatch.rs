@@ -928,6 +928,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // scratch-only identity and violate the publication
             // boundary. An `Opaque(Miss)` at this layer keeps those
             // shapes scratch-only while deeper builders take over.
+            //
+            // TODO(follow-up): `TypeExpr::Parenthesized(inner)` should be
+            // transparent — `(A | B)` is structurally equivalent to
+            // `A | B`. Unwrapping happens in `meta_resolve.rs` already;
+            // shallow lowering should do the same. Pre-existing gap,
+            // not a B4 regression; tracked for a later fix.
             _ => self.opaque(QueryError::Miss),
         }
     }
@@ -5003,6 +5009,21 @@ mod tests {
             }
             other => panic!("Mut<string> must publish as Array, got {other:?}"),
         }
+        // Origin-edge check: because the element lowered through a
+        // substitution (`T` → `string`), `build_instantiate` must have
+        // emitted a `SubstituteTypeParam` edge on the Array shell node.
+        // The Array variant doesn't have its own edge kind — it inherits
+        // the parent `Instantiate` and per-visited-substitution edges.
+        let subst_edges = graph.origins_of_kind(mut_result, OriginEdgeKind::SubstituteTypeParam);
+        assert!(
+            !subst_edges.is_empty(),
+            "Mut<string>'s Array shell must carry a SubstituteTypeParam edge for T → string"
+        );
+        let inst_edges = graph.origins_of_kind(mut_result, OriginEdgeKind::Instantiate);
+        assert!(
+            !inst_edges.is_empty(),
+            "Mut<string>'s Array shell must carry an Instantiate edge"
+        );
 
         let ro_base = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Ro");
         let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
@@ -5155,17 +5176,27 @@ mod tests {
     /// publication shape. No separate `Function` semantic-node variant
     /// exists. This test constructs such a view directly (the function
     /// dispatch wiring is out of B4's scope — it lands when function
-    /// types need end-to-end resolution) to lock the shape contract.
+    /// types need end-to-end resolution) to lock the shape contract:
+    /// (a) both signature lists are `Arc<[SemanticNodeId]>` so a function
+    /// may publish multiple overloads, (b) the shape survives round-trip
+    /// through `intern_node` + `node_data`, (c) `members` stays empty for
+    /// a pure function (non-empty only for callable-object hybrids like
+    /// `{ (x: T): U; foo: number }`).
     #[test]
     fn function_surface_publishes_as_object_with_call_signatures() {
         let host = host();
         let graph = host.project_type_store().semantic_graph();
-        let return_ty = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        let call_sig = graph.intern_node(SemanticNodeData::Alias(return_ty));
+        // Two placeholder call signatures to prove the field is a
+        // list (overload set), not an `Option`. In production each id
+        // would point at a function-signature shell; the specific
+        // shape doesn't matter for the contract-lock.
+        let sig_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let sig_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let ctor_sig = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
         let view = SurfaceView {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(vec![call_sig].into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            call_signatures: Arc::from(vec![sig_a, sig_b].into_boxed_slice()),
+            construct_signatures: Arc::from(vec![ctor_sig].into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
@@ -5174,11 +5205,18 @@ mod tests {
         let data = graph.node_data(fn_node).expect("function surface");
         match &*data {
             SemanticNodeData::Object(v) => {
-                assert!(v.members.is_empty(), "function has no ordinary members");
-                assert_eq!(v.call_signatures.len(), 1, "one call signature");
-                assert_eq!(v.call_signatures[0], call_sig);
-                assert!(v.construct_signatures.is_empty());
+                assert!(
+                    v.members.is_empty(),
+                    "pure function has no ordinary members"
+                );
+                assert_eq!(v.call_signatures.len(), 2, "two overload signatures");
+                assert_eq!(v.call_signatures[0], sig_a, "first signature preserved");
+                assert_eq!(v.call_signatures[1], sig_b, "second signature preserved");
+                assert_eq!(v.construct_signatures.len(), 1, "one construct signature");
+                assert_eq!(v.construct_signatures[0], ctor_sig);
                 assert!(v.index_signatures.is_empty());
+                assert!(!v.has_index_signature);
+                assert!(v.keyspace.is_none());
             }
             other => panic!("function must publish as Object, got {other:?}"),
         }
