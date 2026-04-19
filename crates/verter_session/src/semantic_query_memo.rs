@@ -34,8 +34,9 @@ use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, HostResolvedNamedTypeKey, QueryError, QueryResult, SemanticGraphRead,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
+    ProjectionMode, QueryError, QueryResult, ResolveDeclKey, SemanticGraphRead, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, ValueRootKey,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -217,11 +218,37 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 #[derive(Default)]
 pub struct SemanticGraphStore {
     arena: NodeArena,
-    entries: Mutex<FxHashMap<SemanticQueryKey, MemoEntry>>,
+    /// Family-keyed warm memo (plan §2 cache topology + B1b).
+    ///
+    /// Each entry's [`FamilyKey`] is mode-erased; the per-mode result lives
+    /// in one of the [`FamilySlots`] slots. For non-mode-bearing variants
+    /// (`ResolveDecl`, `Instantiate`, `KeyOf`, etc.) the family is the
+    /// variant itself and only the `single` slot is ever populated. For
+    /// mode-bearing variants (`ProjectMember`, `IndexedAccess`,
+    /// `ProjectPath`) the family carries the variant minus its mode field
+    /// and the per-`ProjectionMode` slots hold independent results.
+    ///
+    /// **Backfill on completion:** when a broader-mode build publishes its
+    /// result, it also writes that result into every empty narrower-mode
+    /// slot in the same family — `Expanded` backfills `Shallow` /
+    /// `Navigate` / `Identity`, `Shallow` backfills `Navigate` /
+    /// `Identity`, `Navigate` backfills `Identity`. Narrower builds NEVER
+    /// backfill broader slots. Backfill writes only into empty slots, so a
+    /// concurrent narrower build that already populated its slot is never
+    /// pre-empted.
+    entries: Mutex<FxHashMap<FamilyKey, FamilySlots>>,
+    /// In-flight admission keyed by the full [`SemanticQueryKey`]. Because
+    /// mode is part of the key for mode-bearing variants, this keying
+    /// gives per-`(family, mode_slot)` in-flight authority (plan §7.15) —
+    /// concurrent `Navigate` and `Expanded` builds on the same family run
+    /// as two independent in-flight entries.
     inflight: Mutex<FxHashMap<SemanticQueryKey, Arc<InflightEntry>>>,
     /// Identity map for Vue macro resolution artifacts keyed by
     /// [`HostResolvedNamedTypeKey`]. See the struct-level docs for the
-    /// read-path shape.
+    /// read-path shape. Per plan §7.16, `SemanticQueryKey::ResolvedNamedType`
+    /// bypasses the family memo entirely — this `DashMap` is the cache,
+    /// and `execute_cooperative` short-circuits straight to the build
+    /// closure for that variant.
     named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
 }
 
@@ -239,6 +266,261 @@ impl std::fmt::Debug for SemanticGraphStore {
 struct MemoEntry {
     result: QueryResult<SemanticNodeId>,
     dep_signature: DepSignature,
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Family memo — mode-erased keys + per-mode slots (plan §2 + B1b + §7.15)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Mode-erased identity for one [`SemanticQueryKey`] family.
+///
+/// Two semantic queries that mean the same thing apart from `mode` produce
+/// the same [`FamilyKey`]; their per-mode results live in distinct slots
+/// inside [`FamilySlots`]. Variants without a `mode` field (everything
+/// except [`SemanticQueryKey::ProjectMember`] /
+/// [`SemanticQueryKey::IndexedAccess`] / [`SemanticQueryKey::ProjectPath`])
+/// use only the `single` slot, exactly mirroring the pre-B1b behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FamilyKey {
+    ResolveDecl(ResolveDeclKey),
+    Instantiate {
+        base: SemanticNodeId,
+        args: Arc<[SemanticNodeId]>,
+    },
+    ProjectMember {
+        base: SemanticNodeId,
+        member: Arc<str>,
+    },
+    IndexedAccess {
+        base: SemanticNodeId,
+        index: IndexKey,
+    },
+    KeyOf {
+        base: SemanticNodeId,
+    },
+    MappedType {
+        source: SemanticNodeId,
+        mapper: MapperKey,
+    },
+    Conditional {
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        true_branch: SemanticNodeId,
+        false_branch: SemanticNodeId,
+        distributive: bool,
+    },
+    TypeOf {
+        value_root: ValueRootKey,
+    },
+    NormalizeUnion {
+        members: Arc<[SemanticNodeId]>,
+    },
+    NormalizeIntersection {
+        members: Arc<[SemanticNodeId]>,
+    },
+    ProjectPath {
+        base: SemanticNodeId,
+        path: Arc<[PathSegment]>,
+    },
+    /// Included for completeness so `family_and_slot` is total, but
+    /// [`SemanticQueryKey::ResolvedNamedType`] bypasses the family memo at
+    /// admission and never lands in the warm map (plan §7.16).
+    ResolvedNamedType {
+        key: Arc<HostResolvedNamedTypeKey>,
+    },
+}
+
+/// Per-family slot selector. For non-mode variants only `Single` is used;
+/// for mode-bearing variants one of `Identity` / `Navigate` / `Shallow` /
+/// `Expanded` is selected from the key's `ProjectionMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModeSlot {
+    Single,
+    Identity,
+    Navigate,
+    Shallow,
+    Expanded,
+}
+
+/// Per-family per-slot warm storage. Each slot independently holds an
+/// optional [`MemoEntry`]. Backfill on completion fills empty narrower
+/// slots from a successful broader compute (see [`FamilySlots::publish`]).
+#[derive(Default, Clone)]
+struct FamilySlots {
+    single: Option<MemoEntry>,
+    identity: Option<MemoEntry>,
+    navigate: Option<MemoEntry>,
+    shallow: Option<MemoEntry>,
+    expanded: Option<MemoEntry>,
+}
+
+impl FamilySlots {
+    fn slot(&self, slot: ModeSlot) -> Option<&MemoEntry> {
+        match slot {
+            ModeSlot::Single => self.single.as_ref(),
+            ModeSlot::Identity => self.identity.as_ref(),
+            ModeSlot::Navigate => self.navigate.as_ref(),
+            ModeSlot::Shallow => self.shallow.as_ref(),
+            ModeSlot::Expanded => self.expanded.as_ref(),
+        }
+    }
+
+    fn slot_mut(&mut self, slot: ModeSlot) -> &mut Option<MemoEntry> {
+        match slot {
+            ModeSlot::Single => &mut self.single,
+            ModeSlot::Identity => &mut self.identity,
+            ModeSlot::Navigate => &mut self.navigate,
+            ModeSlot::Shallow => &mut self.shallow,
+            ModeSlot::Expanded => &mut self.expanded,
+        }
+    }
+
+    /// Publish `entry` to `slot` and backfill every narrower slot whose
+    /// cell is empty. The narrower slots store the same `Arc`-shared
+    /// [`MemoEntry`] (same result + same dep-signature) — this is the
+    /// conservative "broader satisfies narrower" rule from plan §7.11; a
+    /// dep-signature tightening pass against the actual narrower read-set
+    /// is permitted follow-up work tracked in §1.4.
+    fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) {
+        *self.slot_mut(slot) = Some(entry.clone());
+        for narrower in backfill_targets(slot) {
+            let cell = self.slot_mut(*narrower);
+            if cell.is_none() {
+                *cell = Some(entry.clone());
+            }
+        }
+    }
+
+    fn populated_count(&self) -> usize {
+        let slots = [
+            &self.single,
+            &self.identity,
+            &self.navigate,
+            &self.shallow,
+            &self.expanded,
+        ];
+        slots.iter().filter(|s| s.is_some()).count()
+    }
+}
+
+/// Slot fan-out for backfill. `Expanded` satisfies `Shallow` / `Navigate` /
+/// `Identity`; `Shallow` satisfies `Navigate` / `Identity`; `Navigate`
+/// satisfies `Identity`. `Identity` and `Single` backfill nothing.
+fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
+    match slot {
+        ModeSlot::Single => &[],
+        ModeSlot::Identity => &[],
+        ModeSlot::Navigate => &[ModeSlot::Identity],
+        ModeSlot::Shallow => &[ModeSlot::Navigate, ModeSlot::Identity],
+        ModeSlot::Expanded => &[ModeSlot::Shallow, ModeSlot::Navigate, ModeSlot::Identity],
+    }
+}
+
+fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
+    match mode {
+        ProjectionMode::Identity => ModeSlot::Identity,
+        ProjectionMode::Navigate => ModeSlot::Navigate,
+        ProjectionMode::Shallow => ModeSlot::Shallow,
+        ProjectionMode::Expanded => ModeSlot::Expanded,
+    }
+}
+
+/// Project a [`SemanticQueryKey`] onto its `(family, slot)` pair. For
+/// mode-bearing variants the mode is stripped into the slot; for everything
+/// else the slot is `Single`.
+fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
+    match key {
+        SemanticQueryKey::ResolveDecl(decl) => {
+            (FamilyKey::ResolveDecl(decl.clone()), ModeSlot::Single)
+        }
+        SemanticQueryKey::Instantiate { base, args } => (
+            FamilyKey::Instantiate {
+                base: *base,
+                args: Arc::clone(args),
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::ProjectMember { base, member, mode } => (
+            FamilyKey::ProjectMember {
+                base: *base,
+                member: Arc::clone(member),
+            },
+            mode_to_slot(*mode),
+        ),
+        SemanticQueryKey::IndexedAccess { base, index, mode } => (
+            FamilyKey::IndexedAccess {
+                base: *base,
+                index: index.clone(),
+            },
+            mode_to_slot(*mode),
+        ),
+        SemanticQueryKey::KeyOf { base } => (FamilyKey::KeyOf { base: *base }, ModeSlot::Single),
+        SemanticQueryKey::MappedType { source, mapper } => (
+            FamilyKey::MappedType {
+                source: *source,
+                mapper: mapper.clone(),
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::Conditional {
+            check,
+            extends,
+            true_branch,
+            false_branch,
+            distributive,
+        } => (
+            FamilyKey::Conditional {
+                check: *check,
+                extends: *extends,
+                true_branch: *true_branch,
+                false_branch: *false_branch,
+                distributive: *distributive,
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::TypeOf { value_root } => (
+            FamilyKey::TypeOf {
+                value_root: value_root.clone(),
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::NormalizeUnion { members } => (
+            FamilyKey::NormalizeUnion {
+                members: Arc::clone(members),
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::NormalizeIntersection { members } => (
+            FamilyKey::NormalizeIntersection {
+                members: Arc::clone(members),
+            },
+            ModeSlot::Single,
+        ),
+        SemanticQueryKey::ProjectPath { base, path, mode } => (
+            FamilyKey::ProjectPath {
+                base: *base,
+                path: Arc::clone(path),
+            },
+            mode_to_slot(*mode),
+        ),
+        SemanticQueryKey::ResolvedNamedType { key } => (
+            FamilyKey::ResolvedNamedType {
+                key: Arc::clone(key),
+            },
+            ModeSlot::Single,
+        ),
+    }
+}
+
+/// Returns `true` iff `family` is rooted in a scope that names `canonical_id`.
+/// Mirrors the conservative pre-B1b helper but operates on the mode-erased
+/// family identity. Replaced in B3 by a dep-signature sweep.
+fn family_references_canonical(family: &FamilyKey, canonical_id: &str) -> bool {
+    match family {
+        FamilyKey::ResolveDecl(decl_key) => decl_key.scope.canonical_id.as_ref() == canonical_id,
+        FamilyKey::TypeOf { value_root } => value_root.scope.canonical_id.as_ref() == canonical_id,
+        _ => false,
+    }
 }
 
 thread_local! {
@@ -274,10 +556,16 @@ impl SemanticGraphStore {
         self.arena.len()
     }
 
-    /// Number of warm memo entries. Useful for tests and counters.
+    /// Number of warm memo entries — sums populated slots across every
+    /// family. Useful for tests and counters. Two distinct mode slots in
+    /// the same family count as two entries.
     #[must_use]
     pub fn memo_entry_count(&self) -> usize {
-        self.entries.lock().len()
+        self.entries
+            .lock()
+            .values()
+            .map(FamilySlots::populated_count)
+            .sum()
     }
 
     /// Invalidate every warm memo entry whose [`SemanticQueryKey`]
@@ -298,17 +586,25 @@ impl SemanticGraphStore {
     /// by mutating the existing entry.
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         let mut entries = self.entries.lock();
-        let before = entries.len();
-        entries.retain(|key, _| !key_references_canonical(key, canonical_id));
-        before - entries.len()
+        let mut evicted = 0usize;
+        entries.retain(|family, slots| {
+            if family_references_canonical(family, canonical_id) {
+                evicted += slots.populated_count();
+                false
+            } else {
+                true
+            }
+        });
+        evicted
     }
 
     /// Clear every warm memo entry. Used on project-generation bumps
     /// (`tsconfig` changes, active-TS-SDK swaps, workspace-folder changes)
-    /// per plan § A0. Returns the number of entries cleared.
+    /// per plan § A0. Returns the number of slots cleared (summed across
+    /// every family).
     pub fn invalidate_all(&self) -> usize {
         let mut entries = self.entries.lock();
-        let removed = entries.len();
+        let removed: usize = entries.values().map(FamilySlots::populated_count).sum();
         entries.clear();
         removed
     }
@@ -395,13 +691,20 @@ impl SemanticGraphStore {
     }
 
     /// Warm-lookup a key. Returns the memoized result + its recorded
-    /// dependency signature when present.
+    /// dependency signature when the requested `(family, mode_slot)` is
+    /// populated. Backfill from broader-mode computes lands in narrower
+    /// slots eagerly at publish time, so a `Navigate` lookup after a
+    /// successful `Expanded` build hits the (backfilled) `Navigate` slot
+    /// directly without any per-call satisfaction logic here.
     #[must_use]
     pub fn get(&self, key: &SemanticQueryKey) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+        let (family, slot) = family_and_slot(key);
         let entries = self.entries.lock();
-        entries.get(key).cloned().map(|entry| CacheRead {
-            value: entry.result,
-            dep_signature: entry.dep_signature,
+        entries.get(&family).and_then(|slots| {
+            slots.slot(slot).cloned().map(|entry| CacheRead {
+                value: entry.result,
+                dep_signature: entry.dep_signature,
+            })
         })
     }
 
@@ -487,17 +790,25 @@ impl SemanticGraphStore {
         drop(_recursion_guard);
 
         // 5. Warm-publish only successful values; errors and recursion
-        //    sentinels never become shared-cache entries.
+        //    sentinels never become shared-cache entries (plan §2 cache
+        //    population). Successful results land in the requested
+        //    `(family, slot)` and backfill every empty narrower slot in
+        //    the same family — the backfill is a no-op against any slot a
+        //    concurrent narrower compute already filled, so per-slot
+        //    in-flight authority (§7.15) is preserved.
         let publishable = matches!(&result, QueryResult::Value(_));
         if publishable {
-            let mut entries = self.entries.lock();
-            entries.insert(
-                key.clone(),
-                MemoEntry {
+            let (family, slot) = family_and_slot(&key);
+            // ResolvedNamedType bypasses the family memo entirely
+            // (§7.16) — its DashMap-backed identity map is the cache.
+            if !matches!(family, FamilyKey::ResolvedNamedType { .. }) {
+                let entry = MemoEntry {
                     result: result.clone(),
                     dep_signature: dep_signature.clone(),
-                },
-            );
+                };
+                let mut entries = self.entries.lock();
+                entries.entry(family).or_default().publish(slot, entry);
+            }
         }
 
         // 6. Finalize in-flight and wake joiners. The completed flag
@@ -546,32 +857,6 @@ impl SemanticGraphRead for SemanticGraphStore {
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
-}
-
-/// Returns `true` iff `key`'s scope (for declaration-rooted keys) references
-/// `canonical_id`. Non-declaration keys are rooted in semantic-node ids
-/// instead of scopes; their invalidation follows the declaration keys they
-/// depend on, so this helper only matches `ResolveDecl` and `TypeOf`
-/// directly.
-///
-/// This is a conservative implementation — it deliberately skips
-/// `Instantiate`, `ProjectMember`, and similar derived keys because their
-/// base `SemanticNodeId` may still be valid (from an unrelated canonical)
-/// even after `canonical_id` changes. If invariants drift and derived keys
-/// leak into the stale set, a broader invalidation pass via
-/// [`SemanticGraphStore::invalidate_all`] is the safe fallback.
-fn key_references_canonical(key: &SemanticQueryKey, canonical_id: &str) -> bool {
-    match key {
-        SemanticQueryKey::ResolveDecl(decl_key) => {
-            decl_key.scope.canonical_id.as_ref() == canonical_id
-        }
-        SemanticQueryKey::TypeOf { value_root } => {
-            value_root.scope.canonical_id.as_ref() == canonical_id
-        }
-        // Node-id-rooted keys survive this targeted pass. Callers that
-        // need whole-graph invalidation use `invalidate_all` instead.
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -1067,6 +1352,330 @@ mod tests {
         assert!(
             Arc::ptr_eq(&second, &observed),
             "latest insert wins — identity map points at the second payload",
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // B1b family-memo backfill matrix (plan §3 B1b + §7.15)
+    // ──────────────────────────────────────────────────────────────────
+
+    fn family_test_path() -> Arc<[PathSegment]> {
+        Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice())
+    }
+
+    fn family_test_key(base: SemanticNodeId, mode: ProjectionMode) -> SemanticQueryKey {
+        SemanticQueryKey::ProjectPath {
+            base,
+            path: family_test_path(),
+            mode,
+        }
+    }
+
+    fn family_test_dep_signature() -> DepSignature {
+        Arc::from(
+            vec![(
+                Arc::<str>::from("/w/family.ts"),
+                crate::semantic_query::DepVersion::WholeHash([7u8; 16]),
+            )]
+            .into_boxed_slice(),
+        )
+    }
+
+    /// Run a cold build for `mode` with a stable result + dep-signature.
+    /// Returns the published `SemanticNodeId`.
+    fn warm_family_slot(
+        store: &SemanticGraphStore,
+        base: SemanticNodeId,
+        mode: ProjectionMode,
+    ) -> SemanticNodeId {
+        let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let key = family_test_key(base, mode);
+        let read = store.execute_cooperative(
+            key,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(value_id), family_test_dep_signature()),
+        );
+        match read.value {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        }
+    }
+
+    fn assert_warm_at(
+        store: &SemanticGraphStore,
+        base: SemanticNodeId,
+        mode: ProjectionMode,
+        expected_id: SemanticNodeId,
+    ) {
+        let warm = store
+            .get(&family_test_key(base, mode))
+            .unwrap_or_else(|| panic!("expected warm hit at mode {mode:?}"));
+        match warm.value {
+            QueryResult::Value(id) => assert_eq!(id, expected_id, "wrong node id at {mode:?}"),
+            other => panic!("expected Value at {mode:?}, got {other:?}"),
+        }
+        assert_eq!(
+            warm.dep_signature.as_ref(),
+            family_test_dep_signature().as_ref(),
+            "narrower-slot dep_signature must match the broader compute's at {mode:?}",
+        );
+    }
+
+    fn assert_cold_at(store: &SemanticGraphStore, base: SemanticNodeId, mode: ProjectionMode) {
+        assert!(
+            store.get(&family_test_key(base, mode)).is_none(),
+            "{mode:?} slot must NOT be backfilled",
+        );
+    }
+
+    // 1. Expanded backfills each narrower slot (×4: source + 3 narrower).
+
+    #[test]
+    fn family_expanded_backfills_shallow_navigate_identity_share_dep_signature() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let id = warm_family_slot(&store, base, ProjectionMode::Expanded);
+
+        // The Expanded slot itself.
+        assert_warm_at(&store, base, ProjectionMode::Expanded, id);
+        // All three narrower slots backfilled with the same id and same dep_sig.
+        assert_warm_at(&store, base, ProjectionMode::Shallow, id);
+        assert_warm_at(&store, base, ProjectionMode::Navigate, id);
+        assert_warm_at(&store, base, ProjectionMode::Identity, id);
+        assert_eq!(store.memo_entry_count(), 4, "all 4 slots populated");
+    }
+
+    // 2. Shallow backfills Navigate + Identity (×3).
+
+    #[test]
+    fn family_shallow_backfills_navigate_and_identity() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let id = warm_family_slot(&store, base, ProjectionMode::Shallow);
+
+        assert_warm_at(&store, base, ProjectionMode::Shallow, id);
+        assert_warm_at(&store, base, ProjectionMode::Navigate, id);
+        assert_warm_at(&store, base, ProjectionMode::Identity, id);
+        // Expanded MUST stay cold — narrower never satisfies broader.
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+        assert_eq!(store.memo_entry_count(), 3);
+    }
+
+    // 3. Navigate backfills Identity only (×2).
+
+    #[test]
+    fn family_navigate_backfills_identity_only() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let id = warm_family_slot(&store, base, ProjectionMode::Navigate);
+
+        assert_warm_at(&store, base, ProjectionMode::Navigate, id);
+        assert_warm_at(&store, base, ProjectionMode::Identity, id);
+        assert_cold_at(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+        assert_eq!(store.memo_entry_count(), 2);
+    }
+
+    // 4. Identity backfills NOTHING (single test, the negative case for it).
+
+    #[test]
+    fn family_identity_does_not_backfill_anything() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let id = warm_family_slot(&store, base, ProjectionMode::Identity);
+
+        assert_warm_at(&store, base, ProjectionMode::Identity, id);
+        assert_cold_at(&store, base, ProjectionMode::Navigate);
+        assert_cold_at(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+        assert_eq!(store.memo_entry_count(), 1);
+    }
+
+    // 5. Six negative cases: narrower never satisfies broader.
+
+    #[test]
+    fn family_navigate_does_not_satisfy_shallow_or_expanded() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let _ = warm_family_slot(&store, base, ProjectionMode::Navigate);
+        assert_cold_at(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+    }
+
+    #[test]
+    fn family_shallow_does_not_satisfy_expanded() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let _ = warm_family_slot(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+    }
+
+    #[test]
+    fn family_identity_does_not_satisfy_navigate_shallow_expanded() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let _ = warm_family_slot(&store, base, ProjectionMode::Identity);
+        assert_cold_at(&store, base, ProjectionMode::Navigate);
+        assert_cold_at(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+    }
+
+    // 6. Concurrent narrower + broader cold builds — both run independently
+    //    per `(family, mode_slot)` in-flight authority (§7.15).
+
+    #[test]
+    fn family_concurrent_navigate_and_expanded_both_complete_independently() {
+        use std::thread;
+        let store = Arc::new(SemanticGraphStore::new());
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let nav_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let exp_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        let store_nav = Arc::clone(&store);
+        let store_exp = Arc::clone(&store);
+        let t_nav = thread::spawn(move || {
+            store_nav.execute_cooperative(
+                family_test_key(base, ProjectionMode::Navigate),
+                || store_nav.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || (QueryResult::Value(nav_value), family_test_dep_signature()),
+            )
+        });
+        let t_exp = thread::spawn(move || {
+            store_exp.execute_cooperative(
+                family_test_key(base, ProjectionMode::Expanded),
+                || store_exp.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || (QueryResult::Value(exp_value), family_test_dep_signature()),
+            )
+        });
+        let nav_read = t_nav.join().unwrap();
+        let exp_read = t_exp.join().unwrap();
+
+        let nav_id = match nav_read.value {
+            QueryResult::Value(id) => id,
+            other => panic!("nav: {other:?}"),
+        };
+        let exp_id = match exp_read.value {
+            QueryResult::Value(id) => id,
+            other => panic!("exp: {other:?}"),
+        };
+        // Each cold build returned its own value — neither pre-empted the
+        // other; per-slot in-flight authority kept them independent.
+        assert_eq!(nav_id, nav_value);
+        assert_eq!(exp_id, exp_value);
+    }
+
+    // 7. Wider backfill is a no-op when the narrower slot already filled.
+
+    #[test]
+    fn family_wider_backfill_noop_when_narrower_slot_already_filled() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        // Narrow build first — Navigate completes and fills Navigate +
+        // Identity slots.
+        let nav_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let _ = store.execute_cooperative(
+            family_test_key(base, ProjectionMode::Navigate),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(nav_id), family_test_dep_signature()),
+        );
+        assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
+        assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
+
+        // Now an Expanded build with a DIFFERENT result. Backfill writes
+        // only into empty slots, so Navigate + Identity must keep their
+        // narrower-build result; only Shallow + Expanded get the new id.
+        let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            family_test_key(base, ProjectionMode::Expanded),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(exp_id), family_test_dep_signature()),
+        );
+        assert_warm_at(&store, base, ProjectionMode::Expanded, exp_id);
+        assert_warm_at(&store, base, ProjectionMode::Shallow, exp_id);
+        // Critical: the populated narrower slots survive — backfill is a
+        // no-op against them.
+        assert_warm_at(&store, base, ProjectionMode::Navigate, nav_id);
+        assert_warm_at(&store, base, ProjectionMode::Identity, nav_id);
+    }
+
+    // 8. Cancelled / errored results do not backfill any slot.
+
+    #[test]
+    fn family_cancelled_does_not_backfill_any_slot() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let read = store.execute_cooperative(
+            family_test_key(base, ProjectionMode::Expanded),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Error(QueryError::Miss), empty_signature()),
+        );
+        assert!(matches!(read.value, QueryResult::Error(_)));
+
+        // Every slot — Expanded itself + the would-be backfilled narrower
+        // slots — must stay cold. Errors never warm, ever.
+        assert_cold_at(&store, base, ProjectionMode::Expanded);
+        assert_cold_at(&store, base, ProjectionMode::Shallow);
+        assert_cold_at(&store, base, ProjectionMode::Navigate);
+        assert_cold_at(&store, base, ProjectionMode::Identity);
+        assert_eq!(store.memo_entry_count(), 0);
+    }
+
+    // 9. ResolvedNamedType bypasses the family memo entirely (plan §7.16).
+    //    The DashMap-backed identity map remains the only cache. After a
+    //    successful execute_cooperative path returning Value via the build
+    //    closure, the family memo's entries map stays empty for this key.
+
+    #[test]
+    fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+
+        let store = SemanticGraphStore::new();
+        let key = make_key("/w/named.ts", [9u8; 16], "Foo");
+        let payload = Arc::new(ResolvedElements::default());
+        let inserted_id = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
+
+        // The family memo has zero entries — ResolvedNamedType is exempt.
+        assert_eq!(
+            store.memo_entry_count(),
+            0,
+            "ResolvedNamedType must NOT populate the family memo",
+        );
+
+        // Hot-path read still works refcount-only.
+        let observed = store.get_resolved_named_type(&key).expect("warm");
+        assert!(Arc::ptr_eq(&payload, &observed));
+
+        // Formal `execute_cooperative` path: even if the build closure
+        // succeeds with a Value, the family memo must not be populated for
+        // this variant.
+        let formal_key = SemanticQueryKey::ResolvedNamedType {
+            key: Arc::new(key.clone()),
+        };
+        let read = store.execute_cooperative(
+            formal_key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store
+                    .resolved_named_type_node_id(&key)
+                    .expect("identity map populated above");
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+        match read.value {
+            QueryResult::Value(id) => assert_eq!(id, inserted_id),
+            other => panic!("expected Value via build, got {other:?}"),
+        }
+        assert_eq!(
+            store.memo_entry_count(),
+            0,
+            "ResolvedNamedType warm-publish must NOT populate the family memo",
+        );
+        assert!(
+            store.get(&formal_key).is_none(),
+            "store.get must return None for ResolvedNamedType — it is bypassed"
         );
     }
 }
