@@ -27,6 +27,7 @@
 //!   [`SemanticGraphStore::intern_node`].
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -34,9 +35,10 @@ use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, PathSegment,
-    ProjectionMode, QueryError, QueryResult, ResolveDeclKey, SemanticGraphRead, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, ValueRootKey,
+    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, OriginEdge,
+    OriginEdgeKind, PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey,
+    SemanticGraphRead, SemanticGraphStats, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    ValueRootKey,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -250,6 +252,16 @@ pub struct SemanticGraphStore {
     /// and `execute_cooperative` short-circuits straight to the build
     /// closure for that variant.
     named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
+    /// Sibling derivation/origin layer (plan B2 + Derivation/Origin Layer
+    /// Contract). Edges are keyed by `(result_node, kind)`; multiple
+    /// derivations of the same structural result store multiple edges per
+    /// key. Edge dep-signatures are interned in the store's signature pool
+    /// so per-builder fence snapshots share allocations.
+    derivation: Mutex<DerivationStore>,
+    /// Lock-free telemetry counters (plan B2 + §7.4). Read via
+    /// [`Self::stats_snapshot`] into the public [`SemanticGraphStats`]
+    /// surface.
+    stats: AtomicSemanticGraphStats,
 }
 
 impl std::fmt::Debug for SemanticGraphStore {
@@ -400,6 +412,134 @@ impl FamilySlots {
             &self.expanded,
         ];
         slots.iter().filter(|s| s.is_some()).count()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Sibling edge store for the derivation/origin layer. Co-owned by
+/// [`SemanticGraphStore`] but conceptually a separate graph: edges are
+/// keyed by `(result_node, kind)` and hold the source-set + per-edge
+/// metadata + a snapshot of the publishing builder's active fence.
+///
+/// Edge dep-signatures are interned in `signature_pool` so builders that
+/// emit dozens of edges with identical fences share one `Arc` allocation
+/// (target: origin-store memory stays within 2× the semantic-node-arena
+/// memory on the F3 corpus).
+///
+/// Multiple derivations of the same structural result produce multiple
+/// edges with the same `(result, kind)` key — the layer supports this
+/// by storing a `Vec<OriginEdge>` per key. Walkers walk the full vector;
+/// dedup is the walker's responsibility (it usually is not — different
+/// derivations carry different dep-sigs).
+#[derive(Default)]
+struct DerivationStore {
+    edges: FxHashMap<(SemanticNodeId, OriginEdgeKind), Vec<OriginEdge>>,
+    signature_pool: FxHashMap<DepSignature, Arc<DepSignature>>,
+}
+
+impl DerivationStore {
+    fn intern_signature(&mut self, sig: DepSignature) -> Arc<DepSignature> {
+        if let Some(existing) = self.signature_pool.get(&sig) {
+            return Arc::clone(existing);
+        }
+        let arc = Arc::new(sig.clone());
+        self.signature_pool.insert(sig, Arc::clone(&arc));
+        arc
+    }
+
+    fn record(&mut self, result: SemanticNodeId, kind: OriginEdgeKind, edge: OriginEdge) {
+        self.edges.entry((result, kind)).or_default().push(edge);
+    }
+
+    fn origins_of_kind(
+        &self,
+        result: SemanticNodeId,
+        kind: OriginEdgeKind,
+    ) -> impl Iterator<Item = &OriginEdge> {
+        self.edges
+            .get(&(result, kind))
+            .into_iter()
+            .flat_map(|v| v.iter())
+    }
+
+    fn origins(
+        &self,
+        result: SemanticNodeId,
+    ) -> impl Iterator<Item = (OriginEdgeKind, &OriginEdge)> {
+        self.edges
+            .iter()
+            .filter_map(move |((r, kind), edges)| {
+                if *r == result {
+                    Some(edges.iter().map(move |e| (*kind, e)))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.edges.values().map(Vec::len).sum()
+    }
+
+    fn max_edges_per_node(&self) -> usize {
+        let mut by_node: FxHashMap<SemanticNodeId, usize> = FxHashMap::default();
+        for ((node, _kind), edges) in &self.edges {
+            *by_node.entry(*node).or_insert(0) += edges.len();
+        }
+        by_node.values().copied().max().unwrap_or(0)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Telemetry — atomic counters (plan B2 + §7.4)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Lock-free counter set updated on the hot path. Read into the immutable
+/// [`SemanticGraphStats`] snapshot via [`SemanticGraphStore::stats_snapshot`].
+#[derive(Default)]
+struct AtomicSemanticGraphStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    same_path_sentinel_returns: AtomicU64,
+    in_flight_current: AtomicU32,
+    in_flight_peak: AtomicU32,
+    waits_ms: AtomicU64,
+    origin_edges_emitted: AtomicU64,
+    instantiate_count: AtomicU64,
+    conditional_decided_count: AtomicU64,
+    conditional_deferred_count: AtomicU64,
+    branch_selections_true: AtomicU64,
+    branch_selections_false: AtomicU64,
+    budget_fallback_count: AtomicU64,
+    max_path_length: AtomicU32,
+    max_projection_depth: AtomicU32,
+}
+
+impl AtomicSemanticGraphStats {
+    fn record_in_flight_enter(&self) {
+        let now = self.in_flight_current.fetch_add(1, Ordering::Relaxed) + 1;
+        // Compare-exchange peak forward; relaxed ordering is fine because
+        // the peak is purely observational.
+        let mut peak = self.in_flight_peak.load(Ordering::Relaxed);
+        while now > peak {
+            match self.in_flight_peak.compare_exchange_weak(
+                peak,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => peak = observed,
+            }
+        }
+    }
+
+    fn record_in_flight_exit(&self) {
+        self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -690,6 +830,207 @@ impl SemanticGraphStore {
         self.named_type_index.len()
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Derivation / origin layer (plan B2)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Record a derivation/origin edge for `result`. Builders call this
+    /// whenever they produce a reusable result — the edge captures the
+    /// source-set, per-edge metadata, and a snapshot of the publishing
+    /// builder's active fence (`builder_fence`). The fence snapshot is
+    /// interned in the store's signature pool so identical fences share
+    /// one allocation.
+    ///
+    /// Multiple derivations of the same structural `result` produce
+    /// multiple edges with the same `(result, kind)` — the layer supports
+    /// this; the walker walks all edges (plan §2 + §7.16).
+    pub fn record_origin_edge(
+        &self,
+        result: SemanticNodeId,
+        kind: OriginEdgeKind,
+        sources: Arc<[SemanticNodeId]>,
+        meta: crate::semantic_query::OriginMeta,
+        builder_fence: DepSignature,
+    ) {
+        let mut store = self.derivation.lock();
+        let edge_dep_signature = store.intern_signature(builder_fence);
+        store.record(
+            result,
+            kind,
+            OriginEdge {
+                sources,
+                meta,
+                edge_dep_signature,
+            },
+        );
+        self.stats
+            .origin_edges_emitted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read-only origin walk for a result node — yields every edge
+    /// reachable from `node`, regardless of kind. Outside-execute
+    /// consumers (LSP hover, debug dumps, compat rendering) use this
+    /// form; it never touches any active completion fence.
+    #[must_use]
+    pub fn origins(&self, node: SemanticNodeId) -> Vec<(OriginEdgeKind, OriginEdge)> {
+        let store = self.derivation.lock();
+        store.origins(node).map(|(k, e)| (k, e.clone())).collect()
+    }
+
+    /// Filtered read-only origin walk: only edges of the given kind.
+    #[must_use]
+    pub fn origins_of_kind(&self, node: SemanticNodeId, kind: OriginEdgeKind) -> Vec<OriginEdge> {
+        let store = self.derivation.lock();
+        store.origins_of_kind(node, kind).cloned().collect()
+    }
+
+    /// Convenience helper: invoke `visitor` for every origin edge on
+    /// `node`. Useful for callers that want to walk without materialising
+    /// the full Vec.
+    pub fn walk_origin_chain<F>(&self, node: SemanticNodeId, mut visitor: F)
+    where
+        F: FnMut(OriginEdgeKind, &OriginEdge),
+    {
+        let store = self.derivation.lock();
+        for (kind, edge) in store.origins(node) {
+            visitor(kind, edge);
+        }
+    }
+
+    /// Total origin edges across all result nodes. Mirrors the public
+    /// [`SemanticGraphStats::origin_edge_count`].
+    #[must_use]
+    pub fn origin_edge_count(&self) -> usize {
+        self.derivation.lock().edge_count()
+    }
+
+    /// Dispatch-side origin walk: visits every edge on `node` and merges
+    /// each edge's `edge_dep_signature` into the supplied
+    /// [`CompletionFence`](crate::completion_fence::CompletionFence) at
+    /// hop-time. Returns the visited edges so the caller can recurse over
+    /// `edge.sources` itself (the transitive walk is the caller's
+    /// responsibility, per plan §7.16).
+    ///
+    /// Per plan §7.16, **edges are the only dep-sig propagation route for
+    /// builders** — there is intentionally no `publisher_of(node)` /
+    /// `dep_signature_of(node)` API. Structurally interned nodes can be
+    /// reached by multiple derivations with different dep-signatures;
+    /// selecting a "canonical" publisher would pick an arbitrary owner
+    /// and merge an incomplete fence, which is unsound.
+    pub fn origins_with_fence(
+        &self,
+        node: SemanticNodeId,
+        fence: &crate::completion_fence::CompletionFence,
+    ) -> Vec<(OriginEdgeKind, OriginEdge)> {
+        let store = self.derivation.lock();
+        let mut visited: Vec<(OriginEdgeKind, OriginEdge)> = Vec::new();
+        for (kind, edge) in store.origins(node) {
+            fence.merge_signature(&edge.edge_dep_signature);
+            visited.push((kind, edge.clone()));
+        }
+        visited
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Telemetry — public stats snapshot (plan B2 + §7.4)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Read an immutable snapshot of every counter the store maintains.
+    /// Safe to call mid-request; counters are atomic so no torn reads.
+    #[must_use]
+    pub fn stats_snapshot(&self) -> SemanticGraphStats {
+        let derivation = self.derivation.lock();
+        let origin_edge_count = derivation.edge_count() as u64;
+        let max_origin_edges_per_node = derivation.max_edges_per_node() as u32;
+        drop(derivation);
+        SemanticGraphStats {
+            hits: self.stats.hits.load(Ordering::Relaxed),
+            misses: self.stats.misses.load(Ordering::Relaxed),
+            same_path_sentinel_returns: self
+                .stats
+                .same_path_sentinel_returns
+                .load(Ordering::Relaxed),
+            in_flight_peak: self.stats.in_flight_peak.load(Ordering::Relaxed),
+            waits_ms: self.stats.waits_ms.load(Ordering::Relaxed),
+            memo_entry_count: self.memo_entry_count() as u64,
+            origin_edge_count,
+            origin_edges_emitted: self.stats.origin_edges_emitted.load(Ordering::Relaxed),
+            max_origin_edges_per_node,
+            instantiate_count: self.stats.instantiate_count.load(Ordering::Relaxed),
+            conditional_decided_count: self.stats.conditional_decided_count.load(Ordering::Relaxed),
+            conditional_deferred_count: self
+                .stats
+                .conditional_deferred_count
+                .load(Ordering::Relaxed),
+            branch_selections_true: self.stats.branch_selections_true.load(Ordering::Relaxed),
+            branch_selections_false: self.stats.branch_selections_false.load(Ordering::Relaxed),
+            budget_fallback_count: self.stats.budget_fallback_count.load(Ordering::Relaxed),
+            max_path_length: self.stats.max_path_length.load(Ordering::Relaxed),
+            max_projection_depth: self.stats.max_projection_depth.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Builder-side counter helpers. Builders increment these as they emit
+    /// reusable work; the per-builder semantics are documented in plan
+    /// §3 Phase C (where the real builders land).
+    pub fn record_instantiate(&self) {
+        self.stats.instantiate_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_conditional_decided(&self) {
+        self.stats
+            .conditional_decided_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_conditional_deferred(&self) {
+        self.stats
+            .conditional_deferred_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_branch_selection_true(&self) {
+        self.stats
+            .branch_selections_true
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_branch_selection_false(&self) {
+        self.stats
+            .branch_selections_false
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_budget_fallback(&self) {
+        self.stats
+            .budget_fallback_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_path_length(&self, length: u32) {
+        let mut current = self.stats.max_path_length.load(Ordering::Relaxed);
+        while length > current {
+            match self.stats.max_path_length.compare_exchange_weak(
+                current,
+                length,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+    pub fn record_projection_depth(&self, depth: u32) {
+        let mut current = self.stats.max_projection_depth.load(Ordering::Relaxed);
+        while depth > current {
+            match self.stats.max_projection_depth.compare_exchange_weak(
+                current,
+                depth,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     /// Warm-lookup a key. Returns the memoized result + its recorded
     /// dependency signature when the requested `(family, mode_slot)` is
     /// populated. Backfill from broader-mode computes lands in narrower
@@ -735,13 +1076,18 @@ impl SemanticGraphStore {
     {
         // 1. Warm memo hit.
         if let Some(hit) = self.get(&key) {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
             return hit;
         }
+        self.stats.misses.fetch_add(1, Ordering::Relaxed);
 
         // 2. Same-path recursion detection — bail with a sentinel.
         let is_self_recursive =
             IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|k| k == &key));
         if is_self_recursive {
+            self.stats
+                .same_path_sentinel_returns
+                .fetch_add(1, Ordering::Relaxed);
             return CacheRead {
                 value: QueryResult::Recursive(recursion_sentinel()),
                 dep_signature: empty_signature(),
@@ -762,10 +1108,16 @@ impl SemanticGraphStore {
             let mut state = inflight.state.lock();
             if state.claimed {
                 // Cooperative wait — block on the per-entry condvar until
-                // `completed` is set. Joiners never busy-spin.
+                // `completed` is set. Joiners never busy-spin. Account
+                // wait time on the stats surface so the F3 corpus
+                // benchmark surfaces non-zero `waits_ms` (plan §6.3).
+                let wait_start = std::time::Instant::now();
                 inflight
                     .ready
                     .wait_while(&mut state, |s| s.completed.is_none());
+                self.stats
+                    .waits_ms
+                    .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let result = state.completed.clone().expect("winner must have published");
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
                 return CacheRead {
@@ -777,6 +1129,10 @@ impl SemanticGraphStore {
             true
         };
         debug_assert!(should_build);
+        // Cold winner — record the in-flight presence for peak tracking
+        // and ensure the exit decrement runs even on panic via the
+        // existing InflightPanicGuard (extended below to cover this).
+        self.stats.record_in_flight_enter();
 
         // 4. Execute the cold build. Both the recursion stack entry and
         //    the in-flight admission are protected by RAII guards so a
@@ -831,6 +1187,9 @@ impl SemanticGraphStore {
             let mut table = self.inflight.lock();
             table.remove(&key);
         }
+        // Decrement the in-flight presence counter. The peak counter is
+        // monotonic; this only updates the current count.
+        self.stats.record_in_flight_exit();
 
         CacheRead {
             value: result,
@@ -1525,6 +1884,7 @@ mod tests {
 
     #[test]
     fn family_concurrent_navigate_and_expanded_both_complete_independently() {
+        use std::sync::Barrier;
         use std::thread;
         let store = Arc::new(SemanticGraphStore::new());
         let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1532,20 +1892,35 @@ mod tests {
         let nav_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let exp_value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
 
+        // Barrier prevents either build closure from publishing until the
+        // other has also entered its body — exercises per-(family, slot)
+        // in-flight authority deterministically (without a barrier the
+        // race is real and one thread can publish + backfill before the
+        // other starts).
+        let barrier = Arc::new(Barrier::new(2));
+
         let store_nav = Arc::clone(&store);
+        let bar_nav = Arc::clone(&barrier);
         let store_exp = Arc::clone(&store);
+        let bar_exp = Arc::clone(&barrier);
         let t_nav = thread::spawn(move || {
             store_nav.execute_cooperative(
                 family_test_key(base, ProjectionMode::Navigate),
                 || store_nav.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || (QueryResult::Value(nav_value), family_test_dep_signature()),
+                || {
+                    bar_nav.wait();
+                    (QueryResult::Value(nav_value), family_test_dep_signature())
+                },
             )
         });
         let t_exp = thread::spawn(move || {
             store_exp.execute_cooperative(
                 family_test_key(base, ProjectionMode::Expanded),
                 || store_exp.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || (QueryResult::Value(exp_value), family_test_dep_signature()),
+                || {
+                    bar_exp.wait();
+                    (QueryResult::Value(exp_value), family_test_dep_signature())
+                },
             )
         });
         let nav_read = t_nav.join().unwrap();
@@ -1559,8 +1934,10 @@ mod tests {
             QueryResult::Value(id) => id,
             other => panic!("exp: {other:?}"),
         };
-        // Each cold build returned its own value — neither pre-empted the
-        // other; per-slot in-flight authority kept them independent.
+        // Each cold build returned its own value — both ran to completion
+        // independently because per-(family, slot) in-flight authority
+        // kept them on separate Condvar pairings, and the barrier kept
+        // the publish ordering from racing them.
         assert_eq!(nav_id, nav_value);
         assert_eq!(exp_id, exp_value);
     }
@@ -1627,6 +2004,360 @@ mod tests {
     //    The DashMap-backed identity map remains the only cache. After a
     //    successful execute_cooperative path returning Value via the build
     //    closure, the family memo's entries map stays empty for this key.
+
+    // ──────────────────────────────────────────────────────────────────
+    // B2 derivation/origin layer + telemetry tests
+    // ──────────────────────────────────────────────────────────────────
+
+    fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
+        Arc::from(
+            vec![(
+                Arc::<str>::from(canonical),
+                crate::semantic_query::DepVersion::WholeHash([hash; 16]),
+            )]
+            .into_boxed_slice(),
+        )
+    }
+
+    /// Multiple edges of the same kind on the same result are stored as a
+    /// list — walkers see all of them. This is the multi-derivation
+    /// support the contract requires (plan §2 + §7.16).
+    #[test]
+    fn origin_multiple_edges_same_kind() {
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let src_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let src_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![src_a].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/a.ts", 1),
+        );
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![src_b].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/b.ts", 2),
+        );
+
+        let edges = store.origins_of_kind(result, OriginEdgeKind::Normalize);
+        assert_eq!(edges.len(), 2, "both Normalize derivations preserved");
+        assert_eq!(store.origin_edge_count(), 2);
+    }
+
+    /// `origins(node)` returns every edge across kinds. Sources are
+    /// preserved verbatim from the recording call.
+    #[test]
+    fn origin_walk_returns_all_sources() {
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let decl = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![decl, arg].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/a.ts", 1),
+        );
+
+        let edges = store.origins(result);
+        assert_eq!(edges.len(), 1);
+        let (kind, edge) = &edges[0];
+        assert_eq!(*kind, OriginEdgeKind::Instantiate);
+        assert_eq!(edge.sources.as_ref(), &[decl, arg]);
+    }
+
+    /// `AliasResolve` edges from the unwrapped target back to the alias
+    /// declaration identity are walkable. Each hop emits one edge so a
+    /// chain is reconstructible.
+    #[test]
+    fn alias_resolve_edge_walk_returns_declaration_identity() {
+        let store = SemanticGraphStore::new();
+        let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let alias_decl = store.intern_node(SemanticNodeData::Alias(target));
+
+        store.record_origin_edge(
+            target,
+            OriginEdgeKind::AliasResolve,
+            Arc::from(vec![alias_decl].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::MemberName(Arc::from("AliasName")),
+            dep_sig_for("/w/a.ts", 1),
+        );
+
+        let alias_edges = store.origins_of_kind(target, OriginEdgeKind::AliasResolve);
+        assert_eq!(alias_edges.len(), 1);
+        assert_eq!(alias_edges[0].sources.as_ref(), &[alias_decl]);
+        assert!(matches!(
+            &alias_edges[0].meta,
+            crate::semantic_query::OriginMeta::MemberName(name) if name.as_ref() == "AliasName"
+        ));
+    }
+
+    /// A barrel/re-export alias chain `X → Y → A` emits one
+    /// `AliasResolve` edge per hop and the chain is walkable end-to-end.
+    #[test]
+    fn alias_chain_multiple_hops_walk() {
+        let store = SemanticGraphStore::new();
+        let final_target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let middle_alias = store.intern_node(SemanticNodeData::Alias(final_target));
+        let outer_alias = store.intern_node(SemanticNodeData::Alias(middle_alias));
+
+        // final_target ← middle_alias (one hop)
+        store.record_origin_edge(
+            final_target,
+            OriginEdgeKind::AliasResolve,
+            Arc::from(vec![middle_alias].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/a.ts", 1),
+        );
+        // middle_alias ← outer_alias (second hop)
+        store.record_origin_edge(
+            middle_alias,
+            OriginEdgeKind::AliasResolve,
+            Arc::from(vec![outer_alias].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/b.ts", 2),
+        );
+
+        // Walk from final_target — caller follows sources transitively.
+        let mut chain: Vec<SemanticNodeId> = vec![final_target];
+        let mut current = final_target;
+        loop {
+            let edges = store.origins_of_kind(current, OriginEdgeKind::AliasResolve);
+            if edges.is_empty() {
+                break;
+            }
+            current = edges[0].sources[0];
+            chain.push(current);
+        }
+        assert_eq!(chain, vec![final_target, middle_alias, outer_alias]);
+    }
+
+    /// `stats_snapshot` increments hits + misses on warm + cold paths.
+    #[test]
+    fn stats_counters_increment_on_hit_and_miss() {
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/stats.ts"),
+            name: Arc::from("Foo"),
+        });
+
+        let stats0 = store.stats_snapshot();
+        assert_eq!(stats0.hits, 0);
+        assert_eq!(stats0.misses, 0);
+
+        // Cold call → misses increments by 1; hits stays 0.
+        let _ = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+        let stats1 = store.stats_snapshot();
+        assert_eq!(stats1.misses, 1);
+        assert_eq!(stats1.hits, 0);
+
+        // Warm call → hits increments; misses stays at 1.
+        let _ = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || panic!("warm hit must skip the build closure"),
+        );
+        let stats2 = store.stats_snapshot();
+        assert_eq!(stats2.misses, 1);
+        assert_eq!(stats2.hits, 1);
+    }
+
+    /// `origins_with_fence` merges each edge's `edge_dep_signature` into
+    /// the supplied fence at hop-time.
+    #[test]
+    fn origins_with_fence_merges_edge_dep_signature_at_each_hop() {
+        use crate::completion_fence::CompletionFence;
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/inst.ts", 1),
+        );
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/norm.ts", 2),
+        );
+
+        let fence = CompletionFence::new();
+        let visited = store.origins_with_fence(result, &fence);
+        assert_eq!(visited.len(), 2, "both edges visited");
+        // Fence should now carry both canonicals' dep facts.
+        let snapshot = fence.observed_signature();
+        let canonicals: Vec<&str> = snapshot.iter().map(|(c, _v)| c.as_ref()).collect();
+        assert!(
+            canonicals.contains(&"/w/inst.ts"),
+            "fence missing /w/inst.ts"
+        );
+        assert!(
+            canonicals.contains(&"/w/norm.ts"),
+            "fence missing /w/norm.ts"
+        );
+    }
+
+    /// `origins(node)` (the read-only walk) does NOT touch any fence.
+    /// Outside-execute consumers (LSP hover, debug dumps) use this form.
+    #[test]
+    fn plain_origins_walk_does_not_touch_active_fence() {
+        use crate::completion_fence::CompletionFence;
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/x.ts", 1),
+        );
+
+        let fence = CompletionFence::new();
+        let _ = store.origins(result);
+        let snapshot = fence.observed_signature();
+        assert!(
+            snapshot.is_empty(),
+            "plain origins() must NOT merge into active fence"
+        );
+    }
+
+    /// Multiple derivations of the SAME structural result store as
+    /// distinct edges with distinct dep-signatures. Walkers see all of
+    /// them — there is no "canonical publisher" shortcut (plan §7.16).
+    #[test]
+    fn multiple_derivations_of_same_node_all_contribute_their_edges() {
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let src1 = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let src2 = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+
+        // Two distinct Instantiate derivations producing the same result.
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![src1].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/p1.ts", 1),
+        );
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![src2].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for("/w/p2.ts", 2),
+        );
+
+        let edges = store.origins_of_kind(result, OriginEdgeKind::Instantiate);
+        assert_eq!(edges.len(), 2);
+        let canonicals: Vec<&str> = edges
+            .iter()
+            .flat_map(|e| e.edge_dep_signature.iter().map(|(c, _)| c.as_ref()))
+            .collect();
+        assert!(canonicals.contains(&"/w/p1.ts"));
+        assert!(canonicals.contains(&"/w/p2.ts"));
+    }
+
+    /// A purely structural node that no builder ever recorded an edge for
+    /// has zero origins — the walk yields nothing and the caller's fence
+    /// stays untouched. Structural / primitive / shared-literal nodes have
+    /// no version identity, so this is correct.
+    #[test]
+    fn structural_node_has_zero_origin_edges_and_contributes_no_dep_sig() {
+        use crate::completion_fence::CompletionFence;
+        let store = SemanticGraphStore::new();
+        let primitive = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let fence = CompletionFence::new();
+
+        let visited = store.origins_with_fence(primitive, &fence);
+        assert!(
+            visited.is_empty(),
+            "structural primitive node must have zero origin edges"
+        );
+        assert_eq!(store.origin_edge_count(), 0);
+        assert!(
+            fence.observed_signature().is_empty(),
+            "fence must carry no facts when node has no origin edges"
+        );
+    }
+
+    /// Edge dep-signature interning: two edges committed with identical
+    /// fences share one `Arc<DepSignature>` allocation.
+    #[test]
+    fn edge_dep_signatures_intern_identical_fences() {
+        let store = SemanticGraphStore::new();
+        let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        let sig = dep_sig_for("/w/shared.ts", 1);
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Instantiate,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            sig.clone(),
+        );
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![src].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            sig.clone(),
+        );
+
+        let edges = store.origins(result);
+        assert_eq!(edges.len(), 2);
+        let arc1 = &edges[0].1.edge_dep_signature;
+        let arc2 = &edges[1].1.edge_dep_signature;
+        assert!(
+            Arc::ptr_eq(arc1, arc2),
+            "identical fences must share one interned Arc<DepSignature>"
+        );
+    }
+
+    /// `stats_snapshot()` is consistent mid-request: counters are atomic
+    /// so concurrent readers never see torn values, and the per-call
+    /// snapshot is internally consistent.
+    #[test]
+    fn stats_snapshot_is_consistent_mid_request() {
+        let store = SemanticGraphStore::new();
+        let _ = store.execute_cooperative(
+            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: scope("/w/snap.ts"),
+                name: Arc::from("Foo"),
+            }),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+
+        let s1 = store.stats_snapshot();
+        let s2 = store.stats_snapshot();
+        assert_eq!(s1, s2, "two consecutive snapshots must be identical");
+        assert_eq!(s1.misses, 1);
+        assert_eq!(s1.memo_entry_count, 1);
+    }
 
     #[test]
     fn resolved_named_type_refcount_path_unchanged_after_family_rewrite() {

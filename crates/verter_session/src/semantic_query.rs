@@ -239,6 +239,136 @@ pub struct CacheRead<T> {
     pub dep_signature: DepSignature,
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Required edge kinds for the derivation/origin layer (plan §2 Derivation
+/// + Origin Layer Contract). Names are normative — semantics MUST NOT drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OriginEdgeKind {
+    /// `result = decl<args>`. From the instantiated result back to the
+    /// declaration identity and concrete argument nodes.
+    Instantiate,
+    /// `result_position = T -> V`. From a concrete type in a substituted
+    /// position back to the declaration's type parameter and the binding
+    /// that produced the substitution.
+    SubstituteTypeParam,
+    /// `result = select(conditional, True | False | Deferred)`. Records
+    /// the branch taken (or `Deferred` if the check stayed open).
+    ConditionalSelect,
+    /// `result = T bound via infer`. From the inferred type back to the
+    /// `infer` binding site and the concrete type captured by the
+    /// relation check.
+    InferBind,
+    /// `result = base.member`. From the projected member back to the
+    /// base node and the member name.
+    ProjectMember,
+    /// `result = base[index]`. From the projected result back to the
+    /// base node and the index expression.
+    ProjectIndex,
+    /// `result = base.path...`. From the projected result back to the
+    /// base node and the full path segment list.
+    ProjectPath,
+    /// `result = normalize(source_members)`. From a normalized union /
+    /// intersection / simplified result back to each contributing member
+    /// node.
+    Normalize,
+    /// `result = unwrap(alias)`. From the unwrapped-target result node
+    /// back to the alias declaration identity. Emitted once per alias hop
+    /// (direct alias, re-export alias, barrel alias). Chains are walkable
+    /// end-to-end.
+    AliasResolve,
+}
+
+/// Branch decision recorded on a [`OriginEdgeKind::ConditionalSelect`] edge.
+/// `Deferred` covers the open-conditional case where the path projection
+/// distributes into both branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BranchSelection {
+    True,
+    False,
+    Deferred,
+}
+
+/// Per-edge metadata payload. Carries the variant-specific scalars an edge
+/// needs to be self-describing (the branch selected, the member name
+/// projected, the path walked, etc.) without inflating the
+/// [`OriginEdgeKind`] discriminant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginMeta {
+    /// No payload beyond the edge kind itself.
+    None,
+    /// Branch decision for [`OriginEdgeKind::ConditionalSelect`].
+    Branch(BranchSelection),
+    /// Member name for [`OriginEdgeKind::ProjectMember`] /
+    /// [`OriginEdgeKind::AliasResolve`].
+    MemberName(Arc<str>),
+    /// Index expression for [`OriginEdgeKind::ProjectIndex`].
+    Index(IndexKey),
+    /// Full path segment list for [`OriginEdgeKind::ProjectPath`].
+    Path(Arc<[PathSegment]>),
+    /// Type-parameter name for [`OriginEdgeKind::SubstituteTypeParam`].
+    SubstitutedParam(Arc<str>),
+}
+
+/// One origin edge: a derivation hop from a source-set to a result. Carries
+/// the per-edge dep-signature snapshot that walkers merge into their fence
+/// at hop-time (plan §7.16 — edges are the only dep-sig propagation route
+/// for builders).
+#[derive(Debug, Clone)]
+pub struct OriginEdge {
+    /// Source nodes this edge derives from (typically 1; multiple for
+    /// `Normalize` over union/intersection arms).
+    pub sources: Arc<[SemanticNodeId]>,
+    /// Variant-specific scalar metadata.
+    pub meta: OriginMeta,
+    /// Snapshot of the publishing builder's active fence at the moment the
+    /// edge was committed. Interned by [`crate::semantic_query_memo`] so
+    /// builders that emit dozens of edges with identical fences share one
+    /// `Arc` allocation.
+    pub edge_dep_signature: Arc<DepSignature>,
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Telemetry — first-class observability surface (plan B2 + §7.4)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Public snapshot of the semantic graph store's telemetry counters. Read
+/// from `SemanticGraphStore::stats_snapshot()`. Per `SemanticGraphKey`
+/// variant counters are aggregated; per-builder counters are aggregated;
+/// path / projection / origin-edge histograms are reduced to running max
+/// for B2 (p50/p95 percentile reduction is permitted follow-up work, not a
+/// semantics-changing addition — the raw counts are already exposed).
+///
+/// Snapshots are immutable and safe to read mid-request. The trace-check
+/// harness, the benchmark pipeline, and the F3 corpus benchmark consume
+/// these snapshots directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SemanticGraphStats {
+    // ── Memo / coordination counters ────────────────────────────────
+    pub hits: u64,
+    pub misses: u64,
+    pub same_path_sentinel_returns: u64,
+    pub in_flight_peak: u32,
+    pub waits_ms: u64,
+    pub memo_entry_count: u64,
+    // ── Derivation / origin counters ─────────────────────────────────
+    pub origin_edge_count: u64,
+    pub origin_edges_emitted: u64,
+    pub max_origin_edges_per_node: u32,
+    // ── Per-builder counters (incremented by builders in C-phase) ───
+    pub instantiate_count: u64,
+    pub conditional_decided_count: u64,
+    pub conditional_deferred_count: u64,
+    pub branch_selections_true: u64,
+    pub branch_selections_false: u64,
+    pub budget_fallback_count: u64,
+    // ── Path / projection histogram running max ─────────────────────
+    pub max_path_length: u32,
+    pub max_projection_depth: u32,
+}
+
 /// Structured query-level failure. Distinct from panics — callers decide
 /// whether an error maps to a top-level public failure or to an opaque
 /// semantic node in the result.
