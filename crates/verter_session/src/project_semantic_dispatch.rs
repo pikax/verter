@@ -66,10 +66,10 @@ use verter_semantic::analysis::type_expr::{LiteralValue, ObjectMember, Primitive
 
 use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::semantic_query::{
-    CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, IndexSignature,
-    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, QueryError, QueryResult,
-    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey,
+    IndexSignature, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind,
+    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
@@ -693,22 +693,130 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
-    /// Conditional type. Returns an `Alias(true_branch)` as a conservative
-    /// anchor — the real branch selection requires the solver's assignability
-    /// judgement, which later phases route through this dispatcher. The
-    /// memoized key preserves the `(check, extends, true, false,
-    /// distributive)` identity so repeated asks dedup.
+    /// Conditional type (plan §3 C2 + §2 lazy block).
+    ///
+    /// Evaluates `check extends extends ? true_branch : false_branch`
+    /// using the shared relation engine and returns either:
+    ///
+    /// - **Closed/decidable check** — one of the branch shell references
+    ///   directly (no `Conditional` node interned). Emits a
+    ///   [`OriginEdgeKind::ConditionalSelect`] edge with
+    ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
+    ///   unselected branch is NOT materialised beyond its shell
+    ///   reference (it already has one via the key's
+    ///   `true_branch` / `false_branch` fields).
+    /// - **Open/undecidable check** — a
+    ///   [`SemanticNodeData::Conditional`] shell with both branch
+    ///   references intact. Emits
+    ///   [`OriginEdgeKind::ConditionalSelect`] with
+    ///   [`BranchSelection::Deferred`]. Neither branch is recursively
+    ///   materialised; path projection into the result (C3) drives
+    ///   per-subexpression lazy expansion.
+    ///
+    /// C2's relation evaluator handles the decidable shapes the shallow
+    /// walker reaches directly: primitive identity, primitive-to-top/any,
+    /// `never` bottom, exact node identity, and the obvious
+    /// non-assignability cases. Object / union / intersection / generic
+    /// relations stay deferred — the full solver routing lands in D2,
+    /// where the solver hands conditionals over to dispatch via
+    /// `SemanticQueryApi::execute`. `infer` bindings require the full
+    /// relation engine integration and remain symbolic (no `InferBind`
+    /// edges) until D2 — the two `infer_*` C2 tests are
+    /// `#[ignore = "pending D2"]` per plan §3 C2.
     fn build_conditional(
         &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
         true_branch: SemanticNodeId,
+        false_branch: SemanticNodeId,
+        distributive: bool,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let node = self
-            .graph()
-            .intern_node(SemanticNodeData::Alias(true_branch));
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        let graph = self.graph();
+        let fence = self.project_generation_signature();
+        let relation = self.shallow_relation_check(check, extends);
+        let (result, branch, is_deferred) = match relation {
+            ShallowRelation::Assignable => (true_branch, BranchSelection::True, false),
+            ShallowRelation::NotAssignable => (false_branch, BranchSelection::False, false),
+            ShallowRelation::Unknown => {
+                let node = graph.intern_node(SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref: true_branch,
+                    false_branch_ref: false_branch,
+                    distributive,
+                });
+                (node, BranchSelection::Deferred, true)
+            }
+        };
+        graph.record_origin_edge(
+            result,
+            OriginEdgeKind::ConditionalSelect,
+            Arc::from(vec![check, extends].into_boxed_slice()),
+            OriginMeta::Branch(branch),
+            Arc::clone(&fence),
+        );
+        if is_deferred {
+            graph.record_conditional_deferred();
+        } else {
+            graph.record_conditional_decided();
+            match branch {
+                BranchSelection::True => graph.record_branch_selection_true(),
+                BranchSelection::False => graph.record_branch_selection_false(),
+                BranchSelection::Deferred => {}
+            }
+        }
+        (QueryResult::Value(result), fence)
+    }
+
+    /// Minimum-correct relation check over shallow semantic nodes.
+    ///
+    /// C2 handles the decidable shapes that show up directly at the
+    /// dispatch boundary without reaching into the full relation engine:
+    ///
+    /// - Identity: same `SemanticNodeId` → `Assignable`.
+    /// - `never` on the source → `Assignable` (bottom assigns anywhere).
+    /// - `any` / `unknown` on the target → `Assignable` (top accepts).
+    /// - `any` on the source → `Assignable` (TS-semantics: any flows).
+    /// - `never` on the target, non-`never` source → `NotAssignable`.
+    /// - Primitive pair equality → `Assignable`; pair inequality →
+    ///   `NotAssignable`.
+    ///
+    /// Every other shape (objects, unions, intersections, aliases, decl
+    /// anchors, conditionals themselves, opaque, vue-macro elements)
+    /// returns `Unknown` so the dispatch leaves the conditional
+    /// deferred. Real relation-engine handling lands in D2.
+    fn shallow_relation_check(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> ShallowRelation {
+        if source == target {
+            return ShallowRelation::Assignable;
+        }
+        let graph = self.graph();
+        let Some(source_data) = graph.node_data(source) else {
+            return ShallowRelation::Unknown;
+        };
+        let Some(target_data) = graph.node_data(target) else {
+            return ShallowRelation::Unknown;
+        };
+        match (&*source_data, &*target_data) {
+            (SemanticNodeData::Primitive(PrimitiveKind::Never), _) => ShallowRelation::Assignable,
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => ShallowRelation::Assignable,
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Any)) => ShallowRelation::Assignable,
+            (SemanticNodeData::Primitive(PrimitiveKind::Any), _) => ShallowRelation::Assignable,
+            (_, SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
+                ShallowRelation::NotAssignable
+            }
+            (SemanticNodeData::Primitive(a), SemanticNodeData::Primitive(b)) => {
+                if a == b {
+                    ShallowRelation::Assignable
+                } else {
+                    ShallowRelation::NotAssignable
+                }
+            }
+            _ => ShallowRelation::Unknown,
+        }
     }
 
     /// Union normalization. Structurally sorts + dedups the supplied members
@@ -799,6 +907,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// Result of C2's minimum-correct shallow relation check used by
+/// [`build_conditional`]. Real relation-engine results land in D2
+/// via the solver hand-off — C2 only decides the obvious cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShallowRelation {
+    Assignable,
+    NotAssignable,
+    Unknown,
 }
 
 /// Map a [`PrimitiveName`] from the parser's IR onto the semantic-graph
@@ -906,8 +1024,14 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             }
             SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
             SemanticQueryKey::MappedType { source, .. } => self.build_mapped_type(*source),
-            SemanticQueryKey::Conditional { true_branch, .. } => {
-                self.build_conditional(*true_branch)
+            SemanticQueryKey::Conditional {
+                check,
+                extends,
+                true_branch,
+                false_branch,
+                distributive,
+            } => {
+                self.build_conditional(*check, *extends, *true_branch, *false_branch, *distributive)
             }
             SemanticQueryKey::NormalizeUnion { members } => self.build_normalize_union(members),
             SemanticQueryKey::NormalizeIntersection { members } => {
@@ -2483,4 +2607,175 @@ mod tests {
             "distinct instantiations must share visited-subpath lowering (before={before}, after={after})"
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // C2 — real `build_conditional` (plan §3 C2 + §2 lazy block)
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::semantic_query::BranchSelection;
+
+    fn primitive(
+        graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+        kind: PrimitiveKind,
+    ) -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Primitive(kind))
+    }
+
+    /// A closed/decidable conditional (`string extends string ? A : B`)
+    /// returns the selected branch directly and emits a
+    /// `ConditionalSelect` edge with `BranchSelection::True`. The losing
+    /// branch is NOT materialised beyond its shell reference.
+    #[test]
+    fn closed_conditional_selects_and_emits_edges() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let string_node = primitive(&graph, PrimitiveKind::String);
+        let true_branch = primitive(&graph, PrimitiveKind::Boolean);
+        let false_branch = primitive(&graph, PrimitiveKind::Number);
+
+        let result = match dispatch.execute(SemanticQueryKey::Conditional {
+            check: string_node,
+            extends: string_node,
+            true_branch,
+            false_branch,
+            distributive: false,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        // Closed selection returns the true branch directly (no
+        // `Conditional` shell interned).
+        assert_eq!(
+            result, true_branch,
+            "closed conditional must return the true branch node id"
+        );
+        let edges = graph.origins_of_kind(result, OriginEdgeKind::ConditionalSelect);
+        assert!(
+            !edges.is_empty(),
+            "expected at least one ConditionalSelect edge on the result"
+        );
+        let has_true = edges.iter().any(|e| {
+            matches!(&e.meta, OriginMeta::Branch(BranchSelection::True))
+                && e.sources.iter().any(|id| *id == string_node)
+        });
+        assert!(
+            has_true,
+            "ConditionalSelect edge must carry Branch::True and source the check/extends"
+        );
+    }
+
+    /// The losing branch in a closed conditional is not interned as a
+    /// sub-object or sub-instantiation. Because we hand back the winning
+    /// branch id directly, the only materialised shape is the branch the
+    /// test prepared — no extra shell for the loser.
+    #[test]
+    fn closed_conditional_does_not_materialise_losing_branch_body() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let string_node = primitive(&graph, PrimitiveKind::String);
+        let number_node = primitive(&graph, PrimitiveKind::Number);
+        let true_branch = primitive(&graph, PrimitiveKind::Boolean);
+        let false_branch = primitive(&graph, PrimitiveKind::Symbol);
+
+        let node_count_before = graph.node_count();
+        let _ = dispatch.execute(SemanticQueryKey::Conditional {
+            check: string_node,
+            extends: number_node,
+            true_branch,
+            false_branch,
+            distributive: false,
+        });
+        let node_count_after = graph.node_count();
+        // No new structural nodes should have been interned — both
+        // branches already exist; the loser is not re-materialised.
+        assert!(
+            node_count_after - node_count_before <= 1,
+            "closed conditional must not intern extra nodes beyond existing branches (before={node_count_before}, after={node_count_after})"
+        );
+    }
+
+    /// An open/undecidable conditional keeps both branch references
+    /// intact in a `Conditional` shell node. Neither branch is recursively
+    /// expanded; the shell's fields point at the as-supplied branch ids.
+    #[test]
+    fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/w/types.ts",
+            "export type Foo = { x: number }\nexport type Bar = { y: string }",
+        );
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        // Check / extends are DeclAnchors — the shallow relation check
+        // returns `Unknown` so the conditional stays deferred.
+        let foo = resolve_decl_anchor(&dispatch, "/w/types.ts", "Foo");
+        let bar = resolve_decl_anchor(&dispatch, "/w/types.ts", "Bar");
+        let true_branch = primitive(&graph, PrimitiveKind::Boolean);
+        let false_branch = primitive(&graph, PrimitiveKind::Number);
+
+        let result = match dispatch.execute(SemanticQueryKey::Conditional {
+            check: foo,
+            extends: bar,
+            true_branch,
+            false_branch,
+            distributive: false,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("result node");
+        match &*data {
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+            } => {
+                assert_eq!(*check, foo);
+                assert_eq!(*extends, bar);
+                assert_eq!(*true_branch_ref, true_branch);
+                assert_eq!(*false_branch_ref, false_branch);
+                assert!(!distributive);
+            }
+            other => panic!("expected Conditional shell, got {other:?}"),
+        }
+        let edges = graph.origins_of_kind(result, OriginEdgeKind::ConditionalSelect);
+        let has_deferred = edges
+            .iter()
+            .any(|e| matches!(&e.meta, OriginMeta::Branch(BranchSelection::Deferred)));
+        assert!(
+            has_deferred,
+            "deferred conditional must emit ConditionalSelect(Branch::Deferred)"
+        );
+    }
+
+    /// `infer` inside a closed conditional binds via the shared relation
+    /// engine and emits `InferBind` edges. C2 does not wire the full
+    /// relation engine yet — the solver hand-off lands in D2. Stay
+    /// ignored until then; F1 un-ignores at track end.
+    #[test]
+    #[ignore = "pending D2 (solver conditional hand-off through dispatch)"]
+    fn infer_in_closed_conditional_binds_via_relation() {}
+
+    /// `infer` inside an open conditional must stay symbolic: no
+    /// `InferBind` edge is emitted because the check could not decide.
+    /// Requires the D2 solver integration to prove the negative
+    /// (no edge) through a real infer-path fixture.
+    #[test]
+    #[ignore = "pending D2 (solver conditional hand-off through dispatch)"]
+    fn infer_in_open_conditional_stays_symbolic_without_private_bind() {}
+
+    /// Distinct projections into the same open conditional materialise
+    /// only the visited subexpressions. Requires C3's path walker to
+    /// distribute `ProjectPath` into each branch via dispatch re-entry.
+    #[test]
+    #[ignore = "pending C3 (build_project_path conditional distribution)"]
+    fn distinct_projections_into_same_open_conditional_materialise_only_visited_subexpressions() {}
 }

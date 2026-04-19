@@ -557,6 +557,36 @@ pub enum SemanticNodeData {
         name: Arc<str>,
         whole_hash: HashValue,
     },
+    /// Conditional shell node (plan §3 C2 + §2 lazy block).
+    ///
+    /// Carries the `check extends extends ? true_branch_ref : false_branch_ref`
+    /// structure without recursively materialising either branch. Produced
+    /// by [`SemanticQueryKey::Conditional`] when the relation engine's
+    /// judgement is undecidable (open check) or when the caller asked for
+    /// the structural shell without branch selection.
+    ///
+    /// - `check` / `extends` — the two sides of the conditional test.
+    /// - `true_branch_ref` / `false_branch_ref` — shell-level references
+    ///   to each branch. Not pre-expanded; a walker that projects into
+    ///   the branch materialises its body via
+    ///   [`SemanticQueryKey::ProjectPath`] sub-queries (C3).
+    /// - `distributive` — `true` when `check` is a naked type parameter
+    ///   (TS distributive-conditional semantics).
+    ///
+    /// When the relation engine decides the check (closed case),
+    /// [`build_conditional`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
+    /// returns the selected branch ref directly and emits a
+    /// [`OriginEdgeKind::ConditionalSelect`] edge with
+    /// [`BranchSelection::True`] or [`BranchSelection::False`] — no
+    /// `Conditional` node is interned. The interned `Conditional` node
+    /// variant only appears for undecidable (deferred) checks.
+    Conditional {
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+        true_branch_ref: SemanticNodeId,
+        false_branch_ref: SemanticNodeId,
+        distributive: bool,
+    },
     /// Pragmatic carrier for Vue macro resolution artifacts (spans, text,
     /// prop/emit metadata) produced by the parser's cross-file type resolver
     /// via the [`NamedTypeCache`](verter_compiler::utils::oxc::vue::resolve_type::cache_keys::NamedTypeCache)
