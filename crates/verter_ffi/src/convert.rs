@@ -1031,6 +1031,12 @@ fn style_lang_to_string(lang: verter_semantic::analysis::style::StyleAnalysisLan
     format!("{lang:?}")
 }
 
+// TODO(E1): emit new names once `ResolverMode` retires per plan §4
+// item 20 + §3 Phase E. Post-E1 this maps to
+// `ProjectionMode::{Identity, Shallow, Expanded}` and the wire format
+// carries `"identity"` / `"shallow"` / `"expanded"`. The A1b→E1
+// transitional allowlist entries for `ResolverMode::Type` /
+// `ResolverMode::Expanded` also retire in the same commit.
 fn resolver_mode_to_string(mode: host::ResolverMode) -> String {
     match mode {
         host::ResolverMode::Type => "type".to_string(),

@@ -195,6 +195,18 @@ impl HostConfig {
 /// Mode selection is always explicit at the caller boundary — it is never
 /// inferred inside `component_meta.rs`, the compat layer, or from legacy
 /// booleans/config.
+///
+/// TODO(E1): this enum retires in the monolithic protocol cutover per
+/// plan §4 item 20 + §3 Phase E. Replaced by an explicit mapping onto
+/// `ProjectionMode::{Identity, Shallow, Expanded}` — the three
+/// dispatch modes that cross the FFI boundary (`Navigate` is
+/// dispatch-internal). `resolver_mode_to_string` in
+/// `crates/verter_ffi/src/convert.rs` emits the new names on the wire.
+/// `@verter/types` regenerates. E1 also removes the A1b→E1
+/// transitional allowlist entries from
+/// `tools/check-four-mode-terminology.sh`. TS consumers that switch on
+/// the old string literals break loudly; they migrate in the same
+/// commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolverMode {
     /// Resolve symbol identity and canonical declaration location only.

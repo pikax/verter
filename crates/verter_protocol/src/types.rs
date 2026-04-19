@@ -4,6 +4,30 @@
 //! match JavaScript convention when serialized. WASM uses these types
 //! directly via `serde_wasm_bindgen`; NAPI maps to/from its own
 //! `#[napi(object)]` structs via zero-copy `From` impls.
+//!
+//! TODO(E1): this module receives the monolithic protocol bump per
+//! plan §3 Phase E + §5 "Breaking / protocol changes":
+//!
+//! - `VERTER_PROTOCOL_VERSION` increments.
+//! - `FfiComponentMeta` (and every payload carrying solver results)
+//!   gains `origin: OriginGraphDto` — compact wire form of the
+//!   reachable-subgraph derivation edges emitted by dispatch. Encoding
+//!   uses dense edge tables + varint-packed node ids + interned
+//!   edge-meta strings.
+//! - `ResolverMode::{Type, Expanded}` (live at `verter_session/src/types.rs`)
+//!   retires and is replaced by an explicit mapping onto
+//!   `ProjectionMode::{Identity, Shallow, Expanded}` that crosses the
+//!   FFI.
+//! - TS consumers (`@verter/language-shared`, `@verter/types`,
+//!   `@verter/native`, `@verter/wasm`, `@verter/component-meta`,
+//!   `@verter/unplugin`, playground, LSP/VSCode) migrate in the same
+//!   commit. The compat layer's `substituteTypeParametersInExpr` helper
+//!   + type-text fallback subsystem delete (plan §4 items 12 and 16).
+//!
+//! Verification matrix (plan §3 Phase E) specifies one non-trivial
+//! origin-walk test per consumer (NAPI / WASM / LSP / MCP / unplugin /
+//! Playground / component-meta compat). Every row must go green in the
+//! same commit.
 
 use serde::{Deserialize, Serialize};
 
