@@ -4165,20 +4165,22 @@ mod tests {
     /// contribute to the requested path follows the intersection
     /// contributor rule (plan §3 C3). Requires intersection arm
     /// walking which is covered end-to-end in C3's
-    /// `intersection_arm_without_path_segment_is_ignored`; we leave
-    /// the dedicated mapped-inside-intersection variant for the
-    /// utility equivalence pass (C7) where richer mapped fixtures
-    /// land.
+    /// `intersection_arm_without_path_segment_is_ignored`. The
+    /// mapped-inside-intersection variant requires mapped-type value
+    /// walking to enter the path-walker's intersection arm — pending
+    /// the full mapped-type value walker (post-C7 follow-up).
     #[test]
-    #[ignore = "pending C7 (userland-utility equivalence fixtures)"]
+    #[ignore = "pending full mapped-type value walker (post-C7 follow-up)"]
     fn mapped_type_inside_non_contributing_intersection_arm_ignored() {}
 
     /// `as`-key remapping produces a `ProjectMember` edge whose
     /// `OriginMeta::MemberName` carries the remapped name. Requires
-    /// value-expr lowering with the remap binding; lands with C7's
-    /// full mapped-type walker.
+    /// value-expr lowering with the remap binding; pending the full
+    /// mapped-type value walker (post-C7 follow-up — C7's utility
+    /// dispatch routes through MappedType but does not implement
+    /// name-remap substitution).
     #[test]
-    #[ignore = "pending C7 (name-remap expansion in mapped-type value walker)"]
+    #[ignore = "pending full mapped-type value walker (post-C7 follow-up)"]
     fn mapped_type_with_as_key_remapping_emits_project_member_with_remap_meta() {}
 
     // ──────────────────────────────────────────────────────────────────
