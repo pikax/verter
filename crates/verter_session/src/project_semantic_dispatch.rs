@@ -56,6 +56,12 @@
 
 use std::sync::Arc;
 
+use verter_semantic::analysis::type_solver::host::{
+    BareRefOrigin, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
+};
+use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+
+use crate::resolver_core::solver_host::SessionSolverHost;
 use crate::semantic_query::{
     CacheRead, DepSignature, DepVersion, HostResolvedNamedTypeKey, IndexKey, NodeScopeId,
     PathSegment, PrimitiveKind, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
@@ -657,13 +663,6 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
 // C1 commit band. Until then, the adapter is complete but only directly
 // tested via the routing assertion.
 
-use verter_semantic::analysis::type_solver::host::{
-    BareRefOrigin, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
-};
-use verter_semantic::analysis::type_solver::PreparedTypeDecl;
-
-use crate::resolver_core::solver_host::SessionSolverHost;
-
 /// Scope-free, minimum-surface host seam for dispatch builders (plan §7.9 +
 /// §7.10 + C1).
 ///
@@ -797,8 +796,8 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 mod tests {
     use super::*;
     use crate::semantic_query::{
-        IndexSignature, PathSegment, ProjectionMode, ScopeId, SemanticNodeData, SurfaceMember,
-        SurfaceView,
+        IndexSignature, NodeScopeId, PathSegment, ProjectionMode, ScopeId, SemanticNodeData,
+        SurfaceMember, SurfaceView,
     };
     use crate::{CompileErrorPolicy, FileKind, HostConfig, UpsertRequest, VerterHost};
 
@@ -1660,8 +1659,6 @@ mod tests {
     /// different scopes; an exempt node routes to `Global`.
     #[test]
     fn dispatch_host_adapter_routes_per_base_scope() {
-        use crate::semantic_query::NodeScopeId;
-
         let host = host();
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
@@ -1727,5 +1724,50 @@ mod tests {
         // user shadowings these return `Builtin` / `Unknown` respectively.
         let _ = adapter.utility_source(anchor_a, "Partial");
         let _ = adapter.bare_ref_origin(anchor_a, "Foo");
+    }
+
+    /// `build_resolve_decl` records the declaration's origin scope in
+    /// the [`SemanticGraphStore`] sidecar at intern time. Verified
+    /// end-to-end through the dispatch API so we exercise the full
+    /// integration path (plan §3 C1 + §7.10).
+    #[test]
+    fn resolve_decl_records_file_scope_in_sidecar() {
+        let host = host();
+        upsert_ts(&host, "/w/types.ts", "export type Foo = { x: number }");
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+        let key = resolve_decl_key("/w/types.ts", "Foo");
+        let node = match dispatch.execute(SemanticQueryKey::ResolveDecl(key)) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+
+        // The anchor carries a File-scoped sidecar entry pointing at the
+        // defining canonical. Future builders reach this via
+        // `SessionDispatchHost::base_scope(node)`.
+        let scope = graph
+            .node_scope(node)
+            .expect("build_resolve_decl must populate the sidecar");
+        match scope {
+            NodeScopeId::File {
+                canonical_id,
+                local_scope,
+                ..
+            } => {
+                assert_eq!(canonical_id.as_ref(), "/w/types.ts");
+                assert_eq!(local_scope, None);
+            }
+            NodeScopeId::Global => panic!("expected File-scoped sidecar, got Global"),
+        }
+
+        // Round-trip through the adapter confirms routing for this base.
+        let adapter = SessionDispatchHost::new(&host);
+        match adapter.base_scope(node) {
+            NodeScopeId::File { canonical_id, .. } => {
+                assert_eq!(canonical_id.as_ref(), "/w/types.ts");
+            }
+            NodeScopeId::Global => panic!("adapter routed to Global instead of File scope"),
+        }
     }
 }

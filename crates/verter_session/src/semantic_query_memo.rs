@@ -46,33 +46,48 @@ use crate::semantic_query::{
 // ──────────────────────────────────────────────────────────────────────────
 //
 // The arena pairs each interned [`SemanticNodeData`] with an **origin-scope
-// sidecar** (plan §7.10 + C1): a `Vec<Option<NodeScopeId>>` parallel to the
-// node vec, so `scopes[id]` answers "where was node `id` first interned?" in
-// one vector index. Dispatch builders query the sidecar via
-// [`SemanticGraphStore::node_scope`] to route per-base-scope lookups through
-// the correct [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
+// sidecar** (plan §7.10 + C1). Both the node vec and the parallel scope
+// vec live inside one [`Mutex<ArenaInner>`] so every push takes a **single
+// lock** (same cost as the pre-C1 baseline) and `(nodes, scopes)` stay
+// index-aligned atomically under every concurrent read.
+//
+// Dispatch builders query the sidecar via [`SemanticGraphStore::node_scope`]
+// to route per-base-scope lookups through the correct
+// [`SessionSolverHost`](crate::resolver_core::solver_host::SessionSolverHost)
 // without threading scope through every call.
 //
 // **Exempt variants.** `SemanticNodeData::VueMacroElements` nodes store
 // `None` in the sidecar slot — they live on the parser's refcount-only hot
 // path and are never consumed by dispatch builders that walk `node_scope`.
 // The exemption is enforced structurally inside `push_impl` so callers can't
-// accidentally populate a sidecar entry for a vue-macro node.
+// accidentally populate a sidecar entry for a vue-macro node, even via
+// [`SemanticGraphStore::intern_node_with_scope`].
 //
-// **Lock ordering.** Only `push_impl` acquires both `nodes` and `scopes`; it
-// always takes `nodes` first, then `scopes`. Readers grab one lock at a
-// time (either `nodes` or `scopes`, never both), so no AB-BA cycle can
-// exist.
+// **Write cost invariant (plan §7.10).** `insert_resolved_named_type` on
+// the parser's refcount-only hot path pays exactly one
+// [`Mutex::lock`](parking_lot::Mutex::lock) on the arena (plus the
+// pre-existing `DashMap::insert` on the resolved-named-type index). The
+// combined [`ArenaInner`] preserves that invariant — the parallel scope
+// vec's push is absorbed into the same critical section as the node
+// vec's, so there is no second lock acquisition for either exempt or
+// non-exempt writes.
 
+/// Interior state of [`NodeArena`]. Held behind a single [`Mutex`] so
+/// `(nodes, scopes)` stay index-aligned under every concurrent read.
 #[derive(Default)]
-struct NodeArena {
-    nodes: Mutex<Vec<Arc<SemanticNodeData>>>,
+struct ArenaInner {
+    nodes: Vec<Arc<SemanticNodeData>>,
     /// Origin-scope sidecar (plan §7.10 + C1). Index-aligned with `nodes`.
     /// `None` marks an exempt slot (`VueMacroElements`); `Some(scope)`
     /// records the scope the node was first interned in (`Global` for
     /// scope-less structural nodes, `File { .. }` for declaration-origin
     /// nodes).
-    scopes: Mutex<Vec<Option<NodeScopeId>>>,
+    scopes: Vec<Option<NodeScopeId>>,
+}
+
+#[derive(Default)]
+struct NodeArena {
+    inner: Mutex<ArenaInner>,
 }
 
 impl NodeArena {
@@ -93,35 +108,39 @@ impl NodeArena {
     fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
         // `VueMacroElements` is exempt per plan §7.10 — record `None` so
         // `node_scope` returns `None` rather than `Some(Global)` for those
-        // nodes.
+        // nodes. The exemption is structural so even
+        // `intern_node_with_scope(VueMacroElements, Some(scope))` yields
+        // `None` in the sidecar slot.
         let sidecar_entry = match &data {
             SemanticNodeData::VueMacroElements(_) => None,
             _ => Some(scope),
         };
 
-        let mut nodes = self.nodes.lock();
-        let mut scopes = self.scopes.lock();
-        let id = SemanticNodeId(nodes.len() as u64);
-        nodes.push(Arc::new(data));
-        scopes.push(sidecar_entry);
+        // Single lock for both vecs: same cost as pre-C1 baseline for
+        // `insert_resolved_named_type`'s refcount-only hot path (plan §7.10
+        // write-cost invariant).
+        let mut inner = self.inner.lock();
+        let id = SemanticNodeId(inner.nodes.len() as u64);
+        inner.nodes.push(Arc::new(data));
+        inner.scopes.push(sidecar_entry);
         id
     }
 
     fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        let nodes = self.nodes.lock();
-        nodes.get(id.0 as usize).cloned()
+        let inner = self.inner.lock();
+        inner.nodes.get(id.0 as usize).cloned()
     }
 
     /// Return the recorded origin scope for `id` — `None` for exempt nodes
     /// (or invalid ids), `Some(scope)` for everything else. Exempt slots
     /// are `VueMacroElements` nodes (plan §7.10).
     fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
-        let scopes = self.scopes.lock();
-        scopes.get(id.0 as usize).cloned().flatten()
+        let inner = self.inner.lock();
+        inner.scopes.get(id.0 as usize).cloned().flatten()
     }
 
     fn len(&self) -> usize {
-        self.nodes.lock().len()
+        self.inner.lock().nodes.len()
     }
 }
 
