@@ -134,15 +134,43 @@ Concrete expectation:
 - If `ProjectSurface(C, Expanded)` materializes member `"foo"`, a later `ProjectMember(C, "foo", Expanded)` should reuse that work.
 - If `ProjectMember(C, "foo", Expanded)` ran first, that must not imply `ProjectSurface(C, Expanded)` is cached.
 
-## Navigation Vs Expansion Target Contract
+## Query Mode Contract
 
-Architectural target for the project-global cache cutover:
+The shared semantic query system has exactly four modes. Every caller picks one; there is no implicit mode. Every `SemanticQueryKey` carries its mode as part of the cache key.
 
-- Type navigation must stay narrower than expansion.
-- Intermediate hops should use a navigation or shallow projection mode rather than eagerly materializing full surfaces.
-- For a path such as `A['c']['full']['bar']`, the resolver should navigate through `A`, `"c"`, and `"full"` with the minimum normalization required to continue, and only expand the terminal requested projection `C['bar']`.
-- Navigation may normalize unions, intersections, aliases, mapped types, or indexed-access intermediates only enough to keep walking the requested path. It must not widen into unrelated sibling members or whole-surface expansion by default.
-- If a whole-surface expansion does happen for another reason, it should backfill the narrower member or indexed-access caches. Narrow navigation must not pretend to have populated unrelated siblings.
+- **`Identity`** — return the declaration identity only (canonical file + symbol name + optional substitution environment). Do not read the body; do not walk the decl graph; do not produce a result shape. Cheapest operation. For an alias `type X = Y`, `Identity(X)` returns **`X`'s** declaration identity — not `Y`'s. Used for "does this name resolve" checks and for wiring dependency edges.
+- **`Navigate`** — do the minimum semantic work required to continue a requested path. Unwrap aliases transparently (aliases have no independent structural shell; `Navigate(X)` where `type X = Y` returns the same node as `Navigate(Y)`), follow member / index hops that are already materialized in the graph, reduce closed conditionals, stop at undecidability barriers. Does NOT recursively materialize subtrees; does NOT expand sibling members. Used by path projection to step one hop at a time.
+- **`Shallow`** — return one shell / one surface level of the requested node without recursive expansion. For an object: produce member names + per-member reference nodes; do NOT recurse into member bodies. For a conditional: if the check is open / undecidable, expose both branches as references; if the check is closed / decidable, reduce immediately and return only the selected branch shell. For a union / intersection: expose contributor references. For an alias: unwrap transparently to the target's `Shallow` form (aliases have no structural shell to materialize).
+- **`Expanded`** — recursively materialize the requested result. Walk into member bodies, resolve nested references, evaluate every decidable conditional, distribute open conditionals into their remaining path projections, normalize unions / intersections. For aliases: unwrap transparently. Most expensive mode.
+
+**Alias boundary preservation.** Although `Navigate` / `Shallow` / `Expanded` unwrap aliases structurally, the alias boundary is preserved on the origin layer via the `AliasResolve` edge kind (see "Derivation / Origin Layer Contract"). Clients that need to render alias provenance (LSP hover, error messages, compat display) walk that edge; clients that need pure structural meaning ignore it. Each alias hop (direct alias, re-export alias, barrel alias) emits one `AliasResolve` edge; chains are walkable end-to-end.
+
+**Backfill rule.** Broader successful results may backfill narrower modes for the same key: an `Expanded` result satisfies `Shallow`, `Navigate`, and `Identity`; a `Shallow` result satisfies `Navigate` and `Identity`; a `Navigate` result satisfies `Identity`. Narrower successful results MUST NOT claim broader modes are cached.
+
+**Cache topology.** The four modes do NOT imply four separate cache subsystems. `SemanticGraphStore` owns one semantic memo layer. At the semantic-contract level, mode is part of request identity; at the storage level, implementations should group same-base different-mode requests into one memo-entry family (or an equivalent single-authority structure) keyed by the mode-erased semantic shape — operation, base identity, path / projection, substitutions, scope, and version root — with per-mode slots or equivalent one-way upgrade/backfill semantics. The required behaviour is: `Expanded` may satisfy `Shallow` / `Navigate` / `Identity`, `Shallow` may satisfy `Navigate` / `Identity`, `Navigate` may satisfy `Identity`, and no lower mode may claim a broader mode is cached. Distinct mode requests must not duplicate in-flight authority or split into independent wait graphs.
+
+**Cache-key distinctness.** `ProjectMember(C, "foo", Shallow)` and `ProjectMember(C, "foo", Expanded)` are distinct cache entries. Generic substitutions are part of the key: `MyType<string>` and `MyType<number>` never alias; two callers reaching `MyType<string>` through different entry paths dedup to one entry.
+
+## Path-Precise Navigation And Projection Contract
+
+Path projection is the default shape of every semantic query. Whole-surface expansion is a degenerate case of projecting the empty path; single-hop `ProjectMember` / `IndexedAccess` are sugar for `ProjectPath` with length 1.
+
+- **Path queries are first-class semantic queries.** `SemanticQueryKey::ProjectPath { base, path, mode }` is the canonical form.
+- **Materialize only subpaths needed for the requested path.** Sibling members and unrelated branches are not touched.
+- **Mode cascades along the path.** Intermediate hops run in `Navigate`; only the terminal hop runs in the caller's requested mode (`Shallow`, `Expanded`, or `Identity`).
+- **Intersection contribution rule.** When projecting a path through `A & B`, only arms that contribute to the next path segment are projected; non-contributing arms are ignored for that path (not rewritten to `never`). If multiple arms contribute, the projected results of the contributing arms are intersected. Zero contributors is a projection miss.
+- **Union contribution rule.** Every union member must contribute to the path; if any member fails the path, the union projection is a union-wide miss.
+- **Conditional path rule.**
+  - **Closed/decidable conditional** (check resolves deterministically under the current substitution environment): reduce immediately, select the winning branch, continue projecting the remaining path through the selected branch only. Emit `ConditionalSelect` origin.
+  - **Open/undecidable conditional** (check depends on free type parameters or unresolved inference): keep the conditional shell and distribute the remaining path **into both branches**, producing a conditional whose branches are per-branch projections. Do NOT short-circuit to an opaque symbolic node as the default behaviour.
+- **Barrier rule.** Undecidability is the barrier, not the existence of a conditional. An `infer` binding is not itself a barrier; if the enclosing conditional's check is decidable with the current substitution environment, the navigator reduces the conditional and binds `infer` via the relation engine. Only when the check stays open does the conditional form a barrier.
+- **Coarse symbolic stop is retired as the default.** The old "open-generic symbolic stop" (`Applied { identity, args }` returned when args are open at depth > 0) is retired for path projection and expansion. Symbolic-stop-style fallback survives only as a **budget-exceeded failure**, signalled explicitly via `BudgetExceededFailure`, never as the main semantic path for open generics.
+
+Concrete expectations:
+
+- Navigating `A['c']['full']['bar']` through an object surface touches at most three projection nodes plus the terminal; no unrelated siblings materialize.
+- Projecting `OtherType<string>['a']['foo']` through `type OtherType<T> = { a: Foo, b: T } & (T extends string ? S : N)` touches `Foo['foo']` and `S['a']['foo']`; `N` is never walked. `b` is not touched because `'a'` is the requested segment.
+- Navigating `OtherType['a']['foo']` with `T` open distributes `['a']['foo']` into both conditional branches, intersects their contributions, and leaves `b` untouched.
 
 ## Navigator Boundary Contract
 
@@ -170,19 +198,134 @@ Concrete expectation:
 
 ## Generic Navigation And Expansion Contract
 
-Architectural target for the project-global cache cutover:
+Generic substitutions are part of semantic meaning and therefore part of semantic query identity. Navigation and expansion operate on instantiated meaning, not on the raw generic declaration body alone.
 
-- Generic substitutions are part of semantic meaning and therefore part of semantic query identity.
-- Navigation and expansion must operate on instantiated meaning, not on the raw generic declaration body alone.
 - Query keys for reusable semantic work must include the relevant type arguments or substitution environment.
 - Member projection and indexed access against generic aliases, instantiated types, or mapped helpers must apply substitutions before deciding what member or keyspace is visible.
-- If two callers reach the same instantiated semantic node through different entry paths, they must converge onto the same cache entry.
-- If two callers reach the same declaration name with different type arguments, they must not alias to the same cache entry.
+- If two callers reach the same instantiated semantic node through different entry paths, they converge onto the same cache entry.
+- If two callers reach the same declaration name with different type arguments, they do not alias to the same cache entry.
+- When a declaration body is navigated in `Navigate` or `Shallow` mode with some type parameters unbound, the resulting graph preserves those parameters as first-class type-parameter references. Clients may later instantiate the preserved graph by applying a substitution environment.
+- When a declaration is instantiated with a concrete substitution, every substituted occurrence of a type parameter in the projected result has a `SubstituteTypeParam` edge on the origin layer linking the substituted concrete type back to the parameter's declaration site.
+- **Navigation-once invariant.** Navigating `type MyType<T> = …` performs at most one full body lowering per `(decl_identity, whole_hash)`. Later instantiations (`MyType<string>`, `MyType<number>`, …) reuse the parameterized lowering and run only substitution + terminal leaf materialization + branch selection. Distinct concrete instantiations never re-lower the body.
+- **Relation-check-once invariant.** For a conditional `T extends S ? A : B`, the relation check runs at most once per distinct check-relevant substitution class. Two instantiations whose substituted check types are identical (e.g., `MyType<string>` called 50 times) run the relation check once.
+- **Built-in utilities follow the same semantic model.** `Partial<T>`, `Pick<T, K>`, `Omit<T, K>`, `Record<K, V>`, `ReturnType<F>`, `Parameters<F>`, `Awaited<P>`, `Uppercase`/`Lowercase`/`Capitalize`/`Uncapitalize`, `Extract`/`Exclude`/`NonNullable`, `NoInfer`, and every other built-in utility participate in the same `Instantiate` / `SubstituteTypeParam` / `ProjectMember` / `Normalize` / `ConditionalSelect` / `InferBind` / `AliasResolve` origin model as user-defined aliases and helpers. A utility is not a second semantic class.
+- **Utility fast-path rule.** Utility-specific fast paths are permissible only when all three clauses hold: (1) measurably faster than the generic dispatch path on a benchmark fixture, (2) observationally equivalent — same `SemanticNodeId` for the same inputs, same mode / cache behaviour, same `SemanticGraphStats` attribution — to the generic path, (3) emit the **same origin edges** the generic path would have emitted. A fast path that skips edge emission is not allowed; revert to the generic dispatch instead. Optimisation happens only after equivalence is test-enforced.
 
-Concrete expectation:
+Concrete expectations:
 
-- Navigating `Box<C>['full']['bar']` should resolve `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
-- If `ProjectMember(ResolveDecl(Box), "full", [C])` was already computed from one path, a later path reaching the same instantiated query should reuse it.
+- Navigating `Box<C>['full']['bar']` resolves `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
+- If `ProjectMember(ResolveDecl(Box), "full", [C])` is already cached, a later path reaching the same instantiated query reuses it.
+- Navigating `MyType<T>` with `T` free returns a shape whose body preserves `T` as a parameter reference. Navigating `MyType<string>` returns a shape with `T` substituted, every substituted position carrying a `SubstituteTypeParam` origin edge to the decl's parameter list.
+
+## Derivation / Origin Layer Contract
+
+The type graph structurally interns nodes — two distinct derivations that produce the same structural result share one arena entry. Origin therefore cannot live inline on each node: the same node may be the result of many derivations. Origin is modelled as a **separate graph layer** of edges from result nodes to their source nodes, co-owned by the `SemanticGraphStore`.
+
+- Origin edges are stored outside the interned node table, in a sibling edge set keyed by `(result_node, edge_kind, source_node)` with optional per-edge metadata.
+- A single result node may have multiple origin edges of the same kind from different derivations; the layer MUST support this. Walking from a result returns the full edge set, not one canonical chain.
+- Walking is a first-class API on `SemanticGraphStore`, not a private solver internal. External consumers (component-meta compat, LSP hover, error-message rendering) walk origin to present provenance.
+- Origin edges are immutable once published; they participate in the same `DepSignature` / `HostFenceValidator` fencing as the interned nodes they point at. Cancelled / budget-exceeded / superseded derivations do not publish origin edges.
+
+**Required edge kinds** (names are normative; semantics must not drift):
+
+- **`Instantiate`** — `result = decl<args>`. From the instantiated result back to the declaration identity and concrete argument nodes.
+- **`SubstituteTypeParam`** — `result_position = T -> V`. From a concrete type in a substituted position back to the declaration's type parameter and the binding that produced the substitution.
+- **`ConditionalSelect`** — `result = select(conditional, True | False | Deferred)`. From the selected-branch result back to the conditional's check, extends, branches, and the deciding relation judgement. Records the branch taken (or `Deferred` if the check stayed open).
+- **`InferBind`** — `result = T bound via infer`. From the inferred type back to the `infer` binding site and the concrete type captured by the relation check.
+- **`ProjectMember` / `ProjectIndex` / `ProjectPath`** — `result = base.segment(s)`. From the projected result back to the base node and the path segment(s) requested.
+- **`Normalize`** — `result = normalize(source_members)`. From a normalized union / intersection / simplified result back to each contributing member node.
+- **`AliasResolve`** — `result = unwrap(alias)`. From the unwrapped-target result node back to the alias declaration identity. Emitted once per alias hop (direct alias, re-export alias, barrel alias). Chains are walkable end-to-end so clients can render the full alias provenance.
+
+Edges compose. `ProjectPath(OtherType<string>, ['a','foo'])` produces a node whose origin traces `ProjectMember → ProjectMember → Instantiate → SubstituteTypeParam → ConditionalSelect`. Clients that need derivation-aware display walk the edges and present whichever chain is relevant.
+
+**First-class telemetry.** `SemanticGraphStore` exposes `SemanticGraphStats` as a public API. Per-`SemanticQueryKey`-variant counters (cache hits, misses, same-path-sentinel returns, in-flight peak, cross-thread-join wait time) and per-dispatch-builder counters (instantiations, conditional branch selections, budget/fallback invocations, path length p50/p95, projection depth p50/p95, origin edges emitted, origin edges per node p50/p95) are mandatory — not an optional observability pass. The trace-check harness, benchmark pipeline, and feedback-file report at track exit consume `SemanticGraphStats::snapshot()` directly.
+
+## Worked Examples
+
+Normative fixtures. Any solver / dispatch change that breaks an expected behaviour below breaks the contract.
+
+### Example A — basic conditional
+
+```ts
+type MyType<T> = T extends string ? StringType : NotStringType;
+```
+
+- **Navigate(`MyType`)**: decl identity, parameters `[T]`, body shape `Conditional(check=T, extends=string)`. Do NOT descend into `StringType` / `NotStringType`. Stop at the open conditional shell.
+- **Expand(`MyType`)** (T unbound): return a `Conditional` graph with both branches materialized. Shape retains `T`, `string`, `StringType`, `NotStringType`. Origin layer carries `Instantiate(MyType, [T])` and structural links into each branch.
+- **Expand(`MyType<string>`)**: conditional is closed. Return only `StringType`. Origin layer carries `Instantiate(MyType, [string])`, `SubstituteTypeParam(T -> string)`, `ConditionalSelect(check=string extends string, branch=True)`. `NotStringType` is NOT walked and does NOT appear in the result.
+
+### Example B — intersection with mixed static and generic members
+
+```ts
+type Foo = { foo: number };
+type StringType = { a: Foo };
+type NotStringType = { a: Foo[] };
+type OtherType<T> = { a: Foo, b: T } & (T extends string ? StringType : NotStringType);
+```
+
+- **Navigate(`OtherType`)**: decl identity, parameters `[T]`, intersection shell with two arms: object `{ a, b }` and conditional `(T extends string ? … : …)`. Members `a` and `b` visible; `b` marked as a generic-parameter reference. Conditional arm stays a symbolic shell.
+- **Expand(`OtherType`)** (T unbound): object arm expands — `a: Foo` fully resolved, `b: T` preserves `T` as a parameter reference (origin links to the `[T]` parameter list). Conditional arm stays `Conditional` with both branches materialized. Intersection is NOT collapsed because the conditional remains open.
+- **Expand(`OtherType<string>`)**: object arm expands — `a: Foo`, `b: string` with `SubstituteTypeParam(T -> string)` origin. Conditional arm closes to `StringType`, which expands to `{ a: Foo }`. Intersection collapses to `{ a: Foo, b: string } & { a: Foo }` and normalizes; origin records `Normalize` over both contributing members.
+
+### Example C — `infer` inside a decidable conditional
+
+```ts
+type Foo = { a: number };
+type OtherFoo = Foo extends { a: infer T } ? T : never;
+```
+
+- The conditional is closed: `Foo` is concrete, `{ a: infer T }` is the extends pattern, no free parameters surround the check.
+- **Expand(`OtherFoo`)**: the relation engine matches `Foo` against `{ a: infer T }`, binds `T = number` via `InferBind`, selects the True branch, returns `number`. Origin: `ConditionalSelect(True)` + `InferBind(T = number)`.
+- **Navigate(`OtherFoo`)** follows the same reduction because `Navigate` reduces closed conditionals. The navigate result is the same `number` node. `infer` does NOT force a stop.
+
+### Example D — path-precise projection
+
+```ts
+type Foo = { foo: number };
+type StringType = { a: Foo };
+type NotStringType = { a: Foo };
+type OtherType<T> = { a: Foo, b: T } & (T extends string ? StringType : NotStringType);
+```
+
+- **`OtherType['a']['foo']`** (T unbound): project path `['a', 'foo']` through the intersection.
+  - Object arm contributes `a: Foo`; project `Foo['foo']` → `number`.
+  - Conditional arm is open; distribute `['a', 'foo']` into both branches.
+    - True: `StringType['a']['foo']` → `Foo['foo']` → `number`.
+    - False: `NotStringType['a']['foo']` → `Foo['foo']` → `number`.
+  - Intersect contributing arms. Final: `number`, with origin edges for each contributing path. The `b` field is NEVER touched. `NotStringType`'s non-`a` members are NEVER walked.
+- **`OtherType<string>['a']['foo']`**: conditional is closed.
+  - Object arm: `Foo['foo']` → `number`.
+  - Conditional arm: `StringType['a']['foo']` → `number`. `NotStringType` is NEVER touched.
+  - Intersection collapses to `number`.
+
+This is path-precise projection, not whole-branch expansion. Sibling members and unrelated branches are not materialized.
+
+### Example E — nested open conditionals
+
+```ts
+type Deep<T> =
+  T extends string
+    ? (T extends "ab" | "cd" ? { kind: "pair"; value: T } : { kind: "str"; value: T })
+    : { kind: "other"; value: T };
+```
+
+- **Expand(`Deep`)** (T unbound): outer check is open. Keep outer `Conditional` shell. In the True branch, inner check is also open; keep inner `Conditional` shell. In the False branch, materialize `{ kind: "other"; value: T }` with `T` preserved.
+- **Expand(`Deep<"ab">`)**: outer check `"ab" extends string` closed → True. Inner check `"ab" extends "ab" | "cd"` closed → True. Return `{ kind: "pair"; value: "ab" }`. Origin chain: `Instantiate(Deep, ["ab"])` → `SubstituteTypeParam(T -> "ab")` → `ConditionalSelect(outer=True)` → `ConditionalSelect(inner=True)`.
+- **Expand(`Deep<"xx">`)**: outer closed → True. Inner `"xx" extends "ab" | "cd"` closed → False. Return `{ kind: "str"; value: "xx" }`. Origin: same outer chain, `ConditionalSelect(inner=False)`.
+
+> Template-literal pattern matching (e.g. `T extends \`${infer _}${infer _}\``) is a future relation-engine extension and is **not** part of this contract's normative fixtures. The nested-conditional semantics above apply uniformly once template-literal infer support lands — adding it does not require a contract revision.
+
+### Example F — contributors-only union / intersection combining
+
+```ts
+type A = { a: number; x: string };
+type B = { a: string; y: boolean };
+type C = { z: number };
+type AB = A | B | C;
+```
+
+- **`AB['a']`** projection: `A` contributes `number`, `B` contributes `string`, `C` does NOT contribute (no `a`). For a union, every member must contribute to the path; `C`'s miss makes the union projection a miss as a whole. (Contrast: if `AB` were `A | B` only, the result would be `number | string`.)
+- For intersection analogs (`A & B & C`): `A` contributes `number`, `B` contributes `string`, `C` does not contribute. Contributing arms' projection: `number & string` → `never` via intersection normalization. `C` is ignored for the path; the `never` arises from the contributors' intersection semantics, not from `C` being rewritten.
 
 ## Shallow File State and Frontier Engine
 
@@ -303,10 +446,13 @@ All type expansion (macro types, component-meta, imported type aliases) goes thr
 
 When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, and other shared host-backed queries), only follow the import graph reachable from the requested type's declaration graph.
 
-- There is one shared cross-file type resolver with two modes. Consumer-specific ownership rules live in `/component-meta`.
-- That resolver has exactly two modes:
-  - `Type`: resolve the requested symbol identity and canonical source location only. Do not expand the shape.
-  - `Expanded`: resolve the same symbol through the same traversal, then materialize the expanded shape / expanded text.
+- There is one shared cross-file type resolver. Consumer-specific ownership rules live in `/component-meta`.
+- The resolver has exactly four query modes (see "Query Mode Contract" above):
+  - `Identity`: declaration identity and canonical source location only. No body read, no shape materialization.
+  - `Navigate`: minimum semantic work needed to continue a requested path. Intermediate hops run in this mode.
+  - `Shallow`: one surface level of the requested node without recursive expansion.
+  - `Expanded`: recursive materialization of the requested result.
+- Older two-mode terminology (`Type` ≡ `Identity`, `Expanded` unchanged) is retired. Do not introduce ad hoc navigate/shallow flags; use the canonical modes and the path-precise projection surface.
 - Do not walk unrelated imports from the same file.
 - Do not treat plain imports as implicit exports.
 - Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.

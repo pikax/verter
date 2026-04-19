@@ -100,7 +100,7 @@ See `/type-resolution` skill for the full rule set (invalidation semantics, rout
 
 ### Macro Type Traversal Rule (CRITICAL)
 
-When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph. There is one shared cross-file type resolver with two modes: `Type` (identity only) and `Expanded` (materialize shape). Do not walk unrelated imports. Do not treat plain imports as implicit exports. Cache discovered symbol mappings and barrel hops.
+When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, component-meta deep expansion, etc.), only follow the import graph reachable from the requested type's declaration graph. There is one shared cross-file type resolver with four query modes: `Identity`, `Navigate`, `Shallow`, `Expanded` (see `/type-resolution` → Query Mode Contract). Path projection is path-precise: intermediate hops run in `Navigate`, the terminal hop runs in the caller's mode, non-contributing intersection arms are ignored (not rewritten to `never`), open conditionals distribute the remaining path into both branches, closed conditionals reduce immediately. Do not walk unrelated imports. Do not treat plain imports as implicit exports. Cache discovered symbol mappings and barrel hops.
 
 **TS-first resolution priority:** TypeScript types always take priority over JavaScript files. Use `effective_target()` which selects: `.d.ts` > `.d.cts` > `.d.mts` > `.ts` > `.tsx` > `.js` > `.jsx` > `.cjs` > `.mjs`.
 
@@ -240,6 +240,10 @@ See `/testing` and `/e2e-vscode-testing` skills for commands, fixture design, an
 
 Prefer architecturally correct, long-term solutions over easy or quick implementations. Evaluate approaches by correctness and durability, not by implementation speed.
 
+The codebase expects the best architecture for the problem. Time constraints, implementation size, migration breadth, anticipated breaking changes, or the fact that something is "a lot of work" are not valid reasons to weaken the design, preserve a compromised path, or diverge from the approved plan. If the correct implementation is larger or breaking, plan for it explicitly or raise it before execution; do not silently ship an architectural deviation.
+
+Do not provide time estimates unless the user explicitly asks for one. Do not use estimated effort, duration, or perceived time cost as a factor for doing, not doing, or partially doing planned work; approved plans already account for timing expectations.
+
 Plans must include these sections:
 1. **Context** — why this change is being made
 2. **Changes** — specific files to modify with concrete modifications
@@ -251,6 +255,9 @@ Without explicit legacy deletion lists, agents skip deletions and leave dual pat
 ### Execution
 
 Execute plans fully in one pass without intermediate checkpoints unless explicitly requested. Do not stop mid-plan to ask for confirmation on steps already approved in the plan.
+
+Once execution starts, complete the approved plan end-to-end in the same pass. Do not pause, defer scope, or leave planned work unfinished because of estimated time or effort unless the user explicitly changes the request.
+Do not rewrite the plan into a smaller or safer variant during execution because the correct path is breaking, broad, or labor-intensive. Approved plans are expected to land as written unless the user explicitly re-scopes them.
 
 ### Self-Review
 
