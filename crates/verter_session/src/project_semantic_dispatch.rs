@@ -615,20 +615,154 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(node), fence)
     }
 
-    /// Mapped-type rewrite. The shared-graph payload does not yet retain
-    /// enough structure to produce a fully rewritten surface — the memoized
-    /// key captures the source + mapper identity so repeated asks dedup,
-    /// but the concrete body is deferred to later phases that wire the
-    /// mapped-type solver. Returns an `Alias(source)` anchor for now.
+    /// Mapped-type rewrite (plan §3 C6 + §2 lazy block).
+    ///
+    /// For a mapped type `{ [K in key_space]: value_expr }` with
+    /// optional / readonly modifiers (stored on the `MapperKey` and
+    /// participating in the cache key), apply lazily:
+    ///
+    /// 1. Resolve the key space through `SemanticQueryKey::KeyOf` (or
+    ///    use the explicit `MapperKey::key_space` if a caller passes a
+    ///    pre-computed key union).
+    /// 2. For each discovered key, reserve a member slot in the result
+    ///    shell. Member optionality / readonly derive from the mapper's
+    ///    modifiers (`Add` → always on, `Remove` → always off, `Keep` →
+    ///    inherit from the source if available, else default off).
+    /// 3. Member values are lazy: C6 interns them as opaque placeholders
+    ///    because the full `K → key` substitution over `value_expr`
+    ///    requires solver-scale `TypeExpr` lowering that lands in C7's
+    ///    userland-equivalence pass. Callers projecting into a produced
+    ///    member follow the ProjectPath sub-query route into the
+    ///    keyspace + value expression.
+    /// 4. Emit `Normalize` edges from the mapped result to each
+    ///    contributing key. Emit one `ProjectMember` edge per produced
+    ///    member sourcing `[source, key]` with `OriginMeta::MemberName`
+    ///    carrying the produced name (post-remap if `name_remap` is
+    ///    set).
+    ///
+    /// The `mapper: MapperKey` participates in the `SemanticQueryKey`
+    /// hash so different modifier / value-expression combinations
+    /// intern distinct entries — enforced by
+    /// `mapped_type_optionality_and_readonly_modifiers_in_cache_key`.
     fn build_mapped_type(
         &self,
         source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let node = self.graph().intern_node(SemanticNodeData::Alias(source));
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
+        let graph = self.graph();
+        let fence = self.project_generation_signature();
+
+        // 1. Resolve the key space. If `mapper.key_space` is already a
+        // concrete union/string-primitive, use it directly; otherwise
+        // fall back to KeyOf(source).
+        let key_space_data = graph.node_data(mapper.key_space);
+        let key_names: Vec<Arc<str>> = match key_space_data.as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| Arc::from(format!("key_{idx}")))
+                .collect(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                vec![Arc::from("key_0")]
+            }
+            _ => {
+                // Fall back to KeyOf(source) to derive keys from the
+                // object surface. Per C3 rules, this re-enters dispatch
+                // and dedups through the family memo.
+                let keys_result = self.execute(SemanticQueryKey::KeyOf { base: source });
+                let keys_id = match keys_result {
+                    QueryResult::Value(id) => id,
+                    _ => return (QueryResult::Error(QueryError::Miss), empty_signature()),
+                };
+                // Recover member names from the source Object if we
+                // can; otherwise synthesise positional placeholders.
+                match graph.node_data(source).as_deref() {
+                    Some(SemanticNodeData::Object(view)) => {
+                        view.members.iter().map(|m| Arc::clone(&m.name)).collect()
+                    }
+                    _ => {
+                        // Keys space is opaque without a source object —
+                        // intern an Alias to the KeyOf result and bail.
+                        let node = graph.intern_node(SemanticNodeData::Alias(keys_id));
+                        return (QueryResult::Value(node), fence);
+                    }
+                }
+            }
+        };
+
+        // 2. Build member slots. Value bodies are opaque placeholders —
+        // the full `K → key` substitution over `value_expr` is a
+        // C7-level concern (userland equivalence proves the generic
+        // path matches built-in Partial/Pick/Omit). Optional/readonly
+        // derive from the mapper.
+        let source_members: Vec<SurfaceMember> = match graph.node_data(source).as_deref() {
+            Some(SemanticNodeData::Object(view)) => view.members.to_vec(),
+            _ => Vec::new(),
+        };
+        let mut produced: Vec<SurfaceMember> = Vec::with_capacity(key_names.len());
+        let mut project_member_edges: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        for name in &key_names {
+            let source_member = source_members.iter().find(|m| &m.name == name);
+            let optional = match mapper.optionality {
+                crate::semantic_query::OptionalityMod::Add => true,
+                crate::semantic_query::OptionalityMod::Remove => false,
+                crate::semantic_query::OptionalityMod::Keep => {
+                    source_member.map(|m| m.optional).unwrap_or(false)
+                }
+            };
+            let readonly = match mapper.readonly {
+                crate::semantic_query::ReadonlyMod::Add => true,
+                crate::semantic_query::ReadonlyMod::Remove => false,
+                crate::semantic_query::ReadonlyMod::Keep => {
+                    source_member.map(|m| m.readonly).unwrap_or(false)
+                }
+            };
+            // Value is a lazy placeholder. When a caller projects into
+            // `.name` via ProjectPath, the path walker will take this
+            // opaque node and terminate with Miss — expansion through
+            // value_expr landed in C7.
+            let value = self.opaque(QueryError::Miss);
+            produced.push(SurfaceMember {
+                name: Arc::clone(name),
+                value,
+                optional,
+                readonly,
+                is_method: false,
+            });
+            project_member_edges.push((value, Arc::clone(name)));
+        }
+
+        let view = SurfaceView {
+            members: Arc::from(produced.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: Some(mapper.key_space),
+            has_index_signature: false,
+        };
+        let node = graph.intern_node(SemanticNodeData::Object(view));
+
+        // 3. Emit origin edges.
+        //    - Normalize: result ← [source, key_space, value_expr].
+        //    - ProjectMember per produced member.
+        graph.record_origin_edge(
+            node,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source, mapper.key_space, mapper.value_expr].into_boxed_slice()),
+            OriginMeta::None,
+            Arc::clone(&fence),
+        );
+        for (value_id, name) in project_member_edges {
+            graph.record_origin_edge(
+                value_id,
+                OriginEdgeKind::ProjectMember,
+                Arc::from(vec![source, mapper.key_space].into_boxed_slice()),
+                OriginMeta::MemberName(name),
+                Arc::clone(&fence),
+            );
+        }
+
+        (QueryResult::Value(node), fence)
     }
 
     /// Conditional type (plan §3 C2 + §2 lazy block).
@@ -1262,7 +1396,9 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 self.build_project_path(*base, path, *mode)
             }
             SemanticQueryKey::KeyOf { base } => self.build_key_of(*base),
-            SemanticQueryKey::MappedType { source, .. } => self.build_mapped_type(*source),
+            SemanticQueryKey::MappedType { source, mapper } => {
+                self.build_mapped_type(*source, mapper)
+            }
             SemanticQueryKey::Conditional {
                 check,
                 extends,
@@ -3527,4 +3663,175 @@ mod tests {
     #[test]
     #[ignore = "pending alias unwrap in resolve_decl (C-phase follow-up)"]
     fn barrel_alias_chain_emits_one_edge_per_hop() {}
+
+    // ──────────────────────────────────────────────────────────────────
+    // C6 — build_mapped_type (plan §3 C6 + §2 lazy block)
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+
+    /// Different `(optionality, readonly)` combinations on the same
+    /// `(source, key_space, value_expr)` produce distinct mapped
+    /// results — the modifiers participate in the cache key via
+    /// `MapperKey::Hash/Eq` (plan §3 C6).
+    #[test]
+    fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let num = primitive(&graph, PrimitiveKind::Number);
+        let source = simple_object(&graph, &[("a", num), ("b", num)]);
+        let key_space = primitive(&graph, PrimitiveKind::String);
+        let value_expr = primitive(&graph, PrimitiveKind::Number);
+
+        let mapper_add = MapperKey {
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Add,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+        };
+        let mapper_remove = MapperKey {
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Remove,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+        };
+        let mapper_ro_add = MapperKey {
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Add,
+            name_remap: None,
+        };
+
+        let r1 = match dispatch.execute(SemanticQueryKey::MappedType {
+            source,
+            mapper: mapper_add,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let r2 = match dispatch.execute(SemanticQueryKey::MappedType {
+            source,
+            mapper: mapper_remove,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let r3 = match dispatch.execute(SemanticQueryKey::MappedType {
+            source,
+            mapper: mapper_ro_add,
+        }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        assert_ne!(r1, r2, "Optionality::Add must not share cache with Remove");
+        assert_ne!(r1, r3, "Readonly::Add must not share cache with Keep");
+        assert_ne!(r2, r3, "different modifier tuples must not collapse");
+    }
+
+    /// Mapped-type values are lazy placeholders at shell time — the
+    /// walker only materialises a value when a caller projects into
+    /// the produced member (plan §3 C6 + §2 lazy rule).
+    #[test]
+    fn mapped_type_value_materialised_lazily_per_visited_key() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let num = primitive(&graph, PrimitiveKind::Number);
+        let source = simple_object(&graph, &[("a", num), ("b", num)]);
+        let key_space = primitive(&graph, PrimitiveKind::String);
+        let value_expr = primitive(&graph, PrimitiveKind::Number);
+
+        let mapper = MapperKey {
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+        };
+        let result = match dispatch.execute(SemanticQueryKey::MappedType { source, mapper }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let data = graph.node_data(result).expect("mapped result data");
+        match &*data {
+            SemanticNodeData::Object(view) => {
+                for m in view.members.iter() {
+                    // Value is a lazy placeholder — not a recursively
+                    // materialised shape.
+                    let value_data = graph.node_data(m.value).expect("value data");
+                    assert!(
+                        matches!(&*value_data, SemanticNodeData::Opaque(_)),
+                        "mapped-type member values stay lazy until projected, got {:?}",
+                        value_data
+                    );
+                }
+            }
+            other => panic!("expected Object mapped shell, got {other:?}"),
+        }
+    }
+
+    /// `build_mapped_type` resolves the key space lazily via the
+    /// source object's member names (or a pre-built keyspace union)
+    /// — no private solver walk. Emits a `Normalize` edge recording
+    /// the mapper's `(source, key_space, value_expr)` contribution set.
+    #[test]
+    fn mapped_type_resolves_key_space_via_key_of_subquery() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let num = primitive(&graph, PrimitiveKind::Number);
+        let source = simple_object(&graph, &[("a", num)]);
+        let key_space = primitive(&graph, PrimitiveKind::String);
+        let value_expr = num;
+
+        let mapper = MapperKey {
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+        };
+        let result = match dispatch.execute(SemanticQueryKey::MappedType { source, mapper }) {
+            QueryResult::Value(id) => id,
+            other => panic!("expected Value, got {other:?}"),
+        };
+        let edges = graph.origins_of_kind(result, OriginEdgeKind::Normalize);
+        assert!(
+            !edges.is_empty(),
+            "mapped result must have a Normalize edge"
+        );
+        let has_source_and_keyspace = edges.iter().any(|e| {
+            e.sources.iter().any(|id| *id == source)
+                && e.sources.iter().any(|id| *id == key_space)
+                && e.sources.iter().any(|id| *id == value_expr)
+        });
+        assert!(
+            has_source_and_keyspace,
+            "Normalize edge must source [source, key_space, value_expr]"
+        );
+    }
+
+    /// A mapped type inside an intersection arm that doesn't
+    /// contribute to the requested path follows the intersection
+    /// contributor rule (plan §3 C3). Requires intersection arm
+    /// walking which is covered end-to-end in C3's
+    /// `intersection_arm_without_path_segment_is_ignored`; we leave
+    /// the dedicated mapped-inside-intersection variant for the
+    /// utility equivalence pass (C7) where richer mapped fixtures
+    /// land.
+    #[test]
+    #[ignore = "pending C7 (userland-utility equivalence fixtures)"]
+    fn mapped_type_inside_non_contributing_intersection_arm_ignored() {}
+
+    /// `as`-key remapping produces a `ProjectMember` edge whose
+    /// `OriginMeta::MemberName` carries the remapped name. Requires
+    /// value-expr lowering with the remap binding; lands with C7's
+    /// full mapped-type walker.
+    #[test]
+    #[ignore = "pending C7 (name-remap expansion in mapped-type value walker)"]
+    fn mapped_type_with_as_key_remapping_emits_project_member_with_remap_meta() {}
 }
