@@ -91,6 +91,13 @@ struct InflightState {
     /// `true` once some thread owns the build. Subsequent threads wait on
     /// `ready` rather than trying to own it themselves.
     claimed: bool,
+    /// Set by [`SemanticGraphStore::invalidate_canonical`] when this
+    /// in-flight entry's `(family, slot)` matched the sweep. Joiners that
+    /// wake from the condvar observe this flag and re-enter dispatch from
+    /// step 1 rather than returning the (now stale) winner result. The
+    /// cold winner skips warm publish when the flag is set so the stale
+    /// result never re-populates the cache.
+    aborted: bool,
 }
 
 impl InflightEntry {
@@ -738,16 +745,26 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
     }
 }
 
-/// Returns `true` iff `family` is rooted in a scope that names `canonical_id`.
-/// Mirrors the conservative pre-B1b helper but operates on the mode-erased
-/// family identity. Replaced in B3 by a dep-signature sweep.
-fn family_references_canonical(family: &FamilyKey, canonical_id: &str) -> bool {
-    match family {
-        FamilyKey::ResolveDecl(decl_key) => decl_key.scope.canonical_id.as_ref() == canonical_id,
-        FamilyKey::TypeOf { value_root } => value_root.scope.canonical_id.as_ref() == canonical_id,
-        _ => false,
-    }
+/// Returns `true` iff `sig` contains a dep-record that names `canonical_id`.
+/// The single invalidation authority in B3: `invalidate_canonical` walks
+/// every populated slot's stored dep-signature and evicts those whose
+/// signature references the changed canonical. No structural short-cut on
+/// family-key shape — the dep-sig is the only truth.
+fn dep_signature_references_canonical(sig: &DepSignature, canonical_id: &str) -> bool {
+    sig.iter()
+        .any(|(canonical, _)| canonical.as_ref() == canonical_id)
 }
+
+/// Every [`ModeSlot`] variant as a static slice — used by invalidation
+/// sweeps that must visit every slot of a family to examine each stored
+/// dep-signature.
+const ALL_MODE_SLOTS: &[ModeSlot] = &[
+    ModeSlot::Single,
+    ModeSlot::Identity,
+    ModeSlot::Navigate,
+    ModeSlot::Shallow,
+    ModeSlot::Expanded,
+];
 
 thread_local! {
     /// Per-thread set of query keys currently being executed. Used to
@@ -794,33 +811,91 @@ impl SemanticGraphStore {
             .sum()
     }
 
-    /// Invalidate every warm memo entry whose [`SemanticQueryKey`]
-    /// references `canonical_id` in its scope. Called on file-content
-    /// changes so subsequent queries for `ResolveDecl(a.ts::Foo)` recompute
-    /// under the new file version instead of returning a stale node.
+    /// Invalidate every warm memo slot whose stored `DepSignature`
+    /// references `canonical_id` (plan B3 dep-signature sweep, replacing
+    /// the pre-B3 conservative `family_references_canonical` helper).
+    ///
+    /// Walks every `(FamilyKey, FamilySlots)` entry and, for each
+    /// populated slot, drops the slot whose dep-signature names the
+    /// changed canonical. Families that end up with no populated slot are
+    /// also removed from the entries map.
+    ///
+    /// In-flight entries whose `(family, slot)` pair matches an evicted
+    /// warm slot drop their in-flight handle — `aborted = true` is set on
+    /// their shared state, a sentinel is planted in `completed` if not
+    /// already set, joiners are woken via `Condvar::notify_all`, and the
+    /// entry is removed from the in-flight table so fresh callers start
+    /// cold. Joiners currently waiting on the condvar observe the abort
+    /// flag on wake and re-enter dispatch from step 1 of
+    /// [`Self::execute_cooperative`] (up to `MAX_INFLIGHT_RETRIES`).
+    ///
+    /// Over-invalidation trade-off (plan §7.11): backfilled narrower
+    /// slots inherit the broader compute's full dep-signature, so this
+    /// sweep may evict a narrower slot whose independent recomputation
+    /// would not have read the changed canonical. Correct — never misses
+    /// — but potentially spurious. Tightening narrower-slot dep-sigs is
+    /// permitted follow-up work.
     ///
     /// Semantic node ids remain stable (the arena is append-only); only
-    /// memo entries are cleared. Returns the number of entries evicted.
-    ///
-    /// Does not touch in-flight admission: an in-flight build for the
-    /// stale canonical will still complete and publish; the next query
-    /// after this call re-runs the build under the new version. This is
-    /// acceptable because the plan's contract says "semantic memo caches
-    /// are rooted in versioned semantic identities, so a change to `C.ts`
-    /// creates new semantic nodes under `C@new_hash` while unrelated files
-    /// stay warm" — the new semantic node is produced by the re-run, not
-    /// by mutating the existing entry.
+    /// memo slots are cleared. Returns the number of warm slots evicted;
+    /// in-flight drops are not included in the count (they are not warm
+    /// entries).
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
-        let mut entries = self.entries.lock();
+        use rustc_hash::FxHashSet;
+
+        // Phase 1: sweep warm slots. Track every (family, slot) whose
+        // dep-signature referenced `canonical_id` so phase 2 can drop
+        // matching in-flight entries.
         let mut evicted = 0usize;
-        entries.retain(|family, slots| {
-            if family_references_canonical(family, canonical_id) {
-                evicted += slots.populated_count();
-                false
-            } else {
-                true
+        let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
+        {
+            let mut entries = self.entries.lock();
+            entries.retain(|family, slots| {
+                for slot in ALL_MODE_SLOTS {
+                    let Some(entry) = slots.slot(*slot) else {
+                        continue;
+                    };
+                    if dep_signature_references_canonical(&entry.dep_signature, canonical_id) {
+                        *slots.slot_mut(*slot) = None;
+                        evicted += 1;
+                        affected_pairs.insert((family.clone(), *slot));
+                    }
+                }
+                slots.populated_count() > 0
+            });
+        }
+
+        // Phase 2: drop in-flight entries for any (family, slot) whose
+        // warm slot was just evicted. Joiners waiting on the condvar
+        // observe `aborted = true` on wake and re-enter dispatch from
+        // step 1 of `execute_cooperative`. The completed sentinel wakes
+        // any joiner whose wait predicate checks only `completed`.
+        if !affected_pairs.is_empty() {
+            let mut table = self.inflight.lock();
+            let keys_to_abort: Vec<SemanticQueryKey> = table
+                .keys()
+                .filter(|key| {
+                    let (family, slot) = family_and_slot(key);
+                    affected_pairs.contains(&(family, slot))
+                })
+                .cloned()
+                .collect();
+            for key in keys_to_abort {
+                if let Some(inflight) = table.remove(&key) {
+                    let mut state = inflight.state.lock();
+                    state.aborted = true;
+                    if state.completed.is_none() {
+                        state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                            "aborted by canonical invalidation",
+                        ))));
+                        state.dep_signature = Some(empty_signature());
+                    }
+                    drop(state);
+                    inflight.ready.notify_all();
+                }
             }
-        });
+        }
+
         evicted
     }
 
@@ -1164,6 +1239,13 @@ impl SemanticGraphStore {
     /// 4. Otherwise claim ownership, invoke `build`, publish the result,
     ///    and wake joiners.
     ///
+    /// **Joiner retry on canonical invalidation (B3).** When a joiner
+    /// wakes from the condvar and observes `state.aborted = true` (set by
+    /// [`Self::invalidate_canonical`] when the (family, slot) was swept),
+    /// it re-enters dispatch from step 1 up to [`MAX_INFLIGHT_RETRIES`]
+    /// times. After exhausting the retry budget the joiner returns the
+    /// sentinel so its caller fails fast rather than spinning.
+    ///
     /// `recursion_sentinel` produces a fallback [`SemanticNodeId`] when
     /// same-path recursion is detected.
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must merge into their active CompletionFence"]
@@ -1177,51 +1259,76 @@ impl SemanticGraphStore {
         F: FnOnce() -> (QueryResult<SemanticNodeId>, DepSignature),
         R: FnOnce() -> SemanticNodeId,
     {
-        // 1. Warm memo hit.
-        if let Some(hit) = self.get(&key) {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            return hit;
-        }
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        let mut miss_recorded = false;
+        let mut retries = 0usize;
 
-        // 2. Same-path recursion detection — bail with a sentinel.
-        let is_self_recursive =
-            IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|k| k == &key));
-        if is_self_recursive {
-            self.stats
-                .same_path_sentinel_returns
-                .fetch_add(1, Ordering::Relaxed);
-            return CacheRead {
-                value: QueryResult::Recursive(recursion_sentinel()),
-                dep_signature: empty_signature(),
+        let (inflight, key) = loop {
+            // 1. Warm memo hit.
+            if let Some(hit) = self.get(&key) {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                return hit;
+            }
+            if !miss_recorded {
+                // Count one miss per logical call, regardless of how many
+                // retries step 3 performs.
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                miss_recorded = true;
+            }
+
+            // 2. Same-path recursion detection — bail with a sentinel.
+            let is_self_recursive =
+                IN_FLIGHT_ON_THIS_THREAD.with(|slot| slot.borrow().iter().any(|k| k == &key));
+            if is_self_recursive {
+                self.stats
+                    .same_path_sentinel_returns
+                    .fetch_add(1, Ordering::Relaxed);
+                return CacheRead {
+                    value: QueryResult::Recursive(recursion_sentinel()),
+                    dep_signature: empty_signature(),
+                };
+            }
+
+            // 3. Register or join the in-flight entry.
+            let inflight = {
+                let mut table = self.inflight.lock();
+                table
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(InflightEntry::new()))
+                    .clone()
             };
-        }
 
-        // 3. Register or join the in-flight entry.
-        let inflight = {
-            let mut table = self.inflight.lock();
-            table
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(InflightEntry::new()))
-                .clone()
-        };
-
-        // Claim ownership or wait for the winner to publish.
-        let should_build = {
+            // Claim ownership or wait for the winner to publish.
             let mut state = inflight.state.lock();
             if state.claimed {
                 // Cooperative wait — block on the per-entry condvar until
-                // `completed` is set. Joiners never busy-spin. Account
-                // wait time on the stats surface so the F3 corpus
+                // `completed` is set OR the entry is aborted by a
+                // canonical-invalidation sweep. Joiners never busy-spin.
+                // Account wait time on the stats surface so the F3 corpus
                 // benchmark surfaces non-zero `waits_ms` (plan §6.3).
                 let wait_start = std::time::Instant::now();
                 inflight
                     .ready
-                    .wait_while(&mut state, |s| s.completed.is_none());
+                    .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
-                let result = state.completed.clone().expect("winner must have published");
+                if state.aborted && retries < MAX_INFLIGHT_RETRIES {
+                    // The (family, slot) this entry was serving was swept
+                    // by a concurrent canonical invalidation. Retry the
+                    // whole dispatch flow from step 1 — the warm slot is
+                    // either already repopulated by another winner or
+                    // still empty, in which case this caller may become
+                    // the fresh cold winner.
+                    retries += 1;
+                    drop(state);
+                    drop(inflight);
+                    continue;
+                }
+                let result = state.completed.clone().unwrap_or_else(|| {
+                    QueryResult::Error(QueryError::Other(Arc::from(
+                        "joiner woke without completion after retry budget exhausted",
+                    )))
+                });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
                 return CacheRead {
                     value: result,
@@ -1229,9 +1336,10 @@ impl SemanticGraphStore {
                 };
             }
             state.claimed = true;
-            true
+            drop(state);
+            break (inflight, key);
         };
-        debug_assert!(should_build);
+
         // Cold winner — record the in-flight presence for peak tracking.
         // The `InFlightStatsGuard` decrements `in_flight_current` on
         // drop so a panic in the cold build cannot leak the counter.
@@ -1256,8 +1364,18 @@ impl SemanticGraphStore {
         //    the same family — the backfill is a no-op against any slot a
         //    concurrent narrower compute already filled, so per-slot
         //    in-flight authority (§7.15) is preserved.
+        //
+        //    If a canonical invalidation swept this (family, slot) while
+        //    the build was running, the winner's result is computed from
+        //    pre-invalidation state — skip the warm publish so the sweep's
+        //    eviction stays in effect. The next caller will run a fresh
+        //    cold build under the new state of the world. This keeps the
+        //    cache monotonic under invalidation: once the sweep removes a
+        //    slot, no in-flight build from the pre-sweep epoch is allowed
+        //    to resurrect it.
         let publishable = matches!(&result, QueryResult::Value(_));
-        if publishable {
+        let aborted_during_build = inflight.state.lock().aborted;
+        if publishable && !aborted_during_build {
             let (family, slot) = family_and_slot(&key);
             // ResolvedNamedType bypasses the family memo entirely
             // (§7.16) — its DashMap-backed identity map is the cache.
@@ -1273,11 +1391,18 @@ impl SemanticGraphStore {
 
         // 6. Finalize in-flight and wake joiners. The completed flag
         //    guarantees any thread that acquired the flight before step 7
-        //    retires the entry still observes the winner's result.
+        //    retires the entry still observes the winner's result (or its
+        //    abort sentinel, if the invalidation sweep set one while the
+        //    winner was mid-build).
         {
             let mut state = inflight.state.lock();
-            state.completed = Some(result.clone());
-            state.dep_signature = Some(dep_signature.clone());
+            // Don't overwrite an abort sentinel planted by invalidation —
+            // joiners that wake on the abort must observe `aborted = true`
+            // and retry, not the (now-stale) winner result.
+            if !state.aborted {
+                state.completed = Some(result.clone());
+                state.dep_signature = Some(dep_signature.clone());
+            }
         }
         inflight.ready.notify_all();
 
@@ -1301,6 +1426,14 @@ impl SemanticGraphStore {
         }
     }
 }
+
+/// Maximum number of times a joiner re-enters dispatch after its
+/// in-flight entry was aborted by a canonical invalidation sweep. Bounds
+/// pathological retry loops (e.g. an invalidation that keeps firing on
+/// the same canonical) to a small constant; in practice 0-1 retries is
+/// typical because the next call either hits a freshly-warm slot or
+/// claims the fresh in-flight as winner.
+const MAX_INFLIGHT_RETRIES: usize = 3;
 
 impl SemanticGraphRead for SemanticGraphStore {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
@@ -1551,14 +1684,15 @@ mod tests {
         assert!(matches!(second.value, QueryResult::Value(_)));
     }
 
-    /// `invalidate_canonical` removes every memo entry whose scope
-    /// references the canonical — future queries compute fresh node ids
-    /// under the new file version. Unrelated keys stay warm.
+    /// `invalidate_canonical` sweeps every slot whose recorded
+    /// dep-signature references the changed canonical. Unrelated entries
+    /// stay warm because their dep-signatures never mention the canonical
+    /// under invalidation.
     #[test]
     fn invalidate_canonical_removes_only_matching_scope_keys() {
         let store = SemanticGraphStore::new();
 
-        // Warm up `ResolveDecl(a.ts::Foo)`.
+        // Warm `ResolveDecl(a.ts::Foo)` with a dep-sig referencing /w/a.ts.
         let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/a.ts"),
             name: Arc::from("Foo"),
@@ -1568,11 +1702,11 @@ mod tests {
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-                (QueryResult::Value(id), empty_signature())
+                (QueryResult::Value(id), dep_sig_for("/w/a.ts", 1))
             },
         );
 
-        // Warm up `ResolveDecl(b.ts::Foo)` — same name, different canonical.
+        // Warm `ResolveDecl(b.ts::Foo)` with a dep-sig referencing /w/b.ts.
         let b_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/b.ts"),
             name: Arc::from("Foo"),
@@ -1582,21 +1716,342 @@ mod tests {
             || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {
                 let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-                (QueryResult::Value(id), empty_signature())
+                (QueryResult::Value(id), dep_sig_for("/w/b.ts", 2))
             },
         );
 
         assert_eq!(store.memo_entry_count(), 2);
 
-        // Invalidate only a.ts.
+        // Dep-sig sweep: only a.ts's entry matches.
         let removed = store.invalidate_canonical("/w/a.ts");
         assert_eq!(removed, 1);
         assert_eq!(store.memo_entry_count(), 1);
 
-        // b.ts still warm.
+        // b.ts still warm (its dep-sig never mentioned /w/a.ts).
         assert!(store.get(&b_key).is_some());
         // a.ts gone — next call re-runs build.
         assert!(store.get(&a_key).is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // B3 — dep-signature-based invalidation sweep + in-flight drop + retry
+    // ──────────────────────────────────────────────────────────────────
+
+    /// An `Instantiate` entry whose body compute reads the changed
+    /// canonical (via the dep-sig) is evicted by the sweep. Regardless of
+    /// the family-key shape — `Instantiate` carries semantic-node ids, not
+    /// canonicals — the dep-sig walk is the single invalidation authority.
+    #[test]
+    fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let key = SemanticQueryKey::Instantiate {
+            base,
+            args: Arc::from(vec![arg].into_boxed_slice()),
+        };
+
+        // Dep-sig references /w/body.ts — the declaration file the
+        // instantiation lowers from.
+        let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(value_id), dep_sig_for("/w/body.ts", 1)),
+        );
+        assert!(
+            store.get(&key).is_some(),
+            "entry must be warm pre-invalidation"
+        );
+
+        let removed = store.invalidate_canonical("/w/body.ts");
+        assert_eq!(removed, 1, "one Instantiate slot evicted");
+        assert!(
+            store.get(&key).is_none(),
+            "Instantiate entry whose dep-sig references /w/body.ts must be evicted",
+        );
+    }
+
+    /// An `Instantiate` entry whose dep-sig does NOT reference the
+    /// canonical under invalidation survives the sweep unchanged —
+    /// confirming the sweep is driven strictly by dep-sig membership.
+    #[test]
+    fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let key = SemanticQueryKey::Instantiate {
+            base,
+            args: Arc::from(vec![arg].into_boxed_slice()),
+        };
+
+        let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(value_id),
+                    dep_sig_for("/w/unrelated.ts", 2),
+                )
+            },
+        );
+
+        let removed = store.invalidate_canonical("/w/changed.ts");
+        assert_eq!(
+            removed, 0,
+            "no eviction: entry dep-sig references /w/unrelated.ts, not /w/changed.ts",
+        );
+        assert!(
+            store.get(&key).is_some(),
+            "unrelated Instantiate entry must remain warm after sweep",
+        );
+    }
+
+    /// A `ProjectPath` entry whose dep-sig references a file touched by a
+    /// subtree walk is evicted. Tests the path-precise family: invalidation
+    /// must reach every mode slot because narrower-mode slots inherit the
+    /// broader compute's dep-sig via backfill (§7.11).
+    #[test]
+    fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let path: Arc<[PathSegment]> = Arc::from(
+            vec![
+                PathSegment::Member(Arc::from("a")),
+                PathSegment::Member(Arc::from("foo")),
+            ]
+            .into_boxed_slice(),
+        );
+        let key = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Shallow,
+        };
+
+        let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(value_id),
+                    dep_sig_for("/w/subtree.ts", 3),
+                )
+            },
+        );
+        // Shallow backfills Navigate + Identity — both carry the same
+        // dep-sig (§7.11 conservative rule). So three slots are populated,
+        // and all three must evict on /w/subtree.ts invalidation.
+        assert_eq!(store.memo_entry_count(), 3);
+
+        let removed = store.invalidate_canonical("/w/subtree.ts");
+        assert_eq!(
+            removed, 3,
+            "Shallow plus its two backfilled narrower slots all reference the touched subtree",
+        );
+        assert!(
+            store.get(&key).is_none(),
+            "ProjectPath Shallow entry through touched subtree must be evicted",
+        );
+        let narrower_key = SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            mode: ProjectionMode::Identity,
+        };
+        assert!(
+            store.get(&narrower_key).is_none(),
+            "backfilled Identity slot inherits the dep-sig and must evict too",
+        );
+    }
+
+    /// Invalidation is per-(family, slot): invalidating one canonical
+    /// evicts only the slots whose dep-signature references it, leaving
+    /// sibling slots in the same family warm. After eviction, the next
+    /// caller for the evicted slot runs a fresh cold build — the
+    /// joiner-retry invariant surfaces here because an in-flight entry at
+    /// that slot (had one existed during the race window between warm
+    /// publish and in-flight retire) would have been dropped alongside
+    /// the warm slot.
+    #[test]
+    fn invalidate_canonical_evicts_in_flight_entries_per_mode_slot_and_joiners_retry() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+
+        let key_identity = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Identity,
+        };
+        let key_expanded = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Expanded,
+        };
+
+        // Identity build FIRST so the narrower slot is populated before
+        // the Expanded build runs — this prevents Expanded's backfill
+        // from clobbering Identity with Expanded's (matching) dep-sig.
+        let ident_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let _ = store.execute_cooperative(
+            key_identity.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(ident_id), dep_sig_for("/w/a.ts", 1)),
+        );
+        let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key_expanded.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(exp_id), dep_sig_for("/w/b.ts", 2)),
+        );
+        // After both warm-ups:
+        //   Identity = /w/a.ts (from Identity build)
+        //   Navigate = /w/b.ts (backfilled from Expanded)
+        //   Shallow  = /w/b.ts (backfilled from Expanded)
+        //   Expanded = /w/b.ts (from Expanded build)
+        assert_eq!(store.memo_entry_count(), 4);
+
+        // Invalidate /w/a.ts — only Identity's dep-sig matches.
+        let removed = store.invalidate_canonical("/w/a.ts");
+        assert_eq!(
+            removed, 1,
+            "per-mode-slot invalidation: only the Identity slot is evicted",
+        );
+        assert!(
+            store.get(&key_identity).is_none(),
+            "Identity slot must be evicted (dep-sig /w/a.ts)",
+        );
+        assert!(
+            store.get(&key_expanded).is_some(),
+            "Expanded slot preserved (dep-sig /w/b.ts, unrelated)",
+        );
+
+        // Post-invalidation, a new caller for the Identity slot must run
+        // a fresh cold build — not latch onto a lingering in-flight entry
+        // from the pre-invalidation warm publish (the sweep also drops
+        // in-flight entries for affected `(family, slot)` pairs so
+        // joiners re-enter dispatch).
+        let mut rebuilt = false;
+        let new_ident = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let _ = store.execute_cooperative(
+            key_identity.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                rebuilt = true;
+                (QueryResult::Value(new_ident), dep_sig_for("/w/a.ts", 9))
+            },
+        );
+        assert!(
+            rebuilt,
+            "post-invalidation caller must run a fresh cold build (no stale in-flight)",
+        );
+    }
+
+    /// Backfill inherits the broader compute's full dep-sig. When any
+    /// canonical from that broader dep-sig is invalidated, the narrower
+    /// backfilled slots evict too — conservative over-invalidation (plan
+    /// §7.11). The sweep is never *incorrect* (it never misses a real
+    /// invalidation); unrelated narrower-only entries with their own
+    /// dep-sigs stay warm.
+    #[test]
+    fn backfilled_slot_with_wider_dep_sig_over_invalidates_conservatively_not_incorrectly() {
+        let store = SemanticGraphStore::new();
+        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let path: Arc<[PathSegment]> =
+            Arc::from(vec![PathSegment::Member(Arc::from("foo"))].into_boxed_slice());
+
+        // Expanded build reads both /w/wide.ts and /w/narrow.ts —
+        // its dep-sig spans both canonicals.
+        let wide_dep_sig: DepSignature = Arc::from(
+            vec![
+                (
+                    Arc::<str>::from("/w/wide.ts"),
+                    crate::semantic_query::DepVersion::WholeHash([1u8; 16]),
+                ),
+                (
+                    Arc::<str>::from("/w/narrow.ts"),
+                    crate::semantic_query::DepVersion::WholeHash([2u8; 16]),
+                ),
+            ]
+            .into_boxed_slice(),
+        );
+        let key_expanded = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Expanded,
+        };
+        let exp_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let _ = store.execute_cooperative(
+            key_expanded.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || (QueryResult::Value(exp_id), wide_dep_sig.clone()),
+        );
+        // Expanded backfills Shallow, Navigate, Identity — all four slots
+        // carry the same wide dep-sig.
+        assert_eq!(store.memo_entry_count(), 4);
+
+        // Conservative over-invalidation: evicting /w/wide.ts also evicts
+        // the three narrower backfilled slots because they inherited the
+        // broader compute's full dep-sig. Narrower independent builds
+        // would have had a smaller read-set (potentially only /w/narrow.ts),
+        // but B3 ships the conservative rule (§7.11 trade-off); tightening
+        // the narrower-slot dep-sigs to their actual read-set is permitted
+        // follow-up work.
+        let removed = store.invalidate_canonical("/w/wide.ts");
+        assert_eq!(
+            removed, 4,
+            "all four slots evict because backfill inherited the wide dep-sig",
+        );
+        for mode in [
+            ProjectionMode::Identity,
+            ProjectionMode::Navigate,
+            ProjectionMode::Shallow,
+            ProjectionMode::Expanded,
+        ] {
+            let key = SemanticQueryKey::ProjectPath {
+                base,
+                path: Arc::clone(&path),
+                mode,
+            };
+            assert!(
+                store.get(&key).is_none(),
+                "{mode:?} slot evicted by conservative sweep",
+            );
+        }
+
+        // Second phase: the sweep is NOT incorrect. A narrower-only
+        // independent build with a dep-sig referencing only /w/narrow.ts
+        // is NOT evicted by an invalidation of /w/wide.ts.
+        let key_navigate = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::clone(&path),
+            mode: ProjectionMode::Navigate,
+        };
+        let narrow_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+        let _ = store.execute_cooperative(
+            key_navigate.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                (
+                    QueryResult::Value(narrow_id),
+                    dep_sig_for("/w/narrow.ts", 3),
+                )
+            },
+        );
+        // Navigate backfills Identity with the narrow-only dep-sig.
+        assert_eq!(store.memo_entry_count(), 2);
+
+        let removed = store.invalidate_canonical("/w/wide.ts");
+        assert_eq!(
+            removed, 0,
+            "narrow-only dep-sig does not reference /w/wide.ts — no false eviction",
+        );
+        assert!(
+            store.get(&key_navigate).is_some(),
+            "narrower independent build survives unrelated invalidation",
+        );
     }
 
     /// `invalidate_all` clears every memo entry — used on project-generation
