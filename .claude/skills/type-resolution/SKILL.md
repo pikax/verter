@@ -452,7 +452,7 @@ When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, a
   - `Navigate`: minimum semantic work needed to continue a requested path. Intermediate hops run in this mode.
   - `Shallow`: one surface level of the requested node without recursive expansion.
   - `Expanded`: recursive materialization of the requested result.
-- Older two-mode terminology (`Type` ≡ `Identity`, `Expanded` unchanged) is retired. Do not introduce ad hoc navigate/shallow flags; use the canonical modes and the path-precise projection surface.
+- Do not introduce ad hoc navigate/shallow flags; use the canonical four modes and the path-precise projection surface.
 - Do not walk unrelated imports from the same file.
 - Do not treat plain imports as implicit exports.
 - Keep direct re-exports (`export { X } from`, `export * from`) as an explicit separate path.
