@@ -3,7 +3,7 @@
 //! Runs the compilation pipeline on real-world Vue projects from verter-test-repos,
 //! with hotpath instrumentation to identify bottlenecks.
 //!
-//! Two modes:
+//! Operating modes:
 //!   - **AST-only** (default): tokenize → AST → OXC expression parsing
 //!   - **Full compile** (`VERTER_PROFILE_FULL=1`): full SFC → JS/CSS pipeline
 //!

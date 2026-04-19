@@ -6,7 +6,7 @@
     {
       "namePattern": "resolve_component_meta",
       "detailPattern": "mode=Expanded",
-      "note": "must resolve component meta in Expanded mode"
+      "note": "must resolve component meta in `ResolverMode::Expanded`"
     },
     {
       "namePattern": "resolve_component_meta_result",

@@ -659,32 +659,32 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("Type mode should return a result for an existing file");
+        .expect("`ResolverMode::Type` should return a result for an existing file");
 
     assert_eq!(state.mode, ResolverMode::Type);
 
-    // Type mode: resolved_macros should carry identity info but NOT expanded props
+    // `ResolverMode::Type`: resolved_macros should carry identity info but NOT expanded props
     assert!(
         !state.resolved_macros.is_empty(),
-        "Type mode should still identify macro type deps"
+        "`ResolverMode::Type` should still identify macro type deps"
     );
     let prop_names = prop_names_from_resolved(&state);
     assert!(
         prop_names.is_empty(),
-        "Type mode must NOT materialize expanded prop shapes, got: {:?}",
+        "`ResolverMode::Type` must NOT materialize expanded prop shapes, got: {:?}",
         prop_names
     );
 
-    // Type mode: no evaluated types
+    // `ResolverMode::Type`: no evaluated types
     assert!(
         state.evaluated_types.is_none(),
-        "Type mode must NOT compute evaluated types"
+        "`ResolverMode::Type` must NOT compute evaluated types"
     );
 
-    // Type mode: no type registry
+    // `ResolverMode::Type`: no type registry
     assert!(
         state.resolved_type_registry.is_empty(),
-        "Type mode must NOT populate type-registry entries"
+        "`ResolverMode::Type` must NOT populate type-registry entries"
     );
 }
 
@@ -711,20 +711,20 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return a result for an existing file");
+        .expect("`ResolverMode::Expanded` should return a result for an existing file");
 
     assert_eq!(state.mode, ResolverMode::Expanded);
 
-    // Expanded mode: materialized props
+    // `ResolverMode::Expanded`: materialized props
     let prop_names = prop_names_from_resolved(&state);
     assert!(
         prop_names.contains(&"a".to_string()),
-        "Expanded mode should materialize prop 'a', got: {:?}",
+        "`ResolverMode::Expanded` should materialize prop 'a', got: {:?}",
         prop_names
     );
     assert!(
         prop_names.contains(&"b".to_string()),
-        "Expanded mode should materialize prop 'b', got: {:?}",
+        "`ResolverMode::Expanded` should materialize prop 'b', got: {:?}",
         prop_names
     );
 }
@@ -770,24 +770,24 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // Call Type mode first, then Expanded
+    // Call `ResolverMode::Type` first, then Expanded
     let type_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("Type mode should return result");
+        .expect("`ResolverMode::Type` should return result");
     let expanded_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     // Type entry must NOT satisfy Expanded
     assert!(
         prop_names_from_resolved(&type_state).is_empty(),
-        "Type mode result must have no expanded props"
+        "`ResolverMode::Type` result must have no expanded props"
     );
     assert!(
         !prop_names_from_resolved(&expanded_state).is_empty(),
-        "Expanded mode result must have expanded props"
+        "`ResolverMode::Expanded` result must have expanded props"
     );
 }
 
@@ -925,40 +925,40 @@ defineProps<Props>()
 
     project.host().provenance().reset();
 
-    // Type mode should NOT perform the expensive external type traversal
+    // `ResolverMode::Type` should NOT perform the expensive external type traversal
     let type_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("Type mode should return result");
+        .expect("`ResolverMode::Type` should return result");
 
     let p1 = provenance(&project);
     assert_eq!(
         p1.resolved_external_type_cache_misses, 0,
-        "Type mode should NOT call resolve_external_type_from_loaded_files"
+        "`ResolverMode::Type` should NOT call resolve_external_type_from_loaded_files"
     );
     assert_eq!(
         p1.resolved_external_type_cache_hits, 0,
-        "Type mode should NOT touch the host traversal cache"
+        "`ResolverMode::Type` should NOT touch the host traversal cache"
     );
 
-    // Expanded mode performs the traversal
+    // `ResolverMode::Expanded` performs the traversal
     let expanded_state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let p2 = provenance(&project);
     assert!(
         prop_names_from_resolved(&type_state).is_empty(),
-        "Type mode result must not include expanded props"
+        "`ResolverMode::Type` result must not include expanded props"
     );
     assert!(
         prop_names_from_resolved(&expanded_state).contains(&"a".to_string()),
-        "Expanded mode should materialize imported props"
+        "`ResolverMode::Expanded` should materialize imported props"
     );
     assert!(
         p2.resolver_node_cache_misses > p1.resolver_node_cache_misses,
-        "Expanded mode should perform additional resolver-owned cache work"
+        "`ResolverMode::Expanded` should perform additional resolver-owned cache work"
     );
 
     // Second Expanded call should hit the resolved-meta cache (no recompute)
@@ -1001,7 +1001,7 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let prop_names = prop_names_from_resolved(&state);
     assert!(
@@ -1038,12 +1038,12 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
     let provenance = provenance(&project);
 
     assert!(
         prop_names_from_resolved(&state).contains(&"a".to_string()),
-        "Expanded mode should still materialize imported props"
+        "`ResolverMode::Expanded` should still materialize imported props"
     );
     assert_eq!(
         provenance.resolved_external_type_cache_hits, 0,
@@ -1099,7 +1099,7 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let class_macro = state
         .resolved_macros
@@ -1206,7 +1206,7 @@ defineProps<Props>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let interface_macro = state
         .resolved_macros
@@ -1262,7 +1262,7 @@ defineEmits<Events>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let emit_names = emit_names_from_resolved(&state);
     assert!(
@@ -1295,7 +1295,7 @@ defineSlots<Slots>()
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("Expanded mode should return result");
+        .expect("`ResolverMode::Expanded` should return result");
 
     let slot_names = slot_names_from_resolved(&state);
     assert!(
@@ -1461,7 +1461,7 @@ defineProps<MissingType>()
         )
         .unwrap();
 
-    // Expanded mode should still return a result (best-effort)
+    // `ResolverMode::Expanded` should still return a result (best-effort)
     let state = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Expanded);
@@ -4125,7 +4125,7 @@ defineProps<Props>()
         .unwrap()
         .expect("get_component_meta should work regardless of deep_expansion flag");
 
-    // After the refactor, get_component_meta should always use Expanded mode
+    // After the refactor, get_component_meta should always use `ResolverMode::Expanded`
     // through resolve_component_meta, so imported props should appear
     let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
     assert!(
@@ -4234,7 +4234,7 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// Edge case: Type mode cache invalidation on dependency change
+// Edge case: `ResolverMode::Type` cache invalidation on dependency change
 // ===========================================================================
 
 #[test]
@@ -4254,11 +4254,11 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // First Type mode call — populates cache
+    // First `ResolverMode::Type` call — populates cache
     let state1 = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("first Type mode should return result");
+        .expect("first `ResolverMode::Type` should return result");
     assert_eq!(
         state1.resolved_macros[0].declaration.canonical_source, "/types.ts",
         "should resolve to /types.ts"
@@ -4274,18 +4274,18 @@ export interface Props { a: string; b: number }"#,
         )
         .unwrap();
 
-    // Second Type mode call — cache should be invalidated by dep change
+    // Second `ResolverMode::Type` call — cache should be invalidated by dep change
     project.host().provenance().reset();
     let state2 = project
         .host()
         .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("second Type mode should return result");
+        .expect("second `ResolverMode::Type` should return result");
 
     let p = provenance(&project);
     // Assert+: resolved state was recomputed (not served from stale cache)
     assert_eq!(
         p.component_meta_resolved_state_recomputes, 1,
-        "Type mode cache should invalidate when dependency changes, got recomputes={}",
+        "`ResolverMode::Type` cache should invalidate when dependency changes, got recomputes={}",
         p.component_meta_resolved_state_recomputes
     );
     // Assert-: the declaration source should still be correct

@@ -1308,7 +1308,7 @@ defineProps<Alpha & Beta>()
 // V6: Imported alias preparation should not eagerly materialize bodies
 // ===========================================================================
 
-/// Type mode and Expanded mode should both resolve, with Expanded mode
+/// `ResolverMode::Type` and `ResolverMode::Expanded` should both resolve, with `ResolverMode::Expanded`
 /// providing evaluated type shapes.
 #[test]
 fn type_and_expanded_modes_both_resolve() {
@@ -1335,7 +1335,7 @@ defineProps<Props>()
 
     set_dep(&host, "/src/Consumer.vue", "./types", "/src/types.ts");
 
-    // Type mode: should resolve identity without full expansion
+    // `ResolverMode::Type`: should resolve identity without full expansion
     let meta_type =
         host.resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Type);
     assert!(
@@ -1345,10 +1345,10 @@ defineProps<Props>()
     let type_result = meta_type.unwrap();
     assert!(
         type_result.evaluated_types.is_none(),
-        "Type mode should not produce evaluated types"
+        "`ResolverMode::Type` should not produce evaluated types"
     );
 
-    // Expanded mode: full materialization
+    // `ResolverMode::Expanded`: full materialization
     let meta_expanded =
         host.resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Expanded);
     assert!(
@@ -1358,7 +1358,7 @@ defineProps<Props>()
     let expanded_result = meta_expanded.unwrap();
     assert!(
         expanded_result.evaluated_types.is_some(),
-        "Expanded mode should produce evaluated types"
+        "`ResolverMode::Expanded` should produce evaluated types"
     );
 }
 
@@ -2141,7 +2141,7 @@ defineProps<AccordionRootProps>()
     assert!(meta.is_some(), "deeply generic Accordion should resolve");
 }
 
-/// Test 4: Component-meta resolution (Expanded mode) for the Accordion
+/// Test 4: Component-meta resolution (`ResolverMode::Expanded`) for the Accordion
 /// pattern. This is the full pipeline that was hanging.
 #[test]
 fn accordion_pattern_component_meta_expanded_does_not_hang() {

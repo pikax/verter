@@ -113,6 +113,13 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
+  terminology-check:
+    name: Four-mode terminology check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash tools/check-four-mode-terminology.sh
+
   rust-fmt:
     name: Rust Format
     needs: detect-changes

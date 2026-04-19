@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 /**
  * Zod adapter — converts TypeDescriptor trees to Zod schemas.
  *
- * Two modes:
+ * Operating modes:
  * - **Codegen** (`typeToZodString`): outputs `"z.string()"` etc. as strings
  * - **Runtime** (`typeToZodSchema`): builds actual `z.ZodType` instances
  *   (requires `zod` as a peer dependency)

@@ -5541,11 +5541,11 @@ defineProps<Props>()
     // Assert+: resolved macros have consistent prop counts
     assert!(
         !first.resolved_macros.is_empty(),
-        "Expanded mode should resolve cross-file macro types on first call"
+        "`ResolverMode::Expanded` should resolve cross-file macro types on first call"
     );
     assert!(
         !second.resolved_macros.is_empty(),
-        "Expanded mode should resolve cross-file macro types on second call"
+        "`ResolverMode::Expanded` should resolve cross-file macro types on second call"
     );
     assert_eq!(
         first.resolved_macros[0].props.len(),
@@ -5657,7 +5657,7 @@ defineProps<Props>()
 
     assert!(
         !first.resolved_macros.is_empty(),
-        "Expanded mode should resolve cross-file macro types"
+        "`ResolverMode::Expanded` should resolve cross-file macro types"
     );
     let first_prop_names: Vec<&str> = first.resolved_macros[0]
         .props

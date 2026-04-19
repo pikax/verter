@@ -6,7 +6,7 @@
     {
       "namePattern": "resolve_component_meta",
       "detailPattern": "mode=Expanded",
-      "note": "must resolve component meta in Expanded mode"
+      "note": "must resolve component meta in `ResolverMode::Expanded`"
     },
     {
       "namePattern": "compute_evaluated_types_expand_macros",
