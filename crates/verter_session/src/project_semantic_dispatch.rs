@@ -562,63 +562,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         (QueryResult::Value(result), fence)
     }
 
-    /// Member projection. Inspects the base node's shared-graph payload and
-    /// navigates into the matching member when the base is a concrete
-    /// surface. Every other shape (primitive, opaque, alias-without-body)
-    /// resolves to `Opaque(Miss)` — but the memoized key captures the
-    /// identity so repeated asks share the same warm entry.
-    fn build_project_member(
-        &self,
-        base: SemanticNodeId,
-        member: &Arc<str>,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let data = self.graph().node_data(base);
-        let node = match data.as_deref() {
-            Some(SemanticNodeData::Object(surface)) => surface
-                .members
-                .iter()
-                .find(|m| m.name.as_ref() == member.as_ref())
-                .map(|m| m.value)
-                .unwrap_or_else(|| self.opaque(QueryError::Miss)),
-            _ => self.opaque(QueryError::Miss),
-        };
-        let signature = self.project_generation_signature();
-        (QueryResult::Value(node), signature)
-    }
-
-    /// Indexed access. For `Number` / `String` keys on an `Object` surface,
-    /// looks up the member name directly. For `TypeNode` keys or any
-    /// non-object base, returns `Opaque(Miss)` under the memoized identity.
-    fn build_indexed_access(
-        &self,
-        base: SemanticNodeId,
-        index: &IndexKey,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
-        let data = self.graph().node_data(base);
-        let node = match (data.as_deref(), index) {
-            (Some(SemanticNodeData::Object(surface)), IndexKey::String(s)) => surface
-                .members
-                .iter()
-                .find(|m| m.name.as_ref() == s.as_ref())
-                .map(|m| m.value)
-                .unwrap_or_else(|| self.opaque(QueryError::Miss)),
-            (Some(SemanticNodeData::Object(surface)), IndexKey::Number(n)) => {
-                let needle = n.to_string();
-                surface
-                    .members
-                    .iter()
-                    .find(|m| m.name.as_ref() == needle.as_str())
-                    .map(|m| m.value)
-                    .unwrap_or_else(|| self.opaque(QueryError::Miss))
-            }
-            _ => self.opaque(QueryError::Miss),
-        };
-        (
-            QueryResult::Value(node),
-            self.project_generation_signature(),
-        )
-    }
-
     /// `keyof` projection. For an `Object` surface, materializes a union of
     /// the member names as `Primitive(String)` anchors — this matches the
     /// TS semantics that `keyof T` yields a union of string literals.
@@ -1255,15 +1198,23 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
             SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
             SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
             SemanticQueryKey::Instantiate { base, args } => self.build_instantiate(*base, args),
-            // ProjectMember / IndexedAccess never reach the build closure once
-            // admission canonicalisation rewrites them to ProjectPath above —
-            // the arms remain to satisfy exhaustiveness; they retire in C4
-            // when the variants themselves are rewritten as thin wrappers.
-            SemanticQueryKey::ProjectMember { base, member, .. } => {
-                self.build_project_member(*base, member)
+            // Plan §3 C4: `ProjectMember` / `IndexedAccess` are API sugar
+            // that admission-time canonicalisation rewrites to
+            // `ProjectPath` above. The build closure never observes
+            // these variants on the rewritten key; the arms below are
+            // pure exhaustiveness: they forward to `build_project_path`
+            // with a length-1 path so any future refactor that skips
+            // admission canonicalisation still gets the correct
+            // path-precise semantics.
+            SemanticQueryKey::ProjectMember { base, member, mode } => {
+                let path: Arc<[PathSegment]> =
+                    Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
+                self.build_project_path(*base, &path, *mode)
             }
-            SemanticQueryKey::IndexedAccess { base, index, .. } => {
-                self.build_indexed_access(*base, index)
+            SemanticQueryKey::IndexedAccess { base, index, mode } => {
+                let path: Arc<[PathSegment]> =
+                    Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice());
+                self.build_project_path(*base, &path, *mode)
             }
             SemanticQueryKey::ProjectPath { base, path, mode } => {
                 self.build_project_path(*base, path, *mode)
