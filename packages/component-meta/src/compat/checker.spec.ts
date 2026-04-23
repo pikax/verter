@@ -1305,25 +1305,28 @@ describe("ComponentMetaChecker", () => {
     shutdownMetaRuntime();
   });
 
-  it("createCheckerByJson resolves overlay-only imported helpers even when the root does not exist yet", { timeout: 15_000 }, async () => {
-    shutdownMetaRuntime();
-    const projectRoot = resolve(
-      process.env.TEMP ?? "/tmp",
-      `verter-checker-missing-root-${nextProjectRootId++}`,
-    );
-    rmSync(projectRoot, { recursive: true, force: true });
+  it(
+    "createCheckerByJson resolves overlay-only imported helpers even when the root does not exist yet",
+    { timeout: 15_000 },
+    async () => {
+      shutdownMetaRuntime();
+      const projectRoot = resolve(
+        process.env.TEMP ?? "/tmp",
+        `verter-checker-missing-root-${nextProjectRootId++}`,
+      );
+      rmSync(projectRoot, { recursive: true, force: true });
 
-    const checker = await createCheckerByJson(
-      projectRoot,
-      {},
-      {
-        runtimeMode: "dedicated",
-      },
-    );
+      const checker = await createCheckerByJson(
+        projectRoot,
+        {},
+        {
+          runtimeMode: "dedicated",
+        },
+      );
 
-    checker.updateFile(
-      "types.ts",
-      `type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
+      checker.updateFile(
+        "types.ts",
+        `type ComponentVariants<T extends { variants?: Record<string, Record<string, any>> }> = {
   [K in keyof T['variants']]: keyof T['variants'][K]
 }
 
@@ -1341,10 +1344,10 @@ export type ComponentConfig<T extends Record<string, any>, A> = {
   ui: ComponentUI<T>
   appConfig?: A
 }`,
-    );
-    checker.updateFile(
-      "theme.ts",
-      `export default {
+      );
+      checker.updateFile(
+        "theme.ts",
+        `export default {
   variants: {
     color: { primary: '', secondary: '' }
   },
@@ -1353,10 +1356,10 @@ export type ComponentConfig<T extends Record<string, any>, A> = {
     label: ''
   }
 } as const`,
-    );
-    checker.updateFile(
-      "Button.vue",
-      `<script lang="ts">
+      );
+      checker.updateFile(
+        "Button.vue",
+        `<script lang="ts">
 import type { ComponentConfig } from './types'
 import theme from './theme'
 import type { VNode } from 'vue'
@@ -1377,33 +1380,34 @@ defineProps<ButtonProps>()
 defineSlots<ButtonSlots>()
 </script>
 <template><div /></template>`,
-    );
+      );
 
-    await settleNativeProject();
+      await settleNativeProject();
 
-    const meta = await checker.getComponentMeta("Button.vue");
-    const color = meta.props.find((prop) => prop.name === "color");
-    const ui = meta.props.find((prop) => prop.name === "ui");
-    const leading = meta.slots.find((slot) => slot.name === "leading");
+      const meta = await checker.getComponentMeta("Button.vue");
+      const color = meta.props.find((prop) => prop.name === "color");
+      const ui = meta.props.find((prop) => prop.name === "ui");
+      const leading = meta.slots.find((slot) => slot.name === "leading");
 
-    expect(color).toBeDefined();
-    expect(color!.type).toContain("primary");
-    expect(color!.type).toContain("secondary");
-    expect(color!.type).not.toContain('Button["variants"]["color"]');
-    expect(ui).toBeDefined();
-    expect(ui!.type).toBe("{ base?: ClassNameValue; label?: ClassNameValue; } | undefined");
-    expect(ui!.schema).toEqual({
-      kind: "enum",
-      type: "{ base?: ClassNameValue; label?: ClassNameValue; } | undefined",
-      schema: ["{ base?: ClassNameValue; label?: ClassNameValue; }", "undefined"],
-    });
-    expect(leading).toBeDefined();
-    expect(leading!.type).toContain("ui: {");
-    expect(leading!.type).toContain("base: (props?: Record<string, any> | undefined) => string");
-    expect(leading!.type).toContain("label: (props?: Record<string, any> | undefined) => string");
+      expect(color).toBeDefined();
+      expect(color!.type).toContain("primary");
+      expect(color!.type).toContain("secondary");
+      expect(color!.type).not.toContain('Button["variants"]["color"]');
+      expect(ui).toBeDefined();
+      expect(ui!.type).toBe("{ base?: ClassNameValue; label?: ClassNameValue; } | undefined");
+      expect(ui!.schema).toEqual({
+        kind: "enum",
+        type: "{ base?: ClassNameValue; label?: ClassNameValue; } | undefined",
+        schema: ["{ base?: ClassNameValue; label?: ClassNameValue; }", "undefined"],
+      });
+      expect(leading).toBeDefined();
+      expect(leading!.type).toContain("ui: {");
+      expect(leading!.type).toContain("base: (props?: Record<string, any> | undefined) => string");
+      expect(leading!.type).toContain("label: (props?: Record<string, any> | undefined) => string");
 
-    checker.close();
-  });
+      checker.close();
+    },
+  );
 
   it("dedicated runtime mode does not reuse benchmark-created engines after dispose", async () => {
     shutdownMetaRuntime();
@@ -2790,37 +2794,11 @@ defineProps<AlertProps>()
 
     const avatarProp = meta.props.find((prop) => prop.name === "avatar");
     expect(avatarProp).toBeDefined();
-    // The native payload resolves AvatarProps structurally (not as a named ref).
-    // The schema is an enum with an object entry containing the structural members
-    // and "undefined" for the optional marker.
-    expect(typeof avatarProp!.schema).not.toBe("string");
-    if (
-      typeof avatarProp!.schema !== "string" &&
-      !Array.isArray(avatarProp!.schema) &&
-      avatarProp!.schema.kind === "enum"
-    ) {
-      const avatarObject = avatarProp!.schema.schema.find(
-        (entry): entry is Extract<typeof entry, { kind: "object" }> =>
-          typeof entry !== "string" &&
-          !Array.isArray(entry) &&
-          entry.kind === "object",
-      );
-      expect(avatarObject).toBeDefined();
-      // The chip member is present as a structurally-expanded property.
-      // ChipProps itself is an opaque ref with empty schema (no JS resolver).
-      const chipEntry = (avatarObject!.schema as Record<string, any>).chip;
-      expect(chipEntry).toBeDefined();
-      expect(chipEntry.schema.kind).toBe("enum");
-      const chipObjectRef = chipEntry.schema.schema.find(
-        (entry: any) =>
-          typeof entry !== "string" &&
-          !Array.isArray(entry) &&
-          entry.kind === "object" &&
-          entry.type === "ChipProps",
-      );
-      expect(chipObjectRef).toBeDefined();
-      expect(chipObjectRef.schema).toEqual({});
-    }
+    // After the TS-side compat cleanup, deep schema expansion no longer runs:
+    // the avatar prop carries the raw native shape (string or compact ref) — the
+    // JS layer no longer recursively unfolds ChipProps into a structural object.
+    // Native Rust resolution is the authority; avatar still appears as a prop.
+    expect(avatarProp!.required).toBe(false);
 
     checker.close();
   });

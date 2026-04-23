@@ -2242,6 +2242,7 @@ import Child from './Child.vue'
             resolved_type_registry: &[],
             evaluated_types: None,
             file_path: "/src/App.vue",
+            canonical_source: None,
         },
     );
     let env = host

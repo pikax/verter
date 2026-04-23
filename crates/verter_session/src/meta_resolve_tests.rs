@@ -6110,6 +6110,7 @@ defineEmits<Emits>()
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
+            canonical_source: None,
         },
     );
     assert!(
@@ -6213,6 +6214,7 @@ defineEmits<Emits>()
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
+            canonical_source: None,
         },
     );
     assert!(

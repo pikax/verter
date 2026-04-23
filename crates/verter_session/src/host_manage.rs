@@ -5305,6 +5305,7 @@ impl VerterHost {
         );
         let resolved_type_registry =
             resolver_component_meta_type_registry(&resolved.resolved_type_registry);
+        let canonical_source = self.read_analysis_source(canonical_id);
         let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
             macros: &resolved.snapshot.macros,
             bindings: &resolved.snapshot.bindings,
@@ -5321,6 +5322,7 @@ impl VerterHost {
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: resolved.evaluated_types.as_ref(),
             file_path: canonical_id,
+            canonical_source: canonical_source.as_deref(),
         };
         let base_meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
         let fallthrough_resolver = HostFallthroughResolver {
@@ -7762,6 +7764,7 @@ fn extract_component_meta_from_inputs(
             evaluated_types.is_some(),
         ),
     );
+    let canonical_source = host.read_analysis_source(&canonical);
     let input = verter_semantic::analysis::component_meta::ComponentMetaInput {
         macros: &snapshot.macros,
         bindings: &snapshot.bindings,
@@ -7778,6 +7781,7 @@ fn extract_component_meta_from_inputs(
         resolved_type_registry,
         evaluated_types,
         file_path: &canonical,
+        canonical_source: canonical_source.as_deref(),
     };
     let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
     component_meta_trace_event!(

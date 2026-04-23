@@ -18,6 +18,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
+        canonical_source: None,
     }
 }
 
@@ -2755,6 +2756,7 @@ fn options_api_props_used_when_no_composition_props() {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
+        canonical_source: None,
     };
 
     let result = extract_component_meta(input);
@@ -2800,6 +2802,7 @@ fn options_api_prop_type_annotation_is_preserved() {
         store_usages: &[],
         evaluated_types: None,
         file_path: "/App.vue",
+        canonical_source: None,
     };
 
     let result = extract_component_meta(input);
@@ -4344,4 +4347,280 @@ fn define_emits_call_signature_events_get_empty_diagnostics_not_global_clones() 
             .any(|d| d.property_name.as_deref() == Some("change")),
         "call-signature event diagnostics must NOT contain per-property diagnostics"
     );
+}
+
+// ---------------------------------------------------------------------------
+// C1: @defaultValue tag synthesis from withDefaults default_value
+// ---------------------------------------------------------------------------
+
+#[test]
+fn synthesizes_default_value_tag_from_with_defaults() {
+    let define_props = make_define_props(vec![make_prop("label", Some("string"), true)]);
+    let with_defaults = AnalyzedMacro {
+        kind: AnalyzedMacroKind::WithDefaults,
+        default_keys: vec!["label".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "label".to_string(),
+            value: "\"hello\"".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![])
+    };
+    let macros = vec![define_props, with_defaults];
+
+    let result = extract_component_meta(empty_input(&macros));
+
+    let label = result.props.iter().find(|p| p.name == "label").unwrap();
+    assert_eq!(label.default_value.as_deref(), Some("\"hello\""));
+    let default_tag = label.tags.iter().find(|t| t.name == "defaultValue");
+    assert!(
+        default_tag.is_some(),
+        "should synthesize @defaultValue tag from withDefaults"
+    );
+    assert_eq!(default_tag.unwrap().text.as_deref(), Some("\"hello\""));
+}
+
+#[test]
+fn does_not_duplicate_existing_default_value_tag() {
+    // Source JSDoc already supplied an @defaultValue tag; withDefaults provides
+    // a different runtime default. Source JSDoc must win — synthesis must not
+    // duplicate or overwrite.
+    let mut field = make_prop("as", Some("string"), true);
+    field.tags = vec![JsdocTag {
+        name: "defaultValue".to_string(),
+        text: Some("'button'".to_string()),
+    }];
+    let define_props = make_define_props(vec![field]);
+    let with_defaults = AnalyzedMacro {
+        kind: AnalyzedMacroKind::WithDefaults,
+        default_keys: vec!["as".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "as".to_string(),
+            value: "\"div\"".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![])
+    };
+    let macros = vec![define_props, with_defaults];
+
+    let result = extract_component_meta(empty_input(&macros));
+
+    let prop = result.props.iter().find(|p| p.name == "as").unwrap();
+    let default_tags: Vec<_> = prop
+        .tags
+        .iter()
+        .filter(|t| t.name == "defaultValue")
+        .collect();
+    assert_eq!(
+        default_tags.len(),
+        1,
+        "should not duplicate existing @defaultValue tag"
+    );
+    assert_eq!(
+        default_tags[0].text.as_deref(),
+        Some("'button'"),
+        "source JSDoc default must be preserved"
+    );
+}
+
+#[test]
+fn no_default_value_means_no_synthesized_tag() {
+    let macros = vec![make_define_props(vec![make_prop(
+        "name",
+        Some("string"),
+        false,
+    )])];
+
+    let result = extract_component_meta(empty_input(&macros));
+
+    let name = result.props.iter().find(|p| p.name == "name").unwrap();
+    assert!(name.default_value.is_none());
+    assert!(
+        !name.tags.iter().any(|t| t.name == "defaultValue"),
+        "no @defaultValue tag should be synthesized when default_value is None"
+    );
+}
+
+#[test]
+fn synthesizes_default_value_tag_for_runtime_define_props() {
+    // Runtime defineProps({ msg: { default: 'hi' } }) stores defaults on the
+    // DefineProps macro itself, not on a wrapping WithDefaults.
+    let define_props = AnalyzedMacro {
+        default_keys: vec!["msg".to_string()],
+        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
+            key: "msg".to_string(),
+            value: "'hi'".to_string(),
+            span: verter_span::Span::default(),
+        }],
+        ..make_define_props(vec![make_prop("msg", Some("string"), true)])
+    };
+    let macros = vec![define_props];
+
+    let result = extract_component_meta(empty_input(&macros));
+
+    let msg = result.props.iter().find(|p| p.name == "msg").unwrap();
+    let tag = msg
+        .tags
+        .iter()
+        .find(|t| t.name == "defaultValue")
+        .expect("runtime defineProps default should produce a @defaultValue tag");
+    assert_eq!(tag.text.as_deref(), Some("'hi'"));
+}
+
+// ---------------------------------------------------------------------------
+// C2: Expanded-only props inherit JSDoc by name from canonical_source
+// ---------------------------------------------------------------------------
+
+#[test]
+fn expanded_props_without_source_field_inherit_jsdoc_from_canonical_source() {
+    // Macro has no prop_fields; expansion produced two props "foo" and "bar".
+    // canonical_source carries JSDoc for both — extractor should populate
+    // description/tags by property name.
+    let macros = vec![make_define_props(Vec::new())];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "foo".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "bar".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            optional: true,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        ..crate::analysis::type_expand::ExpandedComponentTypes::default()
+    };
+    let source = "interface Inner {\n    /** Doc for foo */\n    foo: string;\n    /** Doc for bar.\n     * @deprecated use baz\n     */\n    bar?: number;\n}\n";
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    input.canonical_source = Some(source);
+
+    let result = extract_component_meta(input);
+
+    let foo = result
+        .props
+        .iter()
+        .find(|p| p.name == "foo")
+        .expect("foo should be present");
+    assert_eq!(
+        foo.description.as_deref(),
+        Some("Doc for foo"),
+        "expanded-only prop foo should inherit JSDoc description from source"
+    );
+
+    let bar = result
+        .props
+        .iter()
+        .find(|p| p.name == "bar")
+        .expect("bar should be present");
+    assert_eq!(bar.description.as_deref(), Some("Doc for bar."));
+    assert!(
+        bar.tags.iter().any(|t| t.name == "deprecated"),
+        "expanded-only prop bar should inherit @deprecated tag"
+    );
+}
+
+#[test]
+fn expanded_only_props_in_third_branch_inherit_jsdoc_from_canonical_source() {
+    // Third-branch path: prop_fields contains "x" but expansion adds "y" too.
+    // The first branch only fires when eval_fields is non-empty AND the macro is
+    // type-based; here we drive the third branch by giving prop_fields one entry
+    // and an empty define_props expansion plus a non-empty `props` extension.
+    //
+    // Simpler reproduction: provide prop_fields = [x] and define_props expansion
+    // with both x and y. The first branch fires and iterates eval_fields; since
+    // y has no source_field, that triggers the same loss point. Use that to
+    // assert the helper kicks in.
+    let macros = vec![make_define_props(vec![make_prop(
+        "x",
+        Some("string"),
+        false,
+    )])];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "x".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::String),
+                            optional: false,
+                            readonly: false,
+                        },
+                        crate::analysis::type_expand::ExpandedProperty {
+                            name: "y".to_string(),
+                            ty: TypeExpr::Primitive(PrimitiveName::Number),
+                            optional: false,
+                            readonly: false,
+                        },
+                    ],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        ..crate::analysis::type_expand::ExpandedComponentTypes::default()
+    };
+    let source = "interface Spread {\n    x: string;\n    /** Doc for y */\n    y: number;\n}\n";
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    input.canonical_source = Some(source);
+
+    let result = extract_component_meta(input);
+
+    let y = result.props.iter().find(|p| p.name == "y").expect("y");
+    assert_eq!(
+        y.description.as_deref(),
+        Some("Doc for y"),
+        "expanded-only prop y should inherit JSDoc description from canonical_source"
+    );
+}
+
+#[test]
+fn expanded_only_props_without_canonical_source_have_no_jsdoc() {
+    let macros = vec![make_define_props(Vec::new())];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        define_props: vec![crate::analysis::type_expand::ExpandedMacroProps {
+            macro_index: 0,
+            result: crate::analysis::type_expand::ExpansionResult::exact(
+                crate::analysis::type_expand::ExpandedObjectShape {
+                    properties: vec![crate::analysis::type_expand::ExpandedProperty {
+                        name: "foo".to_string(),
+                        ty: TypeExpr::Primitive(PrimitiveName::String),
+                        optional: false,
+                        readonly: false,
+                    }],
+                    index_signatures: Vec::new(),
+                    call_signatures: Vec::new(),
+                },
+            ),
+        }],
+        ..crate::analysis::type_expand::ExpandedComponentTypes::default()
+    };
+
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    // canonical_source intentionally None
+
+    let result = extract_component_meta(input);
+
+    let foo = result.props.iter().find(|p| p.name == "foo").unwrap();
+    assert!(foo.description.is_none(), "no source — no description");
+    assert!(foo.tags.is_empty(), "no source — no tags");
 }

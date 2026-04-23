@@ -66,6 +66,11 @@ pub struct ComponentMetaInput<'a> {
     pub resolved_type_registry: &'a [ResolvedTypeAnalysis],
     pub evaluated_types: Option<&'a crate::analysis::type_expand::ExpandedComponentTypes>,
     pub file_path: &'a str,
+    /// Source text of `file_path` used as a name-based JSDoc fallback for
+    /// expanded-only props (those produced by type expansion that do not
+    /// appear in `prop_fields` or any `resolved_macros` projection). The
+    /// extractor stays host-independent: it never reads files itself.
+    pub canonical_source: Option<&'a str>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1164,6 +1169,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                     &default_keys,
                     &default_values,
                     evaluated_types,
+                    input.canonical_source,
                     &mut props,
                 );
             }
@@ -1219,6 +1225,21 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
     }
 
     reconcile_update_events_with_props(&props, input.macros, &mut events);
+
+    // Synthesize `@defaultValue` JSDoc tag from the prop's resolved default
+    // value. Runs AFTER extraction so it covers every branch (type-based,
+    // runtime, options API, withDefaults). Source JSDoc wins — if the field
+    // already carries a `@defaultValue` tag, we do not overwrite or duplicate.
+    for prop in &mut props {
+        if let Some(value) = prop.default_value.as_ref() {
+            if !prop.tags.iter().any(|t| t.name == "defaultValue") {
+                prop.tags.push(JsdocTag {
+                    name: "defaultValue".to_string(),
+                    text: Some(value.clone()),
+                });
+            }
+        }
+    }
 
     let type_registry = input.resolved_type_registry.to_vec();
     let components = extract_components(input.template);
@@ -1337,6 +1358,7 @@ fn extract_props_from_macro(
     default_keys: &std::collections::HashSet<&str>,
     default_values: &std::collections::HashMap<&str, &str>,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
+    canonical_source: Option<&str>,
     out: &mut Vec<PropAnalysis>,
 ) {
     if let Some(eval_fields) = expanded_define_props_fields(evaluated, macro_index) {
@@ -1368,6 +1390,9 @@ fn extract_props_from_macro(
                     type_expansion.as_ref(),
                 );
 
+                let (description, tags) =
+                    jsdoc_for_expanded_prop(source_field, canonical_source, field.name.as_str());
+
                 out.push(PropAnalysis {
                     name: field.name.clone(),
                     type_expr,
@@ -1376,10 +1401,8 @@ fn extract_props_from_macro(
                     required: !field.optional && !has_default,
                     has_default,
                     default_value,
-                    description: source_field.and_then(|prop| prop.description.clone()),
-                    tags: source_field
-                        .map(|prop| prop.tags.clone())
-                        .unwrap_or_default(),
+                    description,
+                    tags,
                 });
             }
             // NOTE: We intentionally do NOT fall back to prop_fields here.
@@ -1448,6 +1471,9 @@ fn extract_props_from_macro(
                 type_expansion.as_ref(),
             );
 
+            let (description, tags) =
+                jsdoc_for_expanded_prop(None, canonical_source, field.name.as_str());
+
             out.push(PropAnalysis {
                 name: field.name.clone(),
                 type_expr,
@@ -1456,11 +1482,30 @@ fn extract_props_from_macro(
                 required: !field.optional && !has_default,
                 has_default,
                 default_value,
-                description: None,
-                tags: Vec::new(),
+                description,
+                tags,
             });
         }
     }
+}
+
+/// JSDoc lookup for an expanded prop. Uses the source field's JSDoc when the
+/// expansion mirrors a declared prop, otherwise falls back to a name-based
+/// lookup in the canonical source. When neither is available, returns empty.
+fn jsdoc_for_expanded_prop(
+    source_field: Option<&AnalyzedPropField>,
+    canonical_source: Option<&str>,
+    prop_name: &str,
+) -> (Option<String>, Vec<JsdocTag>) {
+    if let Some(field) = source_field {
+        if field.description.is_some() || !field.tags.is_empty() {
+            return (field.description.clone(), field.tags.clone());
+        }
+    }
+    if let Some(source) = canonical_source {
+        return crate::analysis::jsdoc::extract_jsdoc_for_property_name(source, prop_name);
+    }
+    (None, Vec::new())
 }
 
 fn expanded_define_props_fields(

@@ -206,6 +206,58 @@ pub fn extract_jsdoc_near_offset(
     }
 }
 
+/// Find JSDoc preceding a property declaration with the given name in the source
+/// text. Used as a name-based fallback for expanded-only props that have no
+/// span on the AST (`ExpandedProperty` carries no span).
+///
+/// Searches for `name :` or `name ?:` patterns where `name` is a complete
+/// identifier (not a substring of another). For each candidate, attempts to
+/// extract the leading JSDoc using `extract_jsdoc_near_offset`. Returns the
+/// first occurrence with non-empty JSDoc, or `(None, Vec::new())` if none.
+pub fn extract_jsdoc_for_property_name(
+    source: &str,
+    prop_name: &str,
+) -> (Option<String>, Vec<JsdocTag>) {
+    if prop_name.is_empty() {
+        return (None, Vec::new());
+    }
+    let bytes = source.as_bytes();
+    let pat = prop_name.as_bytes();
+    let mut search_start = 0usize;
+
+    while let Some(rel) = source[search_start..].find(prop_name) {
+        let abs = search_start + rel;
+        let after = abs + pat.len();
+
+        let word_boundary_before = abs == 0 || !is_identifier_continue(bytes[abs - 1]);
+        let word_boundary_after = after >= bytes.len() || !is_identifier_continue(bytes[after]);
+
+        if word_boundary_before && word_boundary_after {
+            let mut cursor = after;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'?' {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b':' {
+                let (description, tags) = extract_jsdoc_near_offset(source, abs as u32);
+                if description.is_some() || !tags.is_empty() {
+                    return (description, tags);
+                }
+            }
+        }
+
+        search_start = abs + 1;
+    }
+
+    (None, Vec::new())
+}
+
+fn is_identifier_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
 #[cfg(test)]
 mod tests {
     use super::extract_jsdoc_near_offset;
