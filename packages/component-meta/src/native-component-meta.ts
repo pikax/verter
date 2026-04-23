@@ -489,6 +489,25 @@ export interface NativeFallthroughBranch {
 
 // ── Top-level native result ─────────────────────────────────────
 
+export interface NativeOriginNode {
+  id: number;
+  kind: string;
+  label?: string;
+}
+
+export interface NativeOriginEdge {
+  source: number;
+  target: number;
+  kind: string;
+  metaIndex?: number;
+}
+
+export interface NativeOriginGraph {
+  nodes: NativeOriginNode[];
+  edges: NativeOriginEdge[];
+  metaStrings: string[];
+}
+
 export interface NativeComponentMetaResult {
   props: NativePropMeta[];
   events: NativeEventMeta[];
@@ -515,6 +534,7 @@ export interface NativeComponentMetaResult {
   optionsApi: boolean;
   filePath: string;
   resolution?: NativeComponentMetaResolution;
+  origin?: NativeOriginGraph;
 }
 
 export interface NativeMacroExpansionDiagnostics {
@@ -674,6 +694,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     rootReachability: meta.rootReachability as RootReachability,
     fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface, nativeRegistry),
     flags: meta.flags,
+    ...(meta.origin !== undefined ? { origin: meta.origin } : {}),
   };
 }
 

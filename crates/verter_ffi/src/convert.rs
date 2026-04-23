@@ -3666,4 +3666,90 @@ mod tests {
             "ProjectionMode::Expanded wire format must be 'expanded'"
         );
     }
+
+    #[test]
+    fn ffi_payload_contains_instantiate_edge_for_generic_component() {
+        use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ProjectionMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            compute_audit: None,
+            origin_graph: Some(OriginGraphDto {
+                nodes: vec![
+                    OriginNodeDto {
+                        id: 0,
+                        kind: "Object".to_string(),
+                        label: Some("{...}".to_string()),
+                    },
+                    OriginNodeDto {
+                        id: 1,
+                        kind: "Primitive".to_string(),
+                        label: Some("string".to_string()),
+                    },
+                    OriginNodeDto {
+                        id: 2,
+                        kind: "TypeParam".to_string(),
+                        label: Some("T".to_string()),
+                    },
+                ],
+                edges: vec![
+                    OriginEdgeDto {
+                        source: 1,
+                        target: 0,
+                        kind: "instantiate".to_string(),
+                        meta_index: None,
+                    },
+                    OriginEdgeDto {
+                        source: 2,
+                        target: 0,
+                        kind: "substituteTypeParam".to_string(),
+                        meta_index: Some(0),
+                    },
+                ],
+                meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
+            }),
+        };
+
+        let ffi =
+            component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+
+        assert_eq!(ffi.origin.nodes.len(), 3, "all 3 origin nodes survive FFI");
+        assert_eq!(ffi.origin.edges.len(), 2, "both origin edges survive FFI");
+
+        let has_instantiate = ffi.origin.edges.iter().any(|e| e.kind == "instantiate");
+        let has_substitute = ffi
+            .origin
+            .edges
+            .iter()
+            .any(|e| e.kind == "substituteTypeParam");
+        assert!(has_instantiate, "instantiate edge must survive FFI");
+        assert!(has_substitute, "substituteTypeParam edge must survive FFI");
+
+        let type_param_node = ffi.origin.nodes.iter().find(|n| n.kind == "TypeParam");
+        assert!(type_param_node.is_some(), "TypeParam node must survive FFI");
+        assert_eq!(
+            type_param_node.unwrap().label.as_deref(),
+            Some("T"),
+            "TypeParam label must survive FFI"
+        );
+
+        assert_eq!(ffi.origin.meta_strings.len(), 1, "meta strings survive FFI");
+        assert_eq!(
+            ffi.origin.meta_strings[0], "SubstitutedParam(\"T\")",
+            "meta string content survives FFI"
+        );
+
+        let proto_bytes = verter_protocol::component_meta::encode_component_meta_payload(&ffi);
+        assert!(
+            !proto_bytes.is_empty(),
+            "proto encoding of origin graph must produce non-empty bytes"
+        );
+    }
 }

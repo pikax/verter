@@ -1385,6 +1385,7 @@ function compatSchemaIsOpaqueObject(schema: PropertyMetaSchema): boolean {
   );
 }
 
+/** @deprecated Superseded by origin-walk for generic type derivation paths. */
 function buildCompatSchemaFromRawType(rawType: string): PropertyMetaSchema | undefined {
   const raw = stripSingleOuterParens(rawType.trim());
   if (!raw) {
@@ -2998,10 +2999,7 @@ export class ComponentMetaChecker {
     const partialMatch = /^Partial<\s*([\s\S]+)\s*>$/.exec(typeText);
     if (partialMatch) {
       const innerType = normalizeTypeString(partialMatch[1]!.trim());
-      const innerSchema = this.buildExpandedCompatSchemaFromTypeText(
-        innerType,
-        seen,
-      );
+      const innerSchema = this.buildExpandedCompatSchemaFromTypeText(innerType, seen);
       if (isCompatObjectRecordSchema(innerSchema)) {
         return {
           kind: "object",
@@ -3070,7 +3068,11 @@ export class ComponentMetaChecker {
         type: normalizedTypeText,
         schema: sortCompatSchemaEnumEntries(schemaEntries),
       };
-      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+      if (
+        this.expandedTypeSchemaCache.size >=
+        ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+      )
+        this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
@@ -3087,29 +3089,35 @@ export class ComponentMetaChecker {
             this.buildCompatSchemaLeafFromTypeText(part),
         ) as unknown as Record<string, PropertyMetaSchema>,
       };
-      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+      if (
+        this.expandedTypeSchemaCache.size >=
+        ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+      )
+        this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
     }
 
     if (normalizedTypeText.startsWith("{") && normalizedTypeText.endsWith("}")) {
-      const result = this.buildExpandedCompatObjectSchemaFromTypeText(
-        normalizedTypeText,
-        seen,
-      );
-      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+      const result = this.buildExpandedCompatObjectSchemaFromTypeText(normalizedTypeText, seen);
+      if (
+        this.expandedTypeSchemaCache.size >=
+        ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+      )
+        this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, result);
       seen.delete(cacheKey);
       return result;
     }
 
-    const utilitySchema = this.tryBuildExpandedUtilitySchema(
-      normalizedTypeText,
-      seen,
-    );
+    const utilitySchema = this.tryBuildExpandedUtilitySchema(normalizedTypeText, seen);
     if (utilitySchema) {
-      if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+      if (
+        this.expandedTypeSchemaCache.size >=
+        ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+      )
+        this.expandedTypeSchemaCache.clear();
       this.expandedTypeSchemaCache.set(cacheKey, utilitySchema);
       seen.delete(cacheKey);
       return utilitySchema;
@@ -3132,7 +3140,11 @@ export class ComponentMetaChecker {
                 type: normalizedTypeText,
               }
             : globalTsSchema;
-        if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+        if (
+          this.expandedTypeSchemaCache.size >=
+          ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+        )
+          this.expandedTypeSchemaCache.clear();
         this.expandedTypeSchemaCache.set(cacheKey, result);
         seen.delete(cacheKey);
         return result;
@@ -3140,12 +3152,16 @@ export class ComponentMetaChecker {
     }
 
     const fallback = this.buildCompatSchemaLeafFromTypeText(normalizedTypeText);
-    if (this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE) this.expandedTypeSchemaCache.clear();
+    if (
+      this.expandedTypeSchemaCache.size >= ComponentMetaChecker.MAX_EXPANDED_TYPE_SCHEMA_CACHE_SIZE
+    )
+      this.expandedTypeSchemaCache.clear();
     this.expandedTypeSchemaCache.set(cacheKey, fallback);
     seen.delete(cacheKey);
     return fallback;
   }
 
+  /** @deprecated Superseded by origin-walk for generic type derivation paths. */
   private buildCompatSchemaLeafFromTypeText(typeText: string): PropertyMetaSchema {
     const normalizedTypeText = normalizeTypeString(stripSingleOuterParens(typeText.trim()));
     if (
@@ -3163,6 +3179,7 @@ export class ComponentMetaChecker {
     return buildCompatSchemaFromRawType(normalizedTypeText) ?? normalizedTypeText;
   }
 
+  /** @deprecated Superseded by origin-walk for generic type derivation paths. */
   private buildExpandedCompatObjectSchemaFromTypeText(
     typeText: string,
     seen: Set<string>,
@@ -3221,7 +3238,11 @@ export class ComponentMetaChecker {
 
     const schema = typeName === "HTMLElement" ? getCompatHtmlElementObjectSchema() : undefined;
     if (schema) {
-      if (this.globalTsTypeSchemaCache.size >= ComponentMetaChecker.MAX_GLOBAL_TS_TYPE_SCHEMA_CACHE_SIZE) this.globalTsTypeSchemaCache.clear();
+      if (
+        this.globalTsTypeSchemaCache.size >=
+        ComponentMetaChecker.MAX_GLOBAL_TS_TYPE_SCHEMA_CACHE_SIZE
+      )
+        this.globalTsTypeSchemaCache.clear();
       this.globalTsTypeSchemaCache.set(typeName, schema);
     }
     return schema;

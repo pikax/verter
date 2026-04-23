@@ -12,6 +12,7 @@ import {
   ExpansionExactness,
   ExpansionExecutionStatus,
   ExpansionStopReason,
+  OriginGraphSchema,
 } from "./gen/verter/v1/component_meta_pb.js";
 
 describe("ComponentMetaPayloadSchema", () => {
@@ -75,5 +76,55 @@ describe("ComponentMetaPayloadSchema", () => {
     const bytesWithout = toBinary(ComponentMetaPayloadSchema, withoutDiags);
     const decodedWithout = fromBinary(ComponentMetaPayloadSchema, bytesWithout);
     expect(decodedWithout.body?.macroExpansionDiagnostics).toHaveLength(0);
+  });
+
+  it("round-trips origin graph with nodes, edges, and meta strings", () => {
+    const base = createTestComponentMetaPayload();
+    const originGraph = create(OriginGraphSchema, {
+      nodes: [
+        { id: 0, kindId: 0, labelId: 1 },
+        { id: 1, kindId: 2, labelId: 3 },
+      ],
+      edges: [
+        { source: 0, target: 1, kindId: 4, metaIndex: 0, hasMeta: false },
+        { source: 1, target: 0, kindId: 5, metaIndex: 0, hasMeta: true },
+      ],
+      metaStrings: [
+        'SubstitutedParam("T")',
+        "Object",
+        "{...}",
+        "Primitive",
+        "string",
+        "instantiate",
+        "substituteTypeParam",
+      ],
+    });
+    const withOrigin = create(ComponentMetaPayloadSchema, {
+      ...base,
+      originGraph,
+    });
+    const bytes = toBinary(ComponentMetaPayloadSchema, withOrigin);
+    const decoded = fromBinary(ComponentMetaPayloadSchema, bytes);
+
+    expect(decoded.originGraph).toBeDefined();
+    expect(decoded.originGraph!.nodes).toHaveLength(2);
+    expect(decoded.originGraph!.edges).toHaveLength(2);
+    expect(decoded.originGraph!.metaStrings).toContain("instantiate");
+    expect(decoded.originGraph!.metaStrings).toContain("substituteTypeParam");
+    expect(decoded.originGraph!.metaStrings).toContain("Object");
+
+    const edge0 = decoded.originGraph!.edges[0];
+    expect(edge0.hasMeta).toBe(false);
+    const edge1 = decoded.originGraph!.edges[1];
+    expect(edge1.hasMeta).toBe(true);
+    expect(decoded.originGraph!.metaStrings[edge1.metaIndex]).toBe('SubstitutedParam("T")');
+  });
+
+  it("omits origin graph when not provided (backward compat)", () => {
+    const base = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, base);
+    const bytes = toBinary(ComponentMetaPayloadSchema, payload);
+    const decoded = fromBinary(ComponentMetaPayloadSchema, bytes);
+    expect(decoded.originGraph).toBeUndefined();
   });
 });

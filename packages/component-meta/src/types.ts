@@ -3,6 +3,7 @@
  */
 
 import type { TypeDescriptor } from "./type-ir.js";
+import type { NativeOriginGraph } from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */
 export interface ComponentMeta {
@@ -67,6 +68,11 @@ export interface ComponentMeta {
 
   /** Quick O(1) boolean checks for component characteristics. */
   flags: ComponentFlags;
+
+  // ── Origin graph ──────────────────────────────────────────────
+
+  /** Semantic derivation graph tracing how types were resolved. */
+  origin?: NativeOriginGraph;
 }
 
 /** A single JSDoc tag. */

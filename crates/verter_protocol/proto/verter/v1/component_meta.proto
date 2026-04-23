@@ -7,6 +7,27 @@ message ComponentMetaPayload {
   TypeGraph type_graph = 2;
   repeated TypeRegistryEntry type_registry = 3;
   ComponentMetaBody body = 4;
+  OriginGraph origin_graph = 5;
+}
+
+message OriginGraph {
+  repeated OriginNode nodes = 1;
+  repeated OriginEdge edges = 2;
+  repeated string meta_strings = 3;
+}
+
+message OriginNode {
+  uint32 id = 1;
+  uint32 kind_id = 2;
+  uint32 label_id = 3;
+}
+
+message OriginEdge {
+  uint32 source = 1;
+  uint32 target = 2;
+  uint32 kind_id = 3;
+  uint32 meta_index = 4;
+  bool has_meta = 5;
 }
 
 message TypeGraph {

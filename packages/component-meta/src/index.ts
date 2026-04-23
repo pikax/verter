@@ -166,6 +166,10 @@ export type {
   NativeBranchStatus,
   NativeUnresolvedBranchReason,
   NativeResolvedRootStep,
+  // Native origin graph types
+  NativeOriginNode,
+  NativeOriginEdge,
+  NativeOriginGraph,
 } from "./native-component-meta.js";
 
 // Session-first project API
@@ -176,6 +180,10 @@ export {
   shutdownMetaRuntime,
 } from "./project.js";
 export type { ComponentMetaSessionConfig } from "./project.js";
+
+// Origin graph walk API
+export { getMetaOrigin, walkOriginChain, findOriginNodesByKind } from "./origin-walk.js";
+export type { OriginWalkResult, OriginChainEntry } from "./origin-walk.js";
 
 // Semantic pipeline types (from verter_protocol via @verter/language-shared)
 export type {

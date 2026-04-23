@@ -2,12 +2,16 @@ import type { Message, MessageInitShape } from "@bufbuild/protobuf";
 
 import {
   ComponentMetaPayloadSchema,
+  OriginGraphSchema,
   type ComponentMetaPayload as RawComponentMetaPayload,
   type TypeGraph as RawTypeGraph,
   type TypeNode as RawTypeNode,
+  type OriginGraph as RawOriginGraph,
+  type OriginNode as RawOriginNode,
+  type OriginEdge as RawOriginEdge,
 } from "./gen/verter/v1/component_meta_pb.js";
 
-export { ComponentMetaPayloadSchema };
+export { ComponentMetaPayloadSchema, OriginGraphSchema };
 
 export type ProtoRecord<TypeName extends string = string> = Message<TypeName> & Record<string, any>;
 
@@ -17,6 +21,11 @@ export type ComponentMetaPayload = ProtoRecord<"verter.v1.ComponentMetaPayload">
   RawComponentMetaPayload;
 
 export type ComponentMetaPayloadInit = MessageInitShape<typeof ComponentMetaPayloadSchema>;
+export type OriginGraphInit = MessageInitShape<typeof OriginGraphSchema>;
+
+export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginGraph;
+export type ProtoOriginNode = ProtoRecord<"verter.v1.OriginNode"> & RawOriginNode;
+export type ProtoOriginEdge = ProtoRecord<"verter.v1.OriginEdge"> & RawOriginEdge;
 
 const SCHEMA_VERSION = 1;
 const PRIMITIVE_STRING = 1;

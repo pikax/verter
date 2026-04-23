@@ -10220,23 +10220,41 @@ fn build_origin_graph(
             return idx;
         }
         let idx = nodes.len() as u32;
-        let kind = graph
+        let (kind, label) = graph
             .node_data(id)
             .map(|d| {
-                format!("{:?}", &*d).split_once('{').map_or_else(
+                use crate::semantic_query::SemanticNodeData;
+                let k = format!("{:?}", &*d).split_once('{').map_or_else(
                     || {
                         format!("{:?}", &*d)
                             .split_once('(')
                             .map_or_else(|| format!("{:?}", &*d), |(name, _)| name.to_string())
                     },
                     |(name, _)| name.to_string(),
-                )
+                );
+                let l = match &*d {
+                    SemanticNodeData::Primitive(p) => Some(format!("{p:?}").to_lowercase()),
+                    SemanticNodeData::Object(_) => Some("{...}".to_string()),
+                    SemanticNodeData::TypeParam { display_name, .. } => {
+                        Some(display_name.to_string())
+                    }
+                    SemanticNodeData::Literal(lit) => Some(format!("{lit:?}")),
+                    SemanticNodeData::Array { readonly, .. } => {
+                        Some(if *readonly { "readonly T[]" } else { "T[]" }.to_string())
+                    }
+                    SemanticNodeData::Tuple { .. } => Some("[...]".to_string()),
+                    SemanticNodeData::Union(_) => Some("A | B".to_string()),
+                    SemanticNodeData::Intersection(_) => Some("A & B".to_string()),
+                    SemanticNodeData::Function { .. } => Some("(...) => R".to_string()),
+                    _ => None,
+                };
+                (k, l)
             })
-            .unwrap_or_else(|| "Unknown".to_string());
+            .unwrap_or_else(|| ("Unknown".to_string(), None));
         nodes.push(OriginNodeDto {
             id: idx,
             kind,
-            label: None,
+            label,
         });
         node_index.insert(id, idx);
         idx

@@ -9,6 +9,7 @@ import {
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import type {
   NativeConsumedRootBindings,
+  NativeOriginGraph,
   NativeRootBranch,
   NativeRootReachability,
   NativeRootTargetRef,
@@ -148,9 +149,11 @@ function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaR
   const graph = decodeTypeGraph(message.typeGraph);
   const typeRegistry = message.typeRegistry.map((entry) => decodeTypeRegistryEntry(entry, graph));
   const body = decodeComponentMetaBody(message.body, graph);
+  const origin = decodeOptionalOriginGraph(message);
   return {
     ...body,
     typeRegistry,
+    ...(origin !== undefined ? { origin } : {}),
   } as unknown as NativeComponentMetaResult;
 }
 
@@ -160,6 +163,31 @@ function decodeTypeGraph(typeGraph: ProtoRecord): DecodedTypeGraph {
   const graph = new DecodedTypeGraph(strings, nodes);
   validateNodeTable(graph);
   return graph;
+}
+
+function decodeOptionalOriginGraph(message: ComponentMetaPayload): NativeOriginGraph | undefined {
+  const og = (message as ProtoRecord).originGraph as ProtoRecord | undefined;
+  if (!og) return undefined;
+  const metaStrings = [...((og.metaStrings as string[] | undefined) ?? [])];
+  const nodes = ((og.nodes as ProtoRecord[] | undefined) ?? []).map((node) => {
+    const id = Number(node.id ?? 0);
+    const kindId = Number(node.kindId ?? 0);
+    const labelId = Number(node.labelId ?? 0);
+    const kind = metaStrings[kindId] ?? `unknown(${kindId})`;
+    const label = labelId !== 0 ? metaStrings[labelId] : undefined;
+    return { id, kind, ...(label !== undefined ? { label } : {}) };
+  });
+  const edges = ((og.edges as ProtoRecord[] | undefined) ?? []).map((edge) => {
+    const source = Number(edge.source ?? 0);
+    const target = Number(edge.target ?? 0);
+    const kindId = Number(edge.kindId ?? 0);
+    const kind = metaStrings[kindId] ?? `unknown(${kindId})`;
+    const hasMeta = Boolean(edge.hasMeta);
+    const metaIndex = hasMeta ? Number(edge.metaIndex ?? 0) : undefined;
+    return { source, target, kind, ...(metaIndex !== undefined ? { metaIndex } : {}) };
+  });
+  if (edges.length === 0) return undefined;
+  return { nodes, edges, metaStrings };
 }
 
 function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {

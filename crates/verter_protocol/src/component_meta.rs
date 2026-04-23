@@ -19,12 +19,13 @@ use crate::verter::v1::{
     FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
     IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
     MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance, ModelMeta,
-    ObjectMember as ProtoObjectMember, ObjectNode, ParenthesizedNode, PartialBranchReason,
-    PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode, ResolvedEmitField,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedPropField,
-    ResolvedRootStep, ResolvedSlotBinding, ResolvedSlotField, ResolvedTypeDeclaration, RestNode,
-    RootBranch, RootInfo, RootReachability, RootTargetRef, ScriptBlockMeta, SelectorMeta,
-    SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
+    ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
+    OriginGraph as ProtoOriginGraph, OriginNode as ProtoOriginNode, ParenthesizedNode,
+    PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode,
+    ResolvedEmitField, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
+    ResolvedPropField, ResolvedRootStep, ResolvedSlotBinding, ResolvedSlotField,
+    ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability, RootTargetRef,
+    ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
     StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta, TemplateLiteralNode,
     TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode, TypeParameterNode,
     TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason,
@@ -45,12 +46,14 @@ pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
         strings: builder.strings().to_vec(),
         nodes: builder.nodes().iter().map(graph_node_to_proto).collect(),
     });
+    let origin_graph = origin_graph_to_proto(&meta.origin);
 
     ComponentMetaPayload {
         schema_version: COMPONENT_META_SCHEMA_VERSION,
         type_graph,
         type_registry,
         body,
+        origin_graph,
     }
 }
 
@@ -1276,6 +1279,58 @@ fn string_ids(builder: &mut GraphBuilder, values: &[String]) -> Vec<u32> {
         .collect()
 }
 
+fn origin_graph_to_proto(origin: &OriginGraphDto) -> Option<ProtoOriginGraph> {
+    if origin.edges.is_empty() {
+        return None;
+    }
+    let mut strings: Vec<String> = origin.meta_strings.clone();
+    let mut string_map: std::collections::HashMap<String, u32> = strings
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i as u32))
+        .collect();
+
+    let mut intern_str = |s: &str| -> u32 {
+        if let Some(&idx) = string_map.get(s) {
+            idx
+        } else {
+            let idx = strings.len() as u32;
+            strings.push(s.to_string());
+            string_map.insert(s.to_string(), idx);
+            idx
+        }
+    };
+
+    let mut nodes: Vec<ProtoOriginNode> = Vec::with_capacity(origin.nodes.len());
+    for node in &origin.nodes {
+        let kind_id = intern_str(&node.kind);
+        let label_id = node.label.as_deref().map(&mut intern_str).unwrap_or(0);
+        nodes.push(ProtoOriginNode {
+            id: node.id,
+            kind_id,
+            label_id,
+        });
+    }
+
+    let mut edges: Vec<ProtoOriginEdge> = Vec::with_capacity(origin.edges.len());
+    for edge in &origin.edges {
+        let kind_id = intern_str(&edge.kind);
+        edges.push(ProtoOriginEdge {
+            source: edge.source,
+            target: edge.target,
+            kind_id,
+            meta_index: edge.meta_index.unwrap_or(0),
+            has_meta: edge.meta_index.is_some(),
+        });
+    }
+
+    Some(ProtoOriginGraph {
+        nodes,
+        edges,
+        meta_strings: strings,
+    })
+}
+
 fn expansion_exactness_to_proto(value: &str) -> proto::ExpansionExactness {
     match value {
         "exactConcrete" => proto::ExpansionExactness::ExactConcrete,
@@ -1550,6 +1605,90 @@ mod tests {
         assert!(
             !flags.async_setup,
             "protocol should compile the component-meta flag DTOs directly"
+        );
+    }
+
+    #[test]
+    fn component_meta_payload_roundtrips_origin_graph() {
+        use crate::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+
+        let mut meta = super::build_test_meta();
+        meta.origin = OriginGraphDto {
+            nodes: vec![
+                OriginNodeDto {
+                    id: 0,
+                    kind: "Object".to_string(),
+                    label: Some("{...}".to_string()),
+                },
+                OriginNodeDto {
+                    id: 1,
+                    kind: "Primitive".to_string(),
+                    label: Some("string".to_string()),
+                },
+                OriginNodeDto {
+                    id: 2,
+                    kind: "TypeParam".to_string(),
+                    label: Some("T".to_string()),
+                },
+            ],
+            edges: vec![
+                OriginEdgeDto {
+                    source: 1,
+                    target: 0,
+                    kind: "instantiate".to_string(),
+                    meta_index: None,
+                },
+                OriginEdgeDto {
+                    source: 2,
+                    target: 0,
+                    kind: "substituteTypeParam".to_string(),
+                    meta_index: Some(0),
+                },
+            ],
+            meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
+        };
+
+        let payload = super::component_meta_payload(&meta);
+        let bytes = payload.encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(bytes.as_slice()).expect("proto payload should decode");
+
+        let origin = decoded
+            .origin_graph
+            .as_ref()
+            .expect("origin_graph should be present");
+
+        assert_eq!(origin.nodes.len(), 3, "all 3 origin nodes survive");
+        assert_eq!(origin.edges.len(), 2, "both origin edges survive");
+
+        let strings = &origin.meta_strings;
+        let node0 = &origin.nodes[0];
+        assert_eq!(
+            strings[node0.kind_id as usize], "Object",
+            "node kind survives round-trip"
+        );
+        assert_ne!(node0.label_id, 0, "node label_id should be non-zero");
+        assert_eq!(
+            strings[node0.label_id as usize], "{...}",
+            "node label survives round-trip"
+        );
+
+        let edge0 = &origin.edges[0];
+        assert_eq!(
+            strings[edge0.kind_id as usize], "instantiate",
+            "edge kind survives round-trip"
+        );
+        assert!(!edge0.has_meta, "first edge has no meta");
+
+        let edge1 = &origin.edges[1];
+        assert_eq!(
+            strings[edge1.kind_id as usize], "substituteTypeParam",
+            "second edge kind survives round-trip"
+        );
+        assert!(edge1.has_meta, "second edge has meta");
+        assert_eq!(
+            strings[edge1.meta_index as usize], "SubstitutedParam(\"T\")",
+            "edge meta_index resolves correctly"
         );
     }
 }

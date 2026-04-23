@@ -31,3 +31,6 @@ export type {
 } from "./types.js";
 
 export { typeDescriptorToSchema, typeDescriptorToString } from "./schema.js";
+
+export { getMetaOrigin, walkOriginChain, findOriginNodesByKind } from "../origin-walk.js";
+export type { OriginWalkResult, OriginChainEntry } from "../origin-walk.js";
