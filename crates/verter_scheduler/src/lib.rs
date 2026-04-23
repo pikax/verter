@@ -23,6 +23,7 @@ pub mod overlay;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pool;
 pub mod queue;
+pub mod request_context;
 pub mod scheduler;
 pub mod source_loader;
 pub mod stage;

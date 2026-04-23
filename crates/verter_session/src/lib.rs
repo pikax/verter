@@ -1278,6 +1278,7 @@ impl VerterHost {
                     priority: verter_scheduler::stage::Priority::Interactive,
                     source: None,
                     file_kind: None,
+                    request_context: None,
                 });
 
             // Wait for the scheduler to reach Analysis. `wait_or_drive` drives

@@ -87,6 +87,13 @@ pub struct Request {
     pub priority: Priority,
     pub source: Option<Arc<str>>,
     pub file_kind: Option<SourceFileKind>,
+    /// Optional session-side request context. When present, the
+    /// scheduler stores the winner's context on the dedup group,
+    /// fires `on_dedup_joiner` callbacks when this request joins an
+    /// existing group, and installs the context into worker TLS
+    /// around each stage closure so `current_request_id()` returns a
+    /// meaningful value while the job runs.
+    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
 /// Path C C12 — batch submission handle (plan §2 Stage 7 Pass C12).
@@ -273,6 +280,7 @@ impl Scheduler {
             file_kind: request.file_kind,
             sender: sender.clone(),
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+            request_context: request.request_context,
         };
         match self.inbox.sender.send(submission) {
             Ok(()) => {
@@ -566,6 +574,7 @@ impl Scheduler {
                     priority: std::cmp::min(inherited_priority, Priority::Interactive),
                     source: None,
                     file_kind: None,
+                    request_context: None,
                     sender: {
                         let (_, s) = completion_pair::<RequestResult>();
                         s
@@ -718,6 +727,7 @@ impl Scheduler {
                 source: None,
                 file_kind: None,
                 submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+                request_context: None,
                 sender: {
                     let (_, sender) = completion_pair::<RequestResult>();
                     sender
@@ -798,6 +808,7 @@ impl Scheduler {
                 file_kind,
                 sender,
                 submitted_epoch,
+                request_context,
             } => {
                 self.handle_new_request(
                     file_id,
@@ -807,6 +818,7 @@ impl Scheduler {
                     file_kind,
                     sender,
                     submitted_epoch,
+                    request_context,
                 );
             }
             Submission::StageComplete {
@@ -837,6 +849,7 @@ impl Scheduler {
         file_kind: Option<SourceFileKind>,
         sender: CompletionSender<RequestResult>,
         submitted_epoch: u64,
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
     ) {
         // Check tombstone. A submission is stale if it was submitted before
         // the removal (submitted_epoch < tombstone_epoch). Only genuinely
@@ -922,10 +935,18 @@ impl Scheduler {
             return;
         }
 
-        // Register pending request
-        let upgrade = node
-            .pending_requests
-            .register(generation, target.clone(), priority, sender);
+        // Register pending request. The dedup hook fires inside `register`
+        // when this request joins an existing winner's group — the winner's
+        // stored context is called back via `on_dedup_joiner`.
+        let canonical_id: Arc<str> = Arc::from(file_id.as_str());
+        let upgrade = node.pending_requests.register(
+            generation,
+            target.clone(),
+            priority,
+            sender,
+            request_context,
+            &canonical_id,
+        );
 
         // Determine what job to enqueue
         let first_missing = if node.current_source().is_none() {
@@ -1199,30 +1220,70 @@ impl Scheduler {
                 continue;
             }
 
+            // Look up the winner's session-side context for this job's
+            // generation. The closure below installs it into TLS for the
+            // duration of the stage so `current_request_id()` returns
+            // the winner's request id while the worker runs.
+            let winner_ctx = node
+                .pending_requests
+                .winner_context_at_generation(generation);
+
             if matches!(task_kind, TaskKind::Source) {
                 // Source jobs: I/O pool loads content, then hands off to CPU pool
                 // for parse. This keeps disk reads off the CPU threads.
+                let node_for_panic = Arc::clone(&node);
                 self.io_pool.execute(move || {
-                    Self::execute_stage_on_worker(
-                        &node,
-                        generation,
-                        task_kind,
-                        executor.as_ref(),
-                        source_loader.as_ref(),
-                        &inbox_sender,
-                    );
+                    let _guard =
+                        winner_ctx.map(crate::request_context::OpaqueContextGuard::install);
+                    // Catch panics so the worker thread (and its TLS
+                    // guard's RAII drop) stays intact for subsequent
+                    // jobs on the same pool.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::execute_stage_on_worker(
+                            &node,
+                            generation,
+                            task_kind,
+                            executor.as_ref(),
+                            source_loader.as_ref(),
+                            &inbox_sender,
+                        );
+                    }));
+                    if result.is_err() {
+                        // Surface the panic as Failed to all pending
+                        // groups at this generation so callers aren't
+                        // left hanging.
+                        Self::surface_stage_panic_as_failed(
+                            &node_for_panic,
+                            generation,
+                            &task_kind,
+                            &inbox_sender,
+                        );
+                    }
                 });
             } else {
                 // Analysis/Artifact jobs: pure CPU work.
+                let node_for_panic = Arc::clone(&node);
                 self.cpu_pool.spawn(move || {
-                    Self::execute_stage_on_worker(
-                        &node,
-                        generation,
-                        task_kind,
-                        executor.as_ref(),
-                        source_loader.as_ref(),
-                        &inbox_sender,
-                    );
+                    let _guard =
+                        winner_ctx.map(crate::request_context::OpaqueContextGuard::install);
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::execute_stage_on_worker(
+                            &node,
+                            generation,
+                            task_kind,
+                            executor.as_ref(),
+                            source_loader.as_ref(),
+                            &inbox_sender,
+                        );
+                    }));
+                    if result.is_err() {
+                        Self::surface_stage_panic_as_failed(
+                            &node_for_panic,
+                            generation,
+                            &task_kind,
+                            &inbox_sender,
+                        );
+                    }
                 });
             }
         }
@@ -1250,6 +1311,29 @@ impl Scheduler {
             self.source_loader.as_ref(),
             &self.inbox.sender,
         );
+    }
+
+    /// Surface a worker-stage panic as `Failed` on all pending groups
+    /// at this `(generation, task_kind)` so callers never hang on a
+    /// crashed stage. The panic has been swallowed by the worker's
+    /// `catch_unwind` — this helper completes the signalling that the
+    /// executor's normal error path would have done.
+    fn surface_stage_panic_as_failed(
+        node: &FileNode,
+        generation: u64,
+        task_kind: &TaskKind,
+        _inbox_sender: &crossbeam_channel::Sender<Submission>,
+    ) {
+        if node.generation() != generation {
+            return;
+        }
+        let error = crate::job::SchedulerError::StageFailed {
+            file_id: node.canonical_id.clone(),
+            stage: format!("{task_kind:?}"),
+            message: "stage executor panicked".to_string(),
+        };
+        node.pending_requests
+            .signal_failed_for_stage(generation, task_kind, error);
     }
 
     /// Execute a stage on a worker (rayon thread or inline).
@@ -1646,6 +1730,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1673,6 +1758,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1699,6 +1785,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1729,6 +1816,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("provided content")),
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1757,6 +1845,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
             file_kind: None,
+            request_context: None,
         });
 
         // Second request (newer source) — before first is processed
@@ -1766,6 +1855,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1798,6 +1888,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         assert!(h1.try_get().unwrap().is_ready());
@@ -1809,6 +1900,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         // Process the submission (but no stage work needed)
         sched.drain_inbox();
@@ -1832,6 +1924,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         let hb = sched.submit_request(Request {
             file_id: "/b.vue".to_string(),
@@ -1839,6 +1932,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         let hc = sched.submit_request(Request {
             file_id: "/c.vue".to_string(),
@@ -1846,6 +1940,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -1871,6 +1966,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -1894,6 +1990,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("editor content")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -1921,6 +2018,7 @@ mod tests {
             priority: Priority::Background,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         // Process submission but DON'T drive stages — the handle stays pending
@@ -1958,6 +2056,7 @@ mod tests {
             priority: Priority::Background,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         // Submit high priority second
         sched.submit_request(Request {
@@ -1966,6 +2065,7 @@ mod tests {
             priority: Priority::Critical,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         // Drain inbox so jobs are in the queue
@@ -1995,6 +2095,7 @@ mod tests {
             priority: Priority::Critical,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         // Wait for completion (driver thread processes it)
@@ -2055,6 +2156,7 @@ mod tests {
             priority: Priority::Critical,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         // Drive: Source(A) → Analysis(A), but Artifact(A) should be gated
@@ -2103,6 +2205,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -2128,6 +2231,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
 
         sched.drive_all();
@@ -2159,6 +2263,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let gen1 = match h.try_get().unwrap() {
@@ -2178,6 +2283,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("v2")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let gen2 = match h2.try_get().unwrap() {
@@ -2241,6 +2347,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a content")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         assert!(h.try_get().unwrap().is_ready());
@@ -2262,6 +2369,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a content v2")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         assert!(h2.try_get().unwrap().is_ready());
@@ -2310,6 +2418,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("v1")),
             file_kind: None,
+            request_context: None,
         });
 
         // Remove BEFORE the driver processes h1 (bumps epoch to 1)
@@ -2355,6 +2464,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -2392,6 +2502,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -2417,6 +2528,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         h.wait();
         assert!(sched.has_node("/a.vue"));
@@ -2440,6 +2552,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
             file_kind: None,
+            request_context: None,
         });
         let state = h2.wait();
         assert!(
@@ -2462,6 +2575,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         let pre_gen = match h.wait() {
             CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
@@ -2479,6 +2593,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
             file_kind: None,
+            request_context: None,
         });
         let post_gen = match h2.wait() {
             CompletionState::Ready(RequestResult::Analysis(s)) => s.generation,
@@ -2523,6 +2638,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let _gen = match h.try_get().unwrap() {
@@ -2537,6 +2653,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
             file_kind: None,
+            request_context: None,
         });
         // DON'T drive yet — the new gen hasn't been assigned
 
@@ -2576,6 +2693,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let gen = match h.try_get().unwrap() {
@@ -2639,6 +2757,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let gen_g = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2650,6 +2769,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
             file_kind: None,
+            request_context: None,
         });
         // Node is still at gen G — the G+1 bump hasn't happened yet.
         assert_eq!(
@@ -2699,6 +2819,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_one(); // processes the Source job only
         let gen = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2745,6 +2866,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v1")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -2762,6 +2884,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a v2")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
 
@@ -2786,6 +2909,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         // DON'T drive — scheduler hasn't processed anything
 
@@ -2839,6 +2963,7 @@ mod tests {
             priority: Priority::Interactive,
             source: Some(Arc::from("a")),
             file_kind: None,
+            request_context: None,
         });
         sched.drive_all();
         let gen = sched.try_get_source("/a.vue").unwrap().generation;
@@ -2858,6 +2983,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         // Drive just admission — don't drive the dep's Source/Analysis
         sched.drain_inbox();
@@ -2881,5 +3007,546 @@ mod tests {
             h.try_get().unwrap().is_ready(),
             "artifact should complete after blocker resolved"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Commit 2 (F2) — Scheduler request context + worker TLS install
+    // ──────────────────────────────────────────────────────────────────
+
+    use crate::node::PendingRequests;
+    use crate::request_context::{
+        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Mutex as StdMutex;
+
+    /// Test-only implementation of `RequestContextLike` that captures
+    /// the observations each probe wants to assert on:
+    ///
+    /// - `seen_request_ids`: every distinct `current_request_id()`
+    ///   observed from inside the stage closure (workers record into
+    ///   this field via `record_cache_event` and a thread-local probe).
+    /// - `dedup_joiner_calls`: every `on_dedup_joiner` invocation,
+    ///   including the winner details.
+    /// - `capture_enabled` mirrors the plan's
+    ///   `RequestContext::footprint_capture`.
+    struct TestContext {
+        request_id: u64,
+        capture: bool,
+        dedup_joiner_calls: StdMutex<Vec<(Arc<str>, u64, bool)>>,
+    }
+
+    impl TestContext {
+        fn new(request_id: u64, capture: bool) -> Arc<Self> {
+            Arc::new(Self {
+                request_id,
+                capture,
+                dedup_joiner_calls: StdMutex::new(Vec::new()),
+            })
+        }
+        fn joiner_calls(&self) -> Vec<(Arc<str>, u64, bool)> {
+            self.dedup_joiner_calls.lock().unwrap().clone()
+        }
+    }
+
+    struct TestGuardBox(#[allow(dead_code)] crate::request_context::OpaqueContextGuard);
+    impl TlsUninstall for TestGuardBox {
+        fn uninstall(self: Box<Self>) {}
+    }
+
+    impl RequestContextLike for TestContext {
+        fn request_id(&self) -> u64 {
+            self.request_id
+        }
+        fn capture_enabled(&self) -> bool {
+            self.capture
+        }
+        fn on_dedup_joiner(
+            &self,
+            canonical_id: Arc<str>,
+            winner_request_id: u64,
+            winner_audited: bool,
+        ) {
+            self.dedup_joiner_calls.lock().unwrap().push((
+                canonical_id,
+                winner_request_id,
+                winner_audited,
+            ));
+        }
+        fn record_cache_event(&self, _event: CacheEventKind) {}
+        fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+            let guard = crate::request_context::OpaqueContextGuard::install(OpaqueRequestContext(
+                self as Arc<dyn RequestContextLike>,
+            ));
+            Box::new(TestGuardBox(guard))
+        }
+    }
+
+    /// Probe executor that records `current_request_id()` as it sees it
+    /// at each stage. Uses an Arc-shared `AtomicU64` (per-stage) so the
+    /// test thread can read what the worker thread observed.
+    struct ProbeExecutor {
+        source_observed: Arc<AtomicU64>,
+        analysis_observed: Arc<AtomicU64>,
+        artifact_observed: Arc<AtomicU64>,
+        panic_on_analysis: Arc<AtomicBool>,
+    }
+
+    impl ProbeExecutor {
+        fn new() -> Self {
+            Self {
+                source_observed: Arc::new(AtomicU64::new(0)),
+                analysis_observed: Arc::new(AtomicU64::new(0)),
+                artifact_observed: Arc::new(AtomicU64::new(0)),
+                panic_on_analysis: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl StageExecutor for ProbeExecutor {
+        fn execute_source(
+            &self,
+            _canonical_id: &str,
+            _file_kind: crate::node::FileKind,
+            content: Arc<str>,
+            generation: u64,
+        ) -> Result<SourceSnapshot, crate::executor::StageError> {
+            let id = crate::request_context::current_request_id().unwrap_or(0);
+            self.source_observed.store(id, AtomicOrdering::SeqCst);
+            Ok(SourceSnapshot::new_empty(content, generation))
+        }
+        fn execute_analysis(
+            &self,
+            _canonical_id: &str,
+            _source: &SourceSnapshot,
+            generation: u64,
+        ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+            let id = crate::request_context::current_request_id().unwrap_or(0);
+            self.analysis_observed.store(id, AtomicOrdering::SeqCst);
+            if self.panic_on_analysis.load(AtomicOrdering::SeqCst) {
+                panic!("probe executor panic_on_analysis");
+            }
+            Ok(AnalysisSnapshot::new_empty(generation))
+        }
+        fn execute_artifact(
+            &self,
+            _canonical_id: &str,
+            _source: &SourceSnapshot,
+            _analysis: &AnalysisSnapshot,
+            profile_hash: u64,
+            generation: u64,
+        ) -> Result<ArtifactSnapshot, crate::executor::StageError> {
+            let id = crate::request_context::current_request_id().unwrap_or(0);
+            self.artifact_observed.store(id, AtomicOrdering::SeqCst);
+            Ok(ArtifactSnapshot {
+                generation,
+                profile_hash,
+                data: Arc::new(crate::node::EmptyData),
+            })
+        }
+    }
+
+    fn async_scheduler_with_executor(executor: Arc<dyn StageExecutor>) -> Arc<Scheduler> {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/ctx.vue".to_string(), Arc::from("<template>x</template>"));
+        Scheduler::with_executor(SchedulerConfig::default(), loader, executor)
+    }
+
+    /// A CPU-worker stage (`Analysis` at minimum) must observe the
+    /// request's context via `current_request_id()` while executing.
+    #[test]
+    fn scheduler_request_context_installed_as_tls_on_cpu_worker() {
+        let probe = Arc::new(ProbeExecutor::new());
+        let analysis_observed = Arc::clone(&probe.analysis_observed);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+        let ctx = TestContext::new(42, true);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+
+        let handle = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        let state = handle.wait();
+        assert!(
+            state.is_ready(),
+            "analysis must have completed, got {state:?}"
+        );
+        assert_eq!(
+            analysis_observed.load(AtomicOrdering::SeqCst),
+            42,
+            "CPU worker must have observed request_id=42 via current_request_id()",
+        );
+    }
+
+    /// The Source stage runs on the I/O pool — the same TLS-install
+    /// guarantee applies.
+    #[test]
+    fn scheduler_request_context_installed_as_tls_on_io_worker() {
+        let probe = Arc::new(ProbeExecutor::new());
+        let source_observed = Arc::clone(&probe.source_observed);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+        let ctx = TestContext::new(7, true);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+
+        let handle = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        let state = handle.wait();
+        assert!(state.is_ready());
+        assert_eq!(
+            source_observed.load(AtomicOrdering::SeqCst),
+            7,
+            "I/O worker must have observed request_id=7 via current_request_id()",
+        );
+    }
+
+    /// After a job completes, the TLS slot on the worker thread must
+    /// be clear — subsequent jobs on the same thread (reused from the
+    /// pool) must not inherit a stale context.
+    #[test]
+    fn scheduler_request_context_dropped_after_job_completes() {
+        // We observe "after" state by submitting a SECOND request that
+        // carries NO context; the probe must then see `None` (== 0) at
+        // execution time.
+        let probe = Arc::new(ProbeExecutor::new());
+        let analysis_observed = Arc::clone(&probe.analysis_observed);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+
+        let ctx = TestContext::new(11, false);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+        let h1 = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        h1.wait();
+        assert_eq!(analysis_observed.load(AtomicOrdering::SeqCst), 11);
+
+        // Now submit a request with a fresh source (bumping generation)
+        // and no context — TLS must be clean when the worker runs.
+        let h2 = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("<template>y</template>")),
+            file_kind: None,
+            request_context: None,
+        });
+        h2.wait();
+        assert_eq!(
+            analysis_observed.load(AtomicOrdering::SeqCst),
+            0,
+            "worker TLS must be clean for the context-less request",
+        );
+    }
+
+    /// Panic inside the stage executor must still unwind the TLS guard
+    /// so the worker thread's slot is clean afterwards.
+    #[test]
+    fn scheduler_worker_tls_cleared_on_panic_unwind() {
+        let probe = Arc::new(ProbeExecutor::new());
+        let panic_flag = Arc::clone(&probe.panic_on_analysis);
+        let analysis_observed = Arc::clone(&probe.analysis_observed);
+        panic_flag.store(true, AtomicOrdering::SeqCst);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+        let ctx = TestContext::new(91, true);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+
+        let handle = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        let state = handle.wait();
+        assert!(
+            matches!(state, CompletionState::Failed(_)),
+            "panicked stage must surface as Failed, got {state:?}"
+        );
+        assert_eq!(
+            analysis_observed.load(AtomicOrdering::SeqCst),
+            91,
+            "panicking stage must still have observed the installed context",
+        );
+        panic_flag.store(false, AtomicOrdering::SeqCst);
+
+        // Run another job without context; worker TLS must be clean.
+        let h2 = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("<template>z</template>")),
+            file_kind: None,
+            request_context: None,
+        });
+        h2.wait();
+        assert_eq!(
+            analysis_observed.load(AtomicOrdering::SeqCst),
+            0,
+            "worker TLS must have been cleared by the panicking guard's Drop",
+        );
+    }
+
+    /// Pool isolation: a panicking job must not leave state that the
+    /// next job on the same pool observes. Covered by the previous test
+    /// but spelled out as its own case for the plan test list.
+    #[test]
+    fn scheduler_pool_isolation_next_job_sees_clean_tls_after_preceding_panic() {
+        let probe = Arc::new(ProbeExecutor::new());
+        let panic_flag = Arc::clone(&probe.panic_on_analysis);
+        let analysis_observed = Arc::clone(&probe.analysis_observed);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+
+        panic_flag.store(true, AtomicOrdering::SeqCst);
+        let ctx = TestContext::new(13, true);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+        let h1 = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        h1.wait();
+        panic_flag.store(false, AtomicOrdering::SeqCst);
+
+        // Next job, no context — must see clean TLS.
+        let h2 = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("<template>q</template>")),
+            file_kind: None,
+            request_context: None,
+        });
+        h2.wait();
+        assert_eq!(analysis_observed.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    /// A request with `request_context: None` runs to completion without
+    /// installing any TLS — `current_request_id()` returns `None` inside
+    /// the worker.
+    #[test]
+    fn scheduler_request_context_absent_when_request_has_none() {
+        let probe = Arc::new(ProbeExecutor::new());
+        let analysis_observed = Arc::clone(&probe.analysis_observed);
+        let sched = async_scheduler_with_executor(probe as Arc<dyn StageExecutor>);
+
+        let handle = sched.submit_request(Request {
+            file_id: "/ctx.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: None,
+        });
+        handle.wait();
+        assert_eq!(
+            analysis_observed.load(AtomicOrdering::SeqCst),
+            0,
+            "absent context means TLS stays None → current_request_id() returns None",
+        );
+    }
+
+    /// Scheduler dedup hook: joiner's `on_dedup_joiner` is called with
+    /// `winner_audited = true` when the winner captures.
+    #[test]
+    fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_true_when_winner_captures() {
+        let pending = PendingRequests::new();
+        let (_h1, s1) = completion_pair::<RequestResult>();
+        let (_h2, s2) = completion_pair::<RequestResult>();
+
+        let winner_ctx = TestContext::new(100, true); // captures
+        let joiner_ctx = TestContext::new(200, true);
+
+        let canonical: Arc<str> = Arc::from("/x.vue");
+        pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s1,
+            Some(OpaqueRequestContext(
+                Arc::clone(&winner_ctx) as Arc<dyn RequestContextLike>
+            )),
+            &canonical,
+        );
+        pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s2,
+            Some(OpaqueRequestContext(
+                Arc::clone(&joiner_ctx) as Arc<dyn RequestContextLike>
+            )),
+            &canonical,
+        );
+
+        let calls = joiner_ctx.joiner_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_ref(), "/x.vue");
+        assert_eq!(calls[0].1, 100, "winner request_id must be relayed");
+        assert!(calls[0].2, "winner_audited must be true when capture=true");
+    }
+
+    /// Dedup hook: `winner_audited = false` when the winner does NOT
+    /// capture.
+    #[test]
+    fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_false_when_winner_does_not_capture(
+    ) {
+        let pending = PendingRequests::new();
+        let (_h1, s1) = completion_pair::<RequestResult>();
+        let (_h2, s2) = completion_pair::<RequestResult>();
+
+        let winner_ctx = TestContext::new(101, false); // no capture
+        let joiner_ctx = TestContext::new(201, true);
+
+        let canonical: Arc<str> = Arc::from("/y.vue");
+        pending.register(
+            2,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s1,
+            Some(OpaqueRequestContext(
+                Arc::clone(&winner_ctx) as Arc<dyn RequestContextLike>
+            )),
+            &canonical,
+        );
+        pending.register(
+            2,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s2,
+            Some(OpaqueRequestContext(
+                Arc::clone(&joiner_ctx) as Arc<dyn RequestContextLike>
+            )),
+            &canonical,
+        );
+
+        let calls = joiner_ctx.joiner_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, 101);
+        assert!(!calls[0].2);
+    }
+
+    /// 16-thread stress: distinct requests on distinct files must not
+    /// see each other's contexts. Each worker records `current_request_id()`
+    /// per-file via the probe executor — we then confirm the per-file
+    /// observation equals the per-file request id.
+    #[test]
+    fn scheduler_16_thread_stress_contexts_never_cross_contaminate() {
+        use std::thread;
+
+        const THREADS: usize = 16;
+
+        // Per-file AtomicU64 that stores the observed request_id when
+        // that file's stage runs.
+        let observed: Arc<Vec<Arc<AtomicU64>>> =
+            Arc::new((0..THREADS).map(|_| Arc::new(AtomicU64::new(0))).collect());
+
+        struct PerFileProbe {
+            slots: Arc<Vec<Arc<AtomicU64>>>,
+        }
+        impl StageExecutor for PerFileProbe {
+            fn execute_analysis(
+                &self,
+                canonical_id: &str,
+                _source: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+                // Extract file index from canonical_id like "/f{N}.vue".
+                let idx = canonical_id
+                    .trim_start_matches("/f")
+                    .trim_end_matches(".vue")
+                    .parse::<usize>()
+                    .unwrap_or(0);
+                let id = crate::request_context::current_request_id().unwrap_or(0);
+                self.slots[idx].store(id, AtomicOrdering::SeqCst);
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
+        }
+
+        let loader = Arc::new(MemorySourceLoader::new());
+        for i in 0..THREADS {
+            loader.insert(format!("/f{i}.vue"), Arc::from("<template>z</template>"));
+        }
+        let executor: Arc<dyn StageExecutor> = Arc::new(PerFileProbe {
+            slots: Arc::clone(&observed),
+        });
+        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let sched = Arc::clone(&sched);
+                thread::spawn(move || {
+                    // request_id = 1000+i, per-thread unique.
+                    let ctx = TestContext::new(1000 + i as u64, true);
+                    let opaque = OpaqueRequestContext(ctx as Arc<dyn RequestContextLike>);
+                    let h = sched.submit_request(Request {
+                        file_id: format!("/f{i}.vue"),
+                        target: TargetStage::Analysis,
+                        priority: Priority::Interactive,
+                        source: None,
+                        file_kind: None,
+                        request_context: Some(opaque),
+                    });
+                    h.wait()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker joined");
+        }
+
+        for i in 0..THREADS {
+            let want = 1000 + i as u64;
+            let got = observed[i].load(AtomicOrdering::SeqCst);
+            assert_eq!(
+                got, want,
+                "file f{i}.vue observed request_id {got}, expected {want} — \
+                 TLS cross-contamination between workers",
+            );
+        }
+    }
+
+    /// Pre-commit behavior: a request with `request_context: None`
+    /// must route and complete exactly as before (no regression).
+    #[test]
+    fn scheduler_submit_without_context_matches_pre_commit_behavior() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
+        let sched = test_scheduler_with_loader(loader);
+
+        let handle = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        let state = handle.try_get().unwrap();
+        assert!(state.is_ready());
+        match state {
+            CompletionState::Ready(RequestResult::Source(snap)) => {
+                assert_eq!(&*snap.source, "<template>hi</template>");
+            }
+            other => panic!("expected Source ready, got {other:?}"),
+        }
     }
 }

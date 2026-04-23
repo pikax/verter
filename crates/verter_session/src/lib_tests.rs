@@ -3322,6 +3322,7 @@ mod scheduler_tests {
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: Some(Arc::from(src)),
                 file_kind: None,
+                request_context: None,
             });
         handle.wait();
     }
@@ -4021,6 +4022,7 @@ mod phase2a_upsert_tests {
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
                 file_kind: None,
+                request_context: None,
             });
 
         assert!(

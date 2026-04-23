@@ -110,6 +110,7 @@ mod tests {
             priority: Priority::Interactive,
             source: None,
             file_kind: None,
+            request_context: None,
         });
         scheduler.drive_all();
 

@@ -63,6 +63,23 @@ impl IoPool {
         });
         IoHandle { rx }
     }
+
+    /// Submit a task with an optional request context installed into
+    /// TLS for the duration of the closure. Equivalent to
+    /// [`submit`](Self::submit) when `context` is `None`.
+    ///
+    /// The guard is dropped on both normal-return and panic-unwind
+    /// paths, restoring the worker thread's prior TLS slot.
+    pub fn submit_with_context<T: Send + 'static>(
+        &self,
+        context: Option<crate::request_context::OpaqueRequestContext>,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> IoHandle<T> {
+        self.submit(move || {
+            let _guard = context.map(crate::request_context::OpaqueContextGuard::install);
+            f()
+        })
+    }
 }
 
 /// Handle for waiting on an I/O pool task result.

@@ -303,27 +303,50 @@ impl PendingRequests {
 
     /// Register a sender for a request. If a matching group exists (same
     /// generation + target), the sender is added to it and a priority upgrade
-    /// is returned if the new priority is higher. Otherwise, a new group is created.
+    /// is returned if the new priority is higher. Otherwise, a new group is
+    /// created and the arriving request's context is stored as the winner's.
+    ///
+    /// `request_context` is the arriving request's optional session-side
+    /// context. On dedup (existing group) the winner's stored context is
+    /// called back via `on_dedup_joiner(canonical_id, winner_id, winner_audited)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         generation: u64,
         target: TargetStage,
         priority: Priority,
         sender: CompletionSender<RequestResult>,
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        canonical_id: &Arc<str>,
     ) -> Option<Priority> {
         let mut groups = self.inner.lock();
         // Try to find an existing group
         for group in groups.iter_mut() {
             if group.generation == generation && group.target == target {
+                // Invoke the joiner's on_dedup_joiner with the winner's
+                // context details BEFORE we alter the group — the joiner's
+                // session-side code records a SharedLoadReuseRecord keyed
+                // by (canonical, winner_id, winner_audited).
+                if let Some(joiner_ctx) = request_context.as_ref() {
+                    let (winner_id, winner_audited) =
+                        group.winner_context_info().unwrap_or((0, false));
+                    joiner_ctx.0.on_dedup_joiner(
+                        Arc::clone(canonical_id),
+                        winner_id,
+                        winner_audited,
+                    );
+                }
                 return group.add_sender(sender, priority);
             }
         }
-        // Create new group
+        // Create new group — arriving request becomes the winner and its
+        // context (if any) is stored for future joiners.
         groups.push(PendingRequestGroup {
             generation,
             target,
             priority,
             senders: vec![sender],
+            winner_context: request_context,
         });
         None
     }
@@ -453,6 +476,26 @@ impl PendingRequests {
     pub fn pending_count(&self) -> usize {
         self.inner.lock().len()
     }
+
+    /// Returns a clone of any pending group's winner context at
+    /// `generation`. Used by the scheduler's dispatch loop to install
+    /// the request context into worker TLS around the stage closure.
+    ///
+    /// A single job (e.g., `Source` at generation `g`) may serve
+    /// multiple target groups (`Source`, `Analysis`, `Artifact{..}` at
+    /// `g`); any of those groups' winner contexts is a valid telemetry
+    /// attribution for the work. The first group found with a non-None
+    /// `winner_context` is returned.
+    pub fn winner_context_at_generation(
+        &self,
+        generation: u64,
+    ) -> Option<crate::request_context::OpaqueRequestContext> {
+        let groups = self.inner.lock();
+        groups
+            .iter()
+            .filter(|g| g.generation == generation)
+            .find_map(|g| g.winner_context.clone())
+    }
 }
 
 /// Groups all callers waiting for the same `(generation, target)`.
@@ -461,6 +504,10 @@ struct PendingRequestGroup {
     target: TargetStage,
     priority: Priority,
     senders: Vec<CompletionSender<RequestResult>>,
+    /// The first-arrived request's optional session-side context. Stored
+    /// so joiners can route `on_dedup_joiner(winner_id, winner_audited)`
+    /// callbacks even after the winner's registration returns.
+    winner_context: Option<crate::request_context::OpaqueRequestContext>,
 }
 
 impl PendingRequestGroup {
@@ -479,6 +526,15 @@ impl PendingRequestGroup {
         } else {
             None
         }
+    }
+
+    /// Return `(winner_request_id, winner_audited)` for the stored
+    /// winner context, or `None` if the winner registered without a
+    /// context (non-audited caller).
+    fn winner_context_info(&self) -> Option<(u64, bool)> {
+        self.winner_context
+            .as_ref()
+            .map(|c| (c.0.request_id(), c.0.capture_enabled()))
     }
 
     /// Signal all callers in this group.
@@ -607,13 +663,24 @@ mod tests {
         assert!(node.last_known_good_artifact(ph).is_some());
     }
 
+    fn test_canonical() -> Arc<str> {
+        Arc::from("/test.vue")
+    }
+
     #[test]
     fn pending_requests_register_and_signal() {
         let pending = PendingRequests::new();
         let (handle, sender) = completion_pair::<RequestResult>();
 
         // Register a request for Analysis at gen 1
-        let upgrade = pending.register(1, TargetStage::Analysis, Priority::Interactive, sender);
+        let upgrade = pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            sender,
+            None,
+            &test_canonical(),
+        );
         assert!(upgrade.is_none()); // first registration, no upgrade
         assert_eq!(pending.pending_count(), 1);
 
@@ -635,8 +702,22 @@ mod tests {
         let (h2, s2) = completion_pair::<RequestResult>();
 
         // Two callers for the same (gen, target)
-        pending.register(1, TargetStage::Analysis, Priority::Background, s1);
-        let upgrade = pending.register(1, TargetStage::Analysis, Priority::Critical, s2);
+        pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Background,
+            s1,
+            None,
+            &test_canonical(),
+        );
+        let upgrade = pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Critical,
+            s2,
+            None,
+            &test_canonical(),
+        );
 
         // Should be grouped — only 1 pending group
         assert_eq!(pending.pending_count(), 1);
@@ -657,8 +738,22 @@ mod tests {
         let (h_old, s_old) = completion_pair::<RequestResult>();
         let (h_new, s_new) = completion_pair::<RequestResult>();
 
-        pending.register(1, TargetStage::Analysis, Priority::Interactive, s_old);
-        pending.register(2, TargetStage::Analysis, Priority::Interactive, s_new);
+        pending.register(
+            1,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s_old,
+            None,
+            &test_canonical(),
+        );
+        pending.register(
+            2,
+            TargetStage::Analysis,
+            Priority::Interactive,
+            s_new,
+            None,
+            &test_canonical(),
+        );
         assert_eq!(pending.pending_count(), 2);
 
         // Supersede gen < 2
@@ -682,8 +777,22 @@ mod tests {
         let (h1, s1) = completion_pair::<RequestResult>();
         let (h2, s2) = completion_pair::<RequestResult>();
 
-        pending.register(1, TargetStage::Source, Priority::Background, s1);
-        pending.register(2, TargetStage::Analysis, Priority::Critical, s2);
+        pending.register(
+            1,
+            TargetStage::Source,
+            Priority::Background,
+            s1,
+            None,
+            &test_canonical(),
+        );
+        pending.register(
+            2,
+            TargetStage::Analysis,
+            Priority::Critical,
+            s2,
+            None,
+            &test_canonical(),
+        );
 
         pending.signal_shutdown();
         assert_eq!(pending.pending_count(), 0);
@@ -709,6 +818,8 @@ mod tests {
             TargetStage::Artifact { profile_hash: 42 },
             Priority::Interactive,
             sender,
+            None,
+            &test_canonical(),
         );
 
         // Signal Source complete — should NOT satisfy Artifact target

@@ -24,6 +24,10 @@ pub enum Submission {
         /// Removal epoch at submission time. If a tombstone exists with a
         /// higher epoch, this submission predates the removal and is rejected.
         submitted_epoch: u64,
+        /// Optional session-side request context. When present, the driver
+        /// stores the winner's context on the dedup group and routes
+        /// `on_dedup_joiner` callbacks when this request joins.
+        request_context: Option<crate::request_context::OpaqueRequestContext>,
     },
     /// A stage completed for a file.
     StageComplete {

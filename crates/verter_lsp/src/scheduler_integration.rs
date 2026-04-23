@@ -61,6 +61,7 @@ pub fn submit_to_scheduler(host: &VerterHost, file_id: &str, source: Arc<str>, p
             HostFileKind::VueSfc => SchedulerFileKind::VueSfc,
             HostFileKind::NonSfc => SchedulerFileKind::NonSfc,
         }),
+        request_context: None,
     });
     scheduler.drive_all();
 }

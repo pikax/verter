@@ -79,6 +79,7 @@ impl VerterHost {
                     FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
                     FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
                 }),
+                request_context: None,
             });
 
         // Wait for scheduler to commit Source + Analysis snapshots.
