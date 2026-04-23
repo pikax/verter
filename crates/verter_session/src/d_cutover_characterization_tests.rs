@@ -2014,6 +2014,52 @@ fn type_query_engine_has_no_shallow_caches() {
 }
 
 // ============================================================================
+// §6.5b D5 structural (2 tests) — SolverTraceSummary + relation dispatch scope
+// ============================================================================
+
+#[test]
+fn solver_trace_summary_does_not_double_count_dispatch_metrics() {
+    // D5 requirement: SolverTraceSummary must not contain counters that
+    // duplicate dispatch-owned SemanticGraphStats fields.  The D-Cutover
+    // deleted SolverTraceSummary entirely, so the structural property
+    // holds trivially — verify by grep-absence.
+    let hits = retired_symbol_hits_in_production(&["SolverTraceSummary", "solver_trace_summary"]);
+    assert!(
+        hits.is_empty(),
+        "SolverTraceSummary still referenced in production code (double-count risk):\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn solver_caches_relation_rebuilt_per_dispatch_builder_invocation() {
+    // D5 requirement: relation scratch is per-dispatch-builder invocation,
+    // not retained across builders.  Post-D-Cutover the relation engine
+    // uses a thread-local RELATION_IN_FLIGHT guard (cleared per call via
+    // enter/exit_relation_guard) and the persistent SemanticGraphStore
+    // relation_memo for cross-request dedup.  ProjectSemanticDispatch is
+    // created fresh per dispatch call (borrows &VerterHost), so no
+    // per-instance relation cache can leak across invocations.
+    //
+    // Verify structurally: ProjectSemanticDispatch has no `relation`
+    // field, and the relation module uses thread-local not instance state.
+    let mod_src = include_str!("project_semantic_dispatch/mod.rs");
+    assert!(
+        !mod_src.contains("relation_cache"),
+        "ProjectSemanticDispatch must not carry a relation_cache field"
+    );
+    let rel_src = include_str!("project_semantic_dispatch/relation.rs");
+    assert!(
+        rel_src.contains("RELATION_IN_FLIGHT"),
+        "relation module must use thread-local RELATION_IN_FLIGHT, not instance state"
+    );
+    assert!(
+        rel_src.contains("fn enter_relation_guard"),
+        "per-call enter/exit guard must be present"
+    );
+}
+
+// ============================================================================
 // §6.5 Zero-legacy (1 test)
 // ============================================================================
 

@@ -105,6 +105,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: SemanticNodeId,
     ) -> (RelationResult, DepSignature) {
         let graph = self.graph();
+        graph.record_relation_check();
         // Warm-hit fast path: memoised result returns without recomputing
         // the judgement. Dep signatures revalidate under content changes
         // via the surrounding completion-fence.

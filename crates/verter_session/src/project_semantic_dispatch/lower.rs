@@ -64,6 +64,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> SemanticNodeId {
         let graph = self.graph();
+        graph.record_decl_subexpression_lowering();
         match expr {
             TypeExpr::Primitive(name) => graph.intern_node_with_scope(
                 SemanticNodeData::Primitive(map_primitive_name(*name)),

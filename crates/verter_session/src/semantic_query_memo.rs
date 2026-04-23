@@ -778,6 +778,8 @@ struct AtomicSemanticGraphStats {
     budget_fallback_count: AtomicU64,
     path_length_samples: Mutex<SampleCollector>,
     projection_depth_samples: Mutex<SampleCollector>,
+    decl_subexpression_lowering_count: AtomicU64,
+    relation_check_count: AtomicU64,
 }
 
 impl Default for AtomicSemanticGraphStats {
@@ -798,6 +800,8 @@ impl Default for AtomicSemanticGraphStats {
             budget_fallback_count: AtomicU64::new(0),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
+            decl_subexpression_lowering_count: AtomicU64::new(0),
+            relation_check_count: AtomicU64::new(0),
         }
     }
 }
@@ -1523,6 +1527,11 @@ impl SemanticGraphStore {
             path_length_p95,
             projection_depth_p50,
             projection_depth_p95,
+            decl_subexpression_lowering_count: self
+                .stats
+                .decl_subexpression_lowering_count
+                .load(Ordering::Relaxed),
+            relation_check_count: self.stats.relation_check_count.load(Ordering::Relaxed),
         }
     }
 
@@ -1567,6 +1576,16 @@ impl SemanticGraphStore {
     /// C-phase.
     pub fn record_projection_depth(&self, depth: u32) {
         self.stats.projection_depth_samples.lock().push(depth);
+    }
+    pub fn record_decl_subexpression_lowering(&self) {
+        self.stats
+            .decl_subexpression_lowering_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_relation_check(&self) {
+        self.stats
+            .relation_check_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Warm-lookup a key. Returns the memoized result + its recorded

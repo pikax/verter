@@ -586,6 +586,9 @@ pub struct SemanticGraphStats {
     pub path_length_p95: u32,
     pub projection_depth_p50: u32,
     pub projection_depth_p95: u32,
+    // ── F2 navigation-once + relation invariants ────────────────────
+    pub decl_subexpression_lowering_count: u64,
+    pub relation_check_count: u64,
 }
 
 /// Structured query-level failure. Distinct from panics — callers decide
@@ -1552,7 +1555,8 @@ mod tests {
     ///   branch_selections_true, branch_selections_false,
     ///   origin_edges_emitted, path_length_p50, path_length_p95,
     ///   projection_depth_p50, projection_depth_p95,
-    ///   origin_edges_per_node_p50, origin_edges_per_node_p95.
+    ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
+    ///   decl_subexpression_lowering_count, relation_check_count.
     /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns.
     #[test]
     fn counter_taxonomy_matches_plan() {
@@ -1579,6 +1583,8 @@ mod tests {
             "projection_depth_p95",
             "origin_edges_per_node_p50",
             "origin_edges_per_node_p95",
+            "decl_subexpression_lowering_count",
+            "relation_check_count",
         ];
         for field in expected_to_fire {
             assert!(

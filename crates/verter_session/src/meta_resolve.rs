@@ -5474,15 +5474,9 @@ impl VerterHost {
                 }
             }
             {
-                // D-Cutover §5.8 WIP-W: the retired owner_engine's
-                // `trace_summary` is gone. Telemetry is zeroed here;
-                // §5.9 moves observability to `SemanticGraphStats`.
                 crate::host_manage::component_meta_trace_event!(
-                    "solver_trace_summary",
-                    format!(
-                        "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 arena_high_water=0 scoped_cache=0",
-                        canonical,
-                    ),
+                    "semantic_graph_stats",
+                    format!("owner={} dispatch_authority=true", canonical),
                 );
             }
             if query_engine.has_fuse_tripped() {
@@ -5502,9 +5496,9 @@ impl VerterHost {
             }
         } else {
             crate::host_manage::component_meta_trace_event!(
-                "solver_trace_summary",
+                "semantic_graph_stats",
                 format!(
-                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped macro_shapes=skipped",
+                    "owner={} registry_materialization=skipped macro_shapes=skipped",
                     canonical,
                 ),
             );
