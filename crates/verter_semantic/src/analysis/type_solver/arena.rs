@@ -1,22 +1,11 @@
-//! Query-local type node arena and memoization caches.
+//! Query-local type node arena.
 //!
-//! Split into two structs:
-//! - `QueryArena`: append-only node store. Immutable once populated.
-//! - `SolverCaches`: mutable memoization tables for relation, instantiation,
-//!   keyspace, and member results.
-//!
-//! This split lets the relation/projection engines hold `&QueryArena` (to read
-//! nodes) and `&mut SolverCaches` (to write results) simultaneously — no
-//! cloning needed.
+//! `QueryArena` is an append-only node store. Once nodes are allocated they
+//! are never mutated, so `&QueryArena` is sufficient for reading. The
+//! companion `SolverCaches` memoization tables were retired together with
+//! the arena solver kernel.
 
 use std::fmt;
-use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
-
-use super::host::ResolvedRootIdentity;
-use super::prepared::{PreparedTypeDecl, PreparedValueDecl};
-use super::result::{Keyspace, RelationMode, RelationResult, SolverExactness};
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -141,10 +130,6 @@ pub enum Node {
         symbol_name: String,
         type_arguments: Vec<NodeId>,
         conditional_context: Vec<ConditionalFrameSnapshot>,
-    },
-    /// An error/unknown node carrying diagnostic context.
-    Error {
-        description: String,
     },
 }
 
@@ -499,12 +484,6 @@ impl QueryArena {
             name_type,
         })
     }
-
-    pub fn error(&mut self, desc: impl Into<String>) -> NodeId {
-        self.alloc(Node::Error {
-            description: desc.into(),
-        })
-    }
 }
 
 impl Default for QueryArena {
@@ -536,180 +515,6 @@ fn union_member_is_new(
         Node::Primitive(kind) => seen_primitives.insert(*kind),
         Node::Literal(literal) => seen_literals.insert(literal.clone()),
         _ => seen.insert(member),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Solver Caches — mutable memoization tables
-// ---------------------------------------------------------------------------
-
-/// Query-local memoization caches, separate from the node store so that
-/// relation/projection code can hold `&QueryArena` and `&mut SolverCaches`
-/// simultaneously without cloning nodes.
-///
-/// TODO(D5): retire the reusable-identity cache fields per plan §3 D5 +
-/// §4 items 6-8:
-/// - `instantiation` → deleted (dispatch + `SemanticGraphStore` owns
-///   reusable identity).
-/// - `member` / `keyspace` → deleted (path-projection + keyspace
-///   projection live in dispatch post-D3).
-/// - `relation` → RETAINED as scratch (relation-engine inner loop; too
-///   tight for dispatcher round-trips). But scope is per
-///   dispatch-builder invocation — constructed fresh per builder call
-///   that needs it, dropped when the builder returns. Enforced by
-///   `solver_caches_relation_rebuilt_per_dispatch_builder_invocation`.
-/// - `root_identity` / `prepared_type_decl` / `prepared_value_decl` →
-///   RETAINED (solver-internal prepared-decl lookup cache; not
-///   reusable identity, not published through dispatch).
-#[derive(Default)]
-pub struct SolverCaches {
-    pub relation: FxHashMap<(NodeId, NodeId, RelationMode), RelationResult>,
-    pub instantiation: FxHashMap<(DeclIdentity, Vec<NodeId>), NodeId>,
-    pub keyspace: FxHashMap<NodeId, Keyspace>,
-    pub member: FxHashMap<NodeId, FxHashMap<String, (NodeId, SolverExactness)>>,
-    pub root_identity: FxHashMap<(String, String), Option<ResolvedRootIdentity>>,
-    pub prepared_type_decl: FxHashMap<ResolvedRootIdentity, Option<Arc<PreparedTypeDecl>>>,
-    pub prepared_value_decl: FxHashMap<ResolvedRootIdentity, Option<Arc<PreparedValueDecl>>>,
-}
-
-impl SolverCaches {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    // -- Relation --
-
-    pub fn get_relation(
-        &self,
-        lhs: NodeId,
-        rhs: NodeId,
-        mode: RelationMode,
-    ) -> Option<RelationResult> {
-        self.relation.get(&(lhs, rhs, mode)).copied()
-    }
-
-    pub fn set_relation(
-        &mut self,
-        lhs: NodeId,
-        rhs: NodeId,
-        mode: RelationMode,
-        result: RelationResult,
-    ) {
-        self.relation.insert((lhs, rhs, mode), result);
-    }
-
-    // -- Instantiation --
-
-    pub fn get_instantiation(&self, identity: &DeclIdentity, args: &[NodeId]) -> Option<NodeId> {
-        self.instantiation
-            .get(&(identity.clone(), args.to_vec()))
-            .copied()
-    }
-
-    pub fn set_instantiation(&mut self, identity: DeclIdentity, args: Vec<NodeId>, node: NodeId) {
-        self.instantiation.insert((identity, args), node);
-    }
-
-    // -- Keyspace --
-
-    pub fn get_keyspace(&self, node: NodeId) -> Option<&Keyspace> {
-        self.keyspace.get(&node)
-    }
-
-    pub fn set_keyspace(&mut self, node: NodeId, ks: Keyspace) {
-        self.keyspace.insert(node, ks);
-    }
-
-    // -- Member --
-
-    pub fn get_member(&self, node: NodeId, key: &str) -> Option<(NodeId, SolverExactness)> {
-        self.member
-            .get(&node)
-            .and_then(|inner| inner.get(key))
-            .copied()
-    }
-
-    pub fn set_member(
-        &mut self,
-        node: NodeId,
-        key: String,
-        value: NodeId,
-        exactness: SolverExactness,
-    ) {
-        self.member
-            .entry(node)
-            .or_default()
-            .insert(key, (value, exactness));
-    }
-
-    // -- Root identity --
-
-    pub fn get_root_identity(
-        &self,
-        canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<Option<ResolvedRootIdentity>> {
-        self.root_identity
-            .get(&(canonical_id.to_string(), symbol_name.to_string()))
-            .cloned()
-    }
-
-    pub fn set_root_identity(
-        &mut self,
-        canonical_id: String,
-        symbol_name: String,
-        result: Option<ResolvedRootIdentity>,
-    ) {
-        self.root_identity
-            .insert((canonical_id, symbol_name), result);
-    }
-
-    // -- Prepared type decl --
-
-    pub fn get_prepared_type_decl(
-        &self,
-        root_identity: &ResolvedRootIdentity,
-    ) -> Option<Option<Arc<PreparedTypeDecl>>> {
-        self.prepared_type_decl.get(root_identity).cloned()
-    }
-
-    pub fn set_prepared_type_decl(
-        &mut self,
-        root_identity: ResolvedRootIdentity,
-        result: Option<Arc<PreparedTypeDecl>>,
-    ) {
-        self.prepared_type_decl.insert(root_identity, result);
-    }
-
-    // -- Prepared value decl --
-
-    pub fn get_prepared_value_decl(
-        &self,
-        root_identity: &ResolvedRootIdentity,
-    ) -> Option<Option<Arc<PreparedValueDecl>>> {
-        self.prepared_value_decl.get(root_identity).cloned()
-    }
-
-    pub fn set_prepared_value_decl(
-        &mut self,
-        root_identity: ResolvedRootIdentity,
-        result: Option<Arc<PreparedValueDecl>>,
-    ) {
-        self.prepared_value_decl.insert(root_identity, result);
-    }
-}
-
-impl fmt::Debug for SolverCaches {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SolverCaches")
-            .field("relation", &self.relation.len())
-            .field("instantiation", &self.instantiation.len())
-            .field("keyspace", &self.keyspace.len())
-            .field("member", &self.member.len())
-            .field("root_identity", &self.root_identity.len())
-            .field("prepared_type_decl", &self.prepared_type_decl.len())
-            .field("prepared_value_decl", &self.prepared_value_decl.len())
-            .finish()
     }
 }
 
@@ -797,59 +602,10 @@ mod tests {
     }
 
     #[test]
-    fn relation_cache_round_trip() {
-        let mut caches = SolverCaches::new();
-        assert!(caches
-            .get_relation(NodeId(0), NodeId(1), RelationMode::Assignable)
-            .is_none());
-        caches.set_relation(
-            NodeId(0),
-            NodeId(1),
-            RelationMode::Assignable,
-            RelationResult::NotAssignable,
-        );
-        assert_eq!(
-            caches.get_relation(NodeId(0), NodeId(1), RelationMode::Assignable),
-            Some(RelationResult::NotAssignable)
-        );
-    }
-
-    #[test]
-    fn instantiation_cache_round_trip() {
-        let mut caches = SolverCaches::new();
-        let identity = DeclIdentity {
-            canonical_id: "/types.ts".into(),
-            symbol_name: "Partial".into(),
-        };
-        assert!(caches.get_instantiation(&identity, &[NodeId(0)]).is_none());
-        caches.set_instantiation(identity.clone(), vec![NodeId(0)], NodeId(99));
-        assert_eq!(
-            caches.get_instantiation(&identity, &[NodeId(0)]),
-            Some(NodeId(99))
-        );
-    }
-
-    #[test]
     fn node_id_unresolved_sentinel() {
         assert!(NodeId::UNRESOLVED.is_unresolved());
         assert!(!NodeId(0).is_unresolved());
         assert!(!NodeId(100).is_unresolved());
-    }
-
-    #[test]
-    fn member_cache_round_trip() {
-        let mut caches = SolverCaches::new();
-        assert!(caches.get_member(NodeId(0), "foo").is_none());
-        caches.set_member(
-            NodeId(0),
-            "foo".into(),
-            NodeId(1),
-            SolverExactness::ExactConcrete,
-        );
-        assert_eq!(
-            caches.get_member(NodeId(0), "foo"),
-            Some((NodeId(1), SolverExactness::ExactConcrete))
-        );
     }
 
     #[test]
@@ -887,68 +643,5 @@ mod tests {
 
         assert_eq!(arena.len(), 5); // str, num, obj, arr, union
         assert!(matches!(arena.get(union), Node::Union(_)));
-    }
-
-    #[test]
-    fn instantiation_cache_hashmap_lookup() {
-        let mut caches = SolverCaches::default();
-        let mut arena = QueryArena::new();
-
-        // Pre-allocate a shared arg node
-        let shared_arg = arena.primitive(PrimitiveKind::Number);
-
-        // Insert 200 entries with different identities but same arg NodeId
-        for i in 0u32..200 {
-            let identity = DeclIdentity {
-                canonical_id: "file.ts".into(),
-                symbol_name: format!("T{i}"),
-            };
-            let result = arena.primitive(PrimitiveKind::String);
-            caches.set_instantiation(identity, vec![shared_arg], result);
-        }
-
-        // Look up the 50th entry
-        let target_identity = DeclIdentity {
-            canonical_id: "file.ts".into(),
-            symbol_name: "T50".to_string(),
-        };
-        let found = caches.get_instantiation(&target_identity, &[shared_arg]);
-        assert!(found.is_some(), "should find T50 among 200 entries");
-
-        // Negative: non-existent entry
-        let missing_identity = DeclIdentity {
-            canonical_id: "file.ts".into(),
-            symbol_name: "T999".to_string(),
-        };
-        let not_found = caches.get_instantiation(&missing_identity, &[shared_arg]);
-        assert!(not_found.is_none(), "should not find non-existent entry");
-    }
-
-    #[test]
-    fn instantiation_cache_multi_arg_round_trip() {
-        let mut caches = SolverCaches::default();
-        let mut arena = QueryArena::new();
-
-        let identity = DeclIdentity {
-            canonical_id: "a.ts".into(),
-            symbol_name: "Foo".into(),
-        };
-        let arg1 = arena.primitive(PrimitiveKind::String);
-        let arg2 = arena.primitive(PrimitiveKind::Number);
-        let result = arena.primitive(PrimitiveKind::Boolean);
-
-        caches.set_instantiation(identity.clone(), vec![arg1, arg2], result);
-
-        // Exact match
-        let found = caches.get_instantiation(&identity, &[arg1, arg2]);
-        assert_eq!(found, Some(result));
-
-        // Wrong arg order
-        let wrong_order = caches.get_instantiation(&identity, &[arg2, arg1]);
-        assert_eq!(wrong_order, None, "different arg order must not match");
-
-        // Subset of args
-        let subset = caches.get_instantiation(&identity, &[arg1]);
-        assert_eq!(subset, None, "subset of args must not match");
     }
 }

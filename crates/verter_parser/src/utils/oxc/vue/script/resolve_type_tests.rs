@@ -3990,16 +3990,19 @@ type Test = TableSlots
 
 #[test]
 fn resolution_depth_is_bounded_per_call_chain() {
-    // Phase 1 §4.7 test 5.7 Test 3.
+    // Phase 1 §4.7 test 5.7 Test 3. Updated in Phase D §5.10 WIP-P — the
+    // parser cap is renamed `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` and is
+    // documented as syntactic stack-safety (plan §3 Change H), not a
+    // semantic budget.
     //
-    // Depth-as-argument refactor replaces the `Rc<Cell<u16>>` in
-    // `TypeResolutionContext` with an explicit `u16` threaded through every
-    // recursive `resolve_type_elements_inner_*` callsite. Deeply nested
-    // generics must still bail at `MAX_TYPE_RESOLUTION_DEPTH` rather than
-    // stack-overflowing.
+    // Depth-as-argument refactor replaced the `Rc<Cell<u16>>` in
+    // `TypeResolutionContext` with a module-local thread-local. Deeply
+    // nested generics must still bail at `PARSER_SYNTACTIC_DEPTH_LIMIT`
+    // rather than stack-overflowing.
     //
-    // Synthesises a `Foo<Foo<Foo<...>>>` chain of depth 100 and asserts that
-    // resolution terminates cleanly.
+    // Synthesises a `Foo<Foo<Foo<...>>>` chain of depth 100 and asserts
+    // that resolution terminates cleanly. 100 stays well under the 256
+    // cap so resolution runs through the full inner body.
     let mut source = String::from(
         "interface Leaf { value: string }\ninterface Foo<T> { inner: T }\ntype Test = ",
     );
@@ -4014,9 +4017,63 @@ fn resolution_depth_is_bounded_per_call_chain() {
     source.push('\n');
 
     let (_resolved, _diagnostics) = resolve_with_ctx(&source);
-    // If we reach this line without stack overflow, the depth guard is working.
-    // The resolved output may be empty (depth limit hit before inner resolution
-    // completes) — the invariant is termination, not payload completeness.
+    // If we reach this line without stack overflow, the depth guard is
+    // working. The invariant is termination, not payload completeness —
+    // 100 < 256 so resolution should run all the way through.
+}
+
+#[test]
+fn parser_syntactic_depth_limit_blocks_excessive_chain_cleanly() {
+    // Phase D §5.10 WIP-P — assert the 256 cap holds: a chain of
+    // `Foo<Foo<...>>` with depth 300 (> PARSER_SYNTACTIC_DEPTH_LIMIT)
+    // must terminate cleanly without stack overflow. Resolution is
+    // allowed to truncate; the invariant is termination + no panic.
+    let mut source = String::from(
+        "interface Leaf { value: string }\ninterface Foo<T> { inner: T }\ntype Test = ",
+    );
+    let depth = 300;
+    for _ in 0..depth {
+        source.push_str("Foo<");
+    }
+    source.push_str("Leaf");
+    for _ in 0..depth {
+        source.push('>');
+    }
+    source.push('\n');
+
+    let (_resolved, _diagnostics) = resolve_with_ctx(&source);
+}
+
+#[test]
+fn parser_syntactic_depth_limit_records_structured_failure_shape() {
+    // Phase D §5.10 WIP-P / plan §3 Change H — the depth guard emits a
+    // structured `ResolutionBudgetExceeded { limit, actual, context }`
+    // record (NOT a silent `None` followed by an `Applied` stub from the
+    // retired solver). A deep type-alias chain forces
+    // `resolve_type_elements_inner_with_ctx` to re-enter the guard
+    // depth-limit-plus times; the last cap-trip is observable via
+    // `take_last_resolution_budget_exceeded`.
+    let _ = take_last_resolution_budget_exceeded();
+
+    let chain_depth = (PARSER_SYNTACTIC_DEPTH_LIMIT as usize) + 20;
+    let mut source = String::from("interface Leaf { value: string }\n");
+    for i in 0..chain_depth {
+        source.push_str(&format!("type A{i} = A{next};\n", next = i + 1));
+    }
+    source.push_str(&format!("type A{chain_depth} = Leaf;\n"));
+    source.push_str("type Test = A0;\n");
+
+    let (_resolved, _diagnostics) = resolve_with_ctx(&source);
+
+    let record = take_last_resolution_budget_exceeded()
+        .expect("ResolutionBudgetExceeded must be recorded when the cap trips");
+    assert_eq!(record.limit, PARSER_SYNTACTIC_DEPTH_LIMIT);
+    assert!(
+        record.actual >= PARSER_SYNTACTIC_DEPTH_LIMIT,
+        "ResolutionBudgetExceeded.actual must be >= limit at cap-trip; got {}",
+        record.actual
+    );
+    assert!(!record.context.is_empty());
 }
 
 #[test]

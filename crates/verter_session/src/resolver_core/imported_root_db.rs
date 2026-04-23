@@ -227,7 +227,10 @@ mod tests {
     impl TestView {
         fn new(token: u64) -> Self {
             Self {
-                token: StoreViewCompatToken(token),
+                token: StoreViewCompatToken {
+                    epoch: token,
+                    session: None,
+                },
             }
         }
     }

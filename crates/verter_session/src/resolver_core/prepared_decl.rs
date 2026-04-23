@@ -23,6 +23,34 @@ pub struct ImportBinding {
     pub exported_name: String,
 }
 
+/// Script-setup generic type-parameter binding (Path C C3 — replaces the
+/// pre-C3 `Arc<PreparedTypeDecl>` wrapper for `<script setup lang="ts"
+/// generic="T extends Item = Item">` parameters).
+///
+/// The binding carries the parameter name plus its declaration-site
+/// `extends` constraint and `=` default as **unlowered** [`TypeExpr`]
+/// values; the dispatch lowering path interns them on demand into
+/// [`SemanticNodeData::TypeParam`](crate::semantic_query::SemanticNodeData::TypeParam)
+/// via `shallow_lower_type_expr`. PreparedTypeDecl was the wrong category
+/// for this data — type parameters do not have alias bodies, scope-local
+/// `name_resolution`, or the rest of the prepared-decl surface — so the
+/// pre-C3 wrapping mis-classified script-setup generics as type aliases.
+///
+/// Plan §2 Pass C3 references this struct. Path C C6a item 1 added
+/// `ordinal` so script-setup binders carry their 0-based clause
+/// position into the lowered `SemanticNodeData::TypeParam.param_index`,
+/// disambiguating same-name parameters across multiple script-setup
+/// declarations within one file.
+#[derive(Debug, Clone)]
+pub struct TypeParamBinding {
+    pub name: Arc<str>,
+    /// Path C C6a item 1: 0-based position in the
+    /// `<script setup generic="T, U, V">` clause.
+    pub ordinal: u16,
+    pub constraint: Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
+    pub default: Option<Arc<verter_semantic::analysis::type_expr::TypeExpr>>,
+}
+
 fn resolve_import_target(
     owner_canonical_id: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -326,7 +354,11 @@ pub struct PreparedDeclBundle {
     /// Script-setup generic type parameter bindings (Vue SFC only).
     /// Empty for non-Vue files. Populated once during bundle materialization
     /// so the solver hot path never calls `current_eval_state`.
-    pub script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
+    ///
+    /// Each entry is a [`TypeParamBinding`] (Path C C3); pre-C3 the
+    /// value type was `Arc<PreparedTypeDecl>` which mis-categorised the
+    /// parameter as a type-alias decl.
+    pub script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
 }
 
 /// Build an atomic declaration-surface bundle from a shallow file state and
@@ -335,11 +367,14 @@ pub struct PreparedDeclBundle {
 /// `script_setup_type_bindings` are supplied by the caller (host_manage) because
 /// extracting them requires access to the host's source/parse state, which is a
 /// session-level concern. For non-Vue files the caller passes an empty map.
+///
+/// Per Path C C3, each entry is a [`TypeParamBinding`]; the pre-C3
+/// `Arc<PreparedTypeDecl>` wrapping has been retired.
 pub fn build_prepared_decl_bundle(
     canonical_id: &str,
     state: Arc<ShallowFileState>,
     dep_edges: FxHashMap<String, String>,
-    script_setup_type_bindings: FxHashMap<String, Arc<PreparedTypeDecl>>,
+    script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
 ) -> PreparedDeclBundle {
     let dep_edges = Arc::new(dep_edges);
 

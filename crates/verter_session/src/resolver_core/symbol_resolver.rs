@@ -358,7 +358,10 @@ mod tests {
 
     fn make_view(token: u64, facts: Vec<FactVersionRef>) -> TestView {
         TestView {
-            token: StoreViewCompatToken(token),
+            token: StoreViewCompatToken {
+                epoch: token,
+                session: None,
+            },
             valid_facts: facts.into_iter().collect(),
         }
     }

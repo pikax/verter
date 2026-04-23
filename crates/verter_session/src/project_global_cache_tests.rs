@@ -617,10 +617,8 @@ fn request_view_is_retired_from_crate_sources() {
             "resolver_core/component_meta_query_engine.rs",
             include_str!("resolver_core/component_meta_query_engine.rs"),
         ),
-        (
-            "resolver_core/solver_host.rs",
-            include_str!("resolver_core/solver_host.rs"),
-        ),
+        // D-Cutover §5.8 WIP-W: `resolver_core/solver_host.rs` deleted —
+        // its `RequestStoreView` / `_in_view` audit entry moves with it.
         (
             "resolver_core/component_meta_registry.rs",
             include_str!("resolver_core/component_meta_registry.rs"),

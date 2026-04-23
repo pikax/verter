@@ -493,6 +493,21 @@ impl std::fmt::Debug for ProjectTypeStore {
 impl ProjectTypeStore {
     #[must_use]
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// Construct a store wired to the host's
+    /// [`MetaProvenance`](crate::types::MetaProvenance) so the embedded
+    /// [`SemanticGraphStore`] reports Path C C1 instrumentation through the
+    /// shared provenance surface. Test-only `ProjectTypeStore::new()`
+    /// callers stay uninstrumented (semantic-graph stats remain visible
+    /// through their own `stats_snapshot` surface).
+    #[must_use]
+    pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
+        Self::build(Some(provenance))
+    }
+
+    fn build(provenance: Option<Arc<crate::types::MetaProvenance>>) -> Self {
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
         // `counters` so the `snapshot()` method sees in-place updates.
@@ -514,13 +529,17 @@ impl ProjectTypeStore {
                 Arc::clone(&counters.component_meta_live),
                 Arc::clone(&counters.component_meta_stale_sweeps),
             );
+        let semantic_graph = match provenance {
+            Some(prov) => Arc::new(SemanticGraphStore::with_provenance(prov)),
+            None => Arc::new(SemanticGraphStore::new()),
+        };
         Self {
             project_generation: AtomicU64::new(0),
             indexed,
             analysis,
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
-            semantic_graph: Arc::new(SemanticGraphStore::new()),
+            semantic_graph,
             owner_import_surfaces,
             component_meta_results,
             intrinsic_registry: IntrinsicRegistry::with_defaults(),

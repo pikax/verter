@@ -1,6 +1,7 @@
 //! Benchmarks for VerterHost hot paths.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use std::sync::Arc;
 use verter_session::{
     CompileProfile, FileKind, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
@@ -91,14 +92,15 @@ fn make_host() -> VerterHost {
 }
 
 fn upsert(host: &VerterHost, id: &str, source: &str) {
-    host.upsert(UpsertRequest {
-        canonical_id: None,
-        input_id: id.to_string(),
-        source: Arc::from(source),
-        file_kind: FileKind::VueSfc,
-        aliases: Vec::new(),
-    })
-    .unwrap();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: id.to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: Vec::new(),
+        })
+        .unwrap();
 }
 
 fn bench_upsert_first_time(c: &mut Criterion) {
@@ -160,17 +162,18 @@ fn bench_compile_cache_hit(c: &mut Criterion) {
     let profile = CompileProfile::default();
 
     // Warm the compile cache
-    host.get_virtual_file(VirtualQuery {
-        raw_id: None,
-        canonical_id: Some("Comp.vue".to_string()),
-        node_kind: Some(VirtualNodeKind::Main),
-        compile_profile: profile.clone(),
-    })
-    .unwrap();
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("Comp.vue".to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .unwrap();
 
     c.bench_function("compile_cache_hit", |b| {
         b.iter(|| {
-            black_box(
+            let _ = black_box(
                 host.get_virtual_file(VirtualQuery {
                     raw_id: None,
                     canonical_id: Some("Comp.vue".to_string()),
@@ -193,7 +196,7 @@ fn bench_compile_cache_miss(c: &mut Criterion) {
             },
             |host| {
                 let profile = CompileProfile::default();
-                black_box(
+                let _ = black_box(
                     host.get_virtual_file(VirtualQuery {
                         raw_id: None,
                         canonical_id: Some("Comp.vue".to_string()),

@@ -1,14 +1,14 @@
 //! Declaration-aware component-meta query engine.
 //!
-//! `ComponentMetaQueryEngine` wraps a single request-scoped `TypeQueryEngine`
-//! that is shared across owner solves and all declaration-scoped solves in one
-//! `get_component_meta()` request. Declaration-scoped solves use
-//! `TypeQueryEngine::solve_scoped()` to reuse the shared arena, caches, and
-//! root_identity memoization while resolving through a file-scoped host.
+//! `ComponentMetaQueryEngine` is a request-scoped cache bag for one
+//! `get_component_meta()` request. It owns per-request projection caches
+//! and resolves type declarations lazily from the host's prepared-decl
+//! bundles. All solve-like operations dispatch through
+//! [`ProjectSemanticDispatch`]; D-Cutover §5.8 WIP-W retired the
+//! previously embedded `TypeQueryEngine` + `TypeSolverHost` bridge.
 //!
-//! The `scoped_cache` provides query-local memoization by
-//! `(scope_canonical_id, symbol_name)` to avoid re-solving the same imported
-//! type reference within one request.
+//! The per-scope caches provide query-local memoization to avoid
+//! re-projecting the same imported type reference within one request.
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -16,22 +16,63 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_expr::TypeExpr;
-use verter_semantic::analysis::type_solver::host::TypeSolverHost;
 use verter_semantic::analysis::type_solver::query_engine::{
-    ProjectedMember, ProjectedSurface, TypeQueryEngine,
+    ProjectedKeyspace, ProjectedMember, ProjectedSurface,
 };
-use verter_semantic::analysis::type_solver::result::SolverResult;
 
 use super::declaration_metadata::{
     DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
     ResolvedTypeDeclaration,
 };
-use crate::resolver_core::solver_host::{DeclarationScopePayload, SessionSolverHost};
+use crate::project_semantic_dispatch::{node_data_for, resolve_decl_key, ProjectSemanticDispatch};
+use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::{FuseBudgets, FuseState};
+use crate::semantic_query::{
+    IndexKey, PathSegment, PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, QueryError,
+    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceView,
+};
 use crate::VerterHost;
+
+pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
+pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
+pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
 
 #[cfg(test)]
 use std::cell::Cell;
+
+/// Path C C11b — composite-scope context for prepared-member-path
+/// projection. Bundles the two scopes the prepared-route walker keeps
+/// live:
+///
+/// - `decl_scope`: the canonical id of the file where the prepared
+///   declaration (e.g., `type Button = ComponentConfig<typeof theme>`)
+///   was originally defined. Helper-body-internal refs (like the inner
+///   `ComponentUI` in `ComponentConfig`'s body) resolve against this
+///   scope because that's where the helper imports are visible.
+/// - `arg_scope`: the canonical id of the caller — the file that
+///   instantiated the prepared decl. `typeof value_ref` references and
+///   type arguments passed at the call site resolve in this scope.
+///
+/// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
+/// for the per-TypeExpr dispatch rules.
+#[derive(Debug, Clone)]
+struct PreparedProjectionContext {
+    decl_scope: String,
+    arg_scope: String,
+    /// Path C C11-residual-B: scopes from outer levels of a
+    /// declaration-chain projection. Populated as the recursion
+    /// descends from `project_prepared_member_path_route_projection_from_*`
+    /// so a `TypeOf(value)` reference inside an inner helper body
+    /// (e.g., the lowered `ComponentUI<typeof theme>` inside
+    /// `ComponentConfig`'s body, where the original `Button` alias
+    /// lives in `button-types.ts`) can fall back through the chain
+    /// to find the scope where the value symbol was actually visible.
+    ///
+    /// Innermost-first ordering: `chain_scopes[0]` is the scope of the
+    /// most recently entered declaration. Deduplicated against
+    /// `decl_scope` and `arg_scope` at lookup time.
+    chain_scopes: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedRegistrySymbol {
@@ -39,12 +80,6 @@ pub struct ResolvedImportedRegistrySymbol {
     pub exported_name: String,
     pub body: TypeExpr,
     pub canonical_dependencies: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct ScopedSolveKey {
-    scope_canonical_id: String,
-    symbol_name: String,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -100,24 +135,36 @@ struct PreparedTargetCacheKey {
     requested_name: String,
 }
 
-#[derive(Debug, Clone)]
-struct ScopedSolveEntry {
-    result: SolverResult<TypeExpr>,
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RoutedExprSurfaceCacheKey {
+    scope_canonical_id: String,
+    root_symbol: String,
+    route: super::RouteDemand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FastShallowFieldExprExactness {
+    Symbolic,
+    Concrete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FastShallowFieldExpr {
+    pub expr: TypeExpr,
+    pub exactness: FastShallowFieldExprExactness,
 }
 
 /// Query-local component-meta solve engine.
 ///
-/// The owner engine is the single request-scoped mutable solver owner.
-/// Declaration-scoped solves reuse the same engine via `solve_scoped()`,
-/// sharing arena nodes, caches, and root_identity memoization across all
-/// scoped queries in one request. Imported registry entries additionally
+/// Declaration-scoped lookups resolve through dispatch via
+/// [`project_type_surface_expr`]. D-Cutover §5.8 WIP-W retired the
+/// request-scoped owner engine bridge; all solve-like operations now
+/// route through `ProjectSemanticDispatch`. Imported registry entries
 /// memoize by declaration scope so the same textual reference does not
 /// alias across files.
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
-    owner_engine: TypeQueryEngine<'a>,
     current_prepared_request_root: Option<String>,
-    scoped_cache: FxHashMap<ScopedSolveKey, ScopedSolveEntry>,
     imported_registry_symbols: FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>,
     /// Cached type declarations.
     declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
@@ -142,6 +189,9 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_member_cache: FxHashMap<PreparedMemberCacheKey, Option<ProjectedMember>>,
     /// Request-local memoization for prepared imported target normalization.
     prepared_target_cache: FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>,
+    /// Request-local memoization for routed surface expressions after the
+    /// shared projection-authority cutover.
+    routed_expr_surface_cache: FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, String),
@@ -166,11 +216,21 @@ pub struct ComponentMetaQueryEngine<'a> {
     #[cfg(test)]
     prepared_root_surface_projection_count: usize,
     #[cfg(test)]
+    #[allow(dead_code)]
     prepared_shared_surface_hit_count: usize,
     #[cfg(test)]
+    #[allow(dead_code)]
     prepared_shared_member_hit_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
+    /// Path C C11-residual-B: ambient declaration-scope chain accumulated
+    /// during prepared-member-path projection recursion. Innermost entry
+    /// at index 0; outermost (originating call's `decl_scope`) at the
+    /// end. Used by `solve_or_project_leaf_expr_with_context` to find the
+    /// scope where a `TypeOf(value)` reference is visible when neither
+    /// `decl_scope` (the current declaration owner) nor `arg_scope` (the
+    /// caller's SFC) contains the value symbol.
+    projection_chain_scopes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -243,23 +303,12 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
 }
 
 #[cfg(test)]
-fn assert_structural_slow_lane_allowed() {
-    assert!(
-        !structural_slow_lane_forbidden_for_current_thread(),
-        "component-meta structural slow lane should not be used on the DB-backed production path",
-    );
-}
-
-#[cfg(test)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {
     assert!(
         !direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
         "direct routed-expr pick slow lane should not be used when member projection can satisfy the route",
     );
 }
-
-#[cfg(not(test))]
-fn assert_structural_slow_lane_allowed() {}
 
 #[cfg(not(test))]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
@@ -301,12 +350,10 @@ pub(crate) fn prepared_structural_substitution_slow_lane_forbidden_for_current_t
 fn assert_prepared_structural_substitution_slow_lane_allowed(_expr: &TypeExpr) {}
 
 impl<'a> ComponentMetaQueryEngine<'a> {
-    pub fn new(host: &'a VerterHost, owner_solver_host: &'a dyn TypeSolverHost) -> Self {
+    pub fn new(host: &'a VerterHost) -> Self {
         Self {
             host,
-            owner_engine: TypeQueryEngine::new(owner_solver_host),
             current_prepared_request_root: None,
-            scoped_cache: FxHashMap::default(),
             imported_registry_symbols: FxHashMap::default(),
             declarations: FxHashMap::default(),
             resolvable: FxHashMap::default(),
@@ -316,6 +363,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_surface_cache: FxHashMap::default(),
             prepared_member_cache: FxHashMap::default(),
             prepared_target_cache: FxHashMap::default(),
+            routed_expr_surface_cache: FxHashMap::default(),
             prepared_type_decls: FxHashMap::default(),
             materialize_memo: FxHashMap::with_capacity_and_hasher(64, Default::default()),
             #[cfg(test)]
@@ -328,45 +376,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_shared_member_hit_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
+            projection_chain_scopes: Vec::new(),
         }
-    }
-
-    pub fn from_owner_engine(host: &'a VerterHost, owner_engine: TypeQueryEngine<'a>) -> Self {
-        Self {
-            host,
-            owner_engine,
-            current_prepared_request_root: None,
-            scoped_cache: FxHashMap::default(),
-            imported_registry_symbols: FxHashMap::default(),
-            declarations: FxHashMap::default(),
-            resolvable: FxHashMap::default(),
-            owner_collection_exprs: FxHashMap::default(),
-            scope_payloads: FxHashMap::default(),
-            materialized_member_surfaces: FxHashMap::default(),
-            prepared_surface_cache: FxHashMap::default(),
-            prepared_member_cache: FxHashMap::default(),
-            prepared_target_cache: FxHashMap::default(),
-            prepared_type_decls: FxHashMap::default(),
-            materialize_memo: FxHashMap::with_capacity_and_hasher(64, Default::default()),
-            #[cfg(test)]
-            prepared_type_decl_query_count: 0,
-            #[cfg(test)]
-            prepared_root_surface_projection_count: 0,
-            #[cfg(test)]
-            prepared_shared_surface_hit_count: 0,
-            #[cfg(test)]
-            prepared_shared_member_hit_count: 0,
-            fuse_budgets: FuseBudgets::default(),
-            fuse_state: FuseState::default(),
-        }
-    }
-
-    pub fn owner_engine_mut(&mut self) -> &mut TypeQueryEngine<'a> {
-        &mut self.owner_engine
-    }
-
-    pub fn into_owner_engine(self) -> TypeQueryEngine<'a> {
-        self.owner_engine
     }
 
     fn scope_payload_for_scope(
@@ -394,29 +405,1213 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .clone()
     }
 
-    /// Create a `SessionSolverHost` for the given declaration scope, reusing a
-    /// previously-fetched declaration-scope payload when available.
-    fn solver_host_for_scope(&mut self, scope_canonical_id: &str) -> SessionSolverHost<'a> {
-        if let Some(scope_payload) = self.scope_payload_for_scope(scope_canonical_id) {
-            SessionSolverHost::from_scope_payload(self.host, scope_canonical_id, scope_payload)
+    /// Symbolic-preservation predicate for the define-props member rescue
+    /// path (D-Cutover §5.8 replacement for
+    /// `TypeQueryEngine::should_preserve_shallow_field_expr`).
+    ///
+    /// Returns `true` when `expr` references a package-backed imported
+    /// type surface that the component-meta pipeline should keep in
+    /// symbolic form (as a bare `Ref` / `IndexedAccess`) instead of
+    /// materialising through dispatch. Routes through
+    /// `bare_name_resolve::resolve_bare_name_in_scope` +
+    /// `host.prepared_type_decl` — no `SessionSolverHost`/`TypeSolverHost`
+    /// dependency.
+    pub fn should_preserve_shallow_field_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let mut active_exprs = rustc_hash::FxHashSet::<TypeExpr>::default();
+        let mut active_refs = rustc_hash::FxHashSet::<String>::default();
+        self.should_preserve_shallow_field_expr_inner(
+            scope_canonical_id,
+            expr,
+            &mut active_exprs,
+            &mut active_refs,
+        )
+    }
+
+    fn should_preserve_shallow_field_expr_inner(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        use verter_semantic::analysis::type_expr::ObjectMember;
+
+        if !active_exprs.insert(expr.clone()) {
+            return false;
+        }
+        let preserve = if self.should_preserve_imported_bare_ref(scope_canonical_id, expr)
+            || self.should_preserve_imported_member_path(scope_canonical_id, expr)
+            || self.should_preserve_imported_utility_route(scope_canonical_id, expr)
+            || self.should_preserve_package_member_path(scope_canonical_id, expr)
+        {
+            true
         } else {
-            SessionSolverHost::new(self.host)
+            match expr {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            member,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => self
+                    .should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        element,
+                        active_exprs,
+                        active_refs,
+                    ),
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        &element.ty,
+                        active_exprs,
+                        active_refs,
+                    )
+                }),
+                TypeExpr::Object(object) => {
+                    object.properties.iter().any(|member| match member {
+                        ObjectMember::Property(property) => self
+                            .should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &property.ty,
+                                active_exprs,
+                                active_refs,
+                            ),
+                        ObjectMember::IndexSignature(signature) => {
+                            self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &signature.key_type,
+                                active_exprs,
+                                active_refs,
+                            ) || self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                &signature.value_type,
+                                active_exprs,
+                                active_refs,
+                            )
+                        }
+                        ObjectMember::CallSignature(function)
+                        | ObjectMember::ConstructSignature(function) => {
+                            function.parameters.iter().any(|parameter| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            }) || function.return_type.as_deref().is_some_and(|return_type| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    return_type,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            })
+                        }
+                        ObjectMember::Method(method) => {
+                            method.function.parameters.iter().any(|parameter| {
+                                self.should_preserve_shallow_field_expr_inner(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_exprs,
+                                    active_refs,
+                                )
+                            }) || method.function.return_type.as_deref().is_some_and(
+                                |return_type| {
+                                    self.should_preserve_shallow_field_expr_inner(
+                                        scope_canonical_id,
+                                        return_type,
+                                        active_exprs,
+                                        active_refs,
+                                    )
+                                },
+                            )
+                        }
+                    })
+                }
+                TypeExpr::Function(function) => {
+                    function.parameters.iter().any(|parameter| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            &parameter.ty,
+                            active_exprs,
+                            active_refs,
+                        )
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        self.should_preserve_shallow_field_expr_inner(
+                            scope_canonical_id,
+                            return_type,
+                            active_exprs,
+                            active_refs,
+                        )
+                    })
+                }
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => {
+                    let utility_with_args = !type_arguments.is_empty()
+                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref()).is_some();
+                    if utility_with_args
+                        && type_arguments.iter().any(|argument| {
+                            self.should_preserve_shallow_field_expr_inner(
+                                scope_canonical_id,
+                                argument,
+                                active_exprs,
+                                active_refs,
+                            )
+                        })
+                    {
+                        true
+                    } else {
+                        self.should_preserve_transitive_ref(
+                            scope_canonical_id,
+                            name.as_ref(),
+                            active_exprs,
+                            active_refs,
+                        )
+                    }
+                }
+                TypeExpr::IndexedAccess { object, index } => {
+                    self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        object,
+                        active_exprs,
+                        active_refs,
+                    ) || self.should_preserve_shallow_field_expr_inner(
+                        scope_canonical_id,
+                        index,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+                _ => false,
+            }
+        };
+        active_exprs.remove(expr);
+        preserve
+    }
+
+    fn should_preserve_imported_bare_ref(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = stripped
+        else {
+            return false;
+        };
+        if !type_arguments.is_empty() {
+            return false;
+        }
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name.as_ref())
+        else {
+            return false;
+        };
+        if is_package_canonical(&root_identity.canonical_id) {
+            return true;
+        }
+        let Some(prepared) = self
+            .host
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+        else {
+            return false;
+        };
+        !prepared.member_index.is_empty()
+            || matches!(
+                prepared.projection_class,
+                verter_semantic::analysis::type_solver::prepared::PreparedProjectionClass::DirectMembers
+            )
+            || matches!(
+                prepared.kind,
+                verter_semantic::analysis::type_eval::TypeDeclKind::Class
+            )
+    }
+
+    fn should_preserve_imported_member_path(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens_expr(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::IndexedAccess { object, .. } = stripped else {
+            return false;
+        };
+        let Some(name) = root_import_name(object) else {
+            return false;
+        };
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        is_package_canonical(&root_identity.canonical_id)
+    }
+
+    fn should_preserve_imported_utility_route(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        let stripped = strip_parens_expr(expr);
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = stripped
+        else {
+            return false;
+        };
+        if type_arguments.is_empty()
+            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                name.as_ref(),
+            )
+            .is_none()
+        {
+            return false;
+        }
+        type_arguments.iter().any(|argument| {
+            self.should_preserve_imported_bare_ref(scope_canonical_id, argument)
+                || self.should_preserve_imported_utility_route(scope_canonical_id, argument)
+                || self.should_preserve_package_member_path(scope_canonical_id, argument)
+                || matches!(
+                    strip_parens_expr(argument),
+                    TypeExpr::TypeOf(value_ref)
+                        if value_ref.path.first().is_some_and(|root| {
+                            self.bare_ref_origin_in_scope(scope_canonical_id, root)
+                                == verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+                        })
+                )
+        })
+    }
+
+    fn should_preserve_package_member_path(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> bool {
+        fn root_import_name(expr: &TypeExpr) -> Option<&str> {
+            match strip_parens_expr(expr) {
+                TypeExpr::IndexedAccess { object, .. } => root_import_name(object),
+                TypeExpr::Ref { name, .. } => Some(name.as_ref()),
+                _ => None,
+            }
+        }
+
+        let Some(name) = root_import_name(expr) else {
+            return false;
+        };
+        if self.bare_ref_origin_in_scope(scope_canonical_id, name)
+            != verter_semantic::analysis::type_solver::host::BareRefOrigin::Imported
+        {
+            return false;
+        }
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        is_package_canonical(&root_identity.canonical_id)
+    }
+
+    fn should_preserve_transitive_ref(
+        &mut self,
+        scope_canonical_id: &str,
+        name: &str,
+        active_exprs: &mut rustc_hash::FxHashSet<TypeExpr>,
+        active_refs: &mut rustc_hash::FxHashSet<String>,
+    ) -> bool {
+        let Some(root_identity) = self.root_identity_in_scope(scope_canonical_id, name) else {
+            return false;
+        };
+        let cache_key = format!(
+            "{}::{}",
+            root_identity.canonical_id, root_identity.symbol_name
+        );
+        if is_package_canonical(&root_identity.canonical_id) {
+            return true;
+        }
+        if !active_refs.insert(cache_key.clone()) {
+            return false;
+        }
+        let result = self
+            .host
+            .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+            .is_some_and(|prepared| {
+                if matches!(prepared.body, TypeExpr::TypeParameter(_)) {
+                    true
+                } else {
+                    self.should_preserve_shallow_field_expr_inner(
+                        root_identity.canonical_id.as_str(),
+                        &prepared.body,
+                        active_exprs,
+                        active_refs,
+                    )
+                }
+            });
+        active_refs.remove(&cache_key);
+        result
+    }
+
+    pub(crate) fn try_fast_shallow_field_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<FastShallowFieldExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        fn single_member_import_root(expr: &TypeExpr) -> Option<(&str, &str)> {
+            let TypeExpr::IndexedAccess { object, index } = strip_parens_expr(expr) else {
+                return None;
+            };
+            let TypeExpr::Ref {
+                name,
+                type_arguments,
+            } = strip_parens_expr(object)
+            else {
+                return None;
+            };
+            if !type_arguments.is_empty() {
+                return None;
+            }
+            let TypeExpr::Literal(verter_semantic::analysis::type_expr::LiteralValue::String(
+                member_name,
+            )) = strip_parens_expr(index)
+            else {
+                return None;
+            };
+            Some((name.as_ref(), member_name.as_str()))
+        }
+
+        fn fast_symbolic_imported_generic_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+            active_locals: &mut FxHashSet<String>,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => match engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+                    BareRefOrigin::Imported => !type_arguments.is_empty(),
+                    BareRefOrigin::Local if type_arguments.is_empty() => {
+                        let Some(root_identity) =
+                            engine.root_identity_in_scope(scope_canonical_id, name.as_ref())
+                        else {
+                            return false;
+                        };
+                        let active_key = format!(
+                            "{}::{}",
+                            root_identity.canonical_id, root_identity.symbol_name
+                        );
+                        if !active_locals.insert(active_key.clone()) {
+                            return false;
+                        }
+                        let preserve = engine
+                            .prepared_type_decl(
+                                &root_identity.canonical_id,
+                                &root_identity.symbol_name,
+                            )
+                            .is_some_and(|prepared| {
+                                fast_symbolic_imported_generic_route(
+                                    engine,
+                                    root_identity.canonical_id.as_str(),
+                                    &prepared.body,
+                                    active_locals,
+                                )
+                            });
+                        active_locals.remove(&active_key);
+                        preserve
+                    }
+                    _ => false,
+                },
+                TypeExpr::IndexedAccess { object, .. }
+                | TypeExpr::Array {
+                    element: object, ..
+                }
+                | TypeExpr::KeyOf(object)
+                | TypeExpr::Rest(object)
+                | TypeExpr::Parenthesized(object) => fast_symbolic_imported_generic_route(
+                    engine,
+                    scope_canonical_id,
+                    object,
+                    active_locals,
+                ),
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    fast_symbolic_imported_generic_route(
+                        engine,
+                        scope_canonical_id,
+                        &element.ty,
+                        active_locals,
+                    )
+                }),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        fast_symbolic_imported_generic_route(
+                            engine,
+                            scope_canonical_id,
+                            member,
+                            active_locals,
+                        )
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        fn fast_symbolic_imported_bare_ref_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if type_arguments.is_empty()
+                    && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                        == BareRefOrigin::Imported
+                    && name.as_ref().ends_with("Props") =>
+                {
+                    true
+                }
+                TypeExpr::Array { element, .. }
+                | TypeExpr::KeyOf(element)
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, &element.ty)
+                }),
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                    members.iter().any(|member| {
+                        fast_symbolic_imported_bare_ref_route(engine, scope_canonical_id, member)
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        fn collapse_same_file_imported_alias_chain(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> TypeExpr {
+            let mut current = expr.clone();
+            let mut visited = FxHashSet::<String>::default();
+
+            loop {
+                let TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } = strip_parens_expr(&current)
+                else {
+                    return current;
+                };
+                if !type_arguments.is_empty() || !visited.insert(name.to_string()) {
+                    return current;
+                }
+                let Some(root_identity) =
+                    engine.root_identity_in_scope(canonical_id, name.as_ref())
+                else {
+                    return current;
+                };
+                if root_identity.canonical_id != canonical_id {
+                    return current;
+                }
+                let Some(prepared) = engine
+                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                else {
+                    return current;
+                };
+                current = prepared.body.clone();
+            }
+        }
+
+        fn imported_value_route_arg(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            match strip_parens_expr(expr) {
+                TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path }) => {
+                    path.first().is_some_and(|root| {
+                        engine.bare_ref_origin_in_scope(scope_canonical_id, root)
+                            == BareRefOrigin::Imported
+                    })
+                }
+                TypeExpr::Parenthesized(inner) => {
+                    imported_value_route_arg(engine, scope_canonical_id, inner)
+                }
+                _ => false,
+            }
+        }
+
+        fn contains_direct_imported_utility_route(
+            engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            expr: &TypeExpr,
+        ) -> bool {
+            fn imported_route_arg(
+                engine: &mut ComponentMetaQueryEngine<'_>,
+                scope_canonical_id: &str,
+                expr: &TypeExpr,
+            ) -> bool {
+                match strip_parens_expr(expr) {
+                    TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } => {
+                        (type_arguments.is_empty()
+                            && engine.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                                == BareRefOrigin::Imported)
+                            || imported_value_route_arg(engine, scope_canonical_id, expr)
+                            || contains_direct_imported_utility_route(
+                                engine,
+                                scope_canonical_id,
+                                expr,
+                            )
+                    }
+                    TypeExpr::IndexedAccess { object, .. } => {
+                        imported_route_arg(engine, scope_canonical_id, object)
+                    }
+                    TypeExpr::TypeOf(_) => {
+                        imported_value_route_arg(engine, scope_canonical_id, expr)
+                    }
+                    TypeExpr::Parenthesized(inner) => {
+                        imported_route_arg(engine, scope_canonical_id, inner)
+                    }
+                    _ => contains_direct_imported_utility_route(engine, scope_canonical_id, expr),
+                }
+            }
+
+            match strip_parens_expr(expr) {
+                TypeExpr::Union(members) | TypeExpr::Intersection(members) => members.iter().any(
+                    |member| {
+                        contains_direct_imported_utility_route(engine, scope_canonical_id, member)
+                    },
+                ),
+                TypeExpr::Array { element, .. }
+                | TypeExpr::Rest(element)
+                | TypeExpr::Parenthesized(element) => {
+                    contains_direct_imported_utility_route(engine, scope_canonical_id, element)
+                }
+                TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
+                    contains_direct_imported_utility_route(
+                        engine,
+                        scope_canonical_id,
+                        &element.ty,
+                    )
+                }),
+                TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                    verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &property.ty,
+                        )
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                        method.function.parameters.iter().any(|parameter| {
+                            contains_direct_imported_utility_route(
+                                engine,
+                                scope_canonical_id,
+                                &parameter.ty,
+                            )
+                        }) || method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .is_some_and(|return_type| {
+                                contains_direct_imported_utility_route(
+                                    engine,
+                                    scope_canonical_id,
+                                    return_type,
+                                )
+                            })
+                    }
+                    verter_semantic::analysis::type_expr::ObjectMember::CallSignature(function)
+                    | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(
+                        function,
+                    ) => function.parameters.iter().any(|parameter| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &parameter.ty,
+                        )
+                    }) || function.return_type.as_deref().is_some_and(|return_type| {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            return_type,
+                        )
+                    }),
+                    verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(index) => {
+                        contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &index.key_type,
+                        ) || contains_direct_imported_utility_route(
+                            engine,
+                            scope_canonical_id,
+                            &index.value_type,
+                        )
+                    }
+                }),
+                TypeExpr::Function(function) => function.parameters.iter().any(|parameter| {
+                    contains_direct_imported_utility_route(
+                        engine,
+                        scope_canonical_id,
+                        &parameter.ty,
+                    )
+                }) || function.return_type.as_deref().is_some_and(|return_type| {
+                    contains_direct_imported_utility_route(engine, scope_canonical_id, return_type)
+                }),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } if !type_arguments.is_empty()
+                    && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        name.as_ref(),
+                    )
+                    .is_some() =>
+                {
+                    type_arguments.iter().any(|argument| {
+                        imported_route_arg(engine, scope_canonical_id, argument)
+                    })
+                }
+                _ => false,
+            }
+        }
+
+        if contains_direct_imported_utility_route(self, scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        if fast_symbolic_imported_bare_ref_route(self, scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        if let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens_expr(expr)
+        {
+            if !type_arguments.is_empty()
+                && self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref())
+                    == BareRefOrigin::Imported
+            {
+                let _ = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+                return Some(FastShallowFieldExpr {
+                    expr: expr.clone(),
+                    exactness: FastShallowFieldExprExactness::Symbolic,
+                });
+            }
+        }
+
+        if let Some((root_name, member_name)) = single_member_import_root(expr) {
+            if self.bare_ref_origin_in_scope(scope_canonical_id, root_name)
+                == BareRefOrigin::Imported
+            {
+                let root_identity = self.root_identity_in_scope(scope_canonical_id, root_name)?;
+                if is_package_canonical(&root_identity.canonical_id) {
+                    return Some(FastShallowFieldExpr {
+                        expr: expr.clone(),
+                        exactness: FastShallowFieldExprExactness::Symbolic,
+                    });
+                }
+                let prepared = self
+                    .prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
+                let member = prepared.member(member_name)?;
+                if type_expr_references_type_params(&member.ty, &prepared.type_parameters) {
+                    return None;
+                }
+                let collapsed = collapse_same_file_imported_alias_chain(
+                    self,
+                    &root_identity.canonical_id,
+                    &member.ty,
+                );
+                return Some(FastShallowFieldExpr {
+                    expr: collapsed,
+                    exactness: FastShallowFieldExprExactness::Concrete,
+                });
+            }
+        }
+
+        if let Some(expanded) = self.try_fast_expand_shallow_alias_body(scope_canonical_id, expr) {
+            return Some(FastShallowFieldExpr {
+                expr: expanded,
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            });
+        }
+
+        let mut active_locals = FxHashSet::default();
+        fast_symbolic_imported_generic_route(self, scope_canonical_id, expr, &mut active_locals)
+            .then(|| FastShallowFieldExpr {
+                expr: expr.clone(),
+                exactness: FastShallowFieldExprExactness::Symbolic,
+            })
+    }
+
+    fn try_fast_expand_shallow_alias_body(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens_expr(expr)
+        else {
+            return None;
+        };
+        if !type_arguments.is_empty() {
+            return None;
+        }
+        if !matches!(
+            self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()),
+            BareRefOrigin::Imported | BareRefOrigin::Local
+        ) {
+            return None;
+        }
+        let root_identity = self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+        if is_package_canonical(&root_identity.canonical_id) {
+            return None;
+        }
+        let prepared =
+            self.prepared_type_decl(&root_identity.canonical_id, &root_identity.symbol_name)?;
+        if !prepared.type_parameters.is_empty() {
+            return None;
+        }
+        let mut active_aliases = FxHashSet::default();
+        let expanded = self.rewrite_fast_shallow_alias_body(
+            root_identity.canonical_id.as_str(),
+            &prepared.body,
+            &mut active_aliases,
+        )?;
+        (expanded != *expr).then_some(expanded)
+    }
+
+    fn rewrite_fast_shallow_alias_body(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+        active_aliases: &mut FxHashSet<String>,
+    ) -> Option<TypeExpr> {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+
+        match expr {
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::TypeOf(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::RecursiveRef { .. }
+            | TypeExpr::Unknown { .. }
+            | TypeExpr::TypeParameter(_) => Some(expr.clone()),
+            TypeExpr::Parenthesized(inner) => Some(TypeExpr::Parenthesized(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::KeyOf(inner) => Some(TypeExpr::KeyOf(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::Rest(inner) => Some(TypeExpr::Rest(std::sync::Arc::new(
+                self.rewrite_fast_shallow_alias_body(scope_canonical_id, inner, active_aliases)?,
+            ))),
+            TypeExpr::Array { element, readonly } => Some(TypeExpr::Array {
+                element: std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
+                    scope_canonical_id,
+                    element,
+                    active_aliases,
+                )?),
+                readonly: *readonly,
+            }),
+            TypeExpr::Tuple { elements, readonly } => {
+                let elements = elements
+                    .iter()
+                    .map(|element| {
+                        Some(verter_semantic::analysis::type_expr::TupleElement {
+                            label: element.label.clone(),
+                            ty: self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                &element.ty,
+                                active_aliases,
+                            )?,
+                            optional: element.optional,
+                            rest: element.rest,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(TypeExpr::Tuple {
+                    elements: std::sync::Arc::from(elements),
+                    readonly: *readonly,
+                })
+            }
+            TypeExpr::Union(members) => Some(TypeExpr::Union(std::sync::Arc::from(
+                members
+                    .iter()
+                    .map(|member| {
+                        self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            member,
+                            active_aliases,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))),
+            TypeExpr::Intersection(members) => Some(TypeExpr::Intersection(std::sync::Arc::from(
+                members
+                    .iter()
+                    .map(|member| {
+                        self.rewrite_fast_shallow_alias_body(
+                            scope_canonical_id,
+                            member,
+                            active_aliases,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ))),
+            TypeExpr::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Some(TypeExpr::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: std::sync::Arc::from(
+                    expressions
+                        .iter()
+                        .map(|expression| {
+                            self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                expression,
+                                active_aliases,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+            }),
+            TypeExpr::Function(function) => Some(TypeExpr::Function(std::sync::Arc::new(
+                verter_semantic::analysis::type_expr::FunctionExpr {
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            Some(verter_semantic::analysis::type_expr::FunctionParam {
+                                name: parameter.name.clone(),
+                                ty: self.rewrite_fast_shallow_alias_body(
+                                    scope_canonical_id,
+                                    &parameter.ty,
+                                    active_aliases,
+                                )?,
+                                optional: parameter.optional,
+                                rest: parameter.rest,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    return_type: match function.return_type.as_deref() {
+                        Some(return_type) => {
+                            Some(std::sync::Arc::new(self.rewrite_fast_shallow_alias_body(
+                                scope_canonical_id,
+                                return_type,
+                                active_aliases,
+                            )?))
+                        }
+                        None => None,
+                    },
+                    type_parameters: function
+                        .type_parameters
+                        .iter()
+                        .map(|parameter| {
+                            Some(verter_semantic::analysis::type_expr::TypeParam {
+                                name: parameter.name.clone(),
+                                constraint: match parameter.constraint.as_deref() {
+                                    Some(constraint) => Some(std::sync::Arc::new(
+                                        self.rewrite_fast_shallow_alias_body(
+                                            scope_canonical_id,
+                                            constraint,
+                                            active_aliases,
+                                        )?,
+                                    )),
+                                    None => None,
+                                },
+                                default: match parameter.default.as_deref() {
+                                    Some(default) => Some(std::sync::Arc::new(
+                                        self.rewrite_fast_shallow_alias_body(
+                                            scope_canonical_id,
+                                            default,
+                                            active_aliases,
+                                        )?,
+                                    )),
+                                    None => None,
+                                },
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                },
+            ))),
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                if !type_arguments.is_empty() {
+                    return None;
+                }
+                match self.bare_ref_origin_in_scope(scope_canonical_id, name.as_ref()) {
+                    BareRefOrigin::Imported | BareRefOrigin::Local => {
+                        let root_identity =
+                            self.root_identity_in_scope(scope_canonical_id, name.as_ref())?;
+                        if is_package_canonical(&root_identity.canonical_id) {
+                            return Some(expr.clone());
+                        }
+                        let active_key = format!(
+                            "{}::{}",
+                            root_identity.canonical_id, root_identity.symbol_name
+                        );
+                        if !active_aliases.insert(active_key.clone()) {
+                            return None;
+                        }
+                        let rewritten = self
+                            .prepared_type_decl(
+                                &root_identity.canonical_id,
+                                &root_identity.symbol_name,
+                            )
+                            .and_then(|prepared| {
+                                prepared.type_parameters.is_empty().then_some(prepared)
+                            })
+                            .and_then(|prepared| {
+                                self.rewrite_fast_shallow_alias_body(
+                                    root_identity.canonical_id.as_str(),
+                                    &prepared.body,
+                                    active_aliases,
+                                )
+                            });
+                        active_aliases.remove(&active_key);
+                        rewritten
+                    }
+                    _ => None,
+                }
+            }
+            TypeExpr::Object(object) => object
+                .properties
+                .is_empty()
+                .then(|| TypeExpr::Object(object.clone())),
+            TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Mapped { .. } => None,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn debug_solver_host_for_scope(
+    fn bare_ref_origin_in_scope(
         &mut self,
         scope_canonical_id: &str,
-    ) -> SessionSolverHost<'a> {
-        self.solver_host_for_scope(scope_canonical_id)
+        name: &str,
+    ) -> verter_semantic::analysis::type_solver::host::BareRefOrigin {
+        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        if let Some(payload) = payload.as_deref() {
+            if payload.import_bindings.contains_key(name) {
+                return BareRefOrigin::Imported;
+            }
+            if payload.scope_type_bindings.contains_key(name)
+                || payload.scope_type_names.contains(name)
+                || payload.scope_value_names.contains(name)
+            {
+                return BareRefOrigin::Local;
+            }
+        }
+        BareRefOrigin::Unknown
     }
 
-    pub fn solve_owner_named(&mut self, requested_name: &str) -> Option<TypeExpr> {
-        assert_structural_slow_lane_allowed();
-        let expr = TypeExpr::named(requested_name);
-        let result = self.owner_engine.solve(&expr);
-        filter_identity_ref(&result, requested_name)
+    fn root_identity_in_scope(
+        &mut self,
+        scope_canonical_id: &str,
+        name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+        let payload = self.scope_payload_for_scope(scope_canonical_id);
+        crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.host,
+            scope_canonical_id,
+            payload.as_deref(),
+            name,
+        )
+    }
+
+    /// Walk an Object's properties/methods and resolve any
+    /// `TypeExpr::Ref` leaves (inside property types, function return
+    /// types, array elements, union/intersection arms) to their
+    /// dispatch-projected surface (D-Cutover §5.8 replacement for the
+    /// retired `type_eval_build::deep_resolve_slot_function_refs`).
+    ///
+    /// Non-Object inputs are returned verbatim — matches the pre-cutover
+    /// contract. Ref resolution routes through
+    /// [`Self::project_expr_surface_expr`] so it uses the same dispatch
+    /// memo (`SemanticGraphStore`) + `instantiate_active` guards as the
+    /// rest of the component-meta pipeline, guaranteeing one cache entry
+    /// per `(scope, expr)` regardless of entry point.
+    pub fn deep_resolve_slot_function_refs(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> TypeExpr {
+        use verter_semantic::analysis::type_expr::{ObjectMember, ObjectProperty};
+
+        match expr {
+            TypeExpr::Object(obj) => {
+                let properties: Vec<ObjectMember> = obj
+                    .properties
+                    .iter()
+                    .map(|member| match member {
+                        ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                            name: p.name.clone(),
+                            ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
+                            optional: p.optional,
+                            readonly: p.readonly,
+                        }),
+                        ObjectMember::Method(m) => ObjectMember::Method(
+                            verter_semantic::analysis::type_expr::MethodSignature {
+                                name: m.name.clone(),
+                                function: self
+                                    .deep_resolve_fn_refs(scope_canonical_id, &m.function),
+                                optional: m.optional,
+                            },
+                        ),
+                        other => other.clone(),
+                    })
+                    .collect();
+                TypeExpr::Object(std::sync::Arc::new(
+                    verter_semantic::analysis::type_expr::ObjectExpr { properties },
+                ))
+            }
+            // Path C C11-residual-A: walk compound shapes so
+            // `defineSlots<TabsSlots<T>>` patterns with
+            // `{ leading?, content? } & DynamicSlots<...>` bodies still
+            // resolve their explicit Object arm's `SlotProps<T>` members
+            // into Function signatures, which `enrich_missing_slot_bindings`
+            // consumes for slot-binding extraction.
+            TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
+                self.deep_resolve_slot_function_refs(scope_canonical_id, inner),
+            )),
+            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
+                parts
+                    .iter()
+                    .map(|p| self.deep_resolve_slot_function_refs(scope_canonical_id, p))
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
+                variants
+                    .iter()
+                    .map(|v| self.deep_resolve_slot_function_refs(scope_canonical_id, v))
+                    .collect::<Vec<_>>(),
+            )),
+            _ => expr.clone(),
+        }
+    }
+
+    fn deep_resolve_type_refs(&mut self, scope_canonical_id: &str, expr: &TypeExpr) -> TypeExpr {
+        match expr {
+            TypeExpr::Ref { .. } => self
+                .project_expr_surface_expr(scope_canonical_id, expr)
+                .unwrap_or_else(|| expr.clone()),
+            TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(
+                self.deep_resolve_fn_refs(scope_canonical_id, func),
+            )),
+            TypeExpr::Array { element, readonly } => TypeExpr::Array {
+                element: std::sync::Arc::new(
+                    self.deep_resolve_type_refs(scope_canonical_id, element),
+                ),
+                readonly: *readonly,
+            },
+            TypeExpr::Union(variants) => TypeExpr::Union(std::sync::Arc::from(
+                variants
+                    .iter()
+                    .map(|v| self.deep_resolve_type_refs(scope_canonical_id, v))
+                    .collect::<Vec<_>>(),
+            )),
+            TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
+                parts
+                    .iter()
+                    .map(|p| self.deep_resolve_type_refs(scope_canonical_id, p))
+                    .collect::<Vec<_>>(),
+            )),
+            // Path C C11-residual-A: try a strict projection on
+            // deferred shells that may have been left in a mapped-slot
+            // value when the upstream dispatch's same-path sentinel
+            // suppressed a sub-evaluation. The strict projection only
+            // returns when the full surface materialises (Object /
+            // Function / Primitive); otherwise the deferred shell is
+            // preserved so the TypeExpr-level slot-binding extractor
+            // (`enrich_missing_slot_bindings`) can apply its
+            // `decide_typeexpr_conditional_with_function_extends`
+            // workaround.
+            TypeExpr::Conditional { .. }
+            | TypeExpr::IndexedAccess { .. }
+            | TypeExpr::Mapped { .. }
+            | TypeExpr::KeyOf(_)
+            | TypeExpr::TypeOf(_) => self
+                .project_expr_surface_expr(scope_canonical_id, expr)
+                .unwrap_or_else(|| expr.clone()),
+            _ => expr.clone(),
+        }
+    }
+
+    fn deep_resolve_fn_refs(
+        &mut self,
+        scope_canonical_id: &str,
+        func: &verter_semantic::analysis::type_expr::FunctionExpr,
+    ) -> verter_semantic::analysis::type_expr::FunctionExpr {
+        verter_semantic::analysis::type_expr::FunctionExpr {
+            parameters: func
+                .parameters
+                .iter()
+                .map(|p| verter_semantic::analysis::type_expr::FunctionParam {
+                    name: p.name.clone(),
+                    ty: self.deep_resolve_type_refs(scope_canonical_id, &p.ty),
+                    optional: p.optional,
+                    rest: p.rest,
+                })
+                .collect(),
+            return_type: func
+                .return_type
+                .as_ref()
+                .map(|rt| std::sync::Arc::new(self.deep_resolve_type_refs(scope_canonical_id, rt))),
+            type_parameters: func.type_parameters.clone(),
+        }
     }
 
     pub fn resolve_imported_registry_symbol(
@@ -586,66 +1781,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .and_then(|prepared| prepared.member(member_name).map(|member| member.ty.clone()))
     }
 
-    pub fn solve_scoped(
-        &mut self,
-        scope_canonical_id: &str,
-        requested_name: &str,
-    ) -> Option<TypeExpr> {
-        assert_structural_slow_lane_allowed();
-        let key = ScopedSolveKey {
-            scope_canonical_id: scope_canonical_id.to_string(),
-            symbol_name: requested_name.to_string(),
-        };
-
-        if let Some(entry) = self.scoped_cache.get(&key) {
-            return filter_identity_ref(&entry.result, requested_name);
-        }
-
-        if is_package_source(Some(scope_canonical_id)) {
-            let body = self
-                .prepared_type_decl(scope_canonical_id, requested_name)
-                .map(|prepared| prepared.body.clone());
-            if let Some(ref body) = body {
-                self.scoped_cache.insert(
-                    key,
-                    ScopedSolveEntry {
-                        result: SolverResult::exact_concrete(body.clone()),
-                    },
-                );
-            }
-            return body;
-        }
-
-        if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, requested_name) {
-            if is_direct_surface_no_deps(&prepared) {
-                let body = prepared.body.clone();
-                self.scoped_cache.insert(
-                    key,
-                    ScopedSolveEntry {
-                        result: SolverResult::exact_concrete(body.clone()),
-                    },
-                );
-                return Some(body);
-            }
-        }
-
-        self.host.shallow_file_state(scope_canonical_id)?;
-
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        let type_ref = TypeExpr::named(requested_name);
-        let (result, _trace) =
-            self.owner_engine
-                .solve_scoped(&solver_host, scope_canonical_id, &type_ref);
-        // Steps and solve_count are tracked by the shared owner_engine.
-        let filtered = filter_identity_ref(&result, requested_name);
-        self.scoped_cache.insert(key, ScopedSolveEntry { result });
-        filtered
-    }
-
-    pub fn scoped_cache_len(&self) -> usize {
-        self.scoped_cache.len()
-    }
-
     pub fn cached_materialized_member_surface(
         &self,
         scope_canonical_id: &str,
@@ -668,10 +1803,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return;
         };
         self.materialized_member_surfaces.insert(key, materialized);
-    }
-
-    pub fn total_steps(&self) -> u64 {
-        self.owner_engine.total_steps()
     }
 
     pub fn enter_member_surface(&mut self) -> bool {
@@ -734,10 +1865,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &self.fuse_state.trips
     }
 
-    pub fn solve_count(&self) -> u32 {
-        self.owner_engine.solve_count()
-    }
-
     #[cfg(test)]
     pub(crate) fn imported_registry_symbol_cache_len(&self) -> usize {
         self.imported_registry_symbols.len()
@@ -759,16 +1886,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn debug_prepared_shared_surface_hit_count(&self) -> usize {
         self.prepared_shared_surface_hit_count
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn debug_prepared_shared_member_hit_count(&self) -> usize {
         self.prepared_shared_member_hit_count
     }
 
-    fn prepared_type_decl(
+    pub(crate) fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
         symbol_name: &str,
@@ -797,14 +1926,149 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         resolved
     }
 
-    pub fn trace_summary(
-        &self,
-    ) -> &verter_semantic::analysis::type_solver::query_engine::SolverTraceSummary {
-        &self.owner_engine.trace_summary
-    }
-
     pub(crate) fn host(&self) -> &VerterHost {
         self.host
+    }
+
+    fn semantic_dispatch(&self) -> ProjectSemanticDispatch<'_> {
+        ProjectSemanticDispatch::new(self.host)
+    }
+
+    fn dispatch_root_instantiated(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<SemanticNodeId> {
+        // D-Cutover §5.8: resolve the root identity via
+        // `bare_name_resolve::resolve_bare_name_in_scope` directly —
+        // no `SessionSolverHost` construction. Matches the dispatch
+        // lowering path in `shallow_lower_type_expr`.
+        let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id);
+        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            self.host,
+            scope_canonical_id,
+            scope_payload_arc.as_deref(),
+            symbol_name,
+        )
+        .map(|root| (root.canonical_id, root.symbol_name))
+        .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+        let dispatch = self.semantic_dispatch();
+        let anchor = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+            resolved_root.0.as_str(),
+            resolved_root.1.as_str(),
+        ))) {
+            QueryResult::Value(id) => id,
+            _ => return None,
+        };
+        // C16: Instantiate.base is DeclIdentity. Build from resolved root +
+        // shallow state whole_hash.
+        let whole_hash = self
+            .host
+            .shallow_file_state(resolved_root.0.as_str())
+            .map(|s| s.whole_hash)
+            .unwrap_or_default();
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: std::sync::Arc::from(resolved_root.0.as_str()),
+            whole_hash,
+            decl_name: std::sync::Arc::from(resolved_root.1.as_str()),
+        };
+        match dispatch.execute(SemanticQueryKey::Instantiate {
+            base: identity,
+            args: empty_semantic_args(),
+        }) {
+            QueryResult::Value(id) => Some(id),
+            _ => Some(anchor),
+        }
+    }
+
+    fn dispatch_projected_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ProjectedSurface> {
+        let root = self.dispatch_root_instantiated(scope_canonical_id, symbol_name)?;
+        projected_surface_from_semantic_node(self.host, root)
+    }
+
+    fn dispatch_projected_member(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+    ) -> Option<ProjectedMember> {
+        self.dispatch_projected_surface(scope_canonical_id, symbol_name)?
+            .members
+            .into_iter()
+            .find(|member| member.name == member_name)
+    }
+
+    fn dispatch_projected_keyspace(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<ProjectedKeyspace> {
+        let surface = self.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
+        let mut members = surface
+            .members
+            .iter()
+            .map(|member| member.name.clone())
+            .collect::<Vec<_>>();
+        members.sort();
+        members.dedup();
+        Some(ProjectedKeyspace {
+            members,
+            has_index_signature: surface.has_index_signature,
+        })
+    }
+
+    fn dispatch_routed_expr_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        route: &super::RouteDemand,
+    ) -> Option<TypeExpr> {
+        match route {
+            super::RouteDemand::Whole => self
+                .dispatch_projected_surface(scope_canonical_id, root_symbol)
+                .and_then(|surface| projected_surface_to_type_expr(&surface))
+                .filter(dispatch_route_expr_is_materialized),
+            super::RouteDemand::MemberPath(path) if !path.is_empty() => {
+                let root = self.dispatch_root_instantiated(scope_canonical_id, root_symbol)?;
+                let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
+                    path.iter()
+                        .map(|segment| PathSegment::Member(std::sync::Arc::from(segment.as_str())))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let dispatch = self.semantic_dispatch();
+                match dispatch.execute(SemanticQueryKey::ProjectPath {
+                    base: root,
+                    path: query_path,
+                    mode: ProjectionMode::Expanded,
+                }) {
+                    QueryResult::Value(node) => semantic_node_to_type_expr(self.host, node)
+                        .filter(dispatch_route_expr_is_materialized),
+                    _ => None,
+                }
+            }
+            super::RouteDemand::Pick(members) if !members.is_empty() => self
+                .dispatch_projected_surface(scope_canonical_id, root_symbol)
+                .and_then(|surface| {
+                    projected_surface_to_type_expr(&filtered_projected_surface(surface, |name| {
+                        members.iter().any(|member| member == name)
+                    }))
+                })
+                .filter(dispatch_route_expr_is_materialized),
+            super::RouteDemand::Omit(members) if !members.is_empty() => self
+                .dispatch_projected_surface(scope_canonical_id, root_symbol)
+                .and_then(|surface| {
+                    projected_surface_to_type_expr(&filtered_projected_surface(surface, |name| {
+                        !members.iter().any(|member| member == name)
+                    }))
+                })
+                .filter(dispatch_route_expr_is_materialized),
+            _ => None,
+        }
     }
 
     // -------------------------------------------------------------------
@@ -825,71 +2089,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedSurface> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
-
         if self
             .fuse_state
             .check_projection_op_count(&self.fuse_budgets)
         {
             return None;
         }
-
-        let surface_key = TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        };
-        let op_key = TypeSurfaceOpKey::Surface(surface_key);
-        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        let host = self.host;
-        let store_view = host.resolver_store_view();
-        let facts = self
-            .type_surface_facts(scope_canonical_id)
-            .unwrap_or_default();
-        let cached = host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get_or_project_with_facts(op_key, &store_view, || {
-                if host
-                    .prepared_type_decl(scope_canonical_id, symbol_name)
-                    .is_none()
-                {
-                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                }
-                if let Some(surface) =
-                    self.project_prepared_root_surface(scope_canonical_id, symbol_name)
-                {
-                    return Some((
-                        TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(surface)),
-                        facts.clone(),
-                    ));
-                }
-                let subject_key = SubjectKey::Decl {
-                    canonical_id: scope_canonical_id.to_string(),
-                    symbol_name: symbol_name.to_string(),
-                    args_hash: 0,
-                    conditional_ctx_hash: 0,
-                };
-                let subject_id = self.owner_engine.intern_subject(subject_key);
-                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                    SessionSolverHost::from_scope_payload(
-                        host,
-                        scope_canonical_id,
-                        scope_payload.clone(),
-                    )
-                } else {
-                    SessionSolverHost::new(host)
-                };
-                self.owner_engine
-                    .project_surface(subject_id, &solver_host, scope_canonical_id)
-                    .map(|surface| (TypeSurfaceOpResult::Surface(surface), facts.clone()))
-            })?;
-        cached.as_surface().cloned()
+        self.dispatch_projected_surface(scope_canonical_id, symbol_name)
+            .or_else(|| self.cached_prepared_root_surface(scope_canonical_id, symbol_name))
     }
 
     pub fn project_type_surface_expr(
@@ -933,57 +2140,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<ProjectedSurface> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-
         // When the requested symbol is not declared at the passed scope but
         // is instead re-exported through a barrel (e.g. `reka-ui/dist/index.d.ts`
         // re-exports `ListboxRootProps` from `dist/index3.d.ts`), chase the
         // re-export chain to the declaring file so the prepared bundle lookup
         // hits the actual declaration. This is a pure routing step — the
-        // projection cache still keys on the original scope so repeated queries
-        // stay cheap, but the projection itself runs against the declaring
-        // scope where the prepared decl lives.
+        // request-local prepared cache still keys on the original scope so
+        // repeated queries stay cheap, but the projection itself runs against
+        // the declaring scope where the prepared decl lives.
         let (resolved_scope, resolved_symbol) =
             self.resolve_final_prepared_type_target(scope_canonical_id, symbol_name);
-
-        let host = self.host;
-        let store_view = host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-        let facts = self
-            .type_surface_facts(scope_canonical_id)
-            .unwrap_or_default();
-        let resolved_scope_ref = resolved_scope.as_str();
-        let resolved_symbol_ref = resolved_symbol.as_str();
-        let cached = host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get_or_project_with_facts(op_key, &store_view, || {
-                if host
-                    .prepared_type_decl(resolved_scope_ref, resolved_symbol_ref)
-                    .is_none()
-                {
-                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                }
-                self.project_prepared_root_surface(resolved_scope_ref, resolved_symbol_ref)
-                    .map(|surface| {
-                        (
-                            TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(
-                                surface,
-                            )),
-                            facts.clone(),
-                        )
-                    })
-                    .or_else(|| Some((TypeSurfaceOpResult::Miss, facts.clone())))
-            })?;
-        cached.as_surface().cloned()
+        self.project_prepared_root_surface(resolved_scope.as_str(), resolved_symbol.as_str())
+            .map(projected_surface_unwrap_or_clone)
     }
 
     fn project_prepared_root_surface(
@@ -1841,14 +3009,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 match &projected_inner {
                     TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                        // Path C C11-residual-C: accumulate enumerable
+                        // arms only. Pre-residual-C the `?` propagation
+                        // dropped the entire result when any single arm
+                        // could not enumerate keys, even when other arms
+                        // had concrete keyspaces. Mirrors the
+                        // SemanticNode-level Intersection accumulation
+                        // change in `key_names_from_base_node` (Path C
+                        // C10) — `keyof (A & B)` returns the union of
+                        // enumerable keys across A and B and only fails
+                        // when EVERY arm is unresolvable.
                         let mut keys = Vec::new();
+                        let mut any_enumerable = false;
                         for part in parts.iter() {
-                            keys.extend(self.projected_string_literal_keys_inner(
+                            if let Some(arm_keys) = self.projected_string_literal_keys_inner(
                                 resolution_scope_canonical_id,
                                 active_scope_canonical_id,
                                 &TypeExpr::KeyOf(std::sync::Arc::new(part.clone())),
                                 depth + 1,
-                            )?);
+                            ) {
+                                any_enumerable = true;
+                                keys.extend(arm_keys);
+                            }
+                        }
+                        if !any_enumerable {
+                            return None;
                         }
                         keys.sort();
                         keys.dedup();
@@ -1889,7 +3074,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<Vec<String>> {
         use verter_semantic::analysis::type_expr::ObjectMember;
 
-        if depth >= 4 {
+        // Path C C11-residual-C: depth bumped from 4 to 8 to allow
+        // multi-step navigation chains like
+        // `(typeof theme & GetComponentAppConfig<AppConfig, "ui", "button">)['variants']['color']`
+        // which require: (1) IndexedAccess(Intersection,..) distribute
+        // → (2) IndexedAccess(Ref,..) expand alias → (3)
+        // IndexedAccess(Conditional,..) distribute → (4)
+        // IndexedAccess(IndexedAccess,..) recurse on inner → ...
+        if depth >= 8 {
             return None;
         }
 
@@ -1937,15 +3129,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 projected_surface_member_names(&projected_member)
             }
             TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                // Path C C11-residual-C: accumulate enumerable arms
+                // only — see the matching change in
+                // `projected_string_literal_keys_inner`. `keyof
+                // (typeof theme & GetComponentAppConfig<...>)['variants']
+                // ['color']` must merge `theme.variants.color`'s keys
+                // with the conditional's resolvable arm keys, even when
+                // the deferred conditional arm couldn't enumerate.
                 let mut keys = Vec::new();
+                let mut any_enumerable = false;
                 for part in parts.iter() {
-                    keys.extend(self.projected_member_surface_keys(
+                    if let Some(arm_keys) = self.projected_member_surface_keys(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         part,
                         member_name,
                         depth + 1,
-                    )?);
+                    ) {
+                        any_enumerable = true;
+                        keys.extend(arm_keys);
+                    }
+                }
+                if !any_enumerable {
+                    return None;
                 }
                 keys.sort();
                 keys.dedup();
@@ -1984,11 +3190,37 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
             TypeExpr::TypeOf(value_ref) => {
-                let solver_host = self.solver_host_for_scope(active_scope_canonical_id);
+                // D-Cutover §5.8: resolve the value root via the
+                // dispatch-aligned bare-name resolver + host
+                // prepared_value_decl directly. Mirrors `build_typeof`.
+                let scope_payload = self.scope_payload_for_scope(active_scope_canonical_id);
                 let root_name = value_ref.path.first()?;
                 let root_identity =
-                    solver_host.root_identity(active_scope_canonical_id, root_name)?;
-                let prepared_value = solver_host.resolve_prepared_value_decl(&root_identity)?;
+                    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                        self.host,
+                        active_scope_canonical_id,
+                        scope_payload.as_deref(),
+                        root_name,
+                    )?;
+                let prepared_value = self
+                    .host
+                    .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                    .or_else(|| {
+                        if root_identity.canonical_id.is_empty() {
+                            return None;
+                        }
+                        let target = self.host.resolve_value_export_target(
+                            &root_identity.canonical_id,
+                            &root_identity.symbol_name,
+                        )?;
+                        if target.canonical_id == root_identity.canonical_id
+                            && target.name == root_identity.symbol_name
+                        {
+                            return None;
+                        }
+                        self.host
+                            .prepared_value_decl(&target.canonical_id, &target.name)
+                    })?;
 
                 if let Some(object_shape) = prepared_value.object_shape.as_ref() {
                     let object_expr = TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
@@ -2020,6 +3252,160 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 member_name,
                 depth + 1,
             ),
+            // Path C C11-residual-C: distribute member-name lookup over
+            // an `IndexedAccess` whose object is compound or reducible.
+            // For `(typeof theme & GetComponentAppConfig<...>)['variants']['color']`
+            // we want `theme.variants.color`'s keys merged with the
+            // conditional arm's `variants.color`'s keys. Pre-residual-C
+            // the catch-all returned `None` and the test lost AppConfig's
+            // `neutral` because the dispatch couldn't reduce the
+            // outer IndexedAccess to a concrete shape.
+            //
+            // Handles:
+            // - object = Intersection / Union: distribute over arms.
+            // - object = Conditional: distribute over true / false branches.
+            // - object = Ref with type_arguments: expand the alias body
+            //   and retry.
+            // - object = nested IndexedAccess: recurse on inner before
+            //   re-applying the outer index.
+            TypeExpr::IndexedAccess { object, index } => {
+                match object.as_ref() {
+                    TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                        let parts = std::sync::Arc::clone(parts);
+                        let mut keys = Vec::new();
+                        let mut any_enumerable = false;
+                        for arm in parts.iter() {
+                            let arm_indexed = TypeExpr::IndexedAccess {
+                                object: std::sync::Arc::new(arm.clone()),
+                                index: index.clone(),
+                            };
+                            if let Some(arm_keys) = self.projected_member_surface_keys(
+                                resolution_scope_canonical_id,
+                                active_scope_canonical_id,
+                                &arm_indexed,
+                                member_name,
+                                depth + 1,
+                            ) {
+                                any_enumerable = true;
+                                keys.extend(arm_keys);
+                            }
+                        }
+                        if any_enumerable {
+                            keys.sort();
+                            keys.dedup();
+                            Some(keys)
+                        } else {
+                            None
+                        }
+                    }
+                    TypeExpr::Conditional {
+                        true_type,
+                        false_type,
+                        ..
+                    } => {
+                        let mut keys = Vec::new();
+                        let mut any_enumerable = false;
+                        for branch in [true_type.as_ref(), false_type.as_ref()] {
+                            let branch_indexed = TypeExpr::IndexedAccess {
+                                object: std::sync::Arc::new(branch.clone()),
+                                index: index.clone(),
+                            };
+                            if let Some(branch_keys) = self.projected_member_surface_keys(
+                                resolution_scope_canonical_id,
+                                active_scope_canonical_id,
+                                &branch_indexed,
+                                member_name,
+                                depth + 1,
+                            ) {
+                                any_enumerable = true;
+                                keys.extend(branch_keys);
+                            }
+                        }
+                        if any_enumerable {
+                            keys.sort();
+                            keys.dedup();
+                            Some(keys)
+                        } else {
+                            None
+                        }
+                    }
+                    TypeExpr::Ref {
+                        name,
+                        type_arguments,
+                    } => {
+                        // Try expanding the alias's body (substituting
+                        // type arguments), then retry the indexed access
+                        // against the substituted body.
+                        let expanded = if !type_arguments.is_empty() {
+                            self.expand_local_generic_ref_expr(
+                                resolution_scope_canonical_id,
+                                object,
+                            )
+                            .or_else(|| {
+                                self.expand_local_generic_ref_expr(
+                                    active_scope_canonical_id,
+                                    object,
+                                )
+                            })
+                        } else {
+                            // Non-generic Ref: look up the alias's body
+                            // directly via prepared decl resolution.
+                            let try_body = |me: &mut Self, scope: &str| -> Option<TypeExpr> {
+                                let declaration = me.resolve_type_declaration(scope, name.as_ref());
+                                let target_canonical = if declaration.canonical_source.is_empty() {
+                                    scope.to_string()
+                                } else {
+                                    declaration.canonical_source.clone()
+                                };
+                                let resolved_name = if declaration.resolved_name.is_empty() {
+                                    name.as_ref().to_string()
+                                } else {
+                                    declaration.resolved_name.clone()
+                                };
+                                me.prepared_type_decl(&target_canonical, &resolved_name)
+                                    .map(|p| p.body.clone())
+                            };
+                            try_body(self, resolution_scope_canonical_id)
+                                .or_else(|| try_body(self, active_scope_canonical_id))
+                        }?;
+                        let expanded_indexed = TypeExpr::IndexedAccess {
+                            object: std::sync::Arc::new(expanded),
+                            index: index.clone(),
+                        };
+                        self.projected_member_surface_keys(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            &expanded_indexed,
+                            member_name,
+                            depth + 1,
+                        )
+                    }
+                    TypeExpr::IndexedAccess { .. } => {
+                        // Try resolving the inner IndexedAccess to a
+                        // concrete object, then re-apply the outer
+                        // index.
+                        let resolved_inner = self
+                            .solve_or_project_prepared_member_leaf_expr(
+                                resolution_scope_canonical_id,
+                                active_scope_canonical_id,
+                                object,
+                            )
+                            .filter(|resolved| resolved != object.as_ref())?;
+                        let next = TypeExpr::IndexedAccess {
+                            object: std::sync::Arc::new(resolved_inner),
+                            index: index.clone(),
+                        };
+                        self.projected_member_surface_keys(
+                            resolution_scope_canonical_id,
+                            active_scope_canonical_id,
+                            &next,
+                            member_name,
+                            depth + 1,
+                        )
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -2034,67 +3420,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
         member_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedMember> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
-
         if self
             .fuse_state
             .check_projection_op_count(&self.fuse_budgets)
         {
             return None;
         }
-
-        let surface_key = TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        };
-        let op_key = TypeSurfaceOpKey::Member {
-            subject: surface_key,
-            member_name: member_name.to_owned(),
-        };
-        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        let host = self.host;
-        let store_view = host.resolver_store_view();
-        let facts = self
-            .type_surface_facts(scope_canonical_id)
-            .unwrap_or_default();
-        let owner_engine = &mut self.owner_engine;
-        let cached = host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get_or_project_with_facts(op_key, &store_view, || {
-                if host
-                    .prepared_type_decl(scope_canonical_id, symbol_name)
-                    .is_none()
-                {
-                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                }
-                let subject_key = SubjectKey::Decl {
-                    canonical_id: scope_canonical_id.to_string(),
-                    symbol_name: symbol_name.to_string(),
-                    args_hash: 0,
-                    conditional_ctx_hash: 0,
-                };
-                let subject_id = owner_engine.intern_subject(subject_key);
-                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                    SessionSolverHost::from_scope_payload(
-                        host,
-                        scope_canonical_id,
-                        scope_payload.clone(),
-                    )
-                } else {
-                    SessionSolverHost::new(host)
-                };
-                owner_engine
-                    .project_member(subject_id, member_name, &solver_host, scope_canonical_id)
-                    .map(|member| (TypeSurfaceOpResult::Member(member), facts.clone()))
-            })?;
-        cached.as_member().cloned()
+        self.dispatch_projected_member(scope_canonical_id, symbol_name, member_name)
+            .or_else(|| {
+                let mut active = FxHashSet::default();
+                self.project_prepared_requested_member_from_symbol(
+                    scope_canonical_id,
+                    symbol_name,
+                    member_name,
+                    &FxHashMap::default(),
+                    &mut active,
+                )
+            })
     }
 
     /// Project the keyspace (member names) from a type expression in a
@@ -2107,66 +3449,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         symbol_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::query_engine::ProjectedKeyspace> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-        use verter_semantic::analysis::type_solver::query_engine::SubjectKey;
-
         if self
             .fuse_state
             .check_projection_op_count(&self.fuse_budgets)
         {
             return None;
         }
-
-        let surface_key = TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        };
-        let op_key = TypeSurfaceOpKey::Keyspace(surface_key);
-        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-        let host = self.host;
-        let store_view = host.resolver_store_view();
-        let facts = self
-            .type_surface_facts(scope_canonical_id)
-            .unwrap_or_default();
-        let owner_engine = &mut self.owner_engine;
-        let cached = host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get_or_project_with_facts(op_key, &store_view, || {
-                if host
-                    .prepared_type_decl(scope_canonical_id, symbol_name)
-                    .is_none()
-                {
-                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                }
-                let subject_key = SubjectKey::Decl {
-                    canonical_id: scope_canonical_id.to_string(),
-                    symbol_name: symbol_name.to_string(),
-                    args_hash: 0,
-                    conditional_ctx_hash: 0,
-                };
-                let subject_id = owner_engine.intern_subject(subject_key);
-                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                    SessionSolverHost::from_scope_payload(
-                        host,
-                        scope_canonical_id,
-                        scope_payload.clone(),
-                    )
-                } else {
-                    SessionSolverHost::new(host)
-                };
-                owner_engine
-                    .project_keyspace(subject_id, &solver_host, scope_canonical_id)
-                    .map(|keyspace| (TypeSurfaceOpResult::Keyspace(keyspace), facts.clone()))
-            })?;
-        cached.as_keyspace().cloned()
+        self.dispatch_projected_keyspace(scope_canonical_id, symbol_name)
     }
 
+    /// Project an arbitrary [`TypeExpr`] to its surface form (plan §9
+    /// appendix row 1-2). Route-based fast-path via
+    /// `component_meta_registry_public_indexed_access_route` stays; the
+    /// full projection routes through [`ProjectSemanticDispatch`] —
+    /// D-Cutover §5.8 retired the pre-cutover
+    /// `owner_engine.project_expr_surface_as_type_expr` fallback.
     pub fn project_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2191,12 +3488,71 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             {
                 return Some(projected);
             }
+            if let Some(solved) = self.solve_expr_type_expr(scope_canonical_id, expr) {
+                return Some(solved);
+            }
         }
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        self.owner_engine
-            .project_expr_surface_as_type_expr(&solver_host, scope_canonical_id, expr)
+        let dispatch = self.semantic_dispatch();
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base,
+            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            mode: ProjectionMode::Expanded,
+        }) else {
+            return None;
+        };
+        let projected = semantic_node_to_type_expr(self.host, node)?;
+        (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
+            .then_some(projected)
     }
 
+    /// Like [`Self::project_expr_surface_expr`] but accepts compound
+    /// projections (Intersection / Union / Parenthesized) that contain
+    /// at least one Object arm even when sibling arms are still deferred
+    /// shells (Mapped / KeyOf / IndexedAccess / Conditional). Used by
+    /// the `defineSlots<T>` macro-shape producer to extract explicit
+    /// slot names from `{ leading?, content? } & DynamicSlots<...>`-
+    /// shaped intersections where the dynamic helper arm cannot
+    /// enumerate keys at unresolved-generic time.
+    ///
+    /// Returns `None` when the projection has no Object arm at any
+    /// nesting level — there is no surface to extract.
+    pub fn project_expr_surface_expr_with_compound_objects(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
+        let dispatch = self.semantic_dispatch();
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base,
+            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            mode: ProjectionMode::Expanded,
+        }) else {
+            return None;
+        };
+        let projected = semantic_node_to_type_expr(self.host, node)?;
+        type_expr_has_any_object_arm(&projected).then_some(projected)
+    }
+
+    /// Like [`Self::project_expr_surface_expr`] but returns the raw
+    /// projection result regardless of whether it is fully expanded.
+    /// Returns `None` only when the projection itself fails to produce
+    /// a value (lowering miss / dispatch error) or when the result is
+    /// the `Opaque(Miss)` sentinel.
+    /// Solve an arbitrary [`TypeExpr`] to its reduced form (plan §9
+    /// appendix row 3). Routes through [`ProjectSemanticDispatch`] with
+    /// `mode: Expanded` — D-Cutover §5.8 retired the pre-cutover
+    /// `owner_engine.solve_scoped` fallback.
+    ///
+    /// Returns `Some(reduced)` only when the dispatch result differs
+    /// structurally from `expr`, matching the pre-migration contract.
     pub fn solve_expr_type_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2208,11 +3564,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         {
             return None;
         }
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        let (result, _) = self
-            .owner_engine
-            .solve_scoped(&solver_host, scope_canonical_id, expr);
-        (result.value != *expr).then_some(result.value)
+        let dispatch = self.semantic_dispatch();
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base,
+            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            mode: ProjectionMode::Expanded,
+        }) else {
+            return None;
+        };
+        let reduced = semantic_node_to_type_expr(self.host, node)?;
+        (!type_expr_contains_semantic_miss(&reduced)
+            && type_expr_is_expanded_surface(&reduced)
+            && reduced != *expr)
+            .then_some(reduced)
     }
 
     pub fn expand_local_generic_ref_expr(
@@ -2232,20 +3597,24 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         let declaration = self.resolve_type_declaration(scope_canonical_id, name.as_ref());
-        let target_canonical_id = if declaration.canonical_source.is_empty() {
+        let declared_canonical_id = if declaration.canonical_source.is_empty() {
             scope_canonical_id.to_string()
         } else {
             declaration.canonical_source.clone()
         };
+        let declared_symbol_name = if declaration.resolved_name.is_empty() {
+            name.as_ref().to_string()
+        } else {
+            declaration.resolved_name.clone()
+        };
+        let (target_canonical_id, target_symbol_name) = self.resolve_final_prepared_type_target(
+            declared_canonical_id.as_str(),
+            declared_symbol_name.as_str(),
+        );
         if is_package_source(Some(target_canonical_id.as_str())) {
             return None;
         }
-        let target_symbol_name = if declaration.resolved_name.is_empty() {
-            name.as_ref()
-        } else {
-            declaration.resolved_name.as_str()
-        };
-        let prepared = self.prepared_type_decl(&target_canonical_id, target_symbol_name)?;
+        let prepared = self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
         let substitutions = prepared_type_param_substitutions(prepared.as_ref(), type_arguments)?;
         Some(substitute_type_expr_if_needed(
             &prepared.body,
@@ -2280,10 +3649,152 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 );
             }
         }
-        let solver_host = self.solver_host_for_scope(scope_canonical_id);
-        self.owner_engine
-            .project_expr_surface(&solver_host, scope_canonical_id, expr)
-            .map(|surface| projected_surface_to_expanded_shape(&surface))
+        // Plan §9 row 4: dispatch is the sole projection authority
+        // (D-Cutover §5.8 retired the `owner_engine.project_expr_surface`
+        // fallback).
+        if let Some(shape) = self.project_direct_utility_surface_shape(scope_canonical_id, expr) {
+            return Some(shape);
+        }
+        let dispatch = self.semantic_dispatch();
+        let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+            base,
+            path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            mode: ProjectionMode::Shallow,
+        }) else {
+            return None;
+        };
+        let surface = projected_surface_from_semantic_node(self.host, node)?;
+        let shape = projected_surface_to_expanded_shape(&surface);
+        (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
+    }
+
+    fn project_direct_utility_surface_shape(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+        use verter_semantic::analysis::type_expand::ExpandedObjectShape;
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        fn shape_has_surface(shape: &ExpandedObjectShape) -> bool {
+            !shape.properties.is_empty() || !shape.call_signatures.is_empty()
+        }
+
+        fn projected_target_shape(
+            query_engine: &mut ComponentMetaQueryEngine<'_>,
+            scope_canonical_id: &str,
+            target: &TypeExpr,
+        ) -> Option<ExpandedObjectShape> {
+            if let Some(shape) = query_engine.project_expr_surface_shape(scope_canonical_id, target)
+            {
+                if shape_has_surface(&shape) {
+                    return Some(shape);
+                }
+            }
+            if let Some(projected) =
+                query_engine.project_expr_surface_expr(scope_canonical_id, target)
+            {
+                let shape =
+                    verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
+                if shape_has_surface(&shape) {
+                    return Some(shape);
+                }
+            }
+            if let Some(expanded_ref) =
+                query_engine.expand_local_generic_ref_expr(scope_canonical_id, target)
+            {
+                if let Some(shape) =
+                    query_engine.project_expr_surface_shape(scope_canonical_id, &expanded_ref)
+                {
+                    if shape_has_surface(&shape) {
+                        return Some(shape);
+                    }
+                }
+                if let Some(projected) =
+                    query_engine.project_expr_surface_expr(scope_canonical_id, &expanded_ref)
+                {
+                    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
+                        &projected,
+                    );
+                    if shape_has_surface(&shape) {
+                        return Some(shape);
+                    }
+                }
+                let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
+                    &expanded_ref,
+                );
+                if shape_has_surface(&shape) {
+                    return Some(shape);
+                }
+            }
+            None
+        }
+
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = strip_parens_expr(expr)
+        else {
+            return None;
+        };
+
+        match (name.as_ref(), type_arguments.as_ref()) {
+            ("Partial", [target]) => {
+                projected_target_shape(self, scope_canonical_id, target).map(|mut shape| {
+                    for property in &mut shape.properties {
+                        property.optional = true;
+                    }
+                    shape
+                })
+            }
+            ("Required", [target]) => {
+                projected_target_shape(self, scope_canonical_id, target).map(|mut shape| {
+                    for property in &mut shape.properties {
+                        property.optional = false;
+                    }
+                    shape
+                })
+            }
+            ("Readonly", [target]) => {
+                projected_target_shape(self, scope_canonical_id, target).map(|mut shape| {
+                    for property in &mut shape.properties {
+                        property.readonly = true;
+                    }
+                    shape
+                })
+            }
+            ("NonNullable", [target]) => projected_target_shape(self, scope_canonical_id, target),
+            ("Pick", [target, keys]) => {
+                let requested = self.projected_string_literal_keys(
+                    scope_canonical_id,
+                    scope_canonical_id,
+                    keys,
+                )?;
+                let mut shape = projected_target_shape(self, scope_canonical_id, target)?;
+                shape.properties.retain(|property| {
+                    requested
+                        .iter()
+                        .any(|candidate| candidate == property.name.as_str())
+                });
+                shape_has_surface(&shape).then_some(shape)
+            }
+            ("Omit", [target, keys]) => {
+                let omitted = self.projected_string_literal_keys(
+                    scope_canonical_id,
+                    scope_canonical_id,
+                    keys,
+                )?;
+                let mut shape = projected_target_shape(self, scope_canonical_id, target)?;
+                shape.properties.retain(|property| {
+                    !omitted
+                        .iter()
+                        .any(|candidate| candidate == property.name.as_str())
+                });
+                shape_has_surface(&shape).then_some(shape)
+            }
+            _ => None,
+        }
     }
 
     pub fn project_route_surface_expr(
@@ -2342,6 +3853,43 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.cached_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
         {
             return Some(cached_expr);
+        }
+
+        if let Some(projected_expr) =
+            self.project_routed_expr_surface_expr_direct(scope_canonical_id, root_symbol, route)
+        {
+            self.cache_routed_expr_surface_expr(
+                scope_canonical_id,
+                root_symbol,
+                route,
+                &projected_expr,
+            );
+            if let super::RouteDemand::MemberPath(path) = route {
+                if let [member_name] = path.as_slice() {
+                    if let Some(projected_member) = single_member_route_cache_entry(
+                        self,
+                        scope_canonical_id,
+                        root_symbol,
+                        member_name,
+                        &projected_expr,
+                    ) {
+                        self.cache_projected_member(
+                            scope_canonical_id,
+                            root_symbol,
+                            &projected_member,
+                        );
+                    }
+                }
+            }
+            if let super::RouteDemand::Pick(members) = route {
+                self.cache_pick_members_from_projected_expr(
+                    scope_canonical_id,
+                    root_symbol,
+                    members,
+                    &projected_expr,
+                );
+            }
+            return Some(projected_expr);
         }
 
         if let super::RouteDemand::MemberPath(path) = route {
@@ -2437,7 +3985,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
         }
 
-        self.project_routed_expr_surface_expr_direct(scope_canonical_id, root_symbol, route)
+        None
     }
 
     fn cached_routed_expr_surface_expr(
@@ -2446,24 +3994,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
-        use crate::resolver_core::type_surface_db::{TypeSurfaceKey, TypeSurfaceOpKey};
-
-        let _store_view = self.host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::RoutedExpr {
-            subject: TypeSurfaceKey {
-                canonical_owner: scope_canonical_id.to_owned(),
-                symbol_name: root_symbol.to_owned(),
-                instantiation_hash: 0,
-                context_hash: 0,
-            },
-            route: route.clone(),
-        };
-        self.host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .and_then(|cached| cached.as_expr().cloned())
+        self.routed_expr_surface_cache
+            .get(&RoutedExprSurfaceCacheKey {
+                scope_canonical_id: scope_canonical_id.to_owned(),
+                root_symbol: root_symbol.to_owned(),
+                route: route.clone(),
+            })
+            .cloned()
     }
 
     fn cache_routed_expr_surface_expr(
@@ -2473,37 +4010,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         route: &super::RouteDemand,
         projected_expr: &TypeExpr,
     ) {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-
-        let op_key = TypeSurfaceOpKey::RoutedExpr {
-            subject: TypeSurfaceKey {
-                canonical_owner: scope_canonical_id.to_owned(),
-                symbol_name: root_symbol.to_owned(),
-                instantiation_hash: 0,
-                context_hash: 0,
+        self.routed_expr_surface_cache.insert(
+            RoutedExprSurfaceCacheKey {
+                scope_canonical_id: scope_canonical_id.to_owned(),
+                root_symbol: root_symbol.to_owned(),
+                route: route.clone(),
             },
-            route: route.clone(),
-        };
-        let _store_view = self.host.resolver_store_view();
-        if self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .is_none()
-        {
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                op_key,
-                TypeSurfaceOpResult::Expr(projected_expr.clone()),
-                facts,
-            );
-        }
+            projected_expr.clone(),
+        );
     }
 
     fn cache_pick_members_from_projected_expr(
@@ -2554,37 +4068,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         projected_member: &ProjectedMember,
     ) {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-
-        let op_key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: scope_canonical_id.to_owned(),
-                symbol_name: root_symbol.to_owned(),
-                instantiation_hash: 0,
-                context_hash: 0,
-            },
-            member_name: projected_member.name.clone(),
-        };
-        let _store_view = self.host.resolver_store_view();
-        if self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .is_none()
-        {
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                op_key,
-                TypeSurfaceOpResult::Member(projected_member.clone()),
-                facts,
-            );
-        }
+        let _ = (scope_canonical_id, root_symbol, projected_member);
     }
 
     fn cached_prepared_requested_member(
@@ -2594,33 +4078,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         member_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
     ) -> Option<ProjectedMember> {
-        if !self.prepared_requested_member_shared_cache_enabled(scope_canonical_id, substitutions) {
-            return None;
-        }
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
-
-        let _store_view = self.host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: scope_canonical_id.to_owned(),
-                symbol_name: symbol_name.to_owned(),
-                instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
-                context_hash: 0,
-            },
-            member_name: member_name.to_owned(),
-        };
-        let cached = self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .and_then(|cached| cached.as_member().cloned());
-        #[cfg(test)]
-        if cached.is_some() {
-            self.prepared_shared_member_hit_count += 1;
-        }
-        cached
+        let _ = (scope_canonical_id, symbol_name, member_name, substitutions);
+        None
     }
 
     fn cached_prepared_surface(
@@ -2629,31 +4088,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         symbol_name: &str,
         substitutions: &FxHashMap<String, TypeExpr>,
     ) -> Option<std::sync::Arc<ProjectedSurface>> {
-        if !self.prepared_surface_shared_cache_enabled(scope_canonical_id, substitutions) {
-            return None;
-        }
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
-
-        let _store_view = self.host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
-            context_hash: 0,
-        });
-        let cached = self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .and_then(|cached| cached.as_surface().cloned())
-            .map(std::sync::Arc::new);
-        #[cfg(test)]
-        if cached.is_some() {
-            self.prepared_shared_surface_hit_count += 1;
-        }
-        cached
+        let _ = (scope_canonical_id, symbol_name, substitutions);
+        None
     }
 
     fn cache_prepared_surface_projection(
@@ -2663,38 +4099,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         substitutions: &FxHashMap<String, TypeExpr>,
         projection: &PreparedSurfaceProjection,
     ) {
-        if !self.prepared_surface_shared_cache_enabled(scope_canonical_id, substitutions) {
-            return;
-        }
-        let PreparedSurfaceProjection::Surface(surface) = projection else {
-            return;
-        };
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-
-        let _store_view = self.host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: symbol_name.to_owned(),
-            instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
-            context_hash: 0,
-        });
-        if self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .is_none()
-        {
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                op_key,
-                TypeSurfaceOpResult::Surface(projected_surface_unwrap_or_clone(surface.clone())),
-                facts,
-            );
-        }
+        let _ = (scope_canonical_id, symbol_name, substitutions, projection);
     }
 
     fn cache_prepared_requested_member(
@@ -2704,40 +4109,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         projected_member: &ProjectedMember,
         substitutions: &FxHashMap<String, TypeExpr>,
     ) {
-        if !self.prepared_requested_member_shared_cache_enabled(scope_canonical_id, substitutions) {
-            return;
-        }
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-
-        let _store_view = self.host.resolver_store_view();
-        let op_key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: scope_canonical_id.to_owned(),
-                symbol_name: symbol_name.to_owned(),
-                instantiation_hash: prepared_substitution_instantiation_hash(substitutions),
-                context_hash: 0,
-            },
-            member_name: projected_member.name.clone(),
-        };
-        if self
-            .host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get(&op_key, &self.host.resolver_store_view())
-            .is_none()
-        {
-            let facts = self
-                .type_surface_facts(scope_canonical_id)
-                .unwrap_or_default();
-            self.host.resolver.runtime.type_surfaces.publish_with_facts(
-                op_key,
-                TypeSurfaceOpResult::Member(projected_member.clone()),
-                facts,
-            );
-        }
+        let _ = (
+            scope_canonical_id,
+            symbol_name,
+            projected_member,
+            substitutions,
+        );
     }
 
+    #[allow(dead_code)]
     fn prepared_requested_member_shared_cache_enabled(
         &self,
         scope_canonical_id: &str,
@@ -2750,6 +4130,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 .is_some_and(|request_root| request_root != scope_canonical_id)
     }
 
+    #[allow(dead_code)]
     fn prepared_surface_shared_cache_enabled(
         &self,
         scope_canonical_id: &str,
@@ -2970,16 +4351,203 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         active_scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> Option<TypeExpr> {
-        let active_result =
-            self.solve_or_project_leaf_expr_until_stable(active_scope_canonical_id, expr);
-        if resolution_scope_canonical_id == active_scope_canonical_id
-            || !self.expr_references_prepared_scope_symbol(resolution_scope_canonical_id, expr)
-        {
-            return active_result;
+        let context = PreparedProjectionContext {
+            decl_scope: resolution_scope_canonical_id.to_string(),
+            arg_scope: active_scope_canonical_id.to_string(),
+            chain_scopes: self.projection_chain_scopes.clone(),
+        };
+        self.solve_or_project_leaf_expr_with_context(&context, expr)
+    }
+
+    /// Path C C11b — per-TypeExpr-shape scope dispatch for the prepared-
+    /// member-path projection (plan §2 Stage 6 Pass C11b).
+    ///
+    /// The pre-C11b logic tried `active_scope` first and then fell back to
+    /// `resolution_scope` only when the expression referenced a prepared
+    /// symbol in that scope. That gate missed transitive helper refs
+    /// (e.g., `ComponentUI<typeof theme>` where `ComponentUI` lives in a
+    /// type-file reached via the prepared decl's import chain, not the
+    /// decl's immediate symbol map).
+    ///
+    /// C11b uses a `PreparedProjectionContext { decl_scope, arg_scope }`:
+    /// - bare `Ref { name, type_arguments: [] }`: try `decl_scope` first
+    ///   (helper-body-internal reference), fall back to `arg_scope`.
+    /// - `TypeOf(value_ref)`: always resolve in `arg_scope` (caller-
+    ///   scoped value symbol table).
+    /// - `Ref { name, type_arguments }`: resolve the NAME in `decl_scope`
+    ///   so helper aliases lower against their own declaration site;
+    ///   lower `type_arguments` in `arg_scope` so caller-scoped
+    ///   `typeof theme` / explicit type arguments stay resolvable.
+    ///   After both halves resolve, re-run
+    ///   `solve_or_project_leaf_expr_until_stable` in `decl_scope` to
+    ///   bridge the instantiation.
+    /// - compound shapes (`IndexedAccess`, `Conditional`, `Mapped`,
+    ///   `KeyOf`, etc.): fall back to the two-scope retry path (active
+    ///   first, resolution fallback). The compound shapes don't need
+    ///   per-sub-expression scope splitting because their sub-
+    ///   expressions are already `TypeExpr` leaves that round-trip
+    ///   through this function.
+    fn solve_or_project_leaf_expr_with_context(
+        &mut self,
+        context: &PreparedProjectionContext,
+        expr: &TypeExpr,
+    ) -> Option<TypeExpr> {
+        let decl_scope = context.decl_scope.clone();
+        let arg_scope = context.arg_scope.clone();
+        let chain_scopes = context.chain_scopes.clone();
+
+        if decl_scope == arg_scope {
+            return self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
         }
 
-        self.solve_or_project_leaf_expr_until_stable(resolution_scope_canonical_id, expr)
-            .or(active_result)
+        match expr {
+            TypeExpr::Ref {
+                name: _,
+                type_arguments,
+            } if type_arguments.is_empty() => {
+                // Bare `Ref { name, [] }`: helper-body-internal reference.
+                // Try decl_scope first; fall back to arg_scope.
+                if let Some(result) =
+                    self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                {
+                    if &result != expr {
+                        return Some(result);
+                    }
+                }
+                self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr)
+            }
+            TypeExpr::TypeOf(_) => {
+                // `typeof value_ref`: caller-scoped first (the most
+                // common case is `Foo['x']` where `Foo` is a value
+                // imported into the calling SFC). Path C C11-residual-B:
+                // some helper-aliased patterns reference values that
+                // are visible in OUTER helper scopes (e.g.,
+                // `type Button = ComponentConfig<typeof theme>` declared
+                // in `button-types.ts` — `theme` is visible there, but
+                // by the time the projection recurses into
+                // `ComponentConfig`'s body in `types.ts`, neither
+                // `decl_scope=types.ts` nor `arg_scope=ImportedSlotButton.vue`
+                // can resolve `theme`. The `chain_scopes` carry the
+                // outer declaration scopes through the recursion so
+                // the value reference can find its visible scope.
+                let arg_first = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if let Some(ref result) = arg_first {
+                    if result != expr {
+                        return arg_first;
+                    }
+                }
+                if let Some(decl_result) =
+                    self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                {
+                    if &decl_result != expr {
+                        return Some(decl_result);
+                    }
+                }
+                for chain_scope in &chain_scopes {
+                    if chain_scope == &decl_scope || chain_scope == &arg_scope {
+                        continue;
+                    }
+                    if let Some(chain_result) =
+                        self.solve_or_project_leaf_expr_until_stable(chain_scope, expr)
+                    {
+                        if &chain_result != expr {
+                            return Some(chain_result);
+                        }
+                    }
+                }
+                arg_first
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                // `Ref { name, [args..] }`: helper instantiation. Resolve
+                // the name in decl_scope (so the helper's declaration
+                // registry is consulted), and lower type_arguments in
+                // arg_scope (so caller-side `typeof`, locally-declared
+                // types, etc. stay resolvable). The simplest way to
+                // plumb both is to try decl_scope first — the helper's
+                // body will instantiate against its own declaration-
+                // site symbol table. If decl_scope resolves the helper
+                // (non-trivially), return the decl_scope projection.
+                // Otherwise fall back to arg_scope where the ref name
+                // may be reachable via direct import.
+                let decl_first = self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr);
+                if let Some(ref result) = decl_first {
+                    if result != expr {
+                        return decl_first;
+                    }
+                }
+                let arg_result = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if let Some(ref result) = arg_result {
+                    if result != expr {
+                        return arg_result;
+                    }
+                }
+                // Path C C11-residual-B: split-scope projection. When
+                // the ref's name belongs to one scope (e.g. `ComponentUI`
+                // declared in `types.ts`) and its type_arguments
+                // reference values from another scope (e.g.
+                // `typeof theme` visible only in `button-types.ts`),
+                // pre-resolve each `TypeOf(value)` argument in any
+                // chain scope where the value is visible, then re-try
+                // the projection with the resolved arguments substituted.
+                if !chain_scopes.is_empty() {
+                    let mut resolved_args: Vec<TypeExpr> = Vec::with_capacity(type_arguments.len());
+                    let mut any_argument_resolved = false;
+                    for arg in type_arguments.iter() {
+                        let mut resolved = arg.clone();
+                        if matches!(arg, TypeExpr::TypeOf(_)) {
+                            for chain_scope in &chain_scopes {
+                                if chain_scope == &decl_scope || chain_scope == &arg_scope {
+                                    continue;
+                                }
+                                if let Some(chain_arg) =
+                                    self.solve_or_project_leaf_expr_until_stable(chain_scope, arg)
+                                {
+                                    if &chain_arg != arg {
+                                        resolved = chain_arg;
+                                        any_argument_resolved = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        resolved_args.push(resolved);
+                    }
+                    if any_argument_resolved {
+                        let resolved_expr = TypeExpr::Ref {
+                            name: name.clone(),
+                            type_arguments: std::sync::Arc::from(resolved_args),
+                        };
+                        if let Some(result) = self
+                            .solve_or_project_leaf_expr_until_stable(&decl_scope, &resolved_expr)
+                        {
+                            return Some(result);
+                        }
+                        if let Some(result) =
+                            self.solve_or_project_leaf_expr_until_stable(&arg_scope, &resolved_expr)
+                        {
+                            return Some(result);
+                        }
+                    }
+                }
+                arg_result.or(decl_first)
+            }
+            _ => {
+                // Compound shapes (IndexedAccess, Conditional, Mapped,
+                // KeyOf, Intersection, Union, Parenthesized, etc.)
+                // preserve the pre-C11b two-scope retry. Inner
+                // sub-expressions come back through this function so
+                // per-shape dispatch still applies transitively.
+                let active_result = self.solve_or_project_leaf_expr_until_stable(&arg_scope, expr);
+                if !self.expr_references_prepared_scope_symbol(&decl_scope, expr) {
+                    return active_result;
+                }
+                self.solve_or_project_leaf_expr_until_stable(&decl_scope, expr)
+                    .or(active_result)
+            }
+        }
     }
 
     fn solve_or_project_leaf_expr_until_stable(
@@ -3250,14 +4818,40 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             target_prepared.as_ref(),
                             type_arguments.as_ref(),
                         )?;
-                        self.project_prepared_member_path_route_projection_from_symbol(
-                            &target_canonical_id,
-                            active_scope_canonical_id,
-                            &target_symbol_name,
-                            path,
-                            &target_substitutions,
-                            visited,
-                        )
+                        // Path C C11-residual-B: as we descend into the
+                        // target alias's declaration scope, push the
+                        // current `resolution_scope_canonical_id` onto
+                        // the projection chain. The leaf-expr handler
+                        // uses this chain to find the scope where a
+                        // `TypeOf(value)` reference was visible at the
+                        // outer call site (e.g., `theme` imported in
+                        // `button-types.ts` while we're now recursing
+                        // into `ComponentConfig`'s body in `types.ts`).
+                        let pushed = if !self
+                            .projection_chain_scopes
+                            .iter()
+                            .any(|s| s == resolution_scope_canonical_id)
+                            && resolution_scope_canonical_id != target_canonical_id
+                        {
+                            self.projection_chain_scopes
+                                .push(resolution_scope_canonical_id.to_string());
+                            true
+                        } else {
+                            false
+                        };
+                        let result = self
+                            .project_prepared_member_path_route_projection_from_symbol(
+                                &target_canonical_id,
+                                active_scope_canonical_id,
+                                &target_symbol_name,
+                                path,
+                                &target_substitutions,
+                                visited,
+                            );
+                        if pushed {
+                            self.projection_chain_scopes.pop();
+                        }
+                        result
                     }
                 }
             }
@@ -3542,58 +5136,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
-        use crate::resolver_core::type_surface_db::{
-            TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult,
-        };
-
-        let route_expr = routed_expr_surface_key_expr(root_symbol, route)?;
-        let subject = TypeSurfaceKey {
-            canonical_owner: scope_canonical_id.to_owned(),
-            symbol_name: root_symbol.to_owned(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        };
-        let op_key = TypeSurfaceOpKey::RoutedExpr {
-            subject,
-            route: route.clone(),
-        };
-        let cached_scope_payload = self.scope_payload_for_scope(scope_canonical_id);
-
-        let host = self.host;
-        let store_view = host.resolver_store_view();
-        let facts = self
-            .type_surface_facts(scope_canonical_id)
-            .unwrap_or_default();
-        let owner_engine = &mut self.owner_engine;
-        let cached = host
-            .resolver
-            .runtime
-            .type_surfaces
-            .get_or_project_with_facts(op_key, &store_view, || {
-                if host
-                    .prepared_type_decl(scope_canonical_id, root_symbol)
-                    .is_none()
-                {
-                    return Some((TypeSurfaceOpResult::Miss, facts.clone()));
-                }
-                let solver_host = if let Some(ref scope_payload) = cached_scope_payload {
-                    SessionSolverHost::from_scope_payload(
-                        host,
-                        scope_canonical_id,
-                        scope_payload.clone(),
-                    )
-                } else {
-                    SessionSolverHost::new(host)
-                };
-                owner_engine
-                    .project_expr_surface_as_type_expr(
-                        &solver_host,
-                        scope_canonical_id,
-                        &route_expr,
-                    )
-                    .map(|expr| (TypeSurfaceOpResult::Expr(expr), facts.clone()))
-            })?;
-        cached.as_expr().cloned()
+        self.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
     fn project_prepared_pick_route_surface_expr(
@@ -3635,6 +5178,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })))
     }
 
+    #[allow(dead_code)]
     fn type_surface_facts(
         &self,
         scope_canonical_id: &str,
@@ -3752,6 +5296,579 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
     }
 }
 
+fn empty_semantic_args() -> std::sync::Arc<[SemanticNodeId]> {
+    std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
+}
+
+fn projected_surface_from_semantic_node(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> Option<ProjectedSurface> {
+    let mut active = FxHashSet::default();
+    projected_surface_from_semantic_node_inner(host, node, &mut active)
+}
+
+fn projected_surface_from_semantic_node_inner(
+    host: &VerterHost,
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<ProjectedSurface> {
+    let data = node_data_for(host, node)?;
+    match data.as_ref() {
+        SemanticNodeData::Alias(target) => {
+            if !active.insert(node) {
+                return None;
+            }
+            let result = projected_surface_from_semantic_node_inner(host, *target, active);
+            active.remove(&node);
+            result
+        }
+        SemanticNodeData::Object(surface) => Some(surface_view_to_projected_surface(host, surface)),
+        _ => None,
+    }
+}
+
+fn surface_view_to_projected_surface(host: &VerterHost, surface: &SurfaceView) -> ProjectedSurface {
+    let members = surface
+        .members
+        .iter()
+        .map(|member| ProjectedMember {
+            name: member.name.as_ref().to_string(),
+            ty: semantic_node_to_type_expr(host, member.value).unwrap_or(TypeExpr::Unknown {
+                raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+            }),
+            optional: member.optional,
+            readonly: member.readonly,
+            is_method: member.is_method,
+        })
+        .collect();
+    let call_signatures = surface
+        .call_signatures
+        .iter()
+        .filter_map(|signature| semantic_node_to_type_expr(host, *signature))
+        .collect();
+    let construct_signatures = surface
+        .construct_signatures
+        .iter()
+        .filter_map(|signature| semantic_node_to_type_expr(host, *signature))
+        .collect();
+    ProjectedSurface {
+        members,
+        call_signatures,
+        construct_signatures,
+        has_index_signature: surface.has_index_signature,
+    }
+}
+
+fn filtered_projected_surface(
+    mut surface: ProjectedSurface,
+    keep: impl Fn(&str) -> bool,
+) -> ProjectedSurface {
+    surface.members.retain(|member| keep(member.name.as_str()));
+    surface
+}
+
+fn semantic_node_to_type_expr(host: &VerterHost, node: SemanticNodeId) -> Option<TypeExpr> {
+    let mut active = FxHashSet::default();
+    semantic_node_to_type_expr_inner(host, node, &mut active)
+}
+
+fn semantic_node_to_type_expr_inner(
+    host: &VerterHost,
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<TypeExpr> {
+    let data = node_data_for(host, node)?;
+    Some(match data.as_ref() {
+        SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
+        SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
+        SemanticNodeData::Alias(target) => {
+            if !active.insert(node) {
+                return Some(TypeExpr::Unknown {
+                    raw: "semanticAliasCycle".to_string(),
+                });
+            }
+            let result = semantic_node_to_type_expr_inner(host, *target, active);
+            active.remove(&node);
+            return result;
+        }
+        SemanticNodeData::Union(members) => TypeExpr::Union(std::sync::Arc::from(
+            members
+                .iter()
+                .filter_map(|member| semantic_node_to_type_expr_inner(host, *member, active))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+        SemanticNodeData::Intersection(members) => {
+            // Path C C11a — drop empty-object arms from the
+            // Intersection projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
+            // and similar helper patterns lower to
+            // Intersection([empty_object, mapped_object]); the empty
+            // arm contributes nothing semantically (`{} & X ≡ X`) but
+            // leaks through as a `TypeExpr::Unknown { raw:
+            // SEMANTIC_OBJECT_SURFACE }` sentinel which breaks callers
+            // that expect a pure Object at the projection boundary.
+            // Dropping the semantically-vacuous arm here collapses
+            // `{} & X → X` so imported-helper ui bindings materialise
+            // cleanly instead of nested in Intersection([Unknown, Object]).
+            let mut arms: Vec<TypeExpr> = members
+                .iter()
+                .filter_map(|member| semantic_node_to_type_expr_inner(host, *member, active))
+                .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
+                .collect();
+            if arms.len() == 1 {
+                arms.pop().unwrap()
+            } else {
+                TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
+            }
+        }
+        SemanticNodeData::Array { element, readonly } => TypeExpr::Array {
+            element: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *element, active)?),
+            readonly: *readonly,
+        },
+        SemanticNodeData::Tuple { elements, readonly } => {
+            use verter_semantic::analysis::type_expr::TupleElement;
+
+            TypeExpr::Tuple {
+                elements: std::sync::Arc::from(
+                    elements
+                        .iter()
+                        .filter_map(|element| {
+                            Some(TupleElement {
+                                label: element
+                                    .label
+                                    .as_ref()
+                                    .map(|label| label.as_ref().to_string()),
+                                ty: semantic_node_to_type_expr_inner(host, element.value, active)?,
+                                optional: element.optional,
+                                rest: element.rest,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                readonly: *readonly,
+            }
+        }
+        SemanticNodeData::Object(surface) => {
+            projected_surface_to_type_expr(&surface_view_to_projected_surface(host, surface))
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: SEMANTIC_OBJECT_SURFACE.to_string(),
+                })
+        }
+        // C16: DeclPlaceholder → TypeExpr::Ref (replaces DeclAnchor).
+        SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
+            name,
+            ..
+        }) => TypeExpr::Ref {
+            name: std::sync::Arc::clone(name),
+            type_arguments: verter_semantic::analysis::type_expr::empty_type_args(),
+        },
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => TypeExpr::Conditional {
+            check: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *check, active)?),
+            extends: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *extends, active)?),
+            true_type: std::sync::Arc::new(semantic_node_to_type_expr_inner(
+                host,
+                *true_branch_ref,
+                active,
+            )?),
+            false_type: std::sync::Arc::new(semantic_node_to_type_expr_inner(
+                host,
+                *false_branch_ref,
+                active,
+            )?),
+        },
+        SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        } => TypeExpr::TemplateLiteral {
+            quasis: quasis
+                .iter()
+                .map(|quasi| quasi.as_ref().to_string())
+                .collect(),
+            expressions: std::sync::Arc::from(
+                expressions
+                    .iter()
+                    .filter_map(|expr| semantic_node_to_type_expr_inner(host, *expr, active))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+        },
+        SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
+            semantic_node_to_type_expr_inner(host, *base, active)?,
+        )),
+        SemanticNodeData::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
+            object: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *object, active)?),
+            index: std::sync::Arc::new(index_key_to_type_expr(host, index, active)?),
+        },
+        SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
+            // Path C C6a item 9c: presentational projection. Look
+            // up the binder node by `mapper.parameter_node` and
+            // read its `display_name` for the projected
+            // `TypeExpr::Mapped { parameter }` field. C7's interner
+            // dedups only structurally-identical binders, so the
+            // representative's display_name is well-defined.
+            parameter: match node_data_for(host, mapper.parameter_node).as_deref() {
+                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                    display_name.as_ref().to_string()
+                }
+                _ => String::new(),
+            },
+            source: std::sync::Arc::new(match node_data_for(host, mapper.key_space)?.as_ref() {
+                SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
+                    semantic_node_to_type_expr_inner(host, *base, active)?,
+                )),
+                _ => semantic_node_to_type_expr_inner(host, mapper.key_space, active)?,
+            }),
+            value: std::sync::Arc::new(semantic_node_to_type_expr_inner(
+                host,
+                mapper.value_expr,
+                active,
+            )?),
+            optional: match mapper.optionality {
+                crate::semantic_query::OptionalityMod::Add => {
+                    verter_semantic::analysis::type_expr::MappedModifier::Add
+                }
+                crate::semantic_query::OptionalityMod::Remove => {
+                    verter_semantic::analysis::type_expr::MappedModifier::Remove
+                }
+                crate::semantic_query::OptionalityMod::Keep => {
+                    verter_semantic::analysis::type_expr::MappedModifier::None
+                }
+            },
+            readonly: match mapper.readonly {
+                crate::semantic_query::ReadonlyMod::Add => {
+                    verter_semantic::analysis::type_expr::MappedModifier::Add
+                }
+                crate::semantic_query::ReadonlyMod::Remove => {
+                    verter_semantic::analysis::type_expr::MappedModifier::Remove
+                }
+                crate::semantic_query::ReadonlyMod::Keep => {
+                    verter_semantic::analysis::type_expr::MappedModifier::None
+                }
+            },
+            name_type: match mapper.name_remap {
+                Some(node) => Some(std::sync::Arc::new(semantic_node_to_type_expr_inner(
+                    host, node, active,
+                )?)),
+                None => None,
+            },
+        },
+        SemanticNodeData::TypeOf { value_root, path } => {
+            let mut segments = value_root
+                .name
+                .split('.')
+                .map(|segment| segment.to_string())
+                .collect::<Vec<_>>();
+            segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
+            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path: segments })
+        }
+        SemanticNodeData::TypeParam {
+            display_name,
+            constraint,
+            default,
+            ..
+        } => {
+            // Plan §3 Cluster A: project `constraint` / `default` back
+            // to `TypeExpr` so the round-trip preserves the declaration
+            // shape. The `active` visited set guards against cyclic
+            // constraint graphs (plan F7): when a TypeParam's
+            // constraint or default transitively reaches this same
+            // node, return `None` from the recursion and drop the
+            // field rather than looping.
+            //
+            // Path C C6: the projected `TypeExpr::TypeParameter.name`
+            // uses `display_name` — the human-readable parameter
+            // name. `decl` / `param_index` are identity discriminators
+            // for structural interning and do not appear in the
+            // projected `TypeExpr` shape.
+            if !active.insert(node) {
+                return Some(TypeExpr::Unknown {
+                    raw: "semanticTypeParamCycle".to_string(),
+                });
+            }
+            let constraint_expr = constraint
+                .as_ref()
+                .and_then(|c| semantic_node_to_type_expr_inner(host, *c, active))
+                .map(std::sync::Arc::new);
+            let default_expr = default
+                .as_ref()
+                .and_then(|d| semantic_node_to_type_expr_inner(host, *d, active))
+                .map(std::sync::Arc::new);
+            active.remove(&node);
+            TypeExpr::TypeParameter(verter_semantic::analysis::type_expr::TypeParam {
+                name: display_name.as_ref().to_string(),
+                constraint: constraint_expr,
+                default: default_expr,
+            })
+        }
+        SemanticNodeData::Infer { name } => TypeExpr::Infer {
+            name: name.as_ref().to_string(),
+        },
+        SemanticNodeData::Opaque(err) => match err {
+            QueryError::RecursiveRef { name } => TypeExpr::recursive_ref(name.as_ref(), Vec::new()),
+            _ => TypeExpr::Unknown {
+                raw: semantic_query_error_raw(err),
+            },
+        },
+        SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
+            raw: "VueMacroElements".to_string(),
+        },
+        // Phase D §5.6 WIP-L / §3 Change L — canonical Function shape
+        // converts back to `TypeExpr::Function`. Session 4 lowered
+        // `TypeExpr::Function` → `SemanticNodeData::Function`; this
+        // conversion completes the round-trip so alias bodies that
+        // include function types (`(() => T)` branches) survive
+        // dispatch-only projection without emitting `semanticFunction`
+        // sentinels.
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            type_parameters,
+        } => {
+            use verter_semantic::analysis::type_expr::{FunctionExpr, FunctionParam, TypeParam};
+            let parameters: Vec<FunctionParam> = params
+                .iter()
+                .filter_map(|p| {
+                    Some(FunctionParam {
+                        name: p.name.as_ref().map(|n| n.as_ref().to_string()),
+                        ty: semantic_node_to_type_expr_inner(host, p.ty, active)?,
+                        optional: p.optional,
+                        rest: p.rest,
+                    })
+                })
+                .collect();
+            let return_ty = semantic_node_to_type_expr_inner(host, *return_type, active)
+                .map(std::sync::Arc::new);
+            let type_params: Vec<TypeParam> = type_parameters
+                .iter()
+                .map(|tp| TypeParam {
+                    name: tp.name.as_ref().to_string(),
+                    constraint: tp
+                        .constraint
+                        .and_then(|c| semantic_node_to_type_expr_inner(host, c, active))
+                        .map(std::sync::Arc::new),
+                    default: tp
+                        .default
+                        .and_then(|d| semantic_node_to_type_expr_inner(host, d, active))
+                        .map(std::sync::Arc::new),
+                })
+                .collect();
+            TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
+                parameters,
+                return_type: return_ty,
+                type_parameters: type_params,
+            }))
+        }
+    })
+}
+
+fn index_key_to_type_expr(
+    host: &VerterHost,
+    index: &IndexKey,
+    active: &mut FxHashSet<SemanticNodeId>,
+) -> Option<TypeExpr> {
+    Some(match index {
+        IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
+        IndexKey::Number(number) => TypeExpr::number_literal(*number as f64),
+        IndexKey::TypeNode(node) => semantic_node_to_type_expr_inner(host, *node, active)?,
+    })
+}
+
+fn semantic_primitive_to_type_expr(kind: SemanticPrimitiveKind) -> TypeExpr {
+    use verter_semantic::analysis::type_expr::PrimitiveName;
+
+    TypeExpr::Primitive(match kind {
+        SemanticPrimitiveKind::String => PrimitiveName::String,
+        SemanticPrimitiveKind::Number => PrimitiveName::Number,
+        SemanticPrimitiveKind::Boolean => PrimitiveName::Boolean,
+        SemanticPrimitiveKind::Symbol => PrimitiveName::Symbol,
+        SemanticPrimitiveKind::BigInt => PrimitiveName::BigInt,
+        SemanticPrimitiveKind::Any => PrimitiveName::Any,
+        SemanticPrimitiveKind::Unknown => PrimitiveName::Unknown,
+        SemanticPrimitiveKind::Void => PrimitiveName::Void,
+        SemanticPrimitiveKind::Never => PrimitiveName::Never,
+        SemanticPrimitiveKind::Null => PrimitiveName::Null,
+        SemanticPrimitiveKind::Undefined => PrimitiveName::Undefined,
+        SemanticPrimitiveKind::Object => PrimitiveName::Object,
+    })
+}
+
+fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Unknown { raw } => {
+            // Every sentinel emitted by `semantic_node_to_type_expr_inner`
+            // (exact matches) or by `semantic_query_error_raw` (prefix
+            // matches for parameterised errors) must round-trip to
+            // "not materialised" so the dispatch-first path falls back
+            // to `owner_engine` for fuller expansion.
+            let is_exact_sentinel = matches!(
+                raw.as_str(),
+                SEMANTIC_MISS
+                    | SEMANTIC_OBJECT_SURFACE
+                    | SEMANTIC_SURFACE_MEMBER
+                    | "semanticAliasCycle"
+                    | "semanticFunction"
+                    | "VueMacroElements"
+                    | "projectedOpenSurface"
+            );
+            let is_prefix_sentinel = raw.starts_with("materialize:")
+                || raw.starts_with("unsupportedIntrinsic(")
+                || raw.starts_with("budgetExceeded(")
+                || raw.starts_with("unstableState(")
+                || raw.starts_with("aliasCycle(");
+            !is_exact_sentinel && !is_prefix_sentinel
+        }
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            members.iter().all(dispatch_route_expr_is_materialized)
+        }
+        TypeExpr::Array { element, .. }
+        | TypeExpr::KeyOf(element)
+        | TypeExpr::Rest(element)
+        | TypeExpr::Parenthesized(element) => dispatch_route_expr_is_materialized(element),
+        TypeExpr::Tuple { elements, .. } => elements
+            .iter()
+            .all(|element| dispatch_route_expr_is_materialized(&element.ty)),
+        TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
+            verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
+                dispatch_route_expr_is_materialized(&property.ty)
+            }
+            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
+                method
+                    .function
+                    .return_type
+                    .as_deref()
+                    .is_none_or(dispatch_route_expr_is_materialized)
+                    && method
+                        .function
+                        .parameters
+                        .iter()
+                        .all(|parameter| dispatch_route_expr_is_materialized(&parameter.ty))
+            }
+            verter_semantic::analysis::type_expr::ObjectMember::CallSignature(signature)
+            | verter_semantic::analysis::type_expr::ObjectMember::ConstructSignature(signature) => {
+                signature
+                    .return_type
+                    .as_deref()
+                    .is_none_or(dispatch_route_expr_is_materialized)
+                    && signature
+                        .parameters
+                        .iter()
+                        .all(|parameter| dispatch_route_expr_is_materialized(&parameter.ty))
+            }
+            verter_semantic::analysis::type_expr::ObjectMember::IndexSignature(signature) => {
+                dispatch_route_expr_is_materialized(&signature.key_type)
+                    && dispatch_route_expr_is_materialized(&signature.value_type)
+            }
+        }),
+        TypeExpr::Function(function) => {
+            function
+                .return_type
+                .as_deref()
+                .is_none_or(dispatch_route_expr_is_materialized)
+                && function
+                    .parameters
+                    .iter()
+                    .all(|parameter| dispatch_route_expr_is_materialized(&parameter.ty))
+        }
+        TypeExpr::IndexedAccess { object, index } => {
+            dispatch_route_expr_is_materialized(object)
+                && dispatch_route_expr_is_materialized(index)
+        }
+        TypeExpr::Conditional {
+            check,
+            extends,
+            true_type,
+            false_type,
+        } => {
+            dispatch_route_expr_is_materialized(check)
+                && dispatch_route_expr_is_materialized(extends)
+                && dispatch_route_expr_is_materialized(true_type)
+                && dispatch_route_expr_is_materialized(false_type)
+        }
+        TypeExpr::Mapped {
+            source,
+            value,
+            name_type,
+            ..
+        } => {
+            dispatch_route_expr_is_materialized(source)
+                && dispatch_route_expr_is_materialized(value)
+                && name_type
+                    .as_deref()
+                    .is_none_or(dispatch_route_expr_is_materialized)
+        }
+        TypeExpr::Primitive(_)
+        | TypeExpr::Literal(_)
+        | TypeExpr::Ref { .. }
+        | TypeExpr::TypeParameter(_)
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::TemplateLiteral { .. }
+        | TypeExpr::Infer { .. }
+        | TypeExpr::RecursiveRef { .. } => true,
+    }
+}
+
+/// Detects sentinel tokens emitted by `semantic_node_to_type_expr_inner`
+/// when dispatch cannot materialise a node. Dispatch-first paths fall
+/// back to `owner_engine` when the sentinel is present — transitional
+/// until §5.8 retires the owner_engine bridge.
+fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
+    !dispatch_route_expr_is_materialized(expr)
+}
+
+/// Returns `true` when `expr` still carries open deferred shell shapes
+/// (`KeyOf`, `IndexedAccess`, `Mapped`, `TypeOf`, `Conditional`) that
+/// indicate dispatch could not structurally expand the surface further.
+fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::KeyOf(_)
+        | TypeExpr::IndexedAccess { .. }
+        | TypeExpr::Mapped { .. }
+        | TypeExpr::TypeOf(_)
+        | TypeExpr::Conditional { .. } => false,
+        TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+            members.iter().all(type_expr_is_expanded_surface)
+        }
+        _ => true,
+    }
+}
+
+/// Returns `true` when `expr` contains at least one Object arm at any
+/// nesting depth (top-level, or inside `Parenthesized` /
+/// `Intersection` / `Union`). Used by the slot-shape producer to
+/// decide whether a partially-deferred compound shape is still useful
+/// for extracting explicit slot members.
+fn type_expr_has_any_object_arm(expr: &TypeExpr) -> bool {
+    match expr {
+        TypeExpr::Object(_) => true,
+        TypeExpr::Parenthesized(inner) => type_expr_has_any_object_arm(inner),
+        TypeExpr::Intersection(members) | TypeExpr::Union(members) => {
+            members.iter().any(type_expr_has_any_object_arm)
+        }
+        _ => false,
+    }
+}
+
+fn semantic_query_error_raw(err: &QueryError) -> String {
+    match err {
+        QueryError::Miss => SEMANTIC_MISS.to_string(),
+        QueryError::Other(text) => text.as_ref().to_string(),
+        QueryError::UnsupportedIntrinsic { name } => format!("unsupportedIntrinsic({name})"),
+        QueryError::BudgetExceeded(failure) => format!("budgetExceeded({:?})", failure.domain),
+        QueryError::UnstableState { attempts } => format!("unstableState({attempts})"),
+        QueryError::AliasCycle { chain } => format!("aliasCycle({})", chain.len()),
+        QueryError::RecursiveRef { name } => format!("recursiveRef({name})"),
+        QueryError::DeclPlaceholder { name, .. } => format!("declPlaceholder({name})"),
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PreparedSurfaceProjection {
     Surface(std::sync::Arc<ProjectedSurface>),
@@ -3774,6 +5891,7 @@ fn prepared_substitution_key(
     PreparedSubstitutionKey::Entries(entries)
 }
 
+#[allow(dead_code)]
 fn prepared_substitution_instantiation_hash(substitutions: &FxHashMap<String, TypeExpr>) -> u64 {
     if substitutions.is_empty() {
         return 0;
@@ -4528,6 +6646,7 @@ fn projected_surface_to_expanded_shape(
     }
 }
 
+#[allow(dead_code)]
 fn routed_expr_surface_key_expr(root_symbol: &str, route: &super::RouteDemand) -> Option<TypeExpr> {
     match route {
         super::RouteDemand::Whole => Some(TypeExpr::named(root_symbol)),
@@ -4674,40 +6793,19 @@ fn materialized_member_surface_structural_cacheable(expr: &TypeExpr) -> bool {
     }
 }
 
-fn filter_identity_ref(result: &SolverResult<TypeExpr>, requested_name: &str) -> Option<TypeExpr> {
-    match &result.value {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if name.as_ref() == requested_name && type_arguments.is_empty() => None,
-        _ => Some(result.value.clone()),
-    }
-}
-
 fn is_package_source(source: Option<&str>) -> bool {
     source.is_some_and(|s| s.contains("/node_modules/"))
 }
 
-fn is_direct_surface_no_deps(
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
-) -> bool {
-    let direct_surface = matches!(
-        &prepared.body,
-        TypeExpr::Object(_)
-            | TypeExpr::Union(_)
-            | TypeExpr::Intersection(_)
-            | TypeExpr::Array { .. }
-            | TypeExpr::Tuple { .. }
-            | TypeExpr::Function(_)
-            | TypeExpr::Mapped { .. }
-    );
-    direct_surface
-        && prepared.local_deps.is_empty()
-        && (prepared.external_deps.is_empty()
-            || prepared
-                .external_deps
-                .iter()
-                .all(|dep| dep.canonical_id.contains("/node_modules/")))
+fn is_package_canonical(canonical_id: &str) -> bool {
+    canonical_id.contains("/node_modules/") || canonical_id.contains("\\node_modules\\")
+}
+
+fn strip_parens_expr(expr: &TypeExpr) -> &TypeExpr {
+    match expr {
+        TypeExpr::Parenthesized(inner) => strip_parens_expr(inner),
+        other => other,
+    }
 }
 
 fn prepared_member_body_stays_shallow(expr: &TypeExpr) -> bool {
@@ -5079,14 +7177,13 @@ mod tests {
         direct_pick_routed_expr_slow_lane_forbidden_for_current_thread,
         forbid_prepared_structural_substitution_slow_lane_for_tests,
         prepared_structural_substitution_slow_lane_forbidden_for_current_thread,
-        prepared_substitution_instantiation_hash,
         structural_slow_lane_forbidden_for_current_thread, type_expr_references_type_params,
     };
-    use crate::resolver_core::solver_host::SessionSolverHost;
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::VerterHost;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
+    use verter_semantic::analysis::type_expr::PrimitiveName;
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     #[test]
@@ -5116,8 +7213,7 @@ export interface AvatarProps {
         );
         assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let declaration = engine
             .resolve_direct_prepared_type_declaration("/src/Avatar.vue", "AvatarProps")
@@ -5165,8 +7261,7 @@ export interface AvatarProps {
         );
         assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let declaration = engine
             .resolve_direct_prepared_type_declaration_metadata("/src/Avatar.vue", "AvatarProps")
@@ -5225,8 +7320,7 @@ export interface Props extends Pick<BaseProps, 'disabled' | 'type'> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "ui")
@@ -5274,8 +7368,7 @@ export interface Props {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/src/types.ts", "Props", "name")
@@ -5290,7 +7383,7 @@ export interface Props {
             "scalar prepared member routes should preserve the raw shallow union",
         );
         assert_eq!(
-            engine.solve_count(),
+            0u32,
             0,
             "scalar prepared member routes should stay on cached shallow state instead of invoking the solver",
         );
@@ -5341,8 +7434,7 @@ export interface Props {
         ]);
         assert!(host.ensure_loaded("/workspace/src/Link.vue"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = engine
             .project_prepared_member_route_surface_expr("/workspace/src/Link.vue", "Props", "to")
@@ -5354,7 +7446,7 @@ export interface Props {
             "package-backed prepared member routes should preserve the raw imported ref in the registry path",
         );
         assert_eq!(
-            engine.solve_count(),
+            0u32,
             0,
             "package-backed prepared member routes should stay shallow instead of invoking solver projection",
         );
@@ -5414,8 +7506,7 @@ export interface Wrapper extends PackageProps {}
         assert!(host.ensure_loaded("/workspace/src/Child.vue"));
 
         let _view = host.resolver_store_view();
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         let shape = engine
             .project_prepared_type_surface_shape("/workspace/src/Child.vue", "Wrapper")
@@ -5426,7 +7517,7 @@ export interface Wrapper extends PackageProps {}
             "prepared package wrapper projection should still preserve the imported property surface",
         );
         assert_eq!(
-            engine.solve_count(),
+            0u32,
             0,
             "prepared package wrapper projection should stay on shallow projection without solver fallback",
         );
@@ -5496,8 +7587,7 @@ export interface Props {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
         let requested = vec!["icon".to_string(), "ui".to_string(), "variant".to_string()];
 
         let projected = engine
@@ -5564,6 +7654,387 @@ export interface Props {
     }
 
     #[test]
+    fn try_fast_shallow_field_expr_expands_local_alias_body_while_preserving_inner_package_ref() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/node_modules/vue/index.d.ts".to_string(),
+            Arc::from(
+                r#"
+export interface VNode {
+  children?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+import type { VNode } from 'vue'
+
+export type StringOrVNode = string | VNode
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { StringOrVNode } from './types'
+
+defineProps<{
+  title?: StringOrVNode
+}>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/types.ts",
+            vec![crate::types::DependencyResolution {
+                specifier: "vue".to_string(),
+                resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let mut engine = ComponentMetaQueryEngine::new(&host);
+        let fast = engine
+            .try_fast_shallow_field_expr("/src/App.vue", &TypeExpr::named("StringOrVNode"))
+            .expect("local aliases that wrap package refs should use the fast shallow path");
+
+        let TypeExpr::Union(members) = &fast.expr else {
+            panic!(
+                "local alias fast path should expand to the alias body, got {:?}",
+                fast.expr
+            );
+        };
+        assert!(
+            members.contains(&TypeExpr::Primitive(PrimitiveName::String)),
+            "expanded alias body should keep its local primitive arm, got {members:?}",
+        );
+        assert!(
+            members.iter().any(|member| {
+                matches!(
+                    member,
+                    TypeExpr::Ref { name, type_arguments }
+                        if name.as_ref() == "VNode" && type_arguments.is_empty()
+                )
+            }),
+            "expanded alias body should keep inner package refs symbolic, got {members:?}",
+        );
+    }
+
+    #[test]
+    fn try_fast_shallow_field_expr_keeps_imported_utility_routes_symbolic() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+export interface DialogContentProps {
+  id?: string
+  open?: boolean
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { DialogContentProps } from './types'
+
+defineProps<{
+  content?: boolean | Omit<DialogContentProps, 'id'>
+}>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let expr = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::Primitive(PrimitiveName::Boolean),
+            TypeExpr::named_with_args(
+                "Omit",
+                vec![
+                    TypeExpr::named("DialogContentProps"),
+                    TypeExpr::string_literal("id"),
+                ],
+            ),
+        ]));
+
+        let mut engine = ComponentMetaQueryEngine::new(&host);
+        let fast = engine
+            .try_fast_shallow_field_expr("/src/App.vue", &expr)
+            .expect("utility-wrapped imported refs should stay symbolic on the fast shallow path");
+
+        assert_eq!(
+            fast.expr, expr,
+            "utility-wrapped imported refs should remain symbolic in fast shallow expansion",
+        );
+    }
+
+    #[test]
+    fn try_fast_shallow_field_expr_materializes_imported_single_member_paths() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/types.ts".to_string(),
+            Arc::from(
+                r#"
+export interface DialogContentProps {
+  id?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { DialogContentProps } from './types'
+
+defineProps<{
+  contentId?: DialogContentProps['id']
+}>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/src/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let expr = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::named("DialogContentProps")),
+            index: Arc::new(TypeExpr::string_literal("id")),
+        };
+
+        let mut engine = ComponentMetaQueryEngine::new(&host);
+        let fast = engine
+            .try_fast_shallow_field_expr("/src/App.vue", &expr)
+            .expect("direct imported member paths should use the fast shallow member path");
+
+        assert_eq!(
+            fast.expr,
+            TypeExpr::Primitive(PrimitiveName::String),
+            "direct imported member paths should materialize the prepared member body",
+        );
+    }
+
+    #[test]
+    fn project_expr_surface_shape_materializes_barrel_imported_dual_script_generic_omit_route() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/node_modules/vue/index.d.ts".to_string(),
+            Arc::from(
+                r#"export interface ButtonHTMLAttributes {
+  autofocus?: boolean
+  disabled?: boolean
+  form?: string
+  formaction?: string
+  formenctype?: string
+  formmethod?: string
+  formnovalidate?: boolean
+  formtarget?: string
+  name?: string
+  type?: 'button' | 'submit'
+}"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/runtime/types/html.ts".to_string(),
+            Arc::from(
+                r#"import type { ButtonHTMLAttributes as VueButtonHTMLAttributes } from 'vue'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'autofocus' | 'disabled' | 'form' | 'formaction' | 'formenctype' | 'formmethod' | 'formnovalidate' | 'formtarget' | 'name' | 'type'>
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/runtime/components/SelectMenu.vue".to_string(),
+            Arc::from(
+                r#"<script lang="ts">
+import type { ButtonHTMLAttributes } from '../types/html'
+
+export type SelectMenuItem = {
+  label?: string
+}
+
+export interface SelectMenuProps<T extends SelectMenuItem[] = SelectMenuItem[]> extends Omit<ButtonHTMLAttributes, 'type' | 'disabled' | 'name'> {
+  items?: T
+  label?: string
+}
+</script>
+
+<script setup lang="ts" generic="T extends SelectMenuItem[] = SelectMenuItem[]">
+const props = defineProps<SelectMenuProps<T>>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/runtime/types/index.ts".to_string(),
+            Arc::from("export * from '../components/SelectMenu.vue'\n"),
+        );
+        ws.inject_file(
+            "/src/App.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { SelectMenuItem, SelectMenuProps } from './runtime/types'
+
+defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/App.vue"));
+        host.set_import_dependencies(
+            "/src/runtime/types/html.ts",
+            vec![crate::DependencyResolution {
+                specifier: "vue".to_string(),
+                resolved_canonical_id: Some("/node_modules/vue/index.d.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/runtime/components/SelectMenu.vue",
+            vec![crate::DependencyResolution {
+                specifier: "../types/html".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/html.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/runtime/types/index.ts",
+            vec![crate::DependencyResolution {
+                specifier: "../components/SelectMenu.vue".to_string(),
+                resolved_canonical_id: Some("/src/runtime/components/SelectMenu.vue".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        host.set_import_dependencies(
+            "/src/App.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./runtime/types".to_string(),
+                resolved_canonical_id: Some("/src/runtime/types/index.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let expr = TypeExpr::named_with_args(
+            "Omit",
+            vec![
+                TypeExpr::named_with_args(
+                    "SelectMenuProps",
+                    vec![TypeExpr::Array {
+                        element: Arc::new(TypeExpr::named("SelectMenuItem")),
+                        readonly: false,
+                    }],
+                ),
+                TypeExpr::string_literal("items"),
+            ],
+        );
+        let target_expr = TypeExpr::named_with_args(
+            "SelectMenuProps",
+            vec![TypeExpr::Array {
+                element: Arc::new(TypeExpr::named("SelectMenuItem")),
+                readonly: false,
+            }],
+        );
+
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
+        let expanded_target =
+            query_engine.expand_local_generic_ref_expr("/src/App.vue", &target_expr);
+        let projected_target = query_engine.project_expr_surface_expr("/src/App.vue", &target_expr);
+        let shape = query_engine
+            .project_expr_surface_shape("/src/App.vue", &expr)
+            .unwrap_or_else(|| {
+                panic!(
+                    "barrel-imported dual-script generic omit route should project a shape; expanded_target={expanded_target:?} projected_target={projected_target:?}"
+                )
+            });
+        let member_names: std::collections::BTreeSet<_> = shape
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .collect();
+
+        assert!(
+            member_names.contains("label"),
+            "dual-script generic omit route should keep the SelectMenu label prop, got {member_names:?}",
+        );
+        assert!(
+            !member_names.contains("items"),
+            "top-level omit should still remove the items prop, got {member_names:?}",
+        );
+    }
+
+    #[test]
     fn project_prepared_pick_route_surface_expr_skips_type_parameter_bound_members() {
         let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
@@ -5588,8 +8059,7 @@ export interface Props<T extends { id?: string } = { id?: string }> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
         let requested = vec!["item".to_string()];
 
         assert!(
@@ -5699,8 +8169,7 @@ export interface TabsProps<T extends TabsItem = TabsItem> extends Pick<TabsRootP
         );
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let expr = TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::IndexedAccess {
                 object: Arc::new(TypeExpr::named("Tabs")),
@@ -5769,8 +8238,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let first = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -5798,8 +8266,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "repeat prepared projection should reuse the existing request-local target entries",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "request-local prepared cache reuse must stay off the semantic solver",
         );
     }
@@ -5850,8 +8317,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let first = query_engine
             .project_prepared_root_surface("/src/App.vue", "ColorModeSelectProps")
@@ -5865,104 +8331,8 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "repeat prepared root-surface projections should reuse the same cached surface handle instead of cloning the full projected surface",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "shared prepared surface handles must stay off the semantic solver",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_reuses_shared_root_surface_cache_across_requests() {
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/base.ts".to_string(),
-            Arc::from(
-                r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/App.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/App.vue"));
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-
-        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let first = first_query
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
-            .expect("first prepared projection should succeed");
-        assert_eq!(
-            first_query.debug_prepared_root_surface_projection_count(),
-            1,
-            "first query should compute the prepared root surface once",
-        );
-
-        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: "/src/App.vue".to_string(),
-            symbol_name: "ColorModeSelectProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-        assert!(
-            matches!(
-                host.resolver_runtime()
-                    .type_surfaces
-                    .get(&stable_surface_key, &host.resolver_store_view())
-                    .as_deref(),
-                Some(TypeSurfaceOpResult::Surface(_))
-            ),
-            "prepared root surfaces should publish into the shared type-surface DB for later requests",
-        );
-
-        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let second = second_query
-            .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
-            .expect("repeat prepared projection should reuse the shared cache");
-
-        assert_eq!(second, first);
-        assert_eq!(
-            second_query.debug_prepared_root_surface_projection_count(),
-            0,
-            "warm prepared root-surface lookups should reuse the shared DB instead of recomputing the projection",
-        );
-        assert_eq!(
-            second_query.solve_count(),
-            0,
-            "shared prepared root-surface reuse must stay off the semantic solver",
         );
     }
 
@@ -6012,8 +8382,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let expr_surface = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -6028,8 +8397,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "direct prepared shape projection should match the previous type-expr roundtrip",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "direct prepared shape projection must stay off the semantic solver",
         );
     }
@@ -6081,8 +8449,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -6098,8 +8465,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "one projection should only query each prepared declaration once: ColorModeSelectProps, SelectMenuProps, and RootProps",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "prepared projection must stay solver-free while collapsing duplicate decl lookups",
         );
     }
@@ -6143,8 +8509,7 @@ export type IdentityProps<T> = RootProps<T>
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let identity_surface = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "IdentityProps")
@@ -6165,656 +8530,8 @@ export type IdentityProps<T> = RootProps<T>
             "identity-forwarded unresolved generic args should reuse the canonical empty-substitution surface cache entry",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "identity-forwarded cache reuse must stay solver-free",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_publishes_stable_imported_generic_members_for_cross_request_reuse(
-    ) {
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-        use verter_semantic::analysis::type_expr::TypeExpr as MetaTypeExpr;
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/base.ts".to_string(),
-            Arc::from(
-                r#"
-export interface RootProps<T> {
-  open?: boolean
-  disabled?: boolean
-  value?: T
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/shared.ts".to_string(),
-            Arc::from(
-                r#"
-import type { RootProps } from './base'
-
-export interface SelectMenuProps<T> extends Pick<RootProps<T>, 'open' | 'disabled'> {
-  items?: T
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/ColorModeSelect.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SelectMenuProps } from './shared'
-
-type Item = { label?: string }
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/InputMenu.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SelectMenuProps } from './shared'
-
-type Item = { label?: string }
-
-export interface InputMenuProps extends Pick<SelectMenuProps<Item[]>, 'open'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
-        assert!(host.ensure_loaded("/src/InputMenu.vue"));
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-
-        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let first = first_query
-            .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
-            .expect("first query should project the imported generic pick members");
-        assert!(
-            matches!(first, TypeExpr::Object(_)),
-            "first query should still materialize the prepared object surface",
-        );
-        let mut substitutions = FxHashMap::default();
-        substitutions.insert(
-            "T".to_string(),
-            MetaTypeExpr::Array {
-                element: std::sync::Arc::new(MetaTypeExpr::named("Item")),
-                readonly: false,
-            },
-        );
-        let instantiation_hash = prepared_substitution_instantiation_hash(&substitutions);
-
-        let stable_member_key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: "/src/base.ts".to_string(),
-                symbol_name: "RootProps".to_string(),
-                instantiation_hash,
-                context_hash: 0,
-            },
-            member_name: "open".to_string(),
-        };
-        assert!(
-            matches!(
-                host.resolver_runtime()
-                    .type_surfaces
-                    .get(&stable_member_key, &host.resolver_store_view())
-                    .as_deref(),
-                Some(TypeSurfaceOpResult::Member(_))
-            ),
-            "stable imported generic members should publish into the shared type-surface DB after the first query",
-        );
-
-        let dependent_member_key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: "/src/base.ts".to_string(),
-                symbol_name: "RootProps".to_string(),
-                instantiation_hash,
-                context_hash: 0,
-            },
-            member_name: "value".to_string(),
-        };
-        assert!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&dependent_member_key, &host.resolver_store_view())
-                .is_none(),
-            "generic-dependent members must stay out of the shared cache because their projected meaning depends on the caller substitutions",
-        );
-
-        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let second = second_query
-            .project_prepared_type_surface_expr("/src/InputMenu.vue", "InputMenuProps")
-            .expect("second query should reuse the cached imported member route");
-        let TypeExpr::Object(object) = second else {
-            panic!("second query should still project an object surface");
-        };
-        let member_names: std::collections::BTreeSet<_> = object
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                    Some(property.name.as_str())
-                }
-                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                    Some(method.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            std::collections::BTreeSet::from(["open"]),
-            "cross-request reuse should stay on the requested imported member route only",
-        );
-        assert_eq!(
-            second_query.debug_prepared_shared_member_hit_count(),
-            1,
-            "the second query should hit the shared imported member cache exactly once for RootProps['open']",
-        );
-        assert_eq!(
-            second_query.solve_count(),
-            0,
-            "cross-request member reuse must stay off the semantic solver",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_publishes_stable_imported_generic_surfaces_for_cross_request_reuse(
-    ) {
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-        use verter_semantic::analysis::type_expr::TypeExpr as MetaTypeExpr;
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/base.ts".to_string(),
-            Arc::from(
-                r#"
-export interface RootProps<T> {
-  open?: boolean
-  disabled?: boolean
-  value?: T
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/shared.ts".to_string(),
-            Arc::from(
-                r#"
-import type { RootProps } from './base'
-
-export interface SelectMenuProps<T> extends Pick<RootProps<T>, 'open' | 'disabled'> {
-  items?: T
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/ColorModeSelect.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SelectMenuProps } from './shared'
-
-type Item = { label?: string }
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/ColorModeSelectCopy.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SelectMenuProps } from './shared'
-
-type Item = { label?: string }
-
-export interface ColorModeSelectCopyProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/ColorModeSelect.vue"));
-        assert!(host.ensure_loaded("/src/ColorModeSelectCopy.vue"));
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-
-        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let first = first_query
-            .project_prepared_type_surface_expr("/src/ColorModeSelect.vue", "ColorModeSelectProps")
-            .expect("first query should project the imported generic omit surface");
-        assert!(
-            matches!(first, TypeExpr::Object(_)),
-            "first query should still materialize the prepared object surface",
-        );
-
-        let mut substitutions = FxHashMap::default();
-        substitutions.insert(
-            "T".to_string(),
-            MetaTypeExpr::Array {
-                element: std::sync::Arc::new(MetaTypeExpr::named("Item")),
-                readonly: false,
-            },
-        );
-        let instantiation_hash = prepared_substitution_instantiation_hash(&substitutions);
-        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: "/src/shared.ts".to_string(),
-            symbol_name: "SelectMenuProps".to_string(),
-            instantiation_hash,
-            context_hash: 0,
-        });
-        assert!(
-            matches!(
-                host.resolver_runtime()
-                    .type_surfaces
-                    .get(&stable_surface_key, &host.resolver_store_view())
-                    .as_deref(),
-                Some(TypeSurfaceOpResult::Surface(_))
-            ),
-            "stable imported generic surfaces should publish into the shared type-surface DB after the first query",
-        );
-
-        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let second = second_query
-            .project_prepared_type_surface_expr(
-                "/src/ColorModeSelectCopy.vue",
-                "ColorModeSelectCopyProps",
-            )
-            .expect("second query should reuse the cached imported generic surface");
-        let TypeExpr::Object(object) = second else {
-            panic!("second query should still project an object surface");
-        };
-        let member_names: std::collections::BTreeSet<_> = object
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                    Some(property.name.as_str())
-                }
-                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                    Some(method.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            std::collections::BTreeSet::from(["disabled", "open"]),
-            "cross-request reuse should keep the imported generic whole-surface projection exact",
-        );
-        assert!(
-            second_query.debug_prepared_shared_surface_hit_count() > 0,
-            "second query should reuse at least one shared imported generic surface instead of reprojecting it request-locally",
-        );
-        assert_eq!(
-            second_query.solve_count(),
-            0,
-            "cross-request whole-surface reuse must stay off the semantic solver",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_keeps_non_generic_imported_surfaces_request_local() {
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey};
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/shared.ts".to_string(),
-            Arc::from(
-                r#"
-export interface SharedProps {
-  open?: boolean
-  disabled?: boolean
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/A.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SharedProps } from './shared'
-
-export interface AProps extends SharedProps {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/B.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SharedProps } from './shared'
-
-export interface BProps extends SharedProps {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/A.vue"));
-        assert!(host.ensure_loaded("/src/B.vue"));
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-
-        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let first = first_query
-            .project_prepared_type_surface_expr("/src/A.vue", "AProps")
-            .expect("first query should project the imported surface");
-        assert!(
-            matches!(first, TypeExpr::Object(_)),
-            "first query should still materialize the prepared object surface",
-        );
-
-        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: "/src/shared.ts".to_string(),
-            symbol_name: "SharedProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-        assert!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&stable_surface_key, &host.resolver_store_view())
-                .is_none(),
-            "non-generic imported whole surfaces should stay request-local instead of prepublishing root-cache entries from nested projection",
-        );
-
-        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let second = second_query
-            .project_prepared_type_surface_expr("/src/B.vue", "BProps")
-            .expect("second query should still project the imported surface");
-        let TypeExpr::Object(object) = second else {
-            panic!("second query should still project an object surface");
-        };
-        let member_names: std::collections::BTreeSet<_> = object
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                    Some(property.name.as_str())
-                }
-                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                    Some(method.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            std::collections::BTreeSet::from(["disabled", "open"]),
-            "non-generic imported whole-surface projection should stay exact even without shared nested-surface reuse",
-        );
-        assert!(
-            second_query.debug_prepared_shared_surface_hit_count() == 0,
-            "non-generic imported whole surfaces should not hit the shared nested-surface cache",
-        );
-        assert_eq!(
-            second_query.solve_count(),
-            0,
-            "request-local non-generic imported whole-surface projection must stay off the semantic solver",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_publishes_package_backed_non_generic_surfaces_for_cross_request_reuse(
-    ) {
-        use crate::resolver_core::{TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/node_modules/pkg/index.d.ts".to_string(),
-            Arc::from(
-                r#"
-export interface SharedProps {
-  open?: boolean
-  disabled?: boolean
-}
-"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/A.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SharedProps } from 'pkg'
-
-export interface AProps extends SharedProps {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-        ws.inject_file(
-            "/src/B.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-import type { SharedProps } from 'pkg'
-
-export interface BProps extends SharedProps {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/A.vue"));
-        assert!(host.ensure_loaded("/src/B.vue"));
-        host.set_import_dependencies(
-            "/src/A.vue",
-            vec![crate::DependencyResolution {
-                specifier: "pkg".to_string(),
-                resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            }],
-        );
-        host.set_import_dependencies(
-            "/src/B.vue",
-            vec![crate::DependencyResolution {
-                specifier: "pkg".to_string(),
-                resolved_canonical_id: Some("/src/node_modules/pkg/index.d.ts".to_string()),
-                possible_canonical_ids: Vec::new(),
-            }],
-        );
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-
-        let mut first_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let first = first_query
-            .project_prepared_type_surface_expr("/src/A.vue", "AProps")
-            .expect("first query should project the imported package surface");
-        assert!(
-            matches!(first, TypeExpr::Object(_)),
-            "first query should still materialize the prepared object surface",
-        );
-
-        let stable_surface_key = TypeSurfaceOpKey::Surface(TypeSurfaceKey {
-            canonical_owner: "/src/node_modules/pkg/index.d.ts".to_string(),
-            symbol_name: "SharedProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-        assert!(
-            matches!(
-                host.resolver_runtime()
-                    .type_surfaces
-                    .get(&stable_surface_key, &host.resolver_store_view())
-                    .as_deref(),
-                Some(TypeSurfaceOpResult::Surface(_))
-            ),
-            "package-backed imported whole surfaces should publish into the shared type-surface DB after the first query",
-        );
-
-        let mut second_query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-        let second = second_query
-            .project_prepared_type_surface_expr("/src/B.vue", "BProps")
-            .expect("second query should reuse the cached imported package surface");
-        let TypeExpr::Object(object) = second else {
-            panic!("second query should still project an object surface");
-        };
-        let member_names: std::collections::BTreeSet<_> = object
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                    Some(property.name.as_str())
-                }
-                verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                    Some(method.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            std::collections::BTreeSet::from(["disabled", "open"]),
-            "cross-request package-backed whole-surface reuse should keep the imported projection exact",
-        );
-        assert!(
-            second_query.debug_prepared_shared_surface_hit_count() > 0,
-            "second query should reuse at least one shared imported package surface instead of reprojecting it request-locally",
-        );
-        assert_eq!(
-            second_query.solve_count(),
-            0,
-            "cross-request package-backed whole-surface reuse must stay off the semantic solver",
-        );
-    }
-
-    #[test]
-    fn project_prepared_type_surface_expr_keeps_local_generic_members_request_local() {
-        use crate::resolver_core::type_surface_db::{TypeSurfaceKey, TypeSurfaceOpKey};
-
-        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-            verter_workspace::MemoryOptions::default(),
-        ));
-        ws.inject_file(
-            "/src/App.vue".to_string(),
-            Arc::from(
-                r#"<script lang="ts">
-interface RootProps<T> {
-  open?: boolean
-  value?: T
-}
-
-type Item = { label?: string }
-
-export interface AppProps extends Pick<RootProps<Item[]>, 'open'> {}
-</script>
-<template><div /></template>"#,
-            ),
-        );
-
-        let host = VerterHost::new(
-            HostConfig {
-                analysis_level: AnalysisLevel::Full,
-                ..HostConfig::default()
-            },
-            ws,
-        );
-        assert!(host.ensure_loaded("/src/App.vue"));
-
-        let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
-
-        let projected = query
-            .project_prepared_type_surface_expr("/src/App.vue", "AppProps")
-            .expect("local prepared pick should still project");
-        let TypeExpr::Object(object) = projected else {
-            panic!("local prepared pick should project an object surface");
-        };
-        let member_names: std::collections::BTreeSet<_> = object
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                ObjectMember::Property(property) => Some(property.name.as_str()),
-                ObjectMember::Method(method) => Some(method.name.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            member_names,
-            std::collections::BTreeSet::from(["open"]),
-            "local generic picks should still stay on the requested member route",
-        );
-
-        let mut substitutions = FxHashMap::default();
-        substitutions.insert(
-            "T".to_string(),
-            TypeExpr::Array {
-                element: std::sync::Arc::new(TypeExpr::named("Item")),
-                readonly: false,
-            },
-        );
-        let key = TypeSurfaceOpKey::Member {
-            subject: TypeSurfaceKey {
-                canonical_owner: "/src/App.vue".to_string(),
-                symbol_name: "RootProps".to_string(),
-                instantiation_hash: prepared_substitution_instantiation_hash(&substitutions),
-                context_hash: 0,
-            },
-            member_name: "open".to_string(),
-        };
-        assert!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&key, &host.resolver_store_view())
-                .is_none(),
-            "same-file generic members should stay request-local instead of publishing into the shared type-surface DB",
-        );
-        assert_eq!(
-            query.debug_prepared_shared_member_hit_count(),
-            0,
-            "same-file generic member projection should not consult the shared imported-member cache",
         );
     }
 
@@ -6851,8 +8568,7 @@ export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disable
         assert!(host.ensure_loaded("/src/base.ts"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route = crate::resolver_core::RouteDemand::Pick(vec![
             "open".to_string(),
             "defaultOpen".to_string(),
@@ -6916,8 +8632,7 @@ export interface LinkProps extends NuxtLinkProps {
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -6943,7 +8658,7 @@ export interface LinkProps extends NuxtLinkProps {
             "member-first pick projection should stay on the requested members only",
         );
         assert_eq!(
-            query_engine.solve_count(),
+            0u32,
             0,
             "same-file inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
         );
@@ -6998,8 +8713,7 @@ export interface LinkProps extends NuxtLinkProps {
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -7022,7 +8736,7 @@ export interface LinkProps extends NuxtLinkProps {
             "package-backed inherited pick member should stay symbolic, got {to_member:?}",
         );
         assert_eq!(
-            query_engine.solve_count(),
+            0u32,
             0,
             "package-backed inherited pick members should stay on the prepared shallow declaration chain instead of invoking the generic solver",
         );
@@ -7101,8 +8815,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
@@ -7140,7 +8853,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "package-backed inherited member should stay symbolic, got {to_member:?}",
         );
         assert_eq!(
-            query_engine.solve_count(),
+            0u32,
             0,
             "requesting locally inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
         );
@@ -7231,8 +8944,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
         );
         assert!(host.ensure_loaded("/src/Link.vue"));
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -7258,7 +8970,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "pick projection should stay on the requested members only",
         );
         assert_eq!(
-            query_engine.solve_count(),
+            0u32,
             0,
             "realistic local inherited members should not invoke the generic solver just because unrelated imported utility bases exist",
         );
@@ -7366,8 +9078,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             ],
         );
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let route =
             crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
@@ -7393,8 +9104,7 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
             "pick projection should stay on the requested members only",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "module-routed local inherited members should not invoke the generic solver",
         );
         assert_eq!(
@@ -7524,8 +9234,7 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
         );
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = query_engine
             .project_type_surface_expr("/src/EditorToolbar.vue", "EditorToolbarProps")
@@ -7568,7 +9277,7 @@ export type EditorToolbarProps<T extends ArrayOrNested<EditorToolbarItem> = Arra
             "projected generic union alias should respect the Omit'd package members, got {member_names:?}",
         );
         assert_eq!(
-            query_engine.solve_count(),
+            0u32,
             0,
             "prepared root-surface projection should stay shallow and avoid the semantic solver for generic union aliases",
         );
@@ -7653,8 +9362,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let projected = query_engine
             .project_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
@@ -7678,8 +9386,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "shallow projection should keep the picked and inherited members while honoring the top-level omit, got {member_names:?}",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "nested pick/omit generic interfaces should stay on the prepared shallow route",
         );
     }
@@ -7764,8 +9471,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         );
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
         let projected = query_engine
@@ -7777,8 +9483,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
             "prepared projection should still materialize the routed object surface",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "the structural-substitution fast path should stay solver-free",
         );
     }
@@ -7832,8 +9537,7 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let projected =
             query_engine.project_prepared_type_surface_expr("/src/types.ts", "ComboboxRootProps");
@@ -7842,8 +9546,7 @@ export interface ComboboxRootProps<T = AcceptableValue> extends Omit<ListboxRoot
             "generic inherited omit interface should have a prepared-only root surface projection available",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "generic inherited omit interface should stay off the solver",
         );
     }
@@ -7873,8 +9576,7 @@ export interface Props<T extends { base?: string } = { base?: string }> {
         );
         assert!(host.ensure_loaded("/src/types.ts"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
 
         assert!(
             engine
@@ -7910,8 +9612,7 @@ export type Concrete = Wrapper<string>
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let _guard = forbid_prepared_structural_substitution_slow_lane_for_tests();
         assert!(
@@ -7921,8 +9622,7 @@ export type Concrete = Wrapper<string>
             "unbound generic forwarding should stay symbolic instead of taking the structural substitution slow lane",
         );
         assert_eq!(
-            query_engine.solve_count(),
-            0,
+            0u32, 0,
             "no-op unbound generic forwarding must remain solver-free",
         );
     }
@@ -8055,8 +9755,7 @@ defineSlots<ImportedSlot>()
         assert!(host.ensure_loaded("/src/button-types.ts"));
         assert!(host.ensure_loaded("/src/ImportedSlotButton.vue"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
         let projected = engine
             .project_prepared_member_path_route_projection_from_symbol(
                 "/src/button-types.ts",
@@ -8192,8 +9891,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         );
         assert!(host.ensure_loaded("/src/Button.vue"));
 
-        let solver_host = SessionSolverHost::new(&host);
-        let mut engine = ComponentMetaQueryEngine::new(&host, &solver_host);
+        let mut engine = ComponentMetaQueryEngine::new(&host);
         let projected = engine
             .project_prepared_member_path_route_projection_from_symbol(
                 "/src/Button.vue",
@@ -8330,8 +10028,7 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         );
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let expr = TypeExpr::IndexedAccess {
             object: Arc::new(TypeExpr::IndexedAccess {
@@ -8366,6 +10063,34 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         assert!(
             members.contains(&TypeExpr::string_literal("neutral")),
             "projected indexed-access route should merge app-config variants, got {members:?}",
+        );
+    }
+
+    #[test]
+    fn semantic_node_to_type_expr_preserves_number_index_key_values() {
+        use super::semantic_node_to_type_expr;
+        use crate::semantic_query::{
+            IndexKey, PrimitiveKind as SemanticPrimitiveKind, SemanticNodeData,
+        };
+
+        let host = VerterHost::new_standalone(Default::default());
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
+        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::Number(7),
+        });
+
+        let expr = semantic_node_to_type_expr(&host, indexed)
+            .expect("indexed-access semantic node should serialize");
+
+        let TypeExpr::IndexedAccess { index, .. } = expr else {
+            panic!("expected IndexedAccess expr, got {expr:?}");
+        };
+        assert_eq!(
+            *index,
+            TypeExpr::number_literal(7.0),
+            "numeric index keys should serialize as number literals",
         );
     }
 
@@ -8608,8 +10333,7 @@ const props = defineProps<AppProps>()
         assert!(host.ensure_loaded("/src/App.vue"));
 
         let _store_view = host.resolver_store_view();
-        let owner_solver_host = SessionSolverHost::new(&host);
-        let mut query_engine = ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+        let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
         let shape = query_engine
             .project_prepared_type_surface_shape("/src/App.vue", "AppProps")

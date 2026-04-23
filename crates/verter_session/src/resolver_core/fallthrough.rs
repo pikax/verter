@@ -75,6 +75,7 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
 
     fn build_generic_child_prop_overrides(
         &self,
+        canonical_id: &str,
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
@@ -82,6 +83,7 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
 
     fn resolve_dynamic_root_candidates(
         &self,
+        canonical_id: &str,
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
@@ -686,11 +688,13 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                     }
                     RootTargetRef::DynamicComponentUsage { usage_index, .. } => {
                         let child_prop_overrides = host.build_generic_child_prop_overrides(
+                            canonical_id,
                             snapshot,
                             *usage_index,
                             &mut eval_env,
                         );
                         let candidates = host.resolve_dynamic_root_candidates(
+                            canonical_id,
                             snapshot,
                             *usage_index,
                             &mut eval_env,
@@ -778,6 +782,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                         ..
                     } => {
                         let child_prop_overrides = host.build_generic_child_prop_overrides(
+                            canonical_id,
                             snapshot,
                             *usage_index,
                             &mut eval_env,
@@ -891,10 +896,80 @@ pub fn inject_prop_type_overrides(
     }
 }
 
-pub fn resolve_usage_prop_type(
-    prop: &verter_semantic::analysis::template::TemplatePropUsage,
-    eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
+/// Structural substitution of bare `TypeOf(ValueRef)` references with
+/// annotations from a standalone evaluation environment.
+///
+/// D-Cutover §5.8 WIP-W migration path: the session-side callers of
+/// `evaluate_value_expression` now route value references through this
+/// env-first substitution + `ComponentMetaQueryEngine` dispatch fallback
+/// pair. This helper handles the injected-override hot path
+/// (`inject_prop_type_overrides` writes length-1 value symbols that the
+/// previous solver would resolve via `EvalEnvSolverHost`). Dispatch, not
+/// env substitution, handles imported/declared types.
+pub fn structural_substitute_typeof_refs(
+    expr: &TypeExpr,
+    env: &verter_semantic::analysis::type_eval::EvalEnv,
+) -> TypeExpr {
+    match expr {
+        TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => env
+            .value_symbols
+            .get(value_ref.path[0].as_str())
+            .and_then(|decl| decl.type_annotation.clone())
+            .unwrap_or_else(|| expr.clone()),
+        TypeExpr::Union(parts) => TypeExpr::union(
+            parts
+                .iter()
+                .map(|part| structural_substitute_typeof_refs(part, env))
+                .collect(),
+        ),
+        TypeExpr::Intersection(parts) => TypeExpr::intersection(
+            parts
+                .iter()
+                .map(|part| structural_substitute_typeof_refs(part, env))
+                .collect(),
+        ),
+        TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(std::sync::Arc::new(
+            structural_substitute_typeof_refs(inner, env),
+        )),
+        other => other.clone(),
+    }
+}
+
+/// Evaluate a value expression by parsing it and resolving identifiers
+/// via env-based substitution followed by component-meta dispatch.
+///
+/// Mirrors the pre-migration `evaluate_value_expression` contract:
+/// env-level substitutions (including injected prop-type overrides) take
+/// precedence; otherwise the lowered expression is routed through
+/// `ComponentMetaQueryEngine::project_expr_surface_expr` /
+/// `solve_expr_type_expr` in the owning canonical scope.
+pub fn evaluate_value_expression_via_env_or_dispatch(
+    expression: &str,
+    canonical_id: &str,
+    env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> Option<TypeExpr> {
+    let lowered =
+        verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)?;
+    if let Some(env) = env {
+        let substituted = structural_substitute_typeof_refs(&lowered, env);
+        if substituted != lowered {
+            return Some(substituted);
+        }
+    }
+    if let Some(projected) = engine.project_expr_surface_expr(canonical_id, &lowered) {
+        return Some(projected);
+    }
+    engine.solve_expr_type_expr(canonical_id, &lowered)
+}
+
+pub fn resolve_usage_prop_type<F>(
+    prop: &verter_semantic::analysis::template::TemplatePropUsage,
+    mut evaluator: F,
+) -> Option<TypeExpr>
+where
+    F: FnMut(&str) -> Option<TypeExpr>,
+{
     if prop.from_spread {
         return None;
     }
@@ -907,12 +982,8 @@ pub fn resolve_usage_prop_type(
     }
 
     if let Some(expression) = &prop.expression {
-        if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) = verter_semantic::analysis::type_eval_build::evaluate_value_expression(
-                expression, env,
-            ) {
-                return Some(ty);
-            }
+        if let Some(ty) = evaluator(expression) {
+            return Some(ty);
         }
 
         if let Some(ty) =
@@ -923,12 +994,8 @@ pub fn resolve_usage_prop_type(
     }
 
     if prop.is_shorthand {
-        if let Some(env) = eval_env.as_mut() {
-            if let Some(ty) = verter_semantic::analysis::type_eval_build::evaluate_value_expression(
-                &prop.name, env,
-            ) {
-                return Some(ty);
-            }
+        if let Some(ty) = evaluator(&prop.name) {
+            return Some(ty);
         }
 
         if let Some(ty) =
@@ -1269,9 +1336,9 @@ mod tests {
         append_component_candidate_branches, append_native_candidate_branch,
         collect_dynamic_root_candidates_from_type, fallthrough_cache_key, hash_prop_type_overrides,
         inject_prop_type_overrides, known_spread_keys_from_type_expr, merge_fallthrough_branches,
-        resolve_fallthrough_surface, resolve_usage_prop_type, DynamicRootCandidate,
-        FallthroughComputeHost, FallthroughResolutionView, FallthroughResolverHost,
-        ResolvedConsumedBindings,
+        resolve_fallthrough_surface, resolve_usage_prop_type, structural_substitute_typeof_refs,
+        DynamicRootCandidate, FallthroughComputeHost, FallthroughResolutionView,
+        FallthroughResolverHost, ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
@@ -1390,6 +1457,7 @@ mod tests {
 
         fn build_generic_child_prop_overrides(
             &self,
+            _canonical_id: &str,
             _snapshot: &Self::Snapshot,
             _usage_index: u32,
             _eval_env: &mut Option<Self::EvalEnv>,
@@ -1399,6 +1467,7 @@ mod tests {
 
         fn resolve_dynamic_root_candidates(
             &self,
+            _canonical_id: &str,
             _snapshot: &Self::Snapshot,
             _usage_index: u32,
             _eval_env: &mut Option<Self::EvalEnv>,
@@ -1748,7 +1817,6 @@ mod tests {
 
     #[test]
     fn resolve_usage_prop_type_handles_static_and_bound_inputs() {
-        let mut env = None;
         let static_prop = TemplatePropUsage {
             name: "title".to_string(),
             is_bound: false,
@@ -1773,12 +1841,109 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_usage_prop_type(&static_prop, &mut env),
+            resolve_usage_prop_type(&static_prop, |_| None),
             Some(TypeExpr::string_literal("hello"))
         );
         assert_eq!(
-            resolve_usage_prop_type(&bound_prop, &mut env),
+            resolve_usage_prop_type(&bound_prop, |_| None),
             Some(TypeExpr::number_literal(42.0))
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_substitutes_length_one_value_refs() {
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: "as".to_string(),
+            declaration_id: 0,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::string_literal("input")),
+            function_signature: None,
+            object_shape: None,
+        });
+
+        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+            path: vec!["as".to_string()],
+        });
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, &env),
+            TypeExpr::string_literal("input")
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_preserves_unresolved_refs() {
+        let env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+            path: vec!["missing".to_string()],
+        });
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, &env),
+            lowered,
+            "bare refs without an env entry must round-trip unchanged"
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_recurses_into_union_and_intersection() {
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: "a".to_string(),
+            declaration_id: 0,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::string_literal("A")),
+            function_signature: None,
+            object_shape: None,
+        });
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: "b".to_string(),
+            declaration_id: 0,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::string_literal("B")),
+            function_signature: None,
+            object_shape: None,
+        });
+
+        let union = TypeExpr::union(vec![
+            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["a".to_string()],
+            }),
+            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+                path: vec!["b".to_string()],
+            }),
+        ]);
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&union, &env),
+            TypeExpr::union(vec![
+                TypeExpr::string_literal("A"),
+                TypeExpr::string_literal("B"),
+            ])
+        );
+    }
+
+    #[test]
+    fn structural_substitute_typeof_refs_leaves_multi_segment_paths_untouched() {
+        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+            name: "props".to_string(),
+            declaration_id: 0,
+            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            type_annotation: Some(TypeExpr::string_literal("ignored")),
+            function_signature: None,
+            object_shape: None,
+        });
+
+        let lowered = TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef {
+            path: vec!["props".to_string(), "name".to_string()],
+        });
+
+        assert_eq!(
+            structural_substitute_typeof_refs(&lowered, &env),
+            lowered,
+            "multi-segment ValueRefs must not swap for the length-1 override binding",
         );
     }
 

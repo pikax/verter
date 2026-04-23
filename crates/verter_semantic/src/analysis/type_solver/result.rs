@@ -260,104 +260,6 @@ impl<T> SolverResult<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Relation result
-// ---------------------------------------------------------------------------
-
-/// Tri-state relation result. Replaces scattered boolean assignability helpers.
-///
-/// Used by:
-/// - conditional resolution
-/// - `infer` binding
-/// - object/function compatibility
-/// - generic instantiation decisions
-/// - union/intersection simplification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelationResult {
-    Assignable,
-    NotAssignable,
-    Unknown,
-}
-
-impl RelationResult {
-    /// Logical AND: both must be `Assignable` for the result to be `Assignable`.
-    /// If either is `Unknown`, result is `Unknown`.
-    pub fn and(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::NotAssignable, _) | (_, Self::NotAssignable) => Self::NotAssignable,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::Assignable, Self::Assignable) => Self::Assignable,
-        }
-    }
-
-    /// Logical OR: if either is `Assignable`, result is `Assignable`.
-    pub fn or(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Assignable, _) | (_, Self::Assignable) => Self::Assignable,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::NotAssignable, Self::NotAssignable) => Self::NotAssignable,
-        }
-    }
-
-    /// Negate: `Assignable` ↔ `NotAssignable`, `Unknown` stays `Unknown`.
-    pub fn negate(self) -> Self {
-        match self {
-            Self::Assignable => Self::NotAssignable,
-            Self::NotAssignable => Self::Assignable,
-            Self::Unknown => Self::Unknown,
-        }
-    }
-}
-
-impl fmt::Display for RelationResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Assignable => write!(f, "Assignable"),
-            Self::NotAssignable => write!(f, "NotAssignable"),
-            Self::Unknown => write!(f, "Unknown"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Relation mode
-// ---------------------------------------------------------------------------
-
-/// Which relation check to perform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RelationMode {
-    /// `A` is assignable to `B` — the standard TypeScript assignability check.
-    Assignable,
-    /// Strict subtype (not currently distinguished from Assignable in the
-    /// initial implementation, but reserved for future refinement).
-    Subtype,
-}
-
-// ---------------------------------------------------------------------------
-// Keyspace
-// ---------------------------------------------------------------------------
-
-/// The keyspace of a type — the set of keys it accepts for indexing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Keyspace {
-    /// Finite enumerable key set.
-    Finite(Vec<String>),
-    /// Open domain (e.g. `string`, `number`, or `symbol` index signatures).
-    Open,
-    /// Empty keyspace — `never` or `{}`.
-    Empty,
-}
-
-impl Keyspace {
-    pub fn is_finite(&self) -> bool {
-        matches!(self, Self::Finite(_))
-    }
-
-    pub fn is_open(&self) -> bool {
-        matches!(self, Self::Open)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -393,37 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn relation_result_and_logic() {
-        use RelationResult::*;
-        assert_eq!(Assignable.and(Assignable), Assignable);
-        assert_eq!(Assignable.and(NotAssignable), NotAssignable);
-        assert_eq!(Assignable.and(Unknown), Unknown);
-        assert_eq!(NotAssignable.and(Unknown), NotAssignable);
-    }
-
-    #[test]
-    fn relation_result_or_logic() {
-        use RelationResult::*;
-        assert_eq!(Assignable.or(NotAssignable), Assignable);
-        assert_eq!(NotAssignable.or(NotAssignable), NotAssignable);
-        assert_eq!(NotAssignable.or(Unknown), Unknown);
-        assert_eq!(Assignable.or(Unknown), Assignable);
-    }
-
-    #[test]
-    fn relation_result_negate() {
-        assert_eq!(
-            RelationResult::Assignable.negate(),
-            RelationResult::NotAssignable
-        );
-        assert_eq!(
-            RelationResult::NotAssignable.negate(),
-            RelationResult::Assignable
-        );
-        assert_eq!(RelationResult::Unknown.negate(), RelationResult::Unknown);
-    }
-
-    #[test]
     fn solver_result_map_preserves_metadata() {
         let result = SolverResult::exact_symbolic(42);
         let mapped = result.map(|x| x.to_string());
@@ -445,14 +316,6 @@ mod tests {
         a.merge_status(&b);
         assert_eq!(a.exactness, SolverExactness::Incomplete);
         assert_eq!(a.incomplete_reasons.len(), 1);
-    }
-
-    #[test]
-    fn keyspace_predicates() {
-        assert!(Keyspace::Finite(vec!["a".into()]).is_finite());
-        assert!(!Keyspace::Finite(vec![]).is_open());
-        assert!(Keyspace::Open.is_open());
-        assert!(!Keyspace::Empty.is_finite());
     }
 
     #[test]

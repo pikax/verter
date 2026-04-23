@@ -136,22 +136,43 @@ These are the canonical component-meta resolver rules. They govern how the share
 
 **Component-meta collection rule:** imported-eval collection must stay lazy/BFS over the active symbol route. Do not add eager collector modes or source-text reparsing fallbacks in shared resolver code.
 
-## Type Solver Integration
+## Semantic Dispatch Integration (Post Phase-D)
 
-All type expansion for component-meta goes through the native `type_solver::solve::solve_type()` pipeline.
+All type expansion for component-meta goes through `ProjectSemanticDispatch::execute(SemanticQueryKey::...)` against the shared `SemanticGraphStore` (see `/type-resolution` for the full authority contract). The component-meta layer is a pure `SemanticQueryApi` consumer — it does not own a separate solver, a separate relation engine, or a separate lowering path.
 
-**Request-scoped engine ownership:** `TypeQueryEngine` is the single request-scoped mutable solver owner for component-meta queries. One engine is created per `get_component_meta()` request and shared across all solves in that request. Declaration-scoped solves reuse the shared engine via `TypeQueryEngine::solve_scoped()` -- they share the arena, instantiation cache, and solver caches while using a different `TypeSolverHost` (scoped to the declaration file).
+**Call-site pattern** (plan §9 appendix — canonical migration shape):
 
-**Key resolver files:**
+```rust
+// Retired: owner_engine.solve_scoped(host, scope, &expr) / .solve(&expr)
+// Post-cutover:
+let base = dispatch.shallow_lower_type_expr(&expr, &env, &scope_node, &name_resolution, &mut substitutions);
+let path: Arc<[PathSegment]> = Arc::from([]);
+dispatch.execute(SemanticQueryKey::ProjectPath { base, path, mode: Expanded });
+// Then `semantic_node_to_type_expr(host, result)` to round-trip to TypeExpr.
+```
+
+`env` (type-parameter bindings) and `name_resolution` (import map) must be preserved per Gemini's substitution-environment warning — dropping either causes bare-name misses in declaration-scoped resolution.
+
+**Retired identifiers** (per plan §9 / §5.7 WIP-C):
+
+- `owner_engine.solve_scoped(...)` / `.solve(...)` → `dispatch.execute(ProjectPath { ..., mode: Expanded })`
+- `owner_engine.project_expr_surface_as_type_expr(...)` → same as above
+- `engine.solve_expr_type_expr(...)` → same as above
+- `engine.project_expr_surface_shape(...)` → `dispatch.execute(ProjectPath { ..., mode: Shallow })` + surface-shape reader helper
+- `engine.expand_local_generic_ref_expr(...)` → `dispatch.execute(SemanticQueryKey::Instantiate { base, args })`
+- `TypeSurfaceDb::{get, publish, evict_*}` → DELETED; identity lives in `SemanticGraphStore`'s node memo
+- `TypeSolverHost`, `EvalEnvSolverHost`, `SessionSolverHost` traits/structs → DELETED; dispatch called directly
+- `TypeQueryEngine` → DELETED; `ProjectSemanticDispatch::new(host)` replaces
+
+**Key resolver files (post-cutover):**
 
 | File | Purpose |
 | --- | --- |
-| `crates/verter_session/src/resolver_core/solver_host.rs` | `SessionSolverHost` (bridges host caches to solver) |
-| `crates/verter_session/src/resolver_core/type_expansion_verter.rs` | `resolved_macro_to_expansion_via_solver()` (component-meta integration) |
-| `crates/verter_session/src/resolver_core/imported_eval_collect.rs` | `ImportedEvalResolver` trait, `HostImportedEvalResolver` |
-| `crates/verter_session/src/host_manage.rs` | `get_component_meta()` entry point, fallthrough resolver |
+| `crates/verter_session/src/project_semantic_dispatch/` | `ProjectSemanticDispatch`, `SemanticQueryApi` impl, build/walk/relate/lower/substitute/evaluate/guards/enumerate sub-modules |
+| `crates/verter_session/src/semantic_query_memo.rs` | `SemanticGraphStore` (node memo + relation memo) |
+| `crates/verter_session/src/host_manage.rs` | `get_component_meta()` entry point, `HostNamedTypeCacheAdapter` (reads/writes `SemanticGraphStore` directly for Vue macro results) |
 | `crates/verter_session/src/host_resolve.rs` | `HostFrontierAdapter`, cross-file type resolution |
-| `crates/verter_session/src/resolver_core/component_meta_query_engine.rs` | `TypeQueryEngine` request-scoped solver owner |
+| `crates/verter_session/src/resolver_core/component_meta_query_engine.rs` | `ComponentMetaQueryEngine` — pure `SemanticQueryApi` consumer; no `owner_engine` field, no private resolver/expander state |
 
 ## Component-Meta Perf / Debug Workflow
 

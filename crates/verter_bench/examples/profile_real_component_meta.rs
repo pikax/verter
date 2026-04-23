@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 //! Real-project component-meta hotpath profiler.
 //!
 //! Usage:
@@ -106,12 +108,12 @@ fn default_project_root() -> PathBuf {
 fn resolve_target_file(project_root: &Path, token: &str) -> io::Result<PathBuf> {
     let direct = PathBuf::from(token);
     if direct.exists() {
-        return Ok(direct.canonicalize()?);
+        return direct.canonicalize();
     }
 
     let relative = project_root.join(token);
     if relative.exists() {
-        return Ok(relative.canonicalize()?);
+        return relative.canonicalize();
     }
 
     let direct_component = project_root
@@ -120,7 +122,7 @@ fn resolve_target_file(project_root: &Path, token: &str) -> io::Result<PathBuf> 
         .join("components")
         .join(format!("{token}.vue"));
     if direct_component.exists() {
-        return Ok(direct_component.canonicalize()?);
+        return direct_component.canonicalize();
     }
 
     let matches: Vec<PathBuf> =

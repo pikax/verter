@@ -3804,6 +3804,7 @@ dependencies = [
 name = "verter_session"
 version = "0.0.1-beta.1"
 dependencies = [
+ "arc-swap",
  "bitflags",
  "criterion",
  "dashmap 6.1.0",
@@ -3822,6 +3823,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "verter_compiler",
+ "verter_parser",
  "verter_scheduler",
  "verter_semantic",
  "verter_span",

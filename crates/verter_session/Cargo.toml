@@ -49,6 +49,7 @@ tracing = "0.1"
 serde_json = { workspace = true }
 sourcemap = "9"
 thiserror = "2"
+arc-swap = "1"
 parking_lot = "0.12"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -56,6 +57,11 @@ web-time = "1"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+verter_parser = { path = "../verter_parser" }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
 
 [[bench]]
 name = "host_bench"

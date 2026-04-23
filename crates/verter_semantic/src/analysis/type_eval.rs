@@ -289,16 +289,3 @@ impl Default for EvalEnv {
         Self::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Evaluator — replaced by type_solver::solve::solve_type()
-// ---------------------------------------------------------------------------
-
-/// Evaluate a `TypeExpr` in the given environment using the native solver.
-///
-/// This is a convenience wrapper for callsites that don't have a
-/// `TypeSolverHost` — it creates an `EvalEnvSolverHost` from the env.
-pub fn evaluate(expr: &TypeExpr, env: &mut EvalEnv) -> TypeExpr {
-    let solver_host = crate::analysis::type_solver::host::EvalEnvSolverHost::new(env);
-    crate::analysis::type_solver::solve::solve_type(expr, &solver_host).value
-}

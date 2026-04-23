@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
     prepared_decl::PreparedDeclBundle, route_db::RouteDb, symbol_resolver::SymbolResolverState,
-    type_surface_db::TypeSurfaceDb, FactVersionRef, FallthroughNodeKey, ResolutionNodeKey,
-    ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView, ValidatedFactCache,
+    FactVersionRef, FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
+    StableExecutionValue, StoreView, ValidatedFactCache,
 };
 
 pub struct StableRequestState<K, V>
@@ -126,8 +126,6 @@ where
     pub routes: RouteDb,
     /// Host-owned imported-root proof cache (positive and negative).
     pub imported_roots: ImportedRootDb,
-    /// Shared projected type surfaces for cross-request reuse.
-    pub type_surfaces: TypeSurfaceDb,
 }
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
@@ -148,7 +146,6 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes: RouteDb::new(),
             imported_roots: ImportedRootDb::new(),
-            type_surfaces: TypeSurfaceDb::new(),
         }
     }
 
@@ -164,7 +161,6 @@ where
             indexed_singleflight: SingleflightGroup::default(),
             routes: RouteDb::new(),
             imported_roots: ImportedRootDb::new(),
-            type_surfaces: TypeSurfaceDb::new(),
         }
     }
 
@@ -178,7 +174,6 @@ where
         self.indexed_singleflight.clear();
         self.routes.clear();
         self.imported_roots.clear();
-        self.type_surfaces.clear();
     }
 
     /// Evict artifacts owned by one canonical file without clearing unrelated
@@ -189,7 +184,6 @@ where
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
-        self.type_surfaces.evict_owner(canonical_id);
     }
 
     /// Hard-evict all artifacts for a deleted file, including archived entries.
@@ -200,7 +194,6 @@ where
             .hard_remove(&canonical_id.to_string());
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
-        self.type_surfaces.evict_owner(canonical_id);
     }
 
     /// Soft-invalidate artifacts for a canonical file (e.g. after import
@@ -212,7 +205,6 @@ where
         self.prepared_decl_bundles.remove(&canonical_id.to_string());
         self.routes.evict_provider(canonical_id);
         self.imported_roots.evict_provider(canonical_id);
-        self.type_surfaces.evict_owner(canonical_id);
     }
 
     /// Take a snapshot of the current counter values.

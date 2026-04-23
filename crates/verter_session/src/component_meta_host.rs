@@ -9,8 +9,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 
 use crate::resolver_core::type_expansion::TypeExpansionError;
 use crate::resolver_core::type_expansion_host::{
@@ -36,15 +34,15 @@ use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 use crate::host_manage::component_meta_trace_scope;
 use crate::VerterHost;
 
-#[cfg(test)]
-static HEAVY_COMPONENT_META_TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn lock_heavy_component_meta_test() -> std::sync::MutexGuard<'static, ()> {
-    HEAVY_COMPONENT_META_TEST_MUTEX
-        .lock()
-        .expect("heavy component-meta test mutex should not be poisoned")
-}
+// Path C C12 (per plan §14.5) retired `HEAVY_COMPONENT_META_TEST_MUTEX`
+// along with its `lock_heavy_component_meta_test` helper and mirrored
+// `HEAVY_COMPONENT_META_TEST_{ACQUIRES,WAIT_NS}` counters. Plan §13.2
+// diagnosis identified OS-level CPU/thread oversubscription (each
+// per-test `Scheduler` spawned a `cpu_threads = num_cpus()` Rayon pool)
+// as the true serialization target — not any in-process shared resource.
+// Test hosts now construct via `new_standalone_with_scheduler_config`
+// with `SchedulerConfig { cpu_threads: 1, .. }`, so the mutex is no
+// longer needed.
 
 // ---------------------------------------------------------------------------
 // Error
@@ -86,6 +84,27 @@ impl ComponentMetaHost {
     /// Create a new component-meta host with a standalone memory workspace.
     pub fn new_standalone(config: crate::types::HostConfig) -> Self {
         let project = crate::meta::MetaProject::new(VerterHost::new_standalone(config));
+        Self {
+            inner: Arc::new(ComponentMetaHostInner {
+                project,
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Create a new component-meta host with a standalone memory workspace and
+    /// an explicit [`SchedulerConfig`].
+    ///
+    /// Path C C12 (per plan §14.5): test harnesses construct hosts with
+    /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
+    /// to avoid CPU oversubscription when many parallel test threads each
+    /// spin up their own scheduler thread pools (see plan §13 diagnosis).
+    pub fn new_standalone_with_scheduler_config(
+        config: crate::types::HostConfig,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+    ) -> Self {
+        let host = VerterHost::new_standalone_with_scheduler_config(config, scheduler_config);
+        let project = crate::meta::MetaProject::new(host);
         Self {
             inner: Arc::new(ComponentMetaHostInner {
                 project,
@@ -175,6 +194,21 @@ impl ComponentMetaHost {
                 .inner
                 .project
                 .open_session()
+                .map_err(ComponentMetaHostError::from)?,
+        })
+    }
+
+    /// Open a new isolated session in [`ExecutionMode::Batch`] mode (Path C C12).
+    ///
+    /// Test harness and MCP server callers use this path. LSP callers stay on
+    /// [`Self::open_session`] (Interactive mode).
+    pub fn open_session_batch(&self) -> Result<ComponentMetaSession, ComponentMetaHostError> {
+        self.check_alive()?;
+        Ok(ComponentMetaSession {
+            inner: self
+                .inner
+                .project
+                .open_session_batch()
                 .map_err(ComponentMetaHostError::from)?,
         })
     }
@@ -627,7 +661,16 @@ mod tests {
     use super::*;
 
     fn make_host() -> ComponentMetaHost {
-        ComponentMetaHost::new_standalone(crate::types::HostConfig::default())
+        // Path C C12 (per plan §14.5): tests use `cpu_threads = 1` to avoid
+        // CPU oversubscription when many parallel test threads each spin up
+        // their own Rayon pools. See plan §13.2 (Option R1).
+        ComponentMetaHost::new_standalone_with_scheduler_config(
+            crate::types::HostConfig::default(),
+            verter_scheduler::scheduler::SchedulerConfig {
+                cpu_threads: 1,
+                ..verter_scheduler::scheduler::SchedulerConfig::default()
+            },
+        )
     }
 
     #[test]
@@ -635,7 +678,7 @@ mod tests {
         let host = make_host();
         host.upsert_base("/src/Foo.vue", "<template><div/></template>")
             .unwrap();
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let source = session.get_effective_source("/src/Foo.vue").unwrap();
         assert!(source.is_some());
         assert!(source.unwrap().contains("<template>"));
@@ -646,8 +689,8 @@ mod tests {
         let host = make_host();
         host.upsert_base("/src/Foo.vue", "<template><div/></template>")
             .unwrap();
-        let session_a = host.open_session().unwrap();
-        let session_b = host.open_session().unwrap();
+        let session_a = host.open_session_batch().unwrap();
+        let session_b = host.open_session_batch().unwrap();
 
         session_a
             .upsert("/src/Foo.vue", "<template><span/></template>".to_string())
@@ -669,13 +712,13 @@ mod tests {
         host.upsert_base("/src/Foo.vue", "<template><div/></template>")
             .unwrap();
 
-        let session_a = host.open_session().unwrap();
+        let session_a = host.open_session_batch().unwrap();
         session_a
             .upsert("/src/Foo.vue", "<template><span/></template>".to_string())
             .unwrap();
         session_a.close();
 
-        let session_b = host.open_session().unwrap();
+        let session_b = host.open_session_batch().unwrap();
         assert_eq!(
             session_b.get_effective_source("/src/Foo.vue").unwrap(),
             Some("<template><div/></template>".to_string())
@@ -693,7 +736,7 @@ mod tests {
     #[test]
     fn get_component_meta_returns_none_for_missing() {
         let host = make_host();
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let result = session.get_component_meta("/nonexistent.vue").unwrap();
         assert!(result.is_none());
     }
@@ -706,7 +749,7 @@ mod tests {
             "<script setup lang=\"ts\">\ndefineProps<{ msg: string }>()\n</script>\n<template><div>{{ msg }}</div></template>",
         )
         .unwrap();
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let result = session.get_component_meta("/src/Button.vue").unwrap();
         assert!(result.is_some(), "should return meta for loaded SFC");
     }
@@ -720,7 +763,7 @@ mod tests {
         )
         .unwrap();
 
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let full = session
             .get_component_meta("/src/App.vue")
             .unwrap()
@@ -821,7 +864,7 @@ defineProps<ButtonProps>()
         )
         .unwrap();
 
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let (_analysis, resolved) = session
             .get_declared_component_meta_with_resolution("/src/Button.vue")
             .unwrap()
@@ -867,7 +910,7 @@ defineProps<ButtonProps>()
     #[test]
     fn overlay_queries_reapply_owner_after_overlay_only_helper_upserts() {
         let host = make_host();
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
 
         // Upsert the owner before its overlay-only helpers. Overlay application
         // must still leave the owner query seeing the helper files.
@@ -1049,7 +1092,6 @@ export type ComponentConfig<
     /// type graphs complete without hang or budget error.
     #[test]
     fn component_meta_budget_errors_surface_on_new_session_api() {
-        let _heavy_test_guard = lock_heavy_component_meta_test();
         let host = make_host();
 
         let import_count = 2_005usize;
@@ -1106,7 +1148,7 @@ defineProps<Props>()
             }],
         );
 
-        let session = host.open_session().unwrap();
+        let session = host.open_session_batch().unwrap();
         let meta = session
             .get_component_meta("/src/App.vue")
             .expect("large finite heritage graph should resolve successfully")

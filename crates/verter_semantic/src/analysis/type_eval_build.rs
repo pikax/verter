@@ -1302,175 +1302,35 @@ pub fn parse_type_parameter_clause(clause: &str) -> Vec<TypeParam> {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot evaluation: evaluate type annotations from an analysis snapshot
-// ---------------------------------------------------------------------------
-
-/// Convenience wrapper: expand all macro type annotations from source.
-///
-/// Builds an `EvalEnv` from the source, then expands each prop/emit/slot
-/// type annotation using the native solver with default limits.
-pub fn evaluate_macro_types(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: &str,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    let mut env = parse_and_build_env(source);
-    let solver_host = crate::analysis::type_solver::host::EvalEnvSolverHost::new(&env);
-    expand_macro_types(macros, Some(source), &mut env, None, &solver_host)
-}
-
-// ---------------------------------------------------------------------------
 // Expansion-based macro type evaluation
 // ---------------------------------------------------------------------------
 
-/// Expand all macro-backed type annotations using the native type solver.
-///
-/// All type resolution goes through `solve_type()` via the provided
-/// `TypeSolverHost`. The host determines how type references are resolved:
-/// - `EvalEnvSolverHost` for standalone/test contexts (resolves from local env)
-/// - `SessionSolverHost` for production (resolves from host caches + owner env)
-pub fn expand_macro_types(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    env: &mut EvalEnv,
-    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
-    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    let binding_entries = collect_binding_entries_from_env(env, local_binding_names);
-    let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
-    let mut result = expand_macro_types_impl(
-        macros,
-        source,
-        binding_entries.as_slice(),
-        Some(env),
-        MacroExpansionScope::Full,
-        &mut engine,
-    );
-    // Standalone path: produce object shapes via the solver directly.
-    // The session path uses the projection-first pipeline in meta_resolve.rs instead.
-    expand_standalone_macro_object_shapes(macros, source, &mut result, &mut engine);
-    result
-}
-
-/// Expand macro-backed type annotations using only pre-collected binding type
-/// annotations plus the solver host.
-///
-/// This is the cache-owned production path used by `verter_session`, where
-/// local binding types come from prepared value declarations rather than an
-/// `EvalEnv`. Creates its own internal `TypeQueryEngine`.
+/// Scope hint for `expand_macro_types_impl_with_expander` — full component
+/// meta uses `Full`, fallthrough resolution uses `Fallthrough` to skip work
+/// the fallthrough pipeline doesn't need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacroExpansionScope {
     Full,
     Fallthrough,
 }
 
-pub fn expand_macro_types_with_bindings(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    binding_entries: &[(String, TypeExpr)],
-    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_with_bindings_for_scope(
-        macros,
-        source,
-        binding_entries,
-        MacroExpansionScope::Full,
-        solver_host,
-    )
-}
-
-pub fn expand_macro_types_with_bindings_for_scope(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    binding_entries: &[(String, TypeExpr)],
-    scope: MacroExpansionScope,
-    solver_host: &dyn crate::analysis::type_solver::host::TypeSolverHost,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    let mut engine = crate::analysis::type_solver::query_engine::TypeQueryEngine::new(solver_host);
-    expand_macro_types_impl(macros, source, binding_entries, None, scope, &mut engine)
-}
-
-/// Like `expand_macro_types_with_bindings`, but accepts an external
-/// request-scoped `TypeQueryEngine` so the caller can share one engine across
-/// macro expansion and later registry projection.
-pub fn expand_macro_types_with_engine(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    binding_entries: &[(String, TypeExpr)],
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_with_engine_for_scope(
-        macros,
-        source,
-        binding_entries,
-        MacroExpansionScope::Full,
-        engine,
-    )
-}
-
-pub fn expand_macro_types_with_engine_for_scope(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    binding_entries: &[(String, TypeExpr)],
-    scope: MacroExpansionScope,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    expand_macro_types_impl(macros, source, binding_entries, None, scope, engine)
-}
-
-fn collect_binding_entries_from_env(
-    env: &EvalEnv,
-    local_binding_names: Option<&rustc_hash::FxHashSet<String>>,
-) -> Vec<(String, TypeExpr)> {
-    env.value_symbols
-        .iter()
-        .filter(|(name, _)| {
-            local_binding_names
-                .map(|names| names.contains(name.as_str()))
-                .unwrap_or(true)
-        })
-        .filter_map(|(name, decl)| {
-            decl.type_annotation
-                .as_ref()
-                .map(|ta| (name.clone(), ta.clone()))
-        })
-        .collect()
-}
-
-fn expand_macro_types_impl(
+pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[(String, TypeExpr)],
     debug_env: Option<&mut EvalEnv>,
     scope: MacroExpansionScope,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> crate::analysis::type_expand::ExpandedComponentTypes {
-    use crate::analysis::type_expand::{
-        solver_result_to_normalized_expansion, ExpandedComponentTypes, ExpandedField,
-        ExpandedNormalizedExpr, ExpansionResult,
-    };
+    mut expand_field_expr: F,
+) -> crate::analysis::type_expand::ExpandedComponentTypes
+where
+    F: FnMut(
+        &TypeExpr,
+    ) -> crate::analysis::type_expand::ExpansionResult<
+        crate::analysis::type_expand::ExpandedNormalizedExpr,
+    >,
+{
+    use crate::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
     use crate::analysis::type_expr_lower::parse_type_annotation;
-    use crate::analysis::type_solver::result::SolverResult;
-
-    fn solver_to_expr_result(
-        result: SolverResult<TypeExpr>,
-    ) -> ExpansionResult<ExpandedNormalizedExpr> {
-        solver_result_to_normalized_expansion(result)
-    }
-
-    fn expand_field_expr(
-        engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-        parsed: &TypeExpr,
-    ) -> ExpansionResult<ExpandedNormalizedExpr> {
-        if let Some(fast) = engine.try_fast_shallow_field_expr(parsed) {
-            solver_to_expr_result(fast)
-        } else if engine.should_preserve_shallow_field_expr(parsed) {
-            ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                expr: parsed.clone(),
-            })
-        } else {
-            solver_to_expr_result(engine.solve_preserving_package_refs(parsed))
-        }
-    }
 
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();
@@ -1502,7 +1362,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(engine, &parsed);
+                    let expanded = expand_field_expr(&parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1542,7 +1402,7 @@ fn expand_macro_types_impl(
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(engine, &parsed);
+                    let expanded = expand_field_expr(&parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1581,7 +1441,7 @@ fn expand_macro_types_impl(
                                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                             };
                             log_expand_stage_start(&stage_log);
-                            let expanded = expand_field_expr(engine, &parsed);
+                            let expanded = expand_field_expr(&parsed);
                             log_expand_stage(
                                 stage_log,
                                 expanded.exactness,
@@ -1618,7 +1478,7 @@ fn expand_macro_types_impl(
                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
             };
             log_expand_stage_start(&stage_log);
-            let expanded = expand_field_expr(engine, type_ann);
+            let expanded = expand_field_expr(type_ann);
             log_expand_stage(
                 stage_log,
                 expanded.exactness,
@@ -1663,191 +1523,8 @@ fn expand_macro_types_impl(
     result
 }
 
-/// Solver-based macro object-shape production for the **standalone** path only
-/// (WASM, playground, EvalEnv-backed tests).
-///
-/// The session path (`verter_session`) uses the projection-first pipeline in
-/// `meta_resolve::produce_macro_object_shapes` instead. This function must NOT
-/// be called from the session path.
-fn expand_standalone_macro_object_shapes(
-    macros: &[crate::analysis::types::AnalyzedMacro],
-    source: Option<&str>,
-    result: &mut crate::analysis::type_expand::ExpandedComponentTypes,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) {
-    use crate::analysis::type_expand::{
-        solver_result_to_object_expansion, ExpandedMacroObjectShape, ExpandedMacroProps,
-    };
-
-    let macro_type_params = source.map(collect_define_macro_type_params);
-    let mut define_props_index = 0usize;
-    let mut define_emits_index = 0usize;
-    let mut define_slots_index = 0usize;
-
-    for (macro_index, m) in macros.iter().enumerate() {
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineProps && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_props)
-            {
-                if let Some(lowered) = type_params.get(define_props_index) {
-                    let solved = engine.solve(lowered);
-                    let shape_result = solver_result_to_object_expansion(solved);
-                    if !shape_result.value.properties.is_empty()
-                        || !shape_result.value.index_signatures.is_empty()
-                    {
-                        result.define_props.push(ExpandedMacroProps {
-                            macro_index,
-                            result: shape_result,
-                        });
-                    }
-                }
-            }
-            define_props_index += 1;
-        }
-
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineEmits && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_emits)
-            {
-                if let Some(lowered) = type_params.get(define_emits_index) {
-                    let solved = engine.solve(lowered);
-                    let shape_result = solver_result_to_object_expansion(solved);
-                    if has_named_shape_surface(&shape_result.value) {
-                        result.define_emits.push(ExpandedMacroObjectShape {
-                            macro_index,
-                            result: shape_result,
-                        });
-                    }
-                }
-            }
-            define_emits_index += 1;
-        }
-
-        if m.kind == crate::analysis::types::AnalyzedMacroKind::DefineSlots && m.is_type_based {
-            if let Some(type_params) = macro_type_params
-                .as_ref()
-                .map(|params| &params.define_slots)
-            {
-                if let Some(lowered) = type_params.get(define_slots_index) {
-                    if m.slot_fields.is_empty() {
-                        let mut solved = engine.solve(lowered);
-                        solved.value = deep_resolve_slot_function_refs(&solved.value, engine);
-                        let shape_result = solver_result_to_object_expansion(solved);
-                        if !shape_result.value.properties.is_empty() {
-                            result.define_slots.push(ExpandedMacroObjectShape {
-                                macro_index,
-                                result: shape_result,
-                            });
-                        }
-                    }
-                }
-            }
-            define_slots_index += 1;
-        }
-    }
-}
-
 pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
-}
-
-/// Deep-resolve remaining `Ref` nodes inside function signatures of a solved
-/// slot object.  The solver intentionally keeps function parameter and return
-/// types shallow (substitutions only, no ref expansion).  For `defineSlots`
-/// results we need refs like `VNode` fully resolved to their object bodies.
-pub fn deep_resolve_slot_function_refs(
-    expr: &TypeExpr,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> TypeExpr {
-    if let TypeExpr::Object(obj) = expr {
-        let properties: Vec<_> = obj
-            .properties
-            .iter()
-            .map(|member| match member {
-                crate::analysis::type_expr::ObjectMember::Property(p) => {
-                    crate::analysis::type_expr::ObjectMember::Property(
-                        crate::analysis::type_expr::ObjectProperty {
-                            name: p.name.clone(),
-                            ty: resolve_type_refs_deep(&p.ty, engine),
-                            optional: p.optional,
-                            readonly: p.readonly,
-                        },
-                    )
-                }
-                crate::analysis::type_expr::ObjectMember::Method(m) => {
-                    crate::analysis::type_expr::ObjectMember::Method(
-                        crate::analysis::type_expr::MethodSignature {
-                            name: m.name.clone(),
-                            function: resolve_fn_refs_deep(&m.function, engine),
-                            optional: m.optional,
-                        },
-                    )
-                }
-                other => other.clone(),
-            })
-            .collect();
-        TypeExpr::Object(std::sync::Arc::new(
-            crate::analysis::type_expr::ObjectExpr { properties },
-        ))
-    } else {
-        expr.clone()
-    }
-}
-
-fn resolve_type_refs_deep(
-    expr: &TypeExpr,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> TypeExpr {
-    match expr {
-        TypeExpr::Ref { .. } => engine.solve(expr).value,
-        TypeExpr::Function(func) => {
-            TypeExpr::Function(std::sync::Arc::new(resolve_fn_refs_deep(func, engine)))
-        }
-        TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: std::sync::Arc::new(resolve_type_refs_deep(element, engine)),
-            readonly: *readonly,
-        },
-        TypeExpr::Union(variants) => {
-            let resolved: Vec<TypeExpr> = variants
-                .iter()
-                .map(|v| resolve_type_refs_deep(v, engine))
-                .collect();
-            TypeExpr::Union(std::sync::Arc::from(resolved))
-        }
-        TypeExpr::Intersection(parts) => {
-            let resolved: Vec<TypeExpr> = parts
-                .iter()
-                .map(|p| resolve_type_refs_deep(p, engine))
-                .collect();
-            TypeExpr::Intersection(std::sync::Arc::from(resolved))
-        }
-        _ => expr.clone(),
-    }
-}
-
-fn resolve_fn_refs_deep(
-    func: &crate::analysis::type_expr::FunctionExpr,
-    engine: &mut crate::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-) -> crate::analysis::type_expr::FunctionExpr {
-    crate::analysis::type_expr::FunctionExpr {
-        parameters: func
-            .parameters
-            .iter()
-            .map(|p| crate::analysis::type_expr::FunctionParam {
-                name: p.name.clone(),
-                ty: resolve_type_refs_deep(&p.ty, engine),
-                optional: p.optional,
-                rest: p.rest,
-            })
-            .collect(),
-        return_type: func
-            .return_type
-            .as_ref()
-            .map(|rt| std::sync::Arc::new(resolve_type_refs_deep(rt, engine))),
-        type_parameters: func.type_parameters.clone(),
-    }
 }
 
 #[derive(Default)]
@@ -1984,12 +1661,6 @@ pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
     let declarator = decl.declarations.first()?;
     let init = declarator.init.as_ref()?;
     Some(lower_value_expression(init, &wrapped))
-}
-
-/// Parse and evaluate a value expression against an existing evaluation environment.
-pub fn evaluate_value_expression(expression: &str, env: &mut EvalEnv) -> Option<TypeExpr> {
-    let lowered = parse_value_expression_type(expression)?;
-    Some(crate::analysis::type_eval::evaluate(&lowered, env))
 }
 
 fn lower_value_expression(expr: &Expression<'_>, source: &str) -> TypeExpr {

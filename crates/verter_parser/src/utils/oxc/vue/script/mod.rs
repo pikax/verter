@@ -30,9 +30,10 @@ pub use macros::{
 };
 pub use resolve_type::{
     build_type_context, extract_companion_types, format_runtime_types, resolve_type_elements,
-    resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref, DiagnosticLocation,
+    resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref,
+    take_last_resolution_budget_exceeded, DiagnosticLocation, ResolutionBudgetExceeded,
     ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit,
-    ResolvedEmitSignature, RuntimeType, TypeResolutionContext,
+    ResolvedEmitSignature, RuntimeType, TypeResolutionContext, PARSER_SYNTACTIC_DEPTH_LIMIT,
 };
 pub use shared::ScriptParseContext;
 pub use types::*;

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Compilation pipeline profiler.
 //!
 //! Runs the compilation pipeline on real-world Vue projects from verter-test-repos,

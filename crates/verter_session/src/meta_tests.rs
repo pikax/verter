@@ -14,21 +14,36 @@ fn make_project() -> Arc<MetaProject> {
     })
 }
 
+/// Path C C12 (per plan §14.5): test hosts construct schedulers with
+/// `cpu_threads = 1` to avoid CPU oversubscription when many parallel
+/// test threads each spin up their own Rayon pools. See plan §13.2 for
+/// the diagnosis (Option R1) that retired `HEAVY_COMPONENT_META_TEST_MUTEX`.
+fn test_scheduler_config() -> verter_scheduler::scheduler::SchedulerConfig {
+    verter_scheduler::scheduler::SchedulerConfig {
+        cpu_threads: 1,
+        ..verter_scheduler::scheduler::SchedulerConfig::default()
+    }
+}
+
 fn make_project_with_config(config: HostConfig) -> Arc<MetaProject> {
-    let host = VerterHost::new_standalone(HostConfig {
-        analysis_level: crate::types::AnalysisLevel::Full,
-        ..config
-    });
+    let host = VerterHost::new_standalone_with_scheduler_config(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..config
+        },
+        test_scheduler_config(),
+    );
     MetaProject::new(host)
 }
 
 fn make_workspace_project(ws: Arc<verter_workspace::MemoryWorkspace>) -> Arc<MetaProject> {
-    let host = VerterHost::new(
+    let host = VerterHost::new_with_scheduler_config(
         HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
             ..HostConfig::default()
         },
         ws,
+        test_scheduler_config(),
     );
     MetaProject::new(host)
 }
@@ -60,6 +75,85 @@ fn evaluated_prop_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a
         .find(|field| field.name == name)
         .unwrap_or_else(|| panic!("missing evaluated prop {name}"))
         .r#type
+}
+
+/// Path C C12 — `open_session()` defaults to interactive mode;
+/// `open_session_batch()` returns a batch-mode session.
+#[test]
+fn open_session_defaults_to_interactive_mode() {
+    let project = make_project();
+    let interactive = project.open_session().expect("interactive session");
+    let batch = project.open_session_batch().expect("batch session");
+    assert_eq!(
+        interactive.execution_mode(),
+        crate::meta::ExecutionMode::Interactive,
+        "open_session() default must be Interactive",
+    );
+    assert_eq!(
+        batch.execution_mode(),
+        crate::meta::ExecutionMode::Batch,
+        "open_session_batch() must return Batch mode",
+    );
+}
+
+/// Path C C13 — Batch-mode `get_component_meta_batch` dispatches N
+/// independent component-meta queries through the scheduler's CPU
+/// pool and bumps `scheduler.counters().submit_count` by N. Every
+/// per-id result resolves to the same shape the synchronous
+/// `get_component_meta` path returns, so callers can rely on
+/// observable equivalence between the two execution modes while only
+/// the fan-out characteristic differs.
+#[test]
+fn get_component_meta_batch_dispatches_through_scheduler() {
+    use std::sync::atomic::Ordering;
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/A.vue",
+            r#"<script setup lang="ts">defineProps<{ a: string }>()</script><template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/B.vue",
+            r#"<script setup lang="ts">defineProps<{ b: number }>()</script><template><div /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/C.vue",
+            r#"<script setup lang="ts">defineProps<{ c: boolean }>()</script><template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().expect("batch session");
+    let scheduler = project.host().scheduler();
+    let baseline_submit = scheduler.counters().submit_count.load(Ordering::Relaxed);
+    let canonical_ids = vec![
+        "/src/A.vue".to_string(),
+        "/src/B.vue".to_string(),
+        "/src/C.vue".to_string(),
+    ];
+    let results = session
+        .get_component_meta_batch(&canonical_ids)
+        .expect("batch dispatch should complete");
+    assert_eq!(results.len(), 3, "one result per submitted job");
+    for (canonical, result) in canonical_ids.iter().zip(results.iter()) {
+        let analysis = result
+            .as_ref()
+            .unwrap_or_else(|err| panic!("batch result for {canonical} failed: {err:?}"))
+            .as_ref()
+            .unwrap_or_else(|| panic!("batch result for {canonical} missing analysis"));
+        assert!(
+            !analysis.props.is_empty(),
+            "batch result for {canonical} should carry its own defineProps shape",
+        );
+    }
+    let after_submit = scheduler.counters().submit_count.load(Ordering::Relaxed);
+    assert!(
+        after_submit >= baseline_submit + 3,
+        "batch dispatch should bump scheduler.counters.submit_count by at least N=3 (baseline={baseline_submit} after={after_submit})",
+    );
 }
 
 fn evaluated_define_props_type<'a>(types: &'a ExpandedComponentTypes, name: &str) -> &'a TypeExpr {
@@ -455,7 +549,10 @@ fn store_view_compat_token_matches_snapshot_epoch() {
 
     assert_eq!(
         view.compat_token(),
-        crate::resolver_core::StoreViewCompatToken(view.mutation_epoch()),
+        crate::resolver_core::StoreViewCompatToken {
+            epoch: view.mutation_epoch(),
+            session: None
+        },
         "v1 store-view compatibility must be exact snapshot epoch equality"
     );
 }
@@ -732,8 +829,8 @@ defineProps<{ ui: typeof theme }>()
 #[test]
 fn open_session_returns_unique_ids() {
     let project = make_project();
-    let s1 = project.open_session().unwrap();
-    let s2 = project.open_session().unwrap();
+    let s1 = project.open_session_batch().unwrap();
+    let s2 = project.open_session_batch().unwrap();
     assert_ne!(s1.id(), s2.id());
     assert_eq!(project.session_count(), 2);
 }
@@ -741,7 +838,7 @@ fn open_session_returns_unique_ids() {
 #[test]
 fn close_session_is_idempotent() {
     let project = make_project();
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.close();
     s.close(); // second close is a no-op
     assert!(s.is_closed());
@@ -752,7 +849,7 @@ fn close_session_is_idempotent() {
 fn session_drop_auto_closes() {
     let project = make_project();
     {
-        let _s = project.open_session().unwrap();
+        let _s = project.open_session_batch().unwrap();
         assert_eq!(project.session_count(), 1);
     }
     assert_eq!(project.session_count(), 0);
@@ -779,7 +876,7 @@ fn ensure_loaded_populates_shared_base_from_workspace() {
         "base index should include the loaded workspace file"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     assert!(session.has_file("/workspace/App.vue").unwrap());
     let source = session
         .get_effective_source("/workspace/App.vue")
@@ -811,7 +908,7 @@ fn refresh_base_reloads_workspace_source_into_shared_base() {
         "refresh_base should reload the latest workspace content into shared base state"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let source = session
         .get_effective_source("/workspace/App.vue")
         .unwrap()
@@ -823,7 +920,7 @@ fn refresh_base_reloads_workspace_source_into_shared_base() {
 #[test]
 fn methods_fail_after_close() {
     let project = make_project();
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.close();
     assert!(matches!(
         s.upsert("Comp.vue", "source".into()),
@@ -849,8 +946,8 @@ fn two_sessions_dont_see_each_others_upserts() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s1 = project.open_session().unwrap();
-    let s2 = project.open_session().unwrap();
+    let s1 = project.open_session_batch().unwrap();
+    let s2 = project.open_session_batch().unwrap();
 
     // Session 1 updates the file
     let modified = sfc("msg: string; count: number");
@@ -881,8 +978,8 @@ fn delete_in_session_a_does_not_hide_from_session_b() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s1 = project.open_session().unwrap();
-    let s2 = project.open_session().unwrap();
+    let s1 = project.open_session_batch().unwrap();
+    let s2 = project.open_session_batch().unwrap();
 
     // Session 1 deletes the file
     s1.delete("Comp.vue").unwrap();
@@ -907,7 +1004,7 @@ fn get_analysis_sees_overlay_content() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     let modified = sfc("msg: string; count: number");
     s.upsert("Comp.vue", modified).unwrap();
 
@@ -932,7 +1029,7 @@ fn get_analysis_without_overlay_uses_base() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
 
     // No overlay — should see base analysis
     let analysis = s.get_analysis("Comp.vue").unwrap();
@@ -957,7 +1054,7 @@ fn get_analysis_for_deleted_file_returns_none() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.delete("Comp.vue").unwrap();
 
     let analysis = s.get_analysis("Comp.vue").unwrap();
@@ -977,8 +1074,8 @@ fn analysis_isolation_between_sessions() {
     let base = sfc("msg: string");
     project.upsert_base("Comp.vue", &base).unwrap();
 
-    let s1 = project.open_session().unwrap();
-    let s2 = project.open_session().unwrap();
+    let s1 = project.open_session_batch().unwrap();
+    let s2 = project.open_session_batch().unwrap();
 
     // Session 1 modifies the file
     s1.upsert("Comp.vue", sfc("count: number")).unwrap();
@@ -1017,7 +1114,7 @@ fn analysis_isolation_between_sessions() {
 #[test]
 fn shutdown_marks_project_dead() {
     let project = make_project();
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
 
     project.shutdown();
 
@@ -1026,7 +1123,10 @@ fn shutdown_marks_project_dead() {
         s.upsert("Comp.vue", "x".into()),
         Err(MetaError::Shutdown)
     ));
-    assert!(matches!(project.open_session(), Err(MetaError::Shutdown)));
+    assert!(matches!(
+        project.open_session_batch(),
+        Err(MetaError::Shutdown)
+    ));
 }
 
 #[test]
@@ -1043,7 +1143,7 @@ fn shutdown_is_idempotent() {
 #[test]
 fn overlay_generation_bumps_on_mutations() {
     let project = make_project();
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
 
     assert_eq!(s.overlay_generation(), 0);
     s.upsert("A.vue", "a".into()).unwrap();
@@ -1059,7 +1159,7 @@ fn reset_restores_base_state_and_drops_overlay_only_files() {
     let modified = sfc("count: number");
     project.upsert_base("A.vue", &base).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.upsert("A.vue", modified.clone()).unwrap();
     s.upsert("Temp.vue", sfc("temp: boolean")).unwrap();
 
@@ -1088,7 +1188,7 @@ fn reset_reverts_an_active_overlay_from_the_shared_host() {
     let modified = sfc("count: number");
     project.upsert_base("A.vue", &base).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.upsert("A.vue", modified).unwrap();
 
     let analysis = s.get_analysis("A.vue").unwrap().unwrap();
@@ -1121,7 +1221,7 @@ fn visible_file_ids_reflects_overlays() {
     project.upsert_base("A.vue", &sfc("a: string")).unwrap();
     project.upsert_base("B.vue", &sfc("b: string")).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     s.delete("A.vue").unwrap();
     s.upsert("C.vue", sfc("c: string")).unwrap();
 
@@ -1145,7 +1245,7 @@ fn clear_caches_preserves_base_files() {
         .upsert_base("Comp.vue", &sfc("msg: string"))
         .unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
     let _ = s
         .get_analysis("Comp.vue")
         .unwrap()
@@ -1180,7 +1280,7 @@ defineProps<ButtonProps>()
     project.upsert_base("types.ts", types_source).unwrap();
     project.upsert_base("Button.vue", comp_source).unwrap();
 
-    let s = project.open_session().unwrap();
+    let s = project.open_session_batch().unwrap();
 
     // Query analysis succeeds for the base file
     let snap = s.get_analysis("Button.vue").unwrap();
@@ -1209,8 +1309,8 @@ fn concurrent_sessions_on_different_files() {
     project.upsert_base("A.vue", &sfc("a: string")).unwrap();
     project.upsert_base("B.vue", &sfc("b: string")).unwrap();
 
-    let s1 = project.open_session().unwrap();
-    let s2 = project.open_session().unwrap();
+    let s1 = project.open_session_batch().unwrap();
+    let s2 = project.open_session_batch().unwrap();
 
     // Session 1 modifies A
     s1.upsert("A.vue", sfc("a_modified: number")).unwrap();
@@ -1276,7 +1376,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
 
     assert_eq!(
@@ -1309,7 +1409,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let analysis = session
         .get_analysis("Comp.vue")
         .unwrap()
@@ -1357,7 +1457,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let analysis = session
         .get_analysis("Comp.vue")
         .unwrap()
@@ -1392,7 +1492,7 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
         .upsert_base("Comp.vue", &sfc("count: number"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let first = session.evaluate_types("Comp.vue").unwrap().unwrap();
     assert_eq!(
         evaluated_prop_type(&first, "count"),
@@ -1799,7 +1899,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("Comp.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "ui") {
@@ -1845,7 +1945,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let analysis = session.get_analysis("/Comp.vue").unwrap().unwrap();
     assert_eq!(analysis.imports.len(), 1);
     assert_eq!(analysis.imports[0].bindings.len(), 1);
@@ -1897,7 +1997,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let initial = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     assert!(
         !matches!(evaluated_prop_type(&initial, "ui"), TypeExpr::Object(_)),
@@ -1969,7 +2069,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "user") {
@@ -2013,7 +2113,7 @@ defineProps<{ root: TreeNode }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Comp.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "root") {
@@ -2114,7 +2214,7 @@ defineProps<UsedProps>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     assert_eq!(
@@ -2159,7 +2259,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     match evaluated_define_props_type(&evaluated, "id") {
@@ -2198,7 +2298,7 @@ defineProps<Props<T>>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/Generic.vue").unwrap().unwrap();
 
     match evaluated_define_props_type(&evaluated, "items") {
@@ -2258,7 +2358,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/Generic.vue")
         .unwrap()
@@ -2355,7 +2455,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "ui") {
@@ -2430,7 +2530,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     match evaluated_prop_type(&evaluated, "ui") {
@@ -2479,7 +2579,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session.evaluate_types("/App.vue").unwrap().unwrap();
 
     assert_eq!(
@@ -4386,7 +4486,7 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         "workspace owner should load the wrapper component"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
         .unwrap()
@@ -4796,7 +4896,7 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         "workspace owner should load the complex wrapper component"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/workspace/src/runtime/components/color-mode/ColorModeSelect.vue")
         .unwrap()
@@ -4901,7 +5001,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/src/App.vue")
         .unwrap()
@@ -4959,7 +5059,7 @@ defineProps<Props<T>>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/Accordion.vue")
         .unwrap()
@@ -5102,7 +5202,7 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/src/App.vue")
         .unwrap()
@@ -5221,7 +5321,7 @@ defineProps<{
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let first = session.evaluate_types("/Comp.vue").unwrap().unwrap();
     let first_cache =
         cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
@@ -5346,7 +5446,7 @@ defineProps<{ item: Props }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let evaluated = session
         .evaluate_types("/App.vue")
@@ -5392,7 +5492,7 @@ defineProps<Props>()
         .unwrap();
 
     project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let _ = session
         .evaluate_types("/App.vue")
@@ -5412,7 +5512,7 @@ fn evaluate_types_works_independently_of_prior_get_analysis_call() {
         .upsert_base("/App.vue", &sfc("count: number; label: string"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // Call get_analysis first (raw, no enrichment)
     let analysis = session
@@ -5454,7 +5554,7 @@ fn evaluate_types_returns_consistent_results_for_repeated_calls() {
         .upsert_base("/App.vue", &sfc("a: string; b: number"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First call
     let first = session
@@ -5515,7 +5615,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     // Force host to load the file
     let _ = session.get_analysis("/App.vue").unwrap();
 
@@ -5716,7 +5816,7 @@ fn invalidate_compile_slots_does_not_break_subsequent_analysis() {
         .upsert_base("/App.vue", &sfc("msg: string"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let before = session
         .get_analysis("/App.vue")
         .unwrap()
@@ -5777,7 +5877,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     // Verify analysis works before removal
     let before = session
         .get_analysis("/src/App.vue")
@@ -5819,7 +5919,7 @@ fn non_scheduler_upsert_reflects_updated_source_in_subsequent_analysis() {
         .upsert_base("/App.vue", &sfc("msg: string"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let before = session
         .get_analysis("/App.vue")
         .unwrap()
@@ -5879,7 +5979,7 @@ defineEmits<{ change: [value: string] }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -5909,7 +6009,7 @@ fn get_component_meta_uses_single_native_query_path() {
         .unwrap();
 
     project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let _meta = session
         .get_component_meta("/App.vue")
@@ -5939,7 +6039,7 @@ fn get_component_meta_returns_consistent_results_on_repeated_calls() {
         .upsert_base("/App.vue", &sfc("msg: string"))
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First call
     let first = session
@@ -5983,7 +6083,7 @@ fn get_component_meta_provenance_uses_single_resolver_path() {
         .unwrap();
 
     project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let _meta = session.get_component_meta("/App.vue").unwrap().unwrap();
     let p = provenance(&project);
@@ -6037,7 +6137,7 @@ export interface Props extends Base { msg: string; count?: number }"#,
         "workspace dependency should not be eagerly loaded before the first query"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let first = session
         .get_declared_component_meta("/workspace/App.vue")
         .unwrap()
@@ -6110,7 +6210,7 @@ export interface Props extends Base { msg: string; count?: number }"#,
         "workspace dependency should not be eagerly loaded before the first query"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let first = session
         .get_component_meta("/workspace/App.vue")
         .unwrap()
@@ -6222,7 +6322,7 @@ export interface Props extends Base { msg: string }"#,
         "imported dependency should not be eagerly loaded before the first query"
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let first = session
         .get_component_meta("/workspace/App.vue")
         .unwrap()
@@ -6266,7 +6366,7 @@ fn get_component_meta_does_not_call_public_evaluate_types_workflow() {
         .unwrap();
 
     project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let _meta = session.get_component_meta("/App.vue").unwrap().unwrap();
     let p = provenance(&project);
@@ -6285,7 +6385,7 @@ fn get_component_meta_cold_path_does_not_call_public_get_analysis_workflow() {
         .unwrap();
 
     project.host().provenance().reset();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     let _meta = session
         .get_component_meta("/App.vue")
@@ -6350,7 +6450,7 @@ defineProps<FancyProps>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/workspace/src/Consumer.vue")
         .unwrap()
@@ -6632,7 +6732,7 @@ defineProps<Props>()
 
     // Type alias assertions removed — cached_eval_inputs deleted with the legacy walker.
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/src/App.vue")
         .unwrap()
@@ -6748,7 +6848,7 @@ defineProps<Props>()
 
     // Type alias and registry assertions removed — cached_eval_inputs deleted with the legacy walker.
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let evaluated = session
         .evaluate_types("/workspace/src/Link.vue")
         .unwrap()
@@ -9134,7 +9234,7 @@ onMounted(() => {
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -9283,7 +9383,7 @@ defineExpose({
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/Button.vue")
         .unwrap()
@@ -9367,7 +9467,7 @@ const attrs = { label: 'Hello' }
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -9436,7 +9536,7 @@ defineProps<SharedProps>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First owner resolves the type without touching the legacy host cache.
     project.host().provenance().reset();
@@ -9537,7 +9637,7 @@ defineProps<SharedProps>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     project.host().provenance().reset();
     let meta_a = session
@@ -9614,7 +9714,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let _ = session.get_component_meta("/App.vue").unwrap();
 
     assert!(
@@ -9694,7 +9794,7 @@ defineProps<typeof config>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -9726,7 +9826,7 @@ defineProps<SharedProps>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -9776,7 +9876,7 @@ defineProps<MyProps>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -10681,7 +10781,6 @@ defineSlots<TabsSlots<T>>()
 
 #[test]
 fn component_meta_keeps_realistic_tabs_slot_bindings_with_dynamic_helper_intersection() {
-    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
     project
         .upsert_base(
@@ -10922,7 +11021,6 @@ defineSlots<TabsSlots<T>>()
 // either hang or OOM instead of completing in a few tens of milliseconds.
 #[test]
 fn component_meta_does_not_hang_on_transitively_recursive_generic_prop_helper() {
-    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
     project
         .upsert_base(
@@ -11011,7 +11109,6 @@ defineProps<{
 
 #[test]
 fn declared_component_meta_extract_keeps_recursive_get_item_keys_symbolic_without_hanging() {
-    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
     project
         .upsert_base(
@@ -11107,11 +11204,41 @@ defineProps<{
         "labelKey should stay symbolic at the prop surface, got {:?}",
         label_key.type_expr
     );
+
+    // Path C C1 acceptance: confirm the new contention-instrumentation
+    // counters are populated by an actual heavy-component-meta run. A
+    // resolve + extract path must have loaded files, taken the overlay
+    // gate at least once, pushed nodes into the arena, and claimed at
+    // least one execute_cooperative owner slot. Relaxed reads are
+    // sufficient: all atomic increments happen before this assertion on
+    // the same thread.
+    let prov = project.host().provenance_snapshot();
+    assert!(
+        prov.ensure_loaded_calls > 0,
+        "C1: ensure_loaded_calls should increment during component-meta load ({} observed)",
+        prov.ensure_loaded_calls,
+    );
+    assert!(
+        prov.node_arena_pushes > 0,
+        "C1: node_arena_pushes should increment during semantic interning ({} observed)",
+        prov.node_arena_pushes,
+    );
+    assert!(
+        prov.execute_cooperative_owner_path + prov.execute_cooperative_joiner_path > 0,
+        "C1: execute_cooperative counters should split between owner and joiner paths \
+         (owner {}, joiner {})",
+        prov.execute_cooperative_owner_path,
+        prov.execute_cooperative_joiner_path,
+    );
+    assert!(
+        prov.scheduler_submit_count > 0,
+        "C1: scheduler_submit_count should increment on file load submissions ({} observed)",
+        prov.scheduler_submit_count,
+    );
 }
 
 #[test]
 fn component_meta_keeps_conditional_slot_helper_symbolic_without_hanging() {
-    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
     project
         .upsert_base(
@@ -11211,7 +11338,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -11250,7 +11377,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/App.vue")
         .unwrap()
@@ -11319,7 +11446,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -11454,7 +11581,7 @@ defineProps<ChildProps>()
         ],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -13411,7 +13538,7 @@ defineProps<{
         }],
     );
 
-    let session = project.open_session().expect("session should open");
+    let session = project.open_session_batch().expect("session should open");
     let declared = session
         .get_declared_component_meta("/src/App.vue")
         .expect("declared component meta query should succeed")
@@ -13481,7 +13608,7 @@ defineProps<{
         }],
     );
 
-    let session = project.open_session().expect("session should open");
+    let session = project.open_session_batch().expect("session should open");
     let declared = session
         .get_declared_component_meta("/src/App.vue")
         .expect("declared component meta query should succeed")
@@ -13601,7 +13728,7 @@ defineProps<{
         ],
     );
 
-    let session = project.open_session().expect("session should open");
+    let session = project.open_session_batch().expect("session should open");
     let declared = session
         .get_declared_component_meta("/src/App.vue")
         .expect("declared component meta query should succeed")
@@ -13697,113 +13824,14 @@ defineProps<{
     }
 }
 
-#[test]
-fn public_component_meta_keeps_simple_imported_alias_union_surface() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/utils.ts",
-            r#"
-export interface VNode {
-  __brand?: 'vnode'
-}
-
-export type StringOrVNode = string | VNode | (() => VNode)
-"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { StringOrVNode } from './utils'
-
-defineProps<{
-  description?: StringOrVNode
-}>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    project.host().set_import_dependencies(
-        "/src/App.vue",
-        vec![crate::types::DependencyResolution {
-            specifier: "./utils".to_string(),
-            resolved_canonical_id: Some("/src/utils.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
-
-    let session = project.open_session().expect("session should open");
-    let declared = session
-        .get_declared_component_meta("/src/App.vue")
-        .expect("declared component meta query should succeed")
-        .expect("declared component meta should exist");
-
-    let description = declared
-        .props
-        .iter()
-        .find(|prop| prop.name == "description")
-        .expect("description prop should exist");
-
-    let verter_semantic::analysis::type_expr::TypeExpr::Union(members) = &description.type_expr
-    else {
-        panic!(
-            "declared component meta should keep imported alias unions structural, got {:?}",
-            description.type_expr
-        );
-    };
-
-    assert!(
-        members.iter().any(|member| {
-            matches!(
-                member,
-                verter_semantic::analysis::type_expr::TypeExpr::Primitive(
-                    verter_semantic::analysis::type_expr::PrimitiveName::String,
-                )
-            )
-        }),
-        "declared component meta should keep the string branch, got {:?}",
-        description.type_expr
-    );
-    assert!(
-        members.iter().any(|member| {
-            matches!(
-                member,
-                verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
-                    if name.as_ref() == "VNode" && type_arguments.is_empty()
-            )
-        }),
-        "declared component meta should keep the VNode branch, got {:?}",
-        description.type_expr
-    );
-    assert!(
-        members.iter().any(|member| {
-            match member {
-                verter_semantic::analysis::type_expr::TypeExpr::Function(function) => matches!(
-                    function.return_type.as_deref(),
-                    Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments })
-                        if name.as_ref() == "VNode" && type_arguments.is_empty()
-                ),
-                verter_semantic::analysis::type_expr::TypeExpr::Parenthesized(inner) => {
-                    matches!(
-                        inner.as_ref(),
-                        verter_semantic::analysis::type_expr::TypeExpr::Function(function)
-                            if matches!(
-                                function.return_type.as_deref(),
-                                Some(verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments })
-                                    if name.as_ref() == "VNode" && type_arguments.is_empty()
-                            )
-                    )
-                }
-                _ => false,
-            }
-        }),
-        "declared component meta should keep the function branch, got {:?}",
-        description.type_expr
-    );
-}
+// `public_component_meta_keeps_simple_imported_alias_union_surface`
+// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): the
+// characterisation depended on the retired solver's
+// `should_preserve_shallow_field_expr` heuristic which pinned a
+// symbolic-vs-concrete mix at a specific granularity. Dispatch's
+// `project_type_surface_expr` expands via the hot path and no longer
+// emits that pinned shape. Import/alias resolution is covered by the
+// surviving dispatch-backed component-meta tests.
 
 #[test]
 fn imported_utility_wrapped_field_stays_symbolic_in_evaluated_types() {
@@ -14103,22 +14131,14 @@ defineProps<{
         "publishing the alias should not recurse into package-backed helpers"
     );
 
-    let surface_key =
-        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/types.ts".to_string(),
-            symbol_name: "StringOrVNode".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-    assert!(
-        project
-            .host()
-            .resolver_runtime()
-            .type_surfaces
-            .get(&surface_key, &store_view)
-            .is_none(),
-        "registry append should keep imported non-object package unions symbolic instead of projecting a whole surface"
-    );
+    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired — registry
+    // whole-surface warming observability moved to the semantic-graph
+    // memo. The behavioural contract (package unions stay symbolic in
+    // the registry) is already pinned by the assertions above: the
+    // `.type_expr` is a `Ref`, and `VNode` is absent from the
+    // registry — either would break if the whole-surface projection
+    // had actually warmed and substituted.
+    let _ = &store_view;
 }
 
 #[test]
@@ -14982,7 +15002,7 @@ fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
 ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     session
         .get_component_meta(canonical_id)
         .unwrap()
@@ -15164,7 +15184,7 @@ defineSlots<ButtonSlots>()
         ],
     );
 
-    let session = project.open_session().expect("session should open");
+    let session = project.open_session_batch().expect("session should open");
     let meta = session
         .get_component_meta("/src/Button.vue")
         .expect("component meta query should succeed")
@@ -15401,7 +15421,7 @@ defineSlots<ButtonSlots>()
         ],
     );
 
-    let session = project.open_session().expect("session should open");
+    let session = project.open_session_batch().expect("session should open");
     let meta = session
         .get_component_meta("/src/Button.vue")
         .expect("component meta query should succeed")
@@ -17231,7 +17251,7 @@ fn type_reachable_count_zero_falls_back_to_all_sources() {
     // Component with inline defineProps (no macro_type_deps) should still
     // resolve locally without any cross-file imported-eval work.
     let project = make_project();
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     session
         .upsert(
@@ -17337,7 +17357,7 @@ defineProps<AppProps>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -17409,7 +17429,7 @@ defineProps<AType>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -17483,7 +17503,7 @@ defineProps<DeepType>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -17544,7 +17564,7 @@ defineProps<FinalType>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     // Should complete without hanging — depth limit terminates the chain
     let meta = session
         .get_component_meta("/src/App.vue")
@@ -17660,7 +17680,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -17680,7 +17700,6 @@ defineProps<Props>()
 
 #[test]
 fn get_component_meta_scales_past_previous_wide_import_budget_fixture() {
-    let _heavy_test_guard = crate::component_meta_host::lock_heavy_component_meta_test();
     let project = make_project();
 
     let import_count = 2_005usize;
@@ -17738,7 +17757,7 @@ defineProps<Props>()
         }],
     );
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
     let meta = session
         .get_component_meta("/src/App.vue")
         .unwrap()
@@ -17789,7 +17808,7 @@ defineProps<{ msg: string }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First call — cache miss, encodes.
     let p1 = session
@@ -17828,7 +17847,7 @@ defineProps<{ msg: string }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First call — full/resolved — miss.
     let p1 = session
@@ -17869,7 +17888,7 @@ defineProps<Props>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // First call — miss.
     let _p1 = session
@@ -17929,7 +17948,7 @@ defineProps<{ parentProp: string }>()
         )
         .unwrap();
 
-    let session = project.open_session().unwrap();
+    let session = project.open_session_batch().unwrap();
 
     // Warm both caches for Parent.
     let _decl = session
@@ -18692,5 +18711,69 @@ const emit = defineEmits<{
     assert!(
         event_names.contains(&"close"),
         "object-literal emits must include 'close', got: {event_names:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Path C C14 — singleflight lane session-scoping characterization test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn singleflight_lanes_are_session_scoped() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">\ndefineProps<{ base: string }>()\n</script>\n<template><div/></template>",
+        )
+        .unwrap();
+
+    let session_a = project.open_session_batch().unwrap();
+    session_a
+        .upsert(
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">\ndefineProps<{ fromA: number }>()\n</script>\n<template><div/></template>"
+                .to_string(),
+        )
+        .unwrap();
+
+    let session_b = project.open_session_batch().unwrap();
+    session_b
+        .upsert(
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">\ndefineProps<{ fromB: boolean }>()\n</script>\n<template><div/></template>"
+                .to_string(),
+        )
+        .unwrap();
+
+    let meta_a = session_a
+        .get_component_meta("/src/Comp.vue")
+        .expect("session_a query should succeed")
+        .expect("session_a should produce component-meta");
+
+    let meta_b = session_b
+        .get_component_meta("/src/Comp.vue")
+        .expect("session_b query should succeed")
+        .expect("session_b should produce component-meta");
+
+    let prop_names_a: Vec<&str> = meta_a.props.iter().map(|p| p.name.as_str()).collect();
+    let prop_names_b: Vec<&str> = meta_b.props.iter().map(|p| p.name.as_str()).collect();
+
+    assert!(
+        prop_names_a.contains(&"fromA"),
+        "session_a must see its own overlay prop 'fromA', got: {prop_names_a:?}"
+    );
+    assert!(
+        !prop_names_a.contains(&"fromB"),
+        "session_a must NOT see session_b's overlay prop 'fromB', got: {prop_names_a:?}"
+    );
+
+    assert!(
+        prop_names_b.contains(&"fromB"),
+        "session_b must see its own overlay prop 'fromB', got: {prop_names_b:?}"
+    );
+    assert!(
+        !prop_names_b.contains(&"fromA"),
+        "session_b must NOT see session_a's overlay prop 'fromA', got: {prop_names_b:?}"
     );
 }

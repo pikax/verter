@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+pub(crate) mod bare_name_resolve;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
 pub mod component_meta_registry;
@@ -20,7 +21,6 @@ pub mod resolver_runtime;
 pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
-pub mod solver_host;
 pub(crate) mod surface_projector;
 pub mod symbol_resolver;
 pub mod type_expansion;
@@ -31,12 +31,10 @@ pub mod type_text_parser;
 pub mod fuses;
 pub mod imported_root_db;
 pub mod route_db;
-pub mod type_surface_db;
 
 pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{BarrelRouteSurface, RouteDb, RouteResult};
-pub use type_surface_db::{TypeSurfaceDb, TypeSurfaceKey, TypeSurfaceOpKey, TypeSurfaceOpResult};
 
 pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub use component_meta::{
@@ -71,10 +69,11 @@ pub use external_type_frontier::{
 };
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
-    collect_dynamic_root_candidates_from_type, extend_unique_fact_versions, fallthrough_cache_key,
-    hash_prop_type_overrides, inject_prop_type_overrides, known_spread_keys_from_type_expr,
-    merge_fallthrough_branches, push_partial_reason, resolve_fallthrough_surface,
-    resolve_usage_prop_type, DynamicRootCandidate, FallthroughComputeHost,
+    collect_dynamic_root_candidates_from_type, evaluate_value_expression_via_env_or_dispatch,
+    extend_unique_fact_versions, fallthrough_cache_key, hash_prop_type_overrides,
+    inject_prop_type_overrides, known_spread_keys_from_type_expr, merge_fallthrough_branches,
+    push_partial_reason, resolve_fallthrough_surface, resolve_usage_prop_type,
+    structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
     FallthroughResolutionView, FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings,
     ResolvedFallthroughSurface,
 };
@@ -96,14 +95,21 @@ pub use shallow_file_state::{
     ShallowFileState, ShallowImportResolver, ShallowTypeSymbol, ShallowTypeView,
     ShallowValueSymbol, WildcardReexport,
 };
-pub use solver_host::SessionSolverHost;
 pub use surface_projector::{
     extract_slot_info_from_type_text, project_macro_surfaces, ProjectedMacroSurfaces,
     ResolvedNativeProp,
 };
 
+/// Lane-identity token for singleflight deduplication.
+///
+/// Widened in Path C C14 to include session identity so that two sessions
+/// with different overlays but the same epoch never coalesce into the same
+/// singleflight lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StoreViewCompatToken(pub u64);
+pub struct StoreViewCompatToken {
+    pub epoch: u64,
+    pub session: Option<u64>,
+}
 
 pub trait StoreView {
     fn compat_token(&self) -> StoreViewCompatToken;
@@ -137,7 +143,10 @@ pub struct PermissiveStoreView;
 
 impl StoreView for PermissiveStoreView {
     fn compat_token(&self) -> StoreViewCompatToken {
-        StoreViewCompatToken(0)
+        StoreViewCompatToken {
+            epoch: 0,
+            session: None,
+        }
     }
 
     fn validates(&self, _fact: &FactVersionRef) -> bool {
@@ -834,7 +843,10 @@ mod tests {
         cache.insert("node".to_string(), 42, vec![fact.clone()]);
 
         let view = TestView {
-            token: StoreViewCompatToken(3),
+            token: StoreViewCompatToken {
+                epoch: 3,
+                session: None,
+            },
             valid_facts: [fact].into_iter().collect(),
         };
 
@@ -857,7 +869,10 @@ mod tests {
         );
 
         let view = TestView {
-            token: StoreViewCompatToken(4),
+            token: StoreViewCompatToken {
+                epoch: 4,
+                session: None,
+            },
             valid_facts: FxHashSet::default(),
         };
 
@@ -866,9 +881,18 @@ mod tests {
 
     #[test]
     fn compat_token_is_exact_snapshot_epoch_in_v1() {
-        let first = StoreViewCompatToken(10);
-        let second = StoreViewCompatToken(10);
-        let third = StoreViewCompatToken(11);
+        let first = StoreViewCompatToken {
+            epoch: 10,
+            session: None,
+        };
+        let second = StoreViewCompatToken {
+            epoch: 10,
+            session: None,
+        };
+        let third = StoreViewCompatToken {
+            epoch: 11,
+            session: None,
+        };
 
         assert_eq!(first, second);
         assert_ne!(first, third);
@@ -878,7 +902,14 @@ mod tests {
     fn stable_request_returns_cached_value_before_compute() {
         let singleflight =
             SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
-        let mut executor = TestRequestExecutor::new("node", StoreViewCompatToken(5), 3);
+        let mut executor = TestRequestExecutor::new(
+            "node",
+            StoreViewCompatToken {
+                epoch: 5,
+                session: None,
+            },
+            3,
+        );
         executor
             .cache
             .insert("node".to_string(), 41, vec![executor.valid_fact.clone()]);
@@ -896,7 +927,14 @@ mod tests {
     fn stable_request_retries_until_compute_is_stable() {
         let singleflight =
             SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
-        let mut executor = TestRequestExecutor::new("node", StoreViewCompatToken(5), 3);
+        let mut executor = TestRequestExecutor::new(
+            "node",
+            StoreViewCompatToken {
+                epoch: 5,
+                session: None,
+            },
+            3,
+        );
         executor.compute_values.extend([11, 12]);
         executor.stability.extend([false, true]);
 
@@ -926,7 +964,14 @@ mod tests {
     fn stable_request_uses_fallback_after_retries_exhausted() {
         let singleflight =
             SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
-        let mut executor = TestRequestExecutor::new("node", StoreViewCompatToken(5), 2);
+        let mut executor = TestRequestExecutor::new(
+            "node",
+            StoreViewCompatToken {
+                epoch: 5,
+                session: None,
+            },
+            2,
+        );
         executor.compute_values.extend([1, 2, 3]);
         executor.stability.extend([false, false, false]);
 
@@ -953,11 +998,18 @@ mod tests {
                 std::thread::spawn(move || {
                     start.wait();
                     group
-                        .run("node".to_string(), StoreViewCompatToken(7), || {
-                            computes.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(50));
-                            Ok(42)
-                        })
+                        .run(
+                            "node".to_string(),
+                            StoreViewCompatToken {
+                                epoch: 7,
+                                session: None,
+                            },
+                            || {
+                                computes.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(Duration::from_millis(50));
+                                Ok(42)
+                            },
+                        )
                         .unwrap()
                 })
             })
@@ -986,24 +1038,33 @@ mod tests {
         let start = Arc::new(Barrier::new(3));
         let computes = Arc::new(AtomicUsize::new(0));
 
-        let handles: Vec<_> = [StoreViewCompatToken(1), StoreViewCompatToken(2)]
-            .into_iter()
-            .map(|token| {
-                let group = Arc::clone(&group);
-                let start = Arc::clone(&start);
-                let computes = Arc::clone(&computes);
-                std::thread::spawn(move || {
-                    start.wait();
-                    group
-                        .run("node".to_string(), token, || {
-                            computes.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(50));
-                            Ok(token.0 as usize)
-                        })
-                        .unwrap()
-                })
+        let handles: Vec<_> = [
+            StoreViewCompatToken {
+                epoch: 1,
+                session: None,
+            },
+            StoreViewCompatToken {
+                epoch: 2,
+                session: None,
+            },
+        ]
+        .into_iter()
+        .map(|token| {
+            let group = Arc::clone(&group);
+            let start = Arc::clone(&start);
+            let computes = Arc::clone(&computes);
+            std::thread::spawn(move || {
+                start.wait();
+                group
+                    .run("node".to_string(), token, || {
+                        computes.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(50));
+                        Ok(token.epoch as usize)
+                    })
+                    .unwrap()
             })
-            .collect();
+        })
+        .collect();
 
         start.wait();
         let mut handles = handles.into_iter();

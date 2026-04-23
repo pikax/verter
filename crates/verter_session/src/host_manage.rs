@@ -1067,6 +1067,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         }
 
         let resolved = self.host.resolve_root_consumption(
+            canonical_id,
             snapshot,
             element_index,
             base,
@@ -1085,22 +1086,26 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
 
     fn build_generic_child_prop_overrides(
         &self,
+        canonical_id: &str,
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> Option<rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>> {
+        debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host
-            .build_generic_child_prop_overrides(snapshot, usage_index, eval_env)
+            .build_generic_child_prop_overrides(canonical_id, snapshot, usage_index, eval_env)
     }
 
     fn resolve_dynamic_root_candidates(
         &self,
+        canonical_id: &str,
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
     ) -> Vec<DynamicRootCandidate> {
+        debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host
-            .resolve_dynamic_root_candidates(snapshot, usage_index, eval_env)
+            .resolve_dynamic_root_candidates(canonical_id, snapshot, usage_index, eval_env)
     }
 }
 
@@ -1609,19 +1614,22 @@ impl VerterHost {
     /// Build script-setup generic type parameter bindings for a Vue SFC.
     /// Called once during `PreparedDeclBundle` materialization. Returns an
     /// empty map for non-Vue files or Vue files without `<script setup>` generics.
+    ///
+    /// Per Path C C3, the result type is `FxHashMap<String,
+    /// TypeParamBinding>` — script-setup parameters are no longer
+    /// wrapped in a `PreparedTypeDecl`. Pre-C3 the wrapper carried a
+    /// large `name_resolution` table populated from the SFC's symbols /
+    /// imports; that table was unused by the lowering hot path
+    /// (constraint / default lowering threads its own `name_resolution`
+    /// through `shallow_lower_type_expr`), so dropping the wrapper also
+    /// drops dead allocation.
     fn build_script_setup_type_bindings(
         &self,
         canonical_id: &str,
-        state: &crate::resolver_core::ShallowFileState,
-        dep_edges: &rustc_hash::FxHashMap<String, String>,
-    ) -> rustc_hash::FxHashMap<
-        String,
-        std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>,
-    > {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
-        use verter_semantic::analysis::type_expr::TypeExpr;
-        use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-        use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+        _state: &crate::resolver_core::ShallowFileState,
+        _dep_edges: &rustc_hash::FxHashMap<String, String>,
+    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::prepared_decl::TypeParamBinding> {
+        use crate::resolver_core::prepared_decl::TypeParamBinding;
 
         let mut bindings = rustc_hash::FxHashMap::default();
 
@@ -1629,42 +1637,23 @@ impl VerterHost {
             return bindings;
         };
 
-        for param in
+        for (idx, param) in
             Self::sfc_script_setup_type_params(raw_source.as_ref(), cached_parse.as_deref())
+                .into_iter()
+                .enumerate()
         {
-            let mut prepared = PreparedTypeDecl::new(
-                ResolvedRootIdentity::new(canonical_id, &param.name),
-                TypeDeclKind::Alias,
-                TypeExpr::type_parameter(param.clone()),
+            bindings.insert(
+                param.name.clone(),
+                TypeParamBinding {
+                    name: std::sync::Arc::from(param.name.as_str()),
+                    // Path C C6a item 1: 0-based clause position so
+                    // multiple `<script setup generic="T, U">` params
+                    // get distinct identity tuples.
+                    ordinal: u16::try_from(idx).unwrap_or(u16::MAX),
+                    constraint: param.constraint.clone(),
+                    default: param.default.clone(),
+                },
             );
-            // Populate name_resolution so the solver can resolve bare names
-            // from within the generic param's scope.
-            for local_name in state.symbols.keys() {
-                prepared.name_resolution.insert(
-                    local_name.clone(),
-                    ResolvedRootIdentity::new(canonical_id, local_name),
-                );
-            }
-            for local_name in state.value_symbols.keys() {
-                prepared.name_resolution.insert(
-                    local_name.clone(),
-                    ResolvedRootIdentity::new(canonical_id, local_name),
-                );
-            }
-            for (local_name, target) in state.import_targets.iter() {
-                let resolved_id = if target.canonical_id.is_empty() {
-                    dep_edges.get(&target.source_specifier).cloned()
-                } else {
-                    Some(target.canonical_id.clone())
-                };
-                if let Some(resolved_id) = resolved_id {
-                    prepared.name_resolution.insert(
-                        local_name.clone(),
-                        ResolvedRootIdentity::new(&resolved_id, &target.imported_name),
-                    );
-                }
-            }
-            bindings.insert(param.name.clone(), std::sync::Arc::new(prepared));
         }
 
         bindings
@@ -2336,16 +2325,22 @@ impl VerterHost {
         canonical_id: &str,
         type_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        let solver_host =
-            crate::resolver_core::SessionSolverHost::with_declaration_scope(self, canonical_id);
-        let mut engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-            &solver_host,
-        );
-        let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
-        let result = engine.solve(&expr);
+        // D-Cutover §5.8: route through CMQE (dispatch-backed) instead
+        // of SessionSolverHost + TypeQueryEngine. `project_type_surface_expr`
+        // expands the named type through the shared semantic-graph memo
+        // (empty-path Expanded ProjectPath now unwraps DeclAnchors per
+        // commit 8f964727), matching the retired solver's fixed-point
+        // expansion.
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        let expanded = engine
+            .project_type_surface_expr(canonical_id, type_name)
+            .or_else(|| {
+                let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
+                engine.project_expr_surface_expr(canonical_id, &expr)
+            })?;
         let mut shape =
-            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value);
-        Self::materialize_project_intrinsic_shape_members(&mut shape, &mut engine);
+            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
+        Self::materialize_project_intrinsic_shape_members(&mut shape, &mut engine, canonical_id);
         Some(shape)
     }
 
@@ -2368,37 +2363,45 @@ impl VerterHost {
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
         let _ = self.ensure_indexed_ready(scope);
-        let solver_host =
-            crate::resolver_core::SessionSolverHost::with_declaration_scope(self, scope);
-        let mut engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-            &solver_host,
-        );
-        let result = engine.solve(&tag_type);
+        // D-Cutover §5.8: CMQE-backed expansion (see the sibling
+        // `expand_project_intrinsic_shape_for_canonical` note).
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        let expanded = engine
+            .project_expr_surface_expr(scope, &tag_type)
+            .unwrap_or_else(|| tag_type.clone());
         let mut tag_shape =
-            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&result.value);
-        Self::materialize_project_intrinsic_shape_members(&mut tag_shape, &mut engine);
+            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
+        Self::materialize_project_intrinsic_shape_members(&mut tag_shape, &mut engine, scope);
         Some(Self::owned_intrinsic_members_from_shape(tag_shape))
     }
 
     fn solve_project_intrinsic_member_type(
-        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        scope_canonical_id: &str,
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        engine.solve(expr).value
+        engine
+            .project_expr_surface_expr(scope_canonical_id, expr)
+            .unwrap_or_else(|| expr.clone())
     }
 
     fn materialize_project_intrinsic_member_surface_expr(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        scope_canonical_id: &str,
         nested_surface: bool,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
         use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
         if nested_surface {
-            let solved = Self::solve_project_intrinsic_member_type(engine, expr);
+            let solved =
+                Self::solve_project_intrinsic_member_type(engine, scope_canonical_id, expr);
             if solved != *expr {
                 return Self::materialize_project_intrinsic_member_surface_expr(
-                    &solved, engine, true,
+                    &solved,
+                    engine,
+                    scope_canonical_id,
+                    true,
                 );
             }
         }
@@ -2408,13 +2411,17 @@ impl VerterHost {
                 let mut function = function.as_ref().clone();
                 for param in &mut function.parameters {
                     param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                        &param.ty, engine, true,
+                        &param.ty,
+                        engine,
+                        scope_canonical_id,
+                        true,
                     );
                 }
                 if let Some(return_type) = function.return_type.as_mut() {
                     let materialized = Self::materialize_project_intrinsic_member_surface_expr(
                         return_type,
                         engine,
+                        scope_canonical_id,
                         true,
                     );
                     *return_type = Arc::new(materialized);
@@ -2436,6 +2443,7 @@ impl VerterHost {
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         &property.ty,
                                         engine,
+                                        scope_canonical_id,
                                         true,
                                     );
                             }
@@ -2445,12 +2453,14 @@ impl VerterHost {
                                 Self::materialize_project_intrinsic_member_surface_expr(
                                     &signature.key_type,
                                     engine,
+                                    scope_canonical_id,
                                     true,
                                 );
                             signature.value_type =
                                 Self::materialize_project_intrinsic_member_surface_expr(
                                     &signature.value_type,
                                     engine,
+                                    scope_canonical_id,
                                     true,
                                 );
                         }
@@ -2458,7 +2468,10 @@ impl VerterHost {
                         | ObjectMember::ConstructSignature(function) => {
                             for param in &mut function.parameters {
                                 param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                                    &param.ty, engine, true,
+                                    &param.ty,
+                                    engine,
+                                    scope_canonical_id,
+                                    true,
                                 );
                             }
                             if let Some(return_type) = function.return_type.as_mut() {
@@ -2466,6 +2479,7 @@ impl VerterHost {
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         return_type,
                                         engine,
+                                        scope_canonical_id,
                                         true,
                                     );
                                 *return_type = Arc::new(materialized);
@@ -2474,7 +2488,10 @@ impl VerterHost {
                         ObjectMember::Method(method) => {
                             for param in &mut method.function.parameters {
                                 param.ty = Self::materialize_project_intrinsic_member_surface_expr(
-                                    &param.ty, engine, true,
+                                    &param.ty,
+                                    engine,
+                                    scope_canonical_id,
+                                    true,
                                 );
                             }
                             if let Some(return_type) = method.function.return_type.as_mut() {
@@ -2482,6 +2499,7 @@ impl VerterHost {
                                     Self::materialize_project_intrinsic_member_surface_expr(
                                         return_type,
                                         engine,
+                                        scope_canonical_id,
                                         true,
                                     );
                                 *return_type = Arc::new(materialized);
@@ -2495,6 +2513,7 @@ impl VerterHost {
                 element: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     element,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
                 readonly: *readonly,
@@ -2509,6 +2528,7 @@ impl VerterHost {
                                 ty: Self::materialize_project_intrinsic_member_surface_expr(
                                     &element.ty,
                                     engine,
+                                    scope_canonical_id,
                                     nested_surface,
                                 ),
                                 optional: element.optional,
@@ -2526,6 +2546,7 @@ impl VerterHost {
                         Self::materialize_project_intrinsic_member_surface_expr(
                             ty,
                             engine,
+                            scope_canonical_id,
                             nested_surface,
                         )
                     })
@@ -2538,6 +2559,7 @@ impl VerterHost {
                         Self::materialize_project_intrinsic_member_surface_expr(
                             ty,
                             engine,
+                            scope_canonical_id,
                             nested_surface,
                         )
                     })
@@ -2547,6 +2569,7 @@ impl VerterHost {
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 ),
             )),
@@ -2554,6 +2577,7 @@ impl VerterHost {
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 ),
             )),
@@ -2561,6 +2585,7 @@ impl VerterHost {
                 Self::materialize_project_intrinsic_member_surface_expr(
                     inner,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 ),
             )),
@@ -2573,21 +2598,25 @@ impl VerterHost {
                 check: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     check,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
                 extends: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     extends,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
                 true_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     true_type,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
                 false_type: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     false_type,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
             },
@@ -2603,6 +2632,7 @@ impl VerterHost {
                 source: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     source,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
                 optional: *optional,
@@ -2611,12 +2641,14 @@ impl VerterHost {
                     Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                         name_type,
                         engine,
+                        scope_canonical_id,
                         nested_surface,
                     ))
                 }),
                 value: Arc::new(Self::materialize_project_intrinsic_member_surface_expr(
                     value,
                     engine,
+                    scope_canonical_id,
                     nested_surface,
                 )),
             },
@@ -2632,6 +2664,7 @@ impl VerterHost {
                             Self::materialize_project_intrinsic_member_surface_expr(
                                 expr,
                                 engine,
+                                scope_canonical_id,
                                 nested_surface,
                             )
                         })
@@ -2644,12 +2677,14 @@ impl VerterHost {
 
     fn materialize_project_intrinsic_shape_members(
         shape: &mut verter_semantic::analysis::type_expand::ExpandedObjectShape,
-        engine: &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
+        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        scope_canonical_id: &str,
     ) {
         for property in &mut shape.properties {
             property.ty = Self::materialize_project_intrinsic_member_surface_expr(
                 &property.ty,
                 engine,
+                scope_canonical_id,
                 false,
             );
         }
@@ -2657,11 +2692,13 @@ impl VerterHost {
             signature.key_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.key_type,
                 engine,
+                scope_canonical_id,
                 true,
             );
             signature.value_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.value_type,
                 engine,
+                scope_canonical_id,
                 true,
             );
         }
@@ -2670,12 +2707,14 @@ impl VerterHost {
                 parameter.ty = Self::materialize_project_intrinsic_member_surface_expr(
                     &parameter.ty,
                     engine,
+                    scope_canonical_id,
                     true,
                 );
             }
             signature.return_type = Self::materialize_project_intrinsic_member_surface_expr(
                 &signature.return_type,
                 engine,
+                scope_canonical_id,
                 true,
             );
         }
@@ -3690,7 +3729,10 @@ impl VerterHost {
         // Collapse concurrent cold loads for the same canonical file through
         // the dedicated singleflight group on the resolver runtime.
         let singleflight = &self.resolver.runtime.indexed_singleflight;
-        let token = crate::resolver_core::StoreViewCompatToken(0);
+        let token = crate::resolver_core::StoreViewCompatToken {
+            epoch: 0,
+            session: None,
+        };
         match singleflight.run(canonical_id.to_owned(), token, || {
             // Re-check cache inside the flight — another thread may have
             // populated it after we dropped the first probe.
@@ -4695,13 +4737,7 @@ impl VerterHost {
                     Self::build_eval_script_source(&source, cached_parse.as_deref())
                 })
         })?;
-        self.compute_evaluated_types_from_owner_context(
-            canonical,
-            snapshot,
-            &eval_source,
-            purpose,
-            None,
-        )
+        self.compute_evaluated_types_from_owner_context(canonical, snapshot, &eval_source, purpose)
     }
 
     fn component_meta_binding_type_entries(
@@ -4730,9 +4766,6 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
-        external_engine: Option<
-            &mut verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'_>,
-        >,
     ) -> Option<ComputedEvaluatedTypes> {
         {
             let _trace = component_meta_trace_scope!(
@@ -4759,52 +4792,85 @@ impl VerterHost {
             );
             self.component_meta_binding_type_entries(canonical, &requested_binding_names)
         };
-        let result = {
-            let _trace = component_meta_trace_scope!(
-                "compute_evaluated_types_expand_macros",
-                format!(
-                    "owner={} macros={} bindings={} store_view={}",
-                    canonical,
-                    snapshot.macros.len(),
-                    binding_entries.len(),
-                    false,
-                ),
-            );
-            if let Some(engine) = external_engine {
-                verter_semantic::analysis::type_eval_build::expand_macro_types_with_engine_for_scope(
-                    snapshot.macros.as_ref(),
-                    Some(eval_source),
-                    binding_entries.as_slice(),
-                    match purpose {
-                        crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
-                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Full
-                        }
-                        crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough => {
-                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
-                        }
-                    },
-                    engine,
-                )
-            } else {
-                let solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
-                    self, canonical,
+        // D-Cutover §5.8 WIP-W: the retired `external_engine` branch is
+        // gone; there is only one `expand_macro_types` entry point left.
+        let result =
+            {
+                let _trace = component_meta_trace_scope!(
+                    "compute_evaluated_types_expand_macros",
+                    format!(
+                        "owner={} macros={} bindings={} store_view={}",
+                        canonical,
+                        snapshot.macros.len(),
+                        binding_entries.len(),
+                        false,
+                    ),
                 );
-                verter_semantic::analysis::type_eval_build::expand_macro_types_with_bindings_for_scope(
-                    snapshot.macros.as_ref(),
-                    Some(eval_source),
-                    binding_entries.as_slice(),
-                    match purpose {
-                        crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
-                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Full
+                let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+                verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
+                snapshot.macros.as_ref(),
+                Some(eval_source),
+                binding_entries.as_slice(),
+                None,
+                match purpose {
+                    crate::resolver_core::ComponentMetaResolutionPurpose::Full => {
+                        verter_semantic::analysis::type_eval_build::MacroExpansionScope::Full
+                    }
+                    crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough => {
+                        verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
+                    }
+                },
+                |parsed| {
+                    use crate::resolver_core::component_meta_query_engine::{
+                        FastShallowFieldExpr, FastShallowFieldExprExactness,
+                    };
+                    use verter_semantic::analysis::type_expand::{
+                        ExpandedNormalizedExpr, ExpansionResult,
+                    };
+
+                    fn fast_to_expansion(
+                        fast: FastShallowFieldExpr,
+                    ) -> ExpansionResult<ExpandedNormalizedExpr> {
+                        match fast.exactness {
+                            FastShallowFieldExprExactness::Symbolic => {
+                                ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                                    expr: fast.expr,
+                                })
+                            }
+                            FastShallowFieldExprExactness::Concrete => {
+                                ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                    expr: fast.expr,
+                                })
+                            }
                         }
-                        crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough => {
-                            verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
+                    }
+
+                    if let Some(fast) = engine.try_fast_shallow_field_expr(canonical, parsed) {
+                        return fast_to_expansion(fast);
+                    }
+                    if engine.should_preserve_shallow_field_expr(canonical, parsed) {
+                        return ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                            expr: parsed.clone(),
+                        });
+                    }
+                    match engine.project_expr_surface_expr(canonical, parsed) {
+                        Some(projected) if projected != *parsed => {
+                            ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                expr: projected,
+                            })
                         }
-                    },
-                    &solver_host,
-                )
-            }
-        };
+                        _ => match engine.solve_expr_type_expr(canonical, parsed) {
+                            Some(solved) => ExpansionResult::exact_concrete(
+                                ExpandedNormalizedExpr { expr: solved },
+                            ),
+                            None => ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                                expr: parsed.clone(),
+                            }),
+                        },
+                    }
+                },
+            )
+            };
         // Dependency tracking comes from the frontier/shallow-file-state path.
         let discovered_dependencies = std::collections::BTreeSet::<String>::new();
         if component_meta_debug_enabled() {
@@ -5391,6 +5457,7 @@ impl VerterHost {
 
     fn build_generic_child_prop_overrides(
         &self,
+        canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
@@ -5402,6 +5469,8 @@ impl VerterHost {
         let template = snapshot.template.as_deref()?;
         let usage = template.components.get(usage_index as usize)?;
         let mut overrides = rustc_hash::FxHashMap::default();
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        let env_ref = eval_env.as_ref();
 
         for prop in &usage.props {
             if prop.from_spread {
@@ -5411,7 +5480,14 @@ impl VerterHost {
                 continue;
             }
 
-            let Some(prop_type) = resolve_usage_prop_type(prop, eval_env) else {
+            let Some(prop_type) = resolve_usage_prop_type(prop, |expr| {
+                crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
+                    expr,
+                    canonical_id,
+                    env_ref,
+                    &mut engine,
+                )
+            }) else {
                 continue;
             };
             overrides.insert(prop.name.clone(), prop_type);
@@ -5426,6 +5502,7 @@ impl VerterHost {
 
     fn resolve_root_consumption(
         &self,
+        canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         element_index: u32,
         base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
@@ -5487,6 +5564,8 @@ impl VerterHost {
                 );
             }
 
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            let env_ref = eval_env.as_ref();
             for directive in spread_directives {
                 let Some(expression) = directive.expression.as_deref() else {
                     push_partial_reason(
@@ -5496,19 +5575,12 @@ impl VerterHost {
                     continue;
                 };
 
-                let Some(env) = eval_env.as_mut() else {
-                    push_partial_reason(
-                        &mut resolved.partial_reasons,
-                        PartialBranchReason::UnknownSpread,
-                    );
-                    continue;
-                };
-
-                let Some(ty) =
-                    verter_semantic::analysis::type_eval_build::evaluate_value_expression(
-                        expression, env,
-                    )
-                else {
+                let Some(ty) = crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
+                    expression,
+                    canonical_id,
+                    env_ref,
+                    &mut engine,
+                ) else {
                     push_partial_reason(
                         &mut resolved.partial_reasons,
                         PartialBranchReason::UnknownSpread,
@@ -5549,6 +5621,7 @@ impl VerterHost {
 
     fn resolve_dynamic_root_candidates(
         &self,
+        canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
@@ -5580,18 +5653,17 @@ impl VerterHost {
                 snapshot.imports.as_slice(),
             ));
         }
-        if let Some(env) = eval_env.as_mut() {
-            if let Some(evaluated) =
-                verter_semantic::analysis::type_eval_build::evaluate_value_expression(
-                    &expression,
-                    env,
-                )
-            {
-                candidates.extend(collect_dynamic_root_candidates_from_type(
-                    &evaluated,
-                    snapshot.imports.as_slice(),
-                ));
-            }
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+        if let Some(evaluated) = crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
+            &expression,
+            canonical_id,
+            eval_env.as_ref(),
+            &mut engine,
+        ) {
+            candidates.extend(collect_dynamic_root_candidates_from_type(
+                &evaluated,
+                snapshot.imports.as_slice(),
+            ));
         }
 
         candidates.sort_by(|left, right| match (left, right) {
@@ -8533,8 +8605,7 @@ fn rematerialize_public_component_meta_types(
         return;
     }
 
-    let solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host, &solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let mut prop_scope_hints = rustc_hash::FxHashMap::default();
     let mut slot_binding_scope_hints = rustc_hash::FxHashMap::default();
     let mut define_props_scopes = Vec::new();

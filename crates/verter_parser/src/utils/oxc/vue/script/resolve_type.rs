@@ -496,9 +496,38 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     named_type_cache: Option<Arc<dyn cache_keys::NamedTypeCache + Send + Sync>>,
 }
 
-/// Maximum recursion depth for in-file type resolution. Prevents stack overflow
-/// on deeply nested generic types (e.g. `InputMenuProps<T, VK, M>` chains).
-const MAX_TYPE_RESOLUTION_DEPTH: u16 = 64;
+/// Maximum syntactic descent depth for in-file type resolution. This is a
+/// stack-safety rail, NOT a semantic budget — AST descent visits distinct
+/// nodes (not the same type repeatedly), and the cap bounds on the input's
+/// syntactic depth rather than on reusable semantic work.
+///
+/// Phase D §5.10 WIP-P — renamed from the legacy `MAX_TYPE_RESOLUTION_DEPTH = 64`
+/// to `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` per plan §3 Change H, documented
+/// as stack-safety rather than a semantic bound. The larger 256 limit matches
+/// TypeScript's own syntactic depth tolerance and avoids false triggers on
+/// deeply nested but legitimate generic chains (e.g. library-grade heavy
+/// conditional / indexed-access stacks).
+pub const PARSER_SYNTACTIC_DEPTH_LIMIT: u16 = 256;
+
+/// Structured failure shape emitted by the parser's syntactic depth
+/// guard (plan §3 Change H). Justified as syntactic stack-safety — not
+/// a semantic budget — so the record captures the exact depth at which
+/// the guard refused entry (`actual`), the configured cap (`limit`),
+/// and a short call-site description (`context`) for diagnostics.
+///
+/// The record is thread-local by design: the guard lives per thread
+/// (matching `RESOLUTION_DEPTH`), and the cap-trip is an observable
+/// event that the parser's callers can query after a resolution
+/// attempt via [`take_last_resolution_budget_exceeded`]. The record
+/// is NOT part of the `Option<ResolvedElements>` result contract —
+/// guard refusal still produces `None` on the hot path so callers can
+/// bail silently — but tests and diagnostics can consult it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionBudgetExceeded {
+    pub limit: u16,
+    pub actual: u16,
+    pub context: &'static str,
+}
 
 thread_local! {
     /// Module-local recursion depth tracker for [`resolve_type_elements_inner_with_ctx`]
@@ -510,23 +539,72 @@ thread_local! {
     /// call chain on one thread, always resets to `0` between top-level entries
     /// via the RAII [`ResolutionDepthGuard`]. It is not cache state.
     static RESOLUTION_DEPTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
+
+    /// Last cap-trip record for the current thread. Updated each time
+    /// [`ResolutionDepthGuard::try_enter`] refuses entry; consumers read
+    /// via [`take_last_resolution_budget_exceeded`] after a resolution
+    /// attempt. Cleared on successful `try_enter` of a fresh top-level
+    /// call chain (depth transition 0 → 1) so every top-level resolution
+    /// starts with no stale record.
+    static LAST_BUDGET_EXCEEDED: std::cell::RefCell<Option<ResolutionBudgetExceeded>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Observe and clear the current thread's most recent
+/// [`ResolutionBudgetExceeded`] record. Returns `None` if no cap trip
+/// occurred during the most recent resolution attempt. Exposed for
+/// tests and diagnostics.
+pub fn take_last_resolution_budget_exceeded() -> Option<ResolutionBudgetExceeded> {
+    LAST_BUDGET_EXCEEDED.with(|cell| cell.borrow_mut().take())
 }
 
 /// RAII guard that increments [`RESOLUTION_DEPTH`] on construction and decrements
 /// it on drop. Returns `None` when the depth would exceed
-/// [`MAX_TYPE_RESOLUTION_DEPTH`]; callers bail silently in that case.
+/// [`PARSER_SYNTACTIC_DEPTH_LIMIT`]; callers bail silently in that case
+/// and the structured [`ResolutionBudgetExceeded`] record is stored in
+/// [`LAST_BUDGET_EXCEEDED`] so tests and diagnostics can observe the
+/// exact cap trip.
 struct ResolutionDepthGuard;
 
 impl ResolutionDepthGuard {
-    fn try_enter() -> Option<Self> {
+    fn try_enter_with_context(context: &'static str) -> Option<Self> {
         RESOLUTION_DEPTH.with(|depth| {
             let current = depth.get();
-            if current >= MAX_TYPE_RESOLUTION_DEPTH {
+            if current >= PARSER_SYNTACTIC_DEPTH_LIMIT {
+                // Structured failure shape per plan §3 Change H: record
+                // the exact cap trip (limit + actual + call-site
+                // context) so consumers can observe the cap-trip event
+                // without parsing string diagnostics.
+                LAST_BUDGET_EXCEEDED.with(|cell| {
+                    *cell.borrow_mut() = Some(ResolutionBudgetExceeded {
+                        limit: PARSER_SYNTACTIC_DEPTH_LIMIT,
+                        actual: current,
+                        context,
+                    });
+                });
                 return None;
+            }
+            if current == 0 {
+                // Fresh top-level call chain — clear any stale cap-trip
+                // record from a previous resolution so callers always
+                // observe at most this chain's trip.
+                LAST_BUDGET_EXCEEDED.with(|cell| cell.borrow_mut().take());
             }
             depth.set(current + 1);
             Some(ResolutionDepthGuard)
         })
+    }
+
+    fn try_enter() -> Option<Self> {
+        Self::try_enter_with_context("resolve_type_elements_inner")
+    }
+
+    /// Observe the current syntactic depth (exposed for telemetry /
+    /// diagnostics; not part of the hot path).
+    #[must_use]
+    #[allow(dead_code)]
+    fn current_depth() -> u16 {
+        RESOLUTION_DEPTH.with(|depth| depth.get())
     }
 }
 
@@ -2650,8 +2728,9 @@ fn get_expression_reference_name(expr: &Expression<'_>) -> Option<String> {
 /// context. Removing that field from `TypeResolutionContext` unblocks the
 /// host-owned cache migration (the resolver context no longer carries `!Send`
 /// interior-mutability state). Depth guarding still bails at
-/// [`MAX_TYPE_RESOLUTION_DEPTH`] to prevent stack overflow on deeply nested
-/// generic types.
+/// [`PARSER_SYNTACTIC_DEPTH_LIMIT`] to prevent stack overflow on deeply nested
+/// generic types (plan §3 Change H — syntactic stack-safety, not a semantic
+/// budget).
 fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
     base_offset: u32,

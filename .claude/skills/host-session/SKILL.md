@@ -14,7 +14,11 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 - `RouteDb` (rehomed) — barrel / route surface cache.
 - `OwnerImportSurfaceDb` — direct-owner-imports cache. Reached via `VerterHost::owner_import_surface` / `resolve_owner_direct_import`.
 - `ComponentMetaResultDb<ComponentMetaAnalysis>` — final component-meta payload cache consulted by `get_component_meta` before any cold work.
-- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Every `SemanticQueryKey` variant dispatches through this memo. Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` has been folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
+- `SemanticGraphStore` — host-owned semantic-query memo, dispatched through `ProjectSemanticDispatch::execute`. Post Phase-D it is the canonical lazy semantic layer and the sole authority for reusable type-resolution work. Two parallel memos:
+  - **Node memo** (mode-erased `FamilyKey` → `FamilySlots`) for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
+  - **Relation memo** (pairwise `DashMap<(SemanticNodeId, SemanticNodeId), (DepSignature, RelationResult)>`) for `Relate` judgements (added Phase D §5.4 WIP-S; plan §2 Relation engine). `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }` — all three cache-with-fence.
+  - Also owns Vue macro resolution artifacts (`SemanticNodeData::VueMacroElements`, keyed by `HostResolvedNamedTypeKey` through an internal identity map) — the former `ResolvedNamedTypesDb` has been folded in; the parser's `NamedTypeCache` adapter hits the graph directly on the refcount-only hot path via `get_resolved_named_type` / `insert_resolved_named_type`.
+  - Canonical node variants include the new `SemanticNodeData::Function { params, return_type, type_parameters }` (added Phase D §5.6 WIP-L; plan §2 "the only new variant" — class/interface lower to `Object` with heritage merged).
 - `IntrinsicRegistry` — SDK-intrinsic dispatch table.
 - `ProjectTypeStoreCounters` — per-layer live / stale / in-flight counters.
 

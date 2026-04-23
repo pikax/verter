@@ -191,44 +191,30 @@ pub fn resolved_macro_to_expansion_via_solver(
     TypeExpansionResult,
     Vec<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity>,
 ) {
-    use verter_semantic::analysis::type_solver::audit::{NoopAudit, RecordingAudit};
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-    use verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine;
+    // D-Cutover §5.8: route through CMQE (dispatch-backed) instead of
+    // SessionSolverHost + TypeQueryEngine. The retired solver returned
+    // a ResolvedRootIdentity trace for each solve; dispatch's audit
+    // lives on `SemanticGraphStore` and is covered by the broader
+    // dep-signature / frontier mechanisms, so the returned trace Vec
+    // is left empty here (matches the pre-§5.8 `NoopAudit` branch
+    // which also produced an empty trace).
+    let scope: &str = if macro_meta.declaration.canonical_source.is_empty() {
+        ""
+    } else {
+        macro_meta.declaration.canonical_source.as_str()
+    };
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
-    enum SolverEngine<'a> {
-        Noop(Box<TypeQueryEngine<'a, NoopAudit>>),
-        Recording(Box<TypeQueryEngine<'a, RecordingAudit>>),
-    }
-
-    impl<'a> SolverEngine<'a> {
-        fn solve_with_trace(
-            &mut self,
-            expr: &TypeExpr,
-        ) -> (
-            verter_semantic::analysis::type_solver::result::SolverResult<TypeExpr>,
-            Vec<ResolvedRootIdentity>,
-        ) {
-            match self {
-                Self::Noop(engine) => engine.solve_with_trace(expr),
-                Self::Recording(engine) => engine.solve_with_trace(expr),
+    let solve_via_dispatch =
+        |engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>, text: &str| -> TypeExpr {
+            let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
+            if scope.is_empty() {
+                return parsed;
             }
-        }
-    }
-
-    let solver_host = if macro_meta.declaration.canonical_source.is_empty() {
-        crate::resolver_core::SessionSolverHost::new(host)
-    } else {
-        crate::resolver_core::SessionSolverHost::with_declaration_scope(
-            host,
-            macro_meta.declaration.canonical_source.as_str(),
-        )
-    };
-    let mut engine = if host.config.audit_enabled {
-        SolverEngine::Recording(Box::new(TypeQueryEngine::new_with_recording(&solver_host)))
-    } else {
-        SolverEngine::Noop(Box::new(TypeQueryEngine::new(&solver_host)))
-    };
-    let mut all_visited = Vec::new();
+            engine
+                .project_expr_surface_expr(scope, &parsed)
+                .unwrap_or(parsed)
+        };
 
     let mut members = Vec::new();
 
@@ -236,12 +222,7 @@ pub fn resolved_macro_to_expansion_via_solver(
         let type_expr = prop
             .type_annotation
             .as_deref()
-            .map(|text| {
-                let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let (result, trace) = engine.solve_with_trace(&parsed);
-                all_visited.extend(trace);
-                result.value
-            })
+            .map(|text| solve_via_dispatch(&mut engine, text))
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
         members.push(ExpandedMember {
@@ -257,12 +238,7 @@ pub fn resolved_macro_to_expansion_via_solver(
         let type_expr = emit
             .payload_type
             .as_deref()
-            .map(|text| {
-                let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-                let (result, trace) = engine.solve_with_trace(&parsed);
-                all_visited.extend(trace);
-                result.value
-            })
+            .map(|text| solve_via_dispatch(&mut engine, text))
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
         members.push(ExpandedMember {
@@ -290,11 +266,13 @@ pub fn resolved_macro_to_expansion_via_solver(
         ExpansionCompleteness::Exact
     };
 
-    let type_expr = if !macro_meta.type_name.is_empty() {
+    let type_expr = if !macro_meta.type_name.is_empty() && !scope.is_empty() {
         let parsed = TypeExpr::named(&macro_meta.type_name);
-        let (result, trace) = engine.solve_with_trace(&parsed);
-        all_visited.extend(trace);
-        result.value
+        engine
+            .project_expr_surface_expr(scope, &parsed)
+            .unwrap_or(parsed)
+    } else if !macro_meta.type_name.is_empty() {
+        TypeExpr::named(&macro_meta.type_name)
     } else {
         TypeExpr::primitive(PrimitiveName::Unknown)
     };
@@ -305,7 +283,7 @@ pub fn resolved_macro_to_expansion_via_solver(
             members,
             completeness,
         },
-        all_visited,
+        Vec::new(),
     )
 }
 

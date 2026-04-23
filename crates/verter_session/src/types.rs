@@ -1344,10 +1344,28 @@ pub(crate) struct CachedMetaPayload {
 // MetaProvenance — per-host counters for component-meta observability
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Number of [`crate::semantic_query::SemanticNodeData`] discriminants used
+/// to size the per-discriminant push-count array in [`MetaProvenance`].
+///
+/// Sized with headroom over the current 20 variants (Path C C1
+/// instrumentation per `/tmp/d-cutover-path-c-full-architectural-cleanup.md`
+/// §2 Stage 1) so adding a variant doesn't require widening the array. If
+/// `SemanticNodeData::discriminant_index` ever returns `>= 24`, that's a
+/// debug-assert hit at the push site rather than a silent overflow.
+pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize = 24;
+
 /// Per-host provenance counters for component-meta observability.
 ///
 /// AtomicU64 for thread-safe increment. Reset on host close. Not persisted.
 /// Host tests read counters directly via `host.provenance()`.
+///
+/// Path C C1 instrumentation (per `/tmp/d-cutover-path-c-full-architectural-cleanup.md`
+/// §2 Stage 1) adds the `ensure_loaded_*`, `execute_cooperative_*`,
+/// `overlay_gate_*`, and `node_arena_*` families. They count
+/// cooperative-execute path selection, intern hot-path activity,
+/// and lock hold/wait time so subsequent passes (C17 interner sharding)
+/// can be evidence-driven. The `heavy_test_mutex_*` family was retired
+/// alongside `HEAVY_COMPONENT_META_TEST_MUTEX` per Path C C12 (plan §14.5).
 pub struct MetaProvenance {
     pub get_component_meta_calls: std::sync::atomic::AtomicU64,
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
@@ -1379,6 +1397,42 @@ pub struct MetaProvenance {
     pub imported_macro_declaration_builds: std::sync::atomic::AtomicU64,
     pub route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64,
     pub route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64,
+
+    // ── Path C C1 contention instrumentation ────────────────────────────
+    /// `VerterHost::ensure_loaded` invocation count.
+    pub ensure_loaded_calls: std::sync::atomic::AtomicU64,
+    /// Time spent inside `Scheduler::wait_or_drive` from `ensure_loaded`.
+    pub ensure_loaded_wait_ns: std::sync::atomic::AtomicU64,
+    /// Time spent inside `integrate_scheduler_snapshot` from `ensure_loaded`.
+    pub ensure_loaded_work_ns: std::sync::atomic::AtomicU64,
+    /// `SemanticGraphStore::execute_cooperative` calls that became the cold
+    /// owner (claimed in-flight slot).
+    pub execute_cooperative_owner_path: std::sync::atomic::AtomicU64,
+    /// `execute_cooperative` calls that joined an in-flight build.
+    pub execute_cooperative_joiner_path: std::sync::atomic::AtomicU64,
+    /// Time the cold owner held the in-flight slot (build duration).
+    pub execute_cooperative_held_ns: std::sync::atomic::AtomicU64,
+    /// `NodeArena::push_impl` total call count (every push, exempt or not).
+    pub node_arena_pushes: std::sync::atomic::AtomicU64,
+    /// `NodeArena::push_impl` calls that allocated a new arena slot
+    /// (always equal to `node_arena_pushes` pre-C7, diverges once
+    /// structural interning lands).
+    pub node_arena_intern_miss: std::sync::atomic::AtomicU64,
+    /// Time spent waiting on `ArenaInner` mutex acquisition during pushes
+    /// (C17 observability per plan §2 Pass C17).
+    pub node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64,
+    /// Scheduler submission count (mirrored from
+    /// `verter_scheduler::scheduler::SchedulerCounters::submit_count` via
+    /// `VerterHost::provenance_snapshot`). The direct-memoized field stays
+    /// zero; `provenance_snapshot` overwrites it with the live value.
+    pub scheduler_submit_count: std::sync::atomic::AtomicU64,
+    /// Scheduler peak inbox depth (mirrored from `SchedulerCounters`).
+    pub scheduler_inbox_depth_max: std::sync::atomic::AtomicU64,
+    /// Per-`SemanticNodeData` discriminant push count, indexed by
+    /// `SemanticNodeData::discriminant_index()`. Sized to
+    /// [`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] for variant headroom.
+    pub node_arena_pushes_per_discriminant:
+        [std::sync::atomic::AtomicU64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 }
 
 impl Default for MetaProvenance {
@@ -1414,6 +1468,20 @@ impl Default for MetaProvenance {
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
             route_owned_snapshot_cache_hits: std::sync::atomic::AtomicU64::new(0),
             route_owned_snapshot_cached_parse_hits: std::sync::atomic::AtomicU64::new(0),
+            ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
+            ensure_loaded_wait_ns: std::sync::atomic::AtomicU64::new(0),
+            ensure_loaded_work_ns: std::sync::atomic::AtomicU64::new(0),
+            execute_cooperative_owner_path: std::sync::atomic::AtomicU64::new(0),
+            execute_cooperative_joiner_path: std::sync::atomic::AtomicU64::new(0),
+            execute_cooperative_held_ns: std::sync::atomic::AtomicU64::new(0),
+            node_arena_pushes: std::sync::atomic::AtomicU64::new(0),
+            node_arena_intern_miss: std::sync::atomic::AtomicU64::new(0),
+            node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64::new(0),
+            scheduler_submit_count: std::sync::atomic::AtomicU64::new(0),
+            scheduler_inbox_depth_max: std::sync::atomic::AtomicU64::new(0),
+            node_arena_pushes_per_discriminant: std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            }),
         }
     }
 }
@@ -1530,6 +1598,47 @@ impl std::fmt::Debug for MetaProvenance {
                 "route_owned_snapshot_cached_parse_hits",
                 &self.route_owned_snapshot_cached_parse_hits.load(Relaxed),
             )
+            .field(
+                "ensure_loaded_calls",
+                &self.ensure_loaded_calls.load(Relaxed),
+            )
+            .field(
+                "ensure_loaded_wait_ns",
+                &self.ensure_loaded_wait_ns.load(Relaxed),
+            )
+            .field(
+                "ensure_loaded_work_ns",
+                &self.ensure_loaded_work_ns.load(Relaxed),
+            )
+            .field(
+                "execute_cooperative_owner_path",
+                &self.execute_cooperative_owner_path.load(Relaxed),
+            )
+            .field(
+                "execute_cooperative_joiner_path",
+                &self.execute_cooperative_joiner_path.load(Relaxed),
+            )
+            .field(
+                "execute_cooperative_held_ns",
+                &self.execute_cooperative_held_ns.load(Relaxed),
+            )
+            .field("node_arena_pushes", &self.node_arena_pushes.load(Relaxed))
+            .field(
+                "node_arena_intern_miss",
+                &self.node_arena_intern_miss.load(Relaxed),
+            )
+            .field(
+                "node_arena_inner_write_wait_ns",
+                &self.node_arena_inner_write_wait_ns.load(Relaxed),
+            )
+            .field(
+                "scheduler_submit_count",
+                &self.scheduler_submit_count.load(Relaxed),
+            )
+            .field(
+                "scheduler_inbox_depth_max",
+                &self.scheduler_inbox_depth_max.load(Relaxed),
+            )
             .finish()
     }
 }
@@ -1579,6 +1688,20 @@ impl MetaProvenance {
             route_owned_snapshot_cached_parse_hits: self
                 .route_owned_snapshot_cached_parse_hits
                 .load(Relaxed),
+            ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
+            ensure_loaded_wait_ns: self.ensure_loaded_wait_ns.load(Relaxed),
+            ensure_loaded_work_ns: self.ensure_loaded_work_ns.load(Relaxed),
+            execute_cooperative_owner_path: self.execute_cooperative_owner_path.load(Relaxed),
+            execute_cooperative_joiner_path: self.execute_cooperative_joiner_path.load(Relaxed),
+            execute_cooperative_held_ns: self.execute_cooperative_held_ns.load(Relaxed),
+            node_arena_pushes: self.node_arena_pushes.load(Relaxed),
+            node_arena_intern_miss: self.node_arena_intern_miss.load(Relaxed),
+            node_arena_inner_write_wait_ns: self.node_arena_inner_write_wait_ns.load(Relaxed),
+            scheduler_submit_count: self.scheduler_submit_count.load(Relaxed),
+            scheduler_inbox_depth_max: self.scheduler_inbox_depth_max.load(Relaxed),
+            node_arena_pushes_per_discriminant: std::array::from_fn(|i| {
+                self.node_arena_pushes_per_discriminant[i].load(Relaxed)
+            }),
         }
     }
 
@@ -1618,6 +1741,20 @@ impl MetaProvenance {
         self.route_owned_snapshot_cache_hits.store(0, Relaxed);
         self.route_owned_snapshot_cached_parse_hits
             .store(0, Relaxed);
+        self.ensure_loaded_calls.store(0, Relaxed);
+        self.ensure_loaded_wait_ns.store(0, Relaxed);
+        self.ensure_loaded_work_ns.store(0, Relaxed);
+        self.execute_cooperative_owner_path.store(0, Relaxed);
+        self.execute_cooperative_joiner_path.store(0, Relaxed);
+        self.execute_cooperative_held_ns.store(0, Relaxed);
+        self.node_arena_pushes.store(0, Relaxed);
+        self.node_arena_intern_miss.store(0, Relaxed);
+        self.node_arena_inner_write_wait_ns.store(0, Relaxed);
+        self.scheduler_submit_count.store(0, Relaxed);
+        self.scheduler_inbox_depth_max.store(0, Relaxed);
+        for slot in &self.node_arena_pushes_per_discriminant {
+            slot.store(0, Relaxed);
+        }
     }
 }
 
@@ -1678,6 +1815,20 @@ pub struct MetaProvenanceSnapshot {
     pub imported_macro_declaration_builds: u64,
     pub route_owned_snapshot_cache_hits: u64,
     pub route_owned_snapshot_cached_parse_hits: u64,
+    /// Path C C1 contention instrumentation.
+    pub ensure_loaded_calls: u64,
+    pub ensure_loaded_wait_ns: u64,
+    pub ensure_loaded_work_ns: u64,
+    pub execute_cooperative_owner_path: u64,
+    pub execute_cooperative_joiner_path: u64,
+    pub execute_cooperative_held_ns: u64,
+    pub node_arena_pushes: u64,
+    pub node_arena_intern_miss: u64,
+    pub node_arena_inner_write_wait_ns: u64,
+    pub scheduler_submit_count: u64,
+    pub scheduler_inbox_depth_max: u64,
+    /// Per-`SemanticNodeData` discriminant push count.
+    pub node_arena_pushes_per_discriminant: [u64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 }
 
 /// Point-in-time snapshot of host performance metrics.

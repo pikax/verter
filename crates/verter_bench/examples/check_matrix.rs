@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::match_like_matches_macro)]
 //! Matrix Comparator for Verter vs Vue output.
 //!
 //! Reads a capture_manifest.json, pairs Vue vs Verter modules by (mode, module_key),

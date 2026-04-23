@@ -11,6 +11,7 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 pub struct HostStoreView {
     compat_token: crate::resolver_core::StoreViewCompatToken,
     mutation_epoch: u64,
+    session_id: Option<u64>,
     whole_hashes: FxHashMap<String, Hash16>,
     derived_hashes: FxHashMap<(String, crate::resolver_core::DerivedFactKind), Hash16>,
     import_routes: FxHashMap<(String, String), crate::types::DependencyResolution>,
@@ -19,8 +20,12 @@ pub struct HostStoreView {
 impl Default for HostStoreView {
     fn default() -> Self {
         Self {
-            compat_token: crate::resolver_core::StoreViewCompatToken(0),
+            compat_token: crate::resolver_core::StoreViewCompatToken {
+                epoch: 0,
+                session: None,
+            },
             mutation_epoch: 0,
+            session_id: None,
             whole_hashes: FxHashMap::default(),
             derived_hashes: FxHashMap::default(),
             import_routes: FxHashMap::default(),
@@ -32,19 +37,41 @@ impl HostStoreView {
     pub(crate) fn from_host(host: &VerterHost) -> Self {
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
             let snapshot_epoch = host.current_store_view_epoch();
-            let view = Self::build(host, snapshot_epoch);
+            let view = Self::build(host, snapshot_epoch, None);
             if host.current_store_view_epoch() == snapshot_epoch {
                 return view;
             }
         }
 
         let snapshot_epoch = host.current_store_view_epoch();
-        Self::build(host, snapshot_epoch)
+        Self::build(host, snapshot_epoch, None)
     }
 
-    fn build(host: &VerterHost, snapshot_epoch: u64) -> Self {
+    /// Build a session-scoped store view.
+    ///
+    /// The compat token includes the session identity so that two sessions
+    /// with different overlays but the same epoch never coalesce into the
+    /// same singleflight lane (Path C C14).
+    pub(crate) fn from_session(
+        view: &crate::session_runtime::SessionView,
+        host: &VerterHost,
+    ) -> Self {
+        for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
+            let snapshot_epoch = host.current_store_view_epoch();
+            let sv = Self::build(host, snapshot_epoch, Some(view.session_id));
+            if host.current_store_view_epoch() == snapshot_epoch {
+                return sv;
+            }
+        }
+
+        let snapshot_epoch = host.current_store_view_epoch();
+        Self::build(host, snapshot_epoch, Some(view.session_id))
+    }
+
+    fn build(host: &VerterHost, snapshot_epoch: u64, session_id: Option<u64>) -> Self {
         let mut view = Self {
             mutation_epoch: snapshot_epoch,
+            session_id,
             ..Self::default()
         };
 
@@ -168,10 +195,12 @@ impl HostStoreView {
         self.mutation_epoch
     }
 
+    #[allow(dead_code)]
     pub(crate) fn whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
         self.whole_hashes.get(canonical_id).copied()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn derived_hash(
         &self,
         canonical_id: &str,
@@ -236,7 +265,10 @@ impl HostStoreView {
     }
 
     fn compute_compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-        crate::resolver_core::StoreViewCompatToken(self.mutation_epoch)
+        crate::resolver_core::StoreViewCompatToken {
+            epoch: self.mutation_epoch,
+            session: self.session_id,
+        }
     }
 }
 

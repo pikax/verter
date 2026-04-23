@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Benchmark for the AST-based compilation pipeline
 //! (Syntax → generate_script → generate_template → styles).
 //!

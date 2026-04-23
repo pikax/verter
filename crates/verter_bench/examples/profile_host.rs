@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 //! Full host pipeline profiler.
 //!
 //! Runs the full Verter host pipeline (upsert → compile → lint) on real-world

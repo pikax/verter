@@ -1,64 +1,40 @@
-//! Native type solver for demand-driven symbolic type resolution.
+//! Shared types for the retired native type solver kernel.
 //!
-//! This module replaces the legacy lightweight evaluator with a cache-owned,
-//! demand-driven solver that can expand TypeScript types accurately using
-//! generous operational safety rails instead of ad hoc budget cutoffs.
+//! The arena-based solver (`solve_type`, `relate`, `project`, `TypeQueryEngine`,
+//! `TypeSolverHost`) has been retired as part of the D-Cutover. What survives
+//! here are the compact data carriers that remain in use across
+//! `verter_session`, `verter_ffi`, and the shared semantic dispatch layer:
 //!
-//! # Architecture
-//!
-//! The solver operates over a pipeline:
-//!
-//! `shallow state → frontier → prepared declarations → query arena → solver → projection`
-//!
-//! ## Ownership boundary
-//!
-//! - `verter_session` owns file readiness, frontier traversal, and prepared
-//!   declaration caching.
-//! - `verter_semantic::analysis::type_solver` owns the solver kernel: arena,
-//!   relations, projections, recursion handling, and built-in utility semantics.
-//! - Consumers enter the solver with resolved root identities only — the solver
-//!   never reopens route discovery from raw import specifiers or source text.
-//!
-//! ## Modules
-//!
-//! - [`host`]: `TypeSolverHost` trait — the load-bearing boundary between
-//!   session (host) and solver.
-//! - [`result`]: Exactness model, execution status, relation outcomes.
-//! - [`arena`]: Query-local node interning with memoization tables.
-//! - [`prepared`]: Prepared declaration structures consumed by the solver.
-//! - [`substitution`]: Generic substitution environments and applied-node keys.
-//! - [`relate`]: Tri-state assignability and unification engine.
-//! - [`project`]: Demand-driven projections: member, keyspace, surface, normalize.
-//! - [`recursion`]: SCC discovery, cycle classes, fixed-point handling.
-//! - [`builtin`]: Built-in TypeScript utility type semantics.
-//! - [`display`]: Debug/display helpers for traces and tests.
+//! - [`arena`] — append-only query-local node store (still used as a scratch
+//!   representation by prepared declarations and `display`-free diagnostics).
+//! - [`builtin`] — `BuiltinUtility` enum + metadata (name, arity, compiler
+//!   intrinsic classification). Consumed by the intrinsic registry and
+//!   dispatch lower.
+//! - [`host`] — identity / utility classification types
+//!   (`ResolvedRootIdentity`, `UtilitySource`, `BareRefOrigin`,
+//!   `RequestStatus`). The `TypeSolverHost` trait has been retired.
+//! - [`prepared`] — prepared declaration bodies consumed by dispatch and
+//!   component-meta's query engine.
+//! - [`query_engine`] — projection result carriers (`ProjectedSurface`,
+//!   `ProjectedMember`, `ProjectedKeyspace`). The standalone `TypeQueryEngine`
+//!   itself is retired.
+//! - [`result`] — solver result exactness / execution status (used by the
+//!   expansion pipeline and FFI).
 
 pub mod arena;
-pub mod audit;
 pub mod builtin;
-pub mod display;
 pub mod host;
-pub mod lower;
 pub mod prepared;
-pub mod project;
 pub mod query_engine;
-pub mod recursion;
-pub mod relate;
 pub mod result;
-pub mod solve;
-pub mod substitution;
-
-#[cfg(test)]
-mod generic_navigation_solver_tests;
 
 // ---------------------------------------------------------------------------
 // Re-exports for ergonomic access
 // ---------------------------------------------------------------------------
 
-pub use host::{
-    NoopSolverHost, RequestStatus, ResolvedRootIdentity, TypeSolverHost, UtilitySource,
-};
+pub use host::{BareRefOrigin, RequestStatus, ResolvedRootIdentity, UtilitySource};
 pub use prepared::{PreparedTypeDecl, PreparedValueDecl};
+pub use query_engine::{ProjectedKeyspace, ProjectedMember, ProjectedSurface};
 pub use result::{
-    ExecutionStatus, IncompleteReason, RelationMode, RelationResult, SolverExactness, SolverResult,
+    ExecutionStatus, IncompleteReason, SolverDiagnostic, SolverExactness, SolverResult,
 };

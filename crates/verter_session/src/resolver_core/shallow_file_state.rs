@@ -239,6 +239,9 @@ pub enum BudgetDomain {
     LocalClosure,
     Frontier,
     BuilderExpansion,
+    SolverResolveSteps,
+    SolverArenaNodes,
+    SolverInstantiationDepth,
 }
 
 impl std::fmt::Display for BudgetExceededFailure {

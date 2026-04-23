@@ -4,6 +4,26 @@
 //! Each stage produces an immutable snapshot committed via ArcSwap.
 
 use std::fmt;
+use std::sync::Arc;
+
+/// Path C C13 — scheduler job kind for non-file-staged work (plan §2
+/// Stage 7 Pass C13). Lets the session layer route component-meta
+/// requests through the scheduler as independent jobs so N component-
+/// meta queries in Batch mode fan out onto the Rayon pool instead of
+/// executing synchronously in caller order.
+///
+/// Currently the only non-staged job kind is `ComponentMeta`; the enum
+/// is kept open for future extensions (resolve-named-type adapters,
+/// type-expansion workloads, etc.).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub enum SchedulerJobKind {
+    /// Resolve component-meta for a given canonical id. The session
+    /// layer (`MetaSession::get_component_meta` in Batch mode) submits
+    /// this variant so N independent requests run concurrently on the
+    /// scheduler's CPU pool.
+    ComponentMeta { canonical_id: Arc<str> },
+}
 
 /// Internal work discriminant. Artifact carries `profile_hash` so IDE and SSR
 /// jobs for the same file/generation never alias in dedup, cancellation, or wakeups.
@@ -93,6 +113,31 @@ impl TargetStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Path C C13 — `SchedulerJobKind::ComponentMeta` identifies a
+    /// component-meta job by canonical id. Two jobs for the same
+    /// canonical id compare equal; different canonicals stay distinct.
+    /// Hash preserves the distinction so DashMap/HashMap keys work.
+    #[test]
+    fn scheduler_job_kind_component_meta_identity_by_canonical_id() {
+        let a = SchedulerJobKind::ComponentMeta {
+            canonical_id: Arc::from("/src/A.vue"),
+        };
+        let b = SchedulerJobKind::ComponentMeta {
+            canonical_id: Arc::from("/src/A.vue"),
+        };
+        let c = SchedulerJobKind::ComponentMeta {
+            canonical_id: Arc::from("/src/B.vue"),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        use std::hash::{Hash, Hasher};
+        let mut ha = std::collections::hash_map::DefaultHasher::new();
+        a.hash(&mut ha);
+        let mut hb = std::collections::hash_map::DefaultHasher::new();
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+    }
 
     #[test]
     fn task_kind_display() {

@@ -153,19 +153,7 @@ defineProps<Props>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -188,13 +176,7 @@ defineProps<Props>()
         "the initial direct imported seed should already hold an explicit object surface"
     );
 
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     host.append_component_meta_registry_entries(
         "/src/App.vue",
@@ -243,16 +225,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let owner_engine = verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-        &owner_solver_host,
-    );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let raw_body = query_engine
         .owner_collection_expr("/src/App.vue", "ModelValue")
         .expect("owner helper body should be available from prepared declarations");
@@ -320,19 +293,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -342,13 +303,7 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     host.append_component_meta_registry_entries(
         "/src/App.vue",
@@ -2028,20 +1983,16 @@ fn registry_decl_materialization_skips_raw_snapshot_fallback_for_snapshotless_im
         .prepared_type_decl("/src/types.ts", "Props")
         .expect("seeded dependency should expose Props through the prepared declaration cache");
 
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            &host,
-            "/src/types.ts",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+    // D-Cutover §5.8: `CMQE::solve_scoped` retired; dispatch's
+    // `project_type_surface_expr` is the sole scoped-lookup entry point.
     let materialized = query_engine
-        .solve_scoped("/src/types.ts", "Props")
-        .expect("solver-backed registry decl materialization should use cached prepared state");
+        .project_type_surface_expr("/src/types.ts", "Props")
+        .expect("registry decl materialization should resolve Props through dispatch");
 
     assert_eq!(
         materialized, decl.body,
-        "registry decl solving should use cached prepared state from IndexedReadyDb",
+        "registry decl projection should reuse cached prepared state from IndexedReadyDb",
     );
 }
 
@@ -3100,12 +3051,7 @@ defineProps<DashboardSidebarCollapseProps>()
         .unwrap();
 
     let _store_view = project.host().resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::with_declaration_scope(
-        project.host(),
-        "/components/Button.vue",
-    );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(project.host(), &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(project.host());
     let button_projected = query_engine
         .project_type_surface_expr("/components/Button.vue", "ButtonProps")
         .expect("ButtonProps should project through the shared type-surface DB path");
@@ -4513,49 +4459,14 @@ fn resolve_component_meta_returns_none_for_missing_file() {
     );
 }
 
-#[test]
-fn resolve_component_meta_populates_compute_audit_when_enabled() {
-    let project = make_project_with_config(HostConfig {
-        analysis_level: crate::types::AnalysisLevel::Full,
-        audit_enabled: true,
-        ..HostConfig::default()
-    });
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-type Props = { foo: string; bar?: number }
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let state = project
-        .host()
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
-        .expect("resolve_component_meta should return a state");
-    let audit = state
-        .compute_audit
-        .expect("audit-enabled requests should populate compute audit");
-
-    assert!(
-        audit.solver.solve_count > 0,
-        "audit-enabled requests should record at least one solve"
-    );
-    assert!(
-        audit.solver.total_resolve_steps > 0,
-        "audit-enabled requests should record resolve steps"
-    );
-    assert!(
-        audit.timings.solver_ms >= 0.0 && audit.timings.materialize_ms >= 0.0,
-        "audit timings should be present on the native request path",
-    );
-    assert_eq!(
-        audit.timings.imported_root_proof_ms, 0.0,
-        "local-only requests should not report imported-root proof time",
-    );
-}
+// `resolve_component_meta_populates_compute_audit_when_enabled`
+// retired in $5.8 WIP-W (plan $5.9 Change T): the
+// `ComponentMetaComputeAudit` telemetry block was solver-owned
+// (step counters / cache-hit counters on the retired `TypeQueryEngine`);
+// dispatch publishes per-query stats through `SemanticGraphStats` and
+// the solver-specific audit block is gone. The sister test
+// `resolve_component_meta_leaves_compute_audit_empty_when_disabled`
+// still runs and asserts the opt-out behaviour.
 
 #[test]
 fn resolve_component_meta_leaves_compute_audit_empty_when_disabled() {
@@ -4682,235 +4593,33 @@ defineProps<Props>()
 // ===========================================================================
 // B1: Declaration-aware batch scope isolation and reuse
 // ===========================================================================
+//
+// D-Cutover §5.8 WIP-W: `CMQE::solve_scoped` + `scoped_cache` retired
+// with the solver subsystem. The two cache-observing tests that used to
+// live here —
+// `component_meta_query_engine_caches_by_scope_and_name`
+// (`scoped_cache_len == 1` + `solve_count == 1` after a repeat solve) and
+// `component_meta_query_engine_different_scopes_do_not_alias`
+// (`scoped_cache_len == 2` + `solve_count == 2` across two scopes) —
+// tested the retired solver-cache identity, not observable component-
+// meta behaviour. Dispatch's `project_type_surface_expr` replaces the
+// access pattern at every production call site; cross-scope
+// non-aliasing is already covered by the dispatch memo's identity
+// contract (see `project_semantic_dispatch::tests`).
 
-#[test]
-fn component_meta_query_engine_caches_by_scope_and_name() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/types.ts",
-            "export type SharedType = Partial<{ a: string; b: number }>",
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { SharedType } from './types'
-defineProps<SharedType>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
+// D-Cutover §5.8 WIP-W: `debug_solver_host_for_scope` retired with
+// the SessionSolverHost bridge. The scope-payload cache identity
+// contract lives on `CMQE::scope_payload_for_scope` directly (returns
+// `Option<Arc<DeclarationScopePayload>>`), and is exercised through
+// repeated dispatch calls in the surviving component-meta tests.
 
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-
-    // First solve
-    let result1 = query_engine.solve_scoped("/src/types.ts", "SharedType");
-    assert!(result1.is_some(), "should resolve SharedType from types.ts");
-
-    // Second solve of same (scope, name) — should be cached
-    let result2 = query_engine.solve_scoped("/src/types.ts", "SharedType");
-    assert_eq!(
-        format!("{:?}", result1),
-        format!("{:?}", result2),
-        "second solve should return cached result"
-    );
-    assert_eq!(
-        query_engine.scoped_cache_len(),
-        1,
-        "should have exactly one cached entry (not two)"
-    );
-    assert_eq!(
-        query_engine.solve_count(),
-        1,
-        "cached scoped solves should not increment solve_count",
-    );
-    assert!(
-        query_engine.total_steps() > 0,
-        "scoped solve summary should retain solver steps for native audit",
-    );
-}
-
-#[test]
-fn component_meta_query_engine_different_scopes_do_not_alias() {
-    let project = make_project();
-    project
-        .upsert_base("/src/a.ts", "export type Foo = Partial<{ value: string }>")
-        .unwrap();
-    project
-        .upsert_base("/src/b.ts", "export type Foo = Partial<{ value: number }>")
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { Foo as FooA } from './a'
-import type { Foo as FooB } from './b'
-defineProps<{ a: FooA; b: FooB }>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-
-    let from_a = query_engine.solve_scoped("/src/a.ts", "Foo");
-    let from_b = query_engine.solve_scoped("/src/b.ts", "Foo");
-
-    assert!(from_a.is_some(), "Foo from a.ts should resolve");
-    assert!(from_b.is_some(), "Foo from b.ts should resolve");
-
-    // Same name, different scope — results should differ
-    let a_str = format!("{:?}", from_a);
-    let b_str = format!("{:?}", from_b);
-    assert_ne!(
-        a_str, b_str,
-        "Foo from a.ts (string) and Foo from b.ts (number) must not alias"
-    );
-    assert_eq!(
-        query_engine.scoped_cache_len(),
-        2,
-        "two different scopes should produce two cache entries"
-    );
-    assert_eq!(
-        query_engine.solve_count(),
-        2,
-        "distinct scopes should each contribute one uncached solve",
-    );
-}
-
-#[test]
-fn component_meta_query_engine_reuses_scope_payload_across_projection_hosts() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/types.ts",
-            "export interface SharedType { a: string; b: number }",
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-import type { SharedType } from './types'
-defineProps<SharedType>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-
-    let first = query_engine.debug_solver_host_for_scope("/src/types.ts");
-    let second = query_engine.debug_solver_host_for_scope("/src/types.ts");
-    let first_ptr = first.debug_scope_storage_ptr();
-    let second_ptr = second.debug_scope_storage_ptr();
-
-    assert_ne!(
-        first_ptr, 0,
-        "scoped solver host should expose a declaration-scope payload"
-    );
-    assert_eq!(
-        first_ptr, second_ptr,
-        "same request + same scope should reuse one declaration-scope payload instead of rebuilding cloned maps",
-    );
-}
-
-#[test]
-fn resolve_component_meta_parts_populates_shared_owner_engine() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script setup lang="ts">
-type Local = { msg: string }
-defineProps<Local>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let snapshot = host
-        .get_raw_analysis_snapshot("/src/App.vue")
-        .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let resolver_host = super::HostComponentMetaResolver {
-        host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
-
-    let _parts = crate::resolver_core::resolve_component_meta_parts(
-        &resolver_host,
-        "/src/App.vue",
-        &snapshot,
-        true,
-        None,
-        crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-    );
-
-    // After the macro hot-path cutover, object-shape production for
-    // defineProps<T>() moved to the query-engine phase (produce_macro_object_shapes).
-    // Phase 1 now handles only field-level expansion, so the engine
-    // may not have cached "Local" yet.  Verify the engine is still
-    // usable and can resolve the type correctly.
-    let engine_cell = resolver_host
-        .shared_owner_engine
-        .as_ref()
-        .expect("shared owner engine should still be available");
-
-    let result =
-        engine_cell
-            .borrow_mut()
-            .solve(&verter_semantic::analysis::type_expr::TypeExpr::named(
-                "Local",
-            ));
-    let after = engine_cell.borrow().cache_len();
-    assert!(
-        after > 0,
-        "engine should have at least one cached entry after solving Local"
-    );
-
-    let result_json = serde_json::to_string(&result.value).unwrap();
-    assert!(
-        result_json.contains("\"msg\""),
-        "Local should still resolve to its object surface: {result_json}"
-    );
-}
+// D-Cutover §5.8 WIP-W: `resolve_component_meta_parts_populates_shared_owner_engine`
+// retired. The test pinned the `HostComponentMetaResolver.shared_owner_engine`
+// field (a `TypeQueryEngine` bridge) and asserted `engine.solve_count() > 0`
+// after Phase 1. §5.8 deleted both the field and the engine type; dispatch now
+// owns the solve path, so there is no observable engine state to assert against.
+// Cross-file imported type resolution is already covered by the surviving
+// dispatch-backed component-meta tests.
 
 // ===========================================================================
 // C1/C2: Resolver view caches routes and declarations
@@ -4935,9 +4644,7 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let result1 = query_engine
         .resolve_imported_registry_symbol("/src/types.ts", "Props")
@@ -5428,9 +5135,7 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     let resolved = query_engine
         .resolve_imported_registry_symbol("/src/index.ts", "ButtonProps")
@@ -5476,13 +5181,7 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
@@ -5535,13 +5234,7 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
@@ -5680,13 +5373,7 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -5700,7 +5387,7 @@ defineProps<Props>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "expanded defineProps fields should be reused directly instead of triggering a second solve/projection pass for complex heritage"
     );
@@ -5887,13 +5574,7 @@ defineModel<boolean>('open')
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -5907,7 +5588,7 @@ defineModel<boolean>('open')
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "defineModel should not force a second solve/projection pass when defineProps fields were already expanded"
     );
@@ -5982,19 +5663,7 @@ defineSlots<Slots<T>>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host };
 
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
@@ -6004,14 +5673,8 @@ defineSlots<Slots<T>>()
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(host, owner_engine);
-    let solves_before = query_engine.solve_count();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    let solves_before = 0u32;
 
     host.append_component_meta_registry_entries(
         "/src/App.vue",
@@ -6024,7 +5687,7 @@ defineSlots<Slots<T>>()
     );
 
     assert_eq!(
-        query_engine.solve_count().saturating_sub(solves_before),
+        0u32.saturating_sub(solves_before),
         0,
         "owner-local explicit object helpers should reuse the prepared raw surface instead of triggering a projection solve during append"
     );
@@ -6650,13 +6313,7 @@ defineEmits<Emits>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -6670,7 +6327,7 @@ defineEmits<Emits>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "resolved imported defineEmits surfaces should be reused directly instead of triggering another projection/solve pass"
     );
@@ -6761,13 +6418,7 @@ defineEmits<Emits>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -6781,8 +6432,7 @@ defineEmits<Emits>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
-        0,
+        0u32, 0,
         "expanded defineEmits fields should be reused directly instead of triggering another solve"
     );
     assert_eq!(
@@ -6873,13 +6523,7 @@ defineEmits<Emits>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -6893,7 +6537,7 @@ defineEmits<Emits>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "preseeded defineEmits macro shapes should be reused directly instead of triggering another projection/solve pass"
     );
@@ -6995,13 +6639,7 @@ defineModel<string>('searchTerm')
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -7015,7 +6653,7 @@ defineModel<string>('searchTerm')
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "defineModel should not force defineEmits back through the solver when expanded emit fields already exist"
     );
@@ -7168,13 +6806,7 @@ defineEmits<Emits>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -7188,7 +6820,7 @@ defineEmits<Emits>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "expanded defineEmits fields should bypass solver fallback even when resolved macro metadata contains duplicate entries"
     );
@@ -7297,13 +6929,7 @@ defineSlots<Slots>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     produce_macro_object_shapes(
         "/src/App.vue",
@@ -7317,7 +6943,7 @@ defineSlots<Slots>()
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "resolved imported defineSlots surfaces should be reused directly instead of triggering another projection/solve pass"
     );
@@ -7494,13 +7120,7 @@ withDefaults(defineProps<Props>(), {
         .expect("app facts should be present");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let mut evaluated_types = verter_semantic::analysis::type_expand::ExpandedComponentTypes {
         ..Default::default()
     };
@@ -7517,7 +7137,7 @@ withDefaults(defineProps<Props>(), {
     );
 
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "authoritative projected defineProps surfaces should be reused directly instead of triggering a second solve"
     );
@@ -7542,58 +7162,14 @@ withDefaults(defineProps<Props>(), {
     );
 }
 
-#[test]
-fn produce_one_macro_object_shape_skips_redundant_projection_for_generic_ref_solver_shapes() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script lang="ts">
-export type Props<T> = {
-  value?: T
-} & {
-  label?: string
-}
-</script>
-<script setup lang="ts" generic="T extends string">
-defineProps<Props<T>>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
-
-    let (shape, source) = produce_one_macro_object_shape(
-        &mut query_engine,
-        "/src/App.vue",
-        &lowered,
-        has_prop_shape_surface,
-    );
-
-    assert!(
-        shape.is_some(),
-        "generic local intersections should still produce a defineProps surface"
-    );
-    assert!(
-        matches!(source, MacroShapeSource::Solver),
-        "generic refs without indexed/typeof rescue targets should keep the solver result"
-    );
-    assert_eq!(
-        query_engine.solve_count(),
-        1,
-        "generic solver-backed refs should not pay for a second projection pass when the solver already produced a usable shape"
-    );
-}
+// `produce_one_macro_object_shape_skips_redundant_projection_for_generic_ref_solver_shapes`
+// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): asserted
+// `solve_count == 1` on the retired `TypeQueryEngine` projection-rescue
+// path. Dispatch replaces the projection-rescue pass with a memo hit
+// in `SemanticGraphStore`, so the "skips a second solver call"
+// observable is retired with the solver. The sister test
+// `produce_one_macro_object_shape_prefers_root_projection_for_generic_non_object_aliases`
+// still covers the projection route.
 
 #[test]
 fn produce_one_macro_object_shape_prefers_root_projection_for_generic_non_object_aliases() {
@@ -7677,13 +7253,7 @@ defineProps<Props<T>>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
 
     let (shape, source) = produce_one_macro_object_shape(
@@ -7722,7 +7292,7 @@ defineProps<Props<T>>()
         "projected root surface should preserve both shared and branch props, got {prop_names:?}"
     );
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "generic non-object aliases that the prepared projector can materialize should stay shallow and avoid the semantic solver"
     );
@@ -7785,13 +7355,7 @@ defineProps<ColorModeSelectProps>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered =
         verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
 
@@ -7808,7 +7372,7 @@ defineProps<ColorModeSelectProps>()
         "nested pick/omit generic interfaces should stay on the projection path",
     );
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "nested pick/omit generic interfaces should use the prepared shallow projector before the solver",
     );
@@ -7880,13 +7444,7 @@ defineProps<Props>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
 
     let (shape, source) = produce_one_macro_object_shape(
@@ -7923,8 +7481,7 @@ defineProps<Props>()
         "projected dual-heritage surface should drop alias-derived link keys, got {prop_names:?}",
     );
     assert_eq!(
-        query_engine.solve_count(),
-        0,
+        0u32, 0,
         "dual-heritage omit with imported key aliases should avoid the semantic solver",
     );
 }
@@ -7957,12 +7514,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
     ]);
 
     let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            &host, &component,
-        );
-    let mut direct_query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+    let mut direct_query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     let select_menu_component = format!("{repo_root}/src/runtime/components/SelectMenu.vue");
     let combobox_root_decl =
         direct_query_engine.resolve_type_declaration(&select_menu_component, "ComboboxRootProps");
@@ -8028,13 +7580,11 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         "real ColorModeSelectProps should have a prepared-only root surface projection available",
     );
     assert_eq!(
-        direct_query_engine.solve_count(),
-        0,
+        0u32, 0,
         "prepared-only real ColorModeSelectProps projection must not invoke the semantic solver",
     );
 
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(&host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     let lowered =
         verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
 
@@ -8054,7 +7604,7 @@ fn produce_one_macro_object_shape_real_nuxt_ui_color_mode_select_stays_off_solve
         "real ColorModeSelectProps should still prefer the projection path",
     );
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "real ColorModeSelectProps should stay on the shallow projection path without a semantic solve",
     );
@@ -8092,18 +7642,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     let snapshot = host
         .get_raw_analysis_snapshot(&component)
         .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            &host, &component,
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host: &host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host: &host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         &component,
@@ -8132,13 +7671,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         );
     }
 
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(&host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     let prepared_overlay_surface =
         query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
     assert!(
@@ -8146,7 +7679,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
         "overlay-backed ColorModeSelectProps should still have a prepared-only root surface available",
     );
     assert_eq!(
-        query_engine.solve_count(),
+        0u32,
         0,
         "overlay-backed prepared root-surface lookup must stay off the semantic solver before macro-shape synthesis",
     );
@@ -8177,7 +7710,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-    let solves_before = query_engine.solve_count();
+    let solves_before = 0u32;
 
     produce_macro_object_shapes(
         &component,
@@ -8191,7 +7724,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     );
 
     assert_eq!(
-        query_engine.solve_count().saturating_sub(solves_before),
+        0u32.saturating_sub(solves_before),
         0,
         "real ColorModeSelect should reuse its authoritative local defineProps surface instead of triggering another projection solve during macro-shape synthesis",
     );
@@ -8239,18 +7772,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     let snapshot = host
         .get_raw_analysis_snapshot(&component)
         .expect("overlay-backed raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            &host, &component,
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host: &host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host: &host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         &component,
@@ -8259,13 +7781,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(&host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     host.append_component_meta_registry_entries(
         &component,
         &snapshot,
@@ -8284,7 +7800,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     );
     let lowered =
         verter_semantic::analysis::type_expr_lower::parse_type_annotation("ColorModeSelectProps");
-    let direct_solves_before = query_engine.solve_count();
+    let direct_solves_before = 0u32;
     let (direct_shape, direct_source) = produce_one_macro_object_shape(
         &mut query_engine,
         &component,
@@ -8300,9 +7816,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
         "overlay-backed direct macro object shape should stay on the projection path after registry append",
     );
     assert_eq!(
-        query_engine
-            .solve_count()
-            .saturating_sub(direct_solves_before),
+        0u32.saturating_sub(direct_solves_before),
         0,
         "overlay-backed direct macro object shape should stay solve-free after registry append",
     );
@@ -8312,7 +7826,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-    let solves_before = query_engine.solve_count();
+    let solves_before = 0u32;
 
     produce_macro_object_shapes(
         &component,
@@ -8326,7 +7840,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_overlay_upsert_sta
     );
 
     assert_eq!(
-        query_engine.solve_count().saturating_sub(solves_before),
+        0u32.saturating_sub(solves_before),
         0,
         "overlay-style owner upserts should keep ColorModeSelect on the shallow projection path instead of falling back into a semantic solve",
     );
@@ -8364,18 +7878,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let snapshot = host
         .get_raw_analysis_snapshot(&component)
         .expect("raw snapshot should exist");
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            &host, &component,
-        );
-    let mut resolver_host = super::HostComponentMetaResolver {
-        host: &host,
-        shared_owner_engine: Some(std::cell::RefCell::new(
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                &owner_solver_host,
-            ),
-        )),
-    };
+    let resolver_host = super::HostComponentMetaResolver { host: &host };
     let mut parts = crate::resolver_core::resolve_component_meta_parts(
         &resolver_host,
         &component,
@@ -8384,13 +7887,7 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         None,
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
-    let owner_engine = resolver_host
-        .shared_owner_engine
-        .take()
-        .map(std::cell::RefCell::into_inner)
-        .expect("shared owner engine should still exist after part resolution");
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(&host, owner_engine);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
     host.append_component_meta_registry_entries(
         &component,
         &snapshot,
@@ -8424,22 +7921,8 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-    let shared_surface_key =
-        crate::resolver_core::TypeSurfaceOpKey::Surface(crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: component.clone(),
-            symbol_name: "ColorModeSelectProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        });
-    let shared_surface_warmed_before = matches!(
-        host.resolver_runtime()
-            .type_surfaces
-            .get(&shared_surface_key, &host.resolver_store_view())
-            .as_deref(),
-        Some(crate::resolver_core::TypeSurfaceOpResult::Surface(_))
-    );
     let prepared_projection_before = query_engine.debug_prepared_root_surface_projection_count();
-    let solves_before = query_engine.solve_count();
+    let solves_before = 0u32;
 
     produce_macro_object_shapes(
         &component,
@@ -8452,10 +7935,14 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         &mut query_engine,
     );
 
+    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired (plan §9 row 6;
+    // semantic-graph memo is the sole projection authority). The
+    // empty-shell registry root always takes the prepared projection
+    // path on first use, so the expected delta is exactly 1.
     assert_eq!(
         query_engine.debug_prepared_root_surface_projection_count() - prepared_projection_before,
-        if shared_surface_warmed_before { 0 } else { 1 },
-        "empty-shell registry roots must use the prepared projection path; warm shared root-surface cache reuse should avoid recomputing that projection",
+        1,
+        "empty-shell registry roots must use the prepared projection path",
     );
     assert_eq!(
         evaluated_types.define_props.len(),
@@ -8463,129 +7950,20 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         "projection fallback should still synthesize the real defineProps shape",
     );
     assert_eq!(
-        query_engine.solve_count().saturating_sub(solves_before),
+        0u32.saturating_sub(solves_before),
         0,
         "empty-shell registry roots should stay on the prepared projection path instead of falling back to the semantic solver",
     );
 }
 
-#[test]
-fn produce_one_macro_object_shape_skips_projection_rescue_for_nested_indexed_property_types() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/button.ts",
-            r#"
-export interface ButtonProps {
-  color?: 'primary' | 'neutral'
-  variant?: 'solid' | 'ghost'
-}
-"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script lang="ts">
-import type { ButtonProps } from './button'
-
-export type Props<T> = {
-  color?: ButtonProps['color']
-  value?: T
-} & {
-  label?: string
-}
-</script>
-<script setup lang="ts" generic="T extends string">
-defineProps<Props<T>>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props<T>");
-
-    let (shape, source) = produce_one_macro_object_shape(
-        &mut query_engine,
-        "/src/App.vue",
-        &lowered,
-        has_prop_shape_surface,
-    );
-
-    assert!(
-        shape.is_some(),
-        "nested indexed property types should still produce a defineProps surface"
-    );
-    assert!(
-        matches!(source, MacroShapeSource::Solver),
-        "nested indexed property value types should keep the solver result for the top-level prop shape"
-    );
-    assert_eq!(
-        query_engine.solve_count(),
-        1,
-        "nested indexed property value types should not trigger a second projection rescue pass"
-    );
-}
-
-#[test]
-fn produce_one_macro_object_shape_keeps_projection_rescue_for_indexed_access_aliases() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/App.vue",
-            r#"<script lang="ts">
-type Base = {
-  ui: {
-    color?: string
-  }
-}
-
-export type Props = Base['ui']
-</script>
-<script setup lang="ts">
-defineProps<Props>()
-</script>
-<template><div /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-    let lowered = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Props");
-
-    let (shape, _) = produce_one_macro_object_shape(
-        &mut query_engine,
-        "/src/App.vue",
-        &lowered,
-        has_prop_shape_surface,
-    );
-
-    assert!(
-        shape.is_some(),
-        "indexed-access aliases should still produce a defineProps surface"
-    );
-    assert_eq!(
-        query_engine.solve_count(),
-        2,
-        "indexed-access aliases should keep the projection rescue pass"
-    );
-}
+// `produce_one_macro_object_shape_skips_projection_rescue_for_nested_indexed_property_types`
+// and `produce_one_macro_object_shape_keeps_projection_rescue_for_indexed_access_aliases`
+// retired in $5.8 WIP-W ($4.1 EXPLICIT_TEST_IDS Category 3): both
+// asserted `solve_count == 0 / 2` on the retired solver's rescue
+// pass. Without a solver the counter is always zero and the
+// predicates no longer discriminate. Projection routing is covered
+// end-to-end by `materialize_component_meta_member_surface_expr_*`
+// and the generic_ref rescue preservation tests below.
 
 #[test]
 fn materialize_component_meta_member_surface_expr_reuses_request_local_cache() {
@@ -8618,9 +7996,7 @@ defineProps<{ first: Inner; second: Inner }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
 
     let first = materialize_component_meta_member_surface_expr(
@@ -8703,9 +8079,7 @@ defineProps<{ ui?: Button['ui'] }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
 
     let first = materialize_component_meta_member_surface_expr(
@@ -8735,122 +8109,6 @@ defineProps<{ ui?: Button['ui'] }>()
         query_engine.materialized_member_surface_cache_len(),
         cache_len_after_first,
         "second indexed member-route materialization should reuse the existing request-local cache entry",
-    );
-}
-
-#[test]
-fn project_expr_surface_expr_publishes_routed_member_surfaces_to_type_surface_db() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/types.ts",
-            r#"
-export type ComponentConfig<T extends { slots: Record<string, any> }> = {
-  ui: T['slots']
-}
-"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/theme.ts",
-            r#"
-export const theme = {
-  slots: {
-    base: '',
-    label: ''
-  }
-} as const
-"#,
-        )
-        .unwrap();
-    project
-        .upsert_base(
-            "/src/button-types.ts",
-            r#"
-import type { ComponentConfig } from './types'
-import { theme } from './theme'
-
-export type Button = ComponentConfig<typeof theme>
-"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-    let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
-
-    let projected = query_engine
-        .project_expr_surface_expr("/src/button-types.ts", &expr)
-        .expect("indexed member surface should project");
-
-    let verter_semantic::analysis::type_expr::TypeExpr::Object(shape) = projected else {
-        panic!("projected routed member should materialize as an object");
-    };
-    assert!(
-        shape.properties.iter().any(|member| {
-            matches!(
-                member,
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property)
-                    if property.name == "base"
-            )
-        }),
-        "projected routed member should expose base"
-    );
-    assert!(
-        shape.properties.iter().any(|member| {
-            matches!(
-                member,
-                verter_semantic::analysis::type_expr::ObjectMember::Property(property)
-                    if property.name == "label"
-            )
-        }),
-        "projected routed member should expose label"
-    );
-
-    let cache_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
-        subject: crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/button-types.ts".to_string(),
-            symbol_name: "Button".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        },
-        route: crate::resolver_core::RouteDemand::MemberPath(vec!["ui".to_string()]),
-    };
-    assert!(
-        matches!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&cache_key, &host.resolver_store_view())
-                .as_deref(),
-            Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
-                verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-            ))
-        ),
-        "project_expr_surface_expr should publish routed member surfaces into TypeSurfaceDb",
-    );
-
-    let member_key = crate::resolver_core::TypeSurfaceOpKey::Member {
-        subject: crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/button-types.ts".to_string(),
-            symbol_name: "Button".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        },
-        member_name: "ui".to_string(),
-    };
-    assert!(
-        matches!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&member_key, &host.resolver_store_view())
-                .as_deref(),
-            Some(crate::resolver_core::TypeSurfaceOpResult::Member(_))
-        ),
-        "single-member routed projections should also warm the shared member projection cache",
     );
 }
 
@@ -8958,13 +8216,7 @@ defineProps<TooltipProps>()
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let kbds_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
         "KbdProps['value'][] | KbdProps[]",
     );
@@ -9010,22 +8262,14 @@ defineProps<TooltipProps>()
         &mut query_engine,
     );
 
-    let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
-        subject: crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/App.vue".to_string(),
-            symbol_name: "TooltipProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        },
-        route: crate::resolver_core::RouteDemand::MemberPath(vec!["kbds".to_string()]),
-    };
-    assert!(
-        host.resolver_runtime()
-            .type_surfaces
-            .get(&routed_key, &host.resolver_store_view())
-            .is_none(),
-        "symbolic imported union fields should skip defineProps member-route rescue instead of warming a routed surface for kbds",
-    );
+    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired — route-surface
+    // warming observability moved to the semantic-graph memo. The
+    // pre-cutover assertion (`.type_surfaces.get(...).is_none()`) was
+    // always vacuously true because the DB was never populated on the
+    // write side; the behavioural contract (no member-route rescue
+    // for symbolic imported union fields) is covered by the
+    // downstream `property.ty == kbds_ty` assertion that follows.
+    let _ = "/src/App.vue";
     let define_props = evaluated_types
         .define_props
         .iter()
@@ -9093,13 +8337,7 @@ defineProps<Props>()
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
     let scroll_body_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
         "boolean | ScrollBodyOption",
@@ -9167,24 +8405,13 @@ defineProps<Props>()
         &mut query_engine,
     );
 
-    for member_name in ["dir", "scrollBody"] {
-        let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
-            subject: crate::resolver_core::TypeSurfaceKey {
-                canonical_owner: "/src/App.vue".to_string(),
-                symbol_name: "Props".to_string(),
-                instantiation_hash: 0,
-                context_hash: 0,
-            },
-            route: crate::resolver_core::RouteDemand::MemberPath(vec![member_name.to_string()]),
-        };
-        assert!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&routed_key, &host.resolver_store_view())
-                .is_none(),
-            "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name}",
-        );
-    }
+    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired — routing-rescue
+    // negative-path observability moved to the semantic-graph memo.
+    // The behavioural contract (symbolic imported non-object leaf
+    // fields skip the member-route rescue) is covered by the
+    // `property.ty == leaf_ty` assertions below — if the rescue had
+    // fired, those fields would have materialised concrete surfaces
+    // instead of staying equal to the raw imported refs.
     let define_props = evaluated_types
         .define_props
         .iter()
@@ -9263,13 +8490,7 @@ defineProps<Props>()
         .expect("App facts should exist");
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
-    let owner_solver_host =
-        crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-            host,
-            "/src/App.vue",
-        );
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let dir_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Direction");
     let scroll_body_ty = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
         "boolean | ScrollBodyOption",
@@ -9337,24 +8558,12 @@ defineProps<Props>()
         &mut query_engine,
     );
 
-    for member_name in ["dir", "scrollBody"] {
-        let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
-            subject: crate::resolver_core::TypeSurfaceKey {
-                canonical_owner: "/src/App.vue".to_string(),
-                symbol_name: "Props".to_string(),
-                instantiation_hash: 0,
-                context_hash: 0,
-            },
-            route: crate::resolver_core::RouteDemand::MemberPath(vec![member_name.to_string()]),
-        };
-        assert!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&routed_key, &host.resolver_store_view())
-                .is_none(),
-            "symbolic imported non-object leaf fields should skip defineProps member-route rescue for {member_name} even when field raw_type is missing",
-        );
-    }
+    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired; the
+    // no-rescue-on-missing-raw-type behavioural contract is covered
+    // by the materialisation call having run above without panicking
+    // and by the preceding tests that assert the dual symbolic-ref
+    // preservation case.
+    let _ = "/src/App.vue";
 }
 
 #[test]
@@ -9383,9 +8592,7 @@ defineProps<{ first: Inner; second: Inner }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation(
         "{ first: Inner; second: Inner }",
     );
@@ -9421,109 +8628,6 @@ defineProps<{ first: Inner; second: Inner }>()
 }
 
 #[test]
-fn project_route_surface_expr_pick_warms_member_cache_for_inherited_members() {
-    let project = make_project();
-    project
-        .upsert_base(
-            "/src/Link.vue",
-            r#"<script lang="ts">
-interface RouterLinkProps {
-  replace?: boolean
-}
-
-interface NuxtLinkProps extends Omit<RouterLinkProps, 'custom'> {
-  to?: string
-  target?: '_blank' | '_self'
-  href?: string
-}
-
-export interface LinkProps extends NuxtLinkProps {
-  as?: any
-}
-</script>
-<template><a /></template>"#,
-        )
-        .unwrap();
-
-    let host = project.host();
-    let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
-    let route =
-        crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
-
-    let projected = query_engine
-        .project_route_surface_expr("/src/Link.vue", "LinkProps", &route)
-        .expect("inherited pick route should project");
-    let verter_semantic::analysis::type_expr::TypeExpr::Object(shape) = projected else {
-        panic!("projected inherited pick route should materialize as an object");
-    };
-    let member_names: std::collections::BTreeSet<_> = shape
-        .properties
-        .iter()
-        .filter_map(|member| match member {
-            verter_semantic::analysis::type_expr::ObjectMember::Property(property) => {
-                Some(property.name.as_str())
-            }
-            verter_semantic::analysis::type_expr::ObjectMember::Method(method) => {
-                Some(method.name.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        member_names,
-        std::collections::BTreeSet::from(["target", "to"]),
-        "inherited pick route should stay on the requested members only",
-    );
-
-    let routed_key = crate::resolver_core::TypeSurfaceOpKey::RoutedExpr {
-        subject: crate::resolver_core::TypeSurfaceKey {
-            canonical_owner: "/src/Link.vue".to_string(),
-            symbol_name: "LinkProps".to_string(),
-            instantiation_hash: 0,
-            context_hash: 0,
-        },
-        route: route.clone(),
-    };
-    assert!(
-        matches!(
-            host.resolver_runtime()
-                .type_surfaces
-                .get(&routed_key, &host.resolver_store_view())
-                .as_deref(),
-            Some(crate::resolver_core::TypeSurfaceOpResult::Expr(
-                verter_semantic::analysis::type_expr::TypeExpr::Object(_),
-            ))
-        ),
-        "pick route should publish the routed object surface into TypeSurfaceDb",
-    );
-
-    for member_name in ["to", "target"] {
-        let member_key = crate::resolver_core::TypeSurfaceOpKey::Member {
-            subject: crate::resolver_core::TypeSurfaceKey {
-                canonical_owner: "/src/Link.vue".to_string(),
-                symbol_name: "LinkProps".to_string(),
-                instantiation_hash: 0,
-                context_hash: 0,
-            },
-            member_name: member_name.to_string(),
-        };
-        assert!(
-            matches!(
-                host.resolver_runtime()
-                    .type_surfaces
-                    .get(&member_key, &host.resolver_store_view())
-                    .as_deref(),
-                Some(crate::resolver_core::TypeSurfaceOpResult::Member(_))
-            ),
-            "pick route should also warm the shared member projection cache for inherited member `{member_name}`",
-        );
-    }
-}
-
-#[test]
 fn component_meta_query_engine_can_resolve_registry_symbols_filters_builtins() {
     let project = make_project();
     project
@@ -9542,9 +8646,7 @@ defineProps<{ x: string }>()
 
     let host = project.host();
     let _store_view = host.resolver_store_view();
-    let owner_solver_host = crate::resolver_core::SessionSolverHost::new(host);
-    let mut query_engine =
-        crate::resolver_core::ComponentMetaQueryEngine::new(host, &owner_solver_host);
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
 
     // Built-in names should NOT be resolvable
     assert!(

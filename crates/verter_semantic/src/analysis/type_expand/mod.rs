@@ -1,7 +1,8 @@
-//! Type expansion — now fully backed by the native type solver.
+//! Type expansion — now fully backed by the shared semantic dispatch layer.
 //!
-//! The old lightweight evaluator functions have been removed. All expansion
-//! goes through `type_solver::solve::solve_type()`.
+//! The standalone arena solver has been retired. All expansion goes through
+//! `ProjectSemanticDispatch::execute`; the helpers here only convert solver
+//! result metadata into the public expansion contract.
 
 mod request;
 
@@ -13,9 +14,7 @@ pub use request::{
 };
 
 use crate::analysis::type_expr::{ObjectMember, PrimitiveName, TypeExpr};
-use crate::analysis::type_solver::host::TypeSolverHost;
 use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
-use crate::analysis::type_solver::solve::solve_type;
 
 // ---------------------------------------------------------------------------
 // Shared solver-result → expansion-result conversion
@@ -99,22 +98,6 @@ pub fn solver_result_to_object_expansion(
         execution_status: result.execution_status,
         diagnostics,
     }
-}
-
-/// Expand a `TypeExpr` into an `ExpandedObjectShape` via the native solver.
-pub fn expand_object_shape(
-    expr: &TypeExpr,
-    solver_host: &dyn TypeSolverHost,
-) -> ExpansionResult<ExpandedObjectShape> {
-    solver_result_to_object_expansion(solve_type(expr, solver_host))
-}
-
-/// Expand a `TypeExpr` into a normalized expression via the native solver.
-pub fn expand_normalized_expr(
-    expr: &TypeExpr,
-    solver_host: &dyn TypeSolverHost,
-) -> ExpansionResult<ExpandedNormalizedExpr> {
-    solver_result_to_normalized_expansion(solve_type(expr, solver_host))
 }
 
 /// Extract an `ExpandedObjectShape` from a `TypeExpr`.

@@ -11,15 +11,18 @@
 //! query, the project applies the requesting session's overlays to the shared
 //! host and reverts any previously-applied session's overlays.
 //!
-//! # Concurrency
+//! # Concurrency (C15)
 //!
-//! A `Mutex<OverlayState>` serializes overlay-aware queries. Overlay-free
-//! sessions query the shared host directly without acquiring the gate.
+//! Per-session isolation is structural via `SessionRuntime`'s
+//! `ArcSwap<SessionView>` snapshots. No project-wide lock serializes
+//! overlay-aware queries. Readers load the snapshot lock-free; writers
+//! serialize via the per-session `view_writer_lock`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crate::session_runtime::SessionRuntime;
 use crate::types::{FileKind, UpsertRequest};
 use crate::VerterHost;
 
@@ -125,21 +128,12 @@ pub enum SessionOverlay {
 }
 
 // ---------------------------------------------------------------------------
-// OverlayState — tracks which session's overlays are currently applied
-// ---------------------------------------------------------------------------
-
-struct OverlayState {
-    /// Which session's overlays are currently applied in the host, if any.
-    active_session: Option<u64>,
-}
-
-// ---------------------------------------------------------------------------
 // SessionState — per-session overlay tracking
 // ---------------------------------------------------------------------------
 
-struct SessionState {
-    overlays: HashMap<String, SessionOverlay>,
-    generation: u64,
+pub(crate) struct SessionState {
+    pub(crate) overlays: HashMap<String, SessionOverlay>,
+    pub(crate) generation: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,21 +143,26 @@ struct SessionState {
 /// Shared project state wrapping one [`VerterHost`].
 ///
 /// Multiple [`MetaSession`]s can be opened against the same project.
-/// The project owns the host, base file cache, and overlay context gate.
+/// The project owns the host, base file cache, and per-session state.
+/// Overlay serialization is per-session via `SessionRuntime`'s
+/// `view_writer_lock` (C15); the project-wide `overlay_gate` is retired.
 pub struct MetaProject {
     host: VerterHost,
     /// Cached base sources for overlay revert. Key = canonical ID.
     base_sources: parking_lot::RwLock<HashMap<String, Arc<str>>>,
     /// Set of canonical IDs in the base file index.
     base_file_ids: parking_lot::RwLock<std::collections::HashSet<String>>,
-    /// Serializes overlay-aware queries (context-switching gate).
-    overlay_gate: Mutex<OverlayState>,
     /// Per-session state, keyed by session ID.
     sessions: parking_lot::RwLock<HashMap<u64, SessionState>>,
     /// Monotonic session ID counter.
     next_session_id: AtomicU64,
     /// Terminal shutdown flag.
     shutdown: AtomicBool,
+    /// C15: lock-free tracking of which session's overlays are currently
+    /// applied to the shared host. 0 = no session active. Replaces the
+    /// retired `overlay_gate: Mutex<OverlayState>` — reads and writes
+    /// are atomic, no Mutex contention between sessions.
+    active_overlay_session: AtomicU64,
 }
 
 impl MetaProject {
@@ -173,12 +172,10 @@ impl MetaProject {
             host,
             base_sources: parking_lot::RwLock::new(HashMap::new()),
             base_file_ids: parking_lot::RwLock::new(std::collections::HashSet::new()),
-            overlay_gate: Mutex::new(OverlayState {
-                active_session: None,
-            }),
             sessions: parking_lot::RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             shutdown: AtomicBool::new(false),
+            active_overlay_session: AtomicU64::new(0),
         })
     }
 
@@ -208,16 +205,11 @@ impl MetaProject {
         true
     }
 
-    fn enter_base_context(&self) -> Result<std::sync::MutexGuard<'_, OverlayState>, MetaError> {
-        let mut gate = self
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-        if let Some(prev_id) = gate.active_session.take() {
-            self.revert_session_overlays(prev_id);
-        }
-        Ok(gate)
-    }
+    // C15: overlay_gate, acquire_overlay_gate, enter_base_context, and
+    // revert_active_session_overlays are all retired. Per-session isolation
+    // is structural via SessionRuntime's ArcSwap<SessionView> snapshots
+    // and session-scoped caches. Base-context operations (upsert_base,
+    // ensure_loaded, etc.) operate directly on the host without a gate.
 
     /// Load a file into the base project. This is the shared state that
     /// all sessions see when they don't have an overlay for the file.
@@ -227,7 +219,7 @@ impl MetaProject {
         source: &str,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
-        let _gate = self.enter_base_context()?;
+        // C15: no overlay_gate — base operations go directly to host.
         let req = UpsertRequest {
             canonical_id: Some(canonical_id.to_string()),
             input_id: canonical_id.to_string(),
@@ -250,7 +242,7 @@ impl MetaProject {
     /// Ensure a workspace-backed file is loaded into the shared base project.
     pub fn ensure_loaded(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
         self.check_alive()?;
-        let _gate = self.enter_base_context()?;
+        // C15: no overlay_gate — base operations go directly to host.
 
         let loaded = self.host.ensure_loaded(canonical_id);
 
@@ -265,7 +257,7 @@ impl MetaProject {
     /// Refresh a workspace-backed base file from the current native workspace.
     pub fn refresh_base(self: &Arc<Self>, canonical_id: &str) -> Result<bool, MetaError> {
         self.check_alive()?;
-        let _gate = self.enter_base_context()?;
+        // C15: no overlay_gate — base operations go directly to host.
 
         self.host.evict(canonical_id);
 
@@ -285,13 +277,36 @@ impl MetaProject {
         projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
-        let _gate = self.enter_base_context()?;
+        // C15: no overlay_gate — base operations go directly to host.
         self.host.configure_projects(projects);
         Ok(())
     }
 
-    /// Open a new session against this project.
+    /// Open a new session against this project (interactive mode).
+    ///
+    /// LSP callers + most user-facing consumers should use this
+    /// constructor. For batch workloads (test harness, MCP server),
+    /// see [`Self::open_session_batch`].
     pub fn open_session(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
+        self.open_session_with_mode(ExecutionMode::Interactive)
+    }
+
+    /// Open a new session in batch execution mode (Path C C12).
+    ///
+    /// Batch mode opts into the scheduler's batched submission surface
+    /// where callers submit N independent requests before any waits.
+    /// The scheduler fans them out onto its Rayon pool. Test harness
+    /// and MCP server callers use this path.
+    #[allow(dead_code)]
+    pub fn open_session_batch(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
+        self.open_session_with_mode(ExecutionMode::Batch)
+    }
+
+    /// Open a new session with an explicit execution mode.
+    fn open_session_with_mode(
+        self: &Arc<Self>,
+        execution_mode: ExecutionMode,
+    ) -> Result<MetaSession, MetaError> {
         self.check_alive()?;
         let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         self.sessions.write().insert(
@@ -301,10 +316,13 @@ impl MetaProject {
                 generation: 0,
             },
         );
+        let runtime = SessionRuntime::new(id, Arc::clone(self));
         Ok(MetaSession {
             id,
             project: Arc::clone(self),
             closed: AtomicBool::new(false),
+            execution_mode,
+            runtime,
         })
     }
 
@@ -312,15 +330,7 @@ impl MetaProject {
     /// Active sessions keep their overlays; only base caches are flushed.
     pub fn clear_caches(&self) -> Result<(), MetaError> {
         self.check_alive()?;
-        // Clear the overlay gate so stale applied state doesn't persist
-        let mut gate = self
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-        if let Some(prev_id) = gate.active_session.take() {
-            self.revert_session_overlays(prev_id);
-        }
-        // Clear host compile caches
+        // C15: no overlay_gate — just clear host caches directly.
         self.host.clear_compile_cache();
         Ok(())
     }
@@ -335,12 +345,8 @@ impl MetaProject {
         {
             return; // Already shut down
         }
-        // Revert any applied overlays before closing
-        if let Ok(mut gate) = self.overlay_gate.lock() {
-            if let Some(prev_id) = gate.active_session.take() {
-                self.revert_session_overlays(prev_id);
-            }
-        }
+        // C15: no overlay_gate to revert — session-scoped isolation is
+        // structural via ArcSwap snapshots. Just close the host.
         self.host.close();
         self.base_sources.write().clear();
         self.base_file_ids.write().clear();
@@ -368,135 +374,70 @@ impl MetaProject {
     }
 
     // -----------------------------------------------------------------------
-    // Overlay context-switching internals
+    // Crate-internal accessors for SessionRuntime
     // -----------------------------------------------------------------------
 
-    /// Apply a session's overlays to the shared host.
-    fn apply_session_overlays(&self, session_id: u64) {
-        let sessions = self.sessions.read();
-        let Some(state) = sessions.get(&session_id) else {
-            return;
-        };
-        for (file_id, overlay) in &state.overlays {
-            match overlay {
-                SessionOverlay::Upsert { source } => {
-                    let req = UpsertRequest {
-                        canonical_id: Some(file_id.clone()),
-                        input_id: file_id.clone(),
-                        source: Arc::from(source.as_str()),
-                        file_kind: FileKind::from_path(file_id),
-                        aliases: Vec::new(),
-                    };
-                    let _ = self.host.upsert(req);
-                }
-                SessionOverlay::Delete => {
-                    self.host.remove(file_id);
-                }
-            }
-        }
+    /// Read-only access to per-session state (overlays, generation).
+    pub(crate) fn sessions_read(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, HashMap<u64, SessionState>> {
+        self.sessions.read()
     }
 
-    /// Revert a session's overlays from the shared host, restoring base state.
-    fn revert_session_overlays(&self, session_id: u64) {
-        let sessions = self.sessions.read();
-        let Some(state) = sessions.get(&session_id) else {
-            return;
-        };
-        let base = self.base_sources.read();
-        for (file_id, overlay) in &state.overlays {
-            match overlay {
-                SessionOverlay::Upsert { .. } => {
-                    if let Some(base_source) = base.get(file_id) {
-                        // Restore base version
-                        let req = UpsertRequest {
-                            canonical_id: Some(file_id.clone()),
-                            input_id: file_id.clone(),
-                            source: Arc::clone(base_source),
-                            file_kind: FileKind::from_path(file_id),
-                            aliases: Vec::new(),
-                        };
-                        let _ = self.host.upsert(req);
-                    } else {
-                        // File was added by overlay, remove it
-                        self.host.remove(file_id);
-                    }
-                }
-                SessionOverlay::Delete => {
-                    if let Some(base_source) = base.get(file_id) {
-                        // Restore base version that was tombstoned
-                        let req = UpsertRequest {
-                            canonical_id: Some(file_id.clone()),
-                            input_id: file_id.clone(),
-                            source: Arc::clone(base_source),
-                            file_kind: FileKind::from_path(file_id),
-                            aliases: Vec::new(),
-                        };
-                        let _ = self.host.upsert(req);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Ensure the given session's overlays are active in the host.
-    /// Must be called with the overlay_gate lock held.
-    fn ensure_session_context(&self, gate: &mut OverlayState, session_id: u64) {
-        if gate.active_session == Some(session_id) {
-            return;
-        }
-        // Revert previous session
-        if let Some(prev_id) = gate.active_session.take() {
-            self.revert_session_overlays(prev_id);
-        }
-        // Apply this session
-        self.apply_session_overlays(session_id);
-        gate.active_session = Some(session_id);
-    }
-
-    /// Release a session: remove its overlays if active, remove its state.
-    fn release_session(&self, session_id: u64) {
-        // If this session's overlays are applied, revert them
-        if let Ok(mut gate) = self.overlay_gate.lock() {
-            if gate.active_session == Some(session_id) {
-                self.revert_session_overlays(session_id);
-                gate.active_session = None;
-            }
-        }
-        // Remove session state
-        self.sessions.write().remove(&session_id);
+    /// Read-only access to cached base sources.
+    pub(crate) fn base_sources_read(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, HashMap<String, Arc<str>>> {
+        self.base_sources.read()
     }
 
     /// Check if a session has any overlays.
-    fn session_has_overlays(&self, session_id: u64) -> bool {
+    pub(crate) fn session_has_overlays(&self, session_id: u64) -> bool {
         let sessions = self.sessions.read();
         sessions
             .get(&session_id)
             .is_some_and(|s| !s.overlays.is_empty())
     }
 
-    fn reapply_overlay_target(&self, session_id: u64, canonical_id: &str) {
-        let sessions = self.sessions.read();
-        let Some(state) = sessions.get(&session_id) else {
-            return;
-        };
-        let Some(SessionOverlay::Upsert { source }) = state.overlays.get(canonical_id) else {
-            return;
-        };
+    // -----------------------------------------------------------------------
+    // Internal: session lifecycle
+    // -----------------------------------------------------------------------
 
-        let req = UpsertRequest {
-            canonical_id: Some(canonical_id.to_string()),
-            input_id: canonical_id.to_string(),
-            source: Arc::from(source.as_str()),
-            file_kind: FileKind::from_path(canonical_id),
-            aliases: Vec::new(),
-        };
-        let _ = self.host.upsert(req);
+    /// Release a session: revert its overlays if active, remove its state.
+    fn release_session(&self, session_id: u64, runtime: &SessionRuntime) {
+        if self
+            .active_overlay_session
+            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            runtime.revert_other_session_overlays(session_id);
+        }
+        self.sessions.write().remove(&session_id);
     }
 }
 
 // ---------------------------------------------------------------------------
 // MetaSession
 // ---------------------------------------------------------------------------
+
+/// Path C C12 — session execution mode (plan §2 Stage 7 Pass C12).
+///
+/// Separates interactive-latency callers (LSP) from batch-throughput
+/// callers (test harness, MCP server). Interactive mode matches the
+/// pre-C12 single-request-then-wait path; Batch mode opts into the
+/// scheduler's `submit_batch` / `wait_batch` surface so N independent
+/// requests fan out onto the Rayon pool.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionMode {
+    /// Single-request latency-sensitive path. Default for
+    /// [`MetaProject::open_session`]. LSP callers stay here.
+    #[default]
+    Interactive,
+    /// Batch-throughput path. Test harness, MCP server. Opt-in via
+    /// [`MetaProject::open_session_batch`].
+    Batch,
+}
 
 /// A lightweight session handle with isolated file overlays.
 ///
@@ -506,6 +447,16 @@ pub struct MetaSession {
     id: u64,
     project: Arc<MetaProject>,
     closed: AtomicBool,
+    /// Path C C12 — per-session execution mode. Scheduler dispatch
+    /// branches on this to choose between interactive and batch
+    /// surfaces. Currently consumed via [`Self::execution_mode`];
+    /// C13 wires component-meta job dispatch to honour the flag.
+    #[allow(dead_code)]
+    execution_mode: ExecutionMode,
+    /// Path C C14 — session-owned runtime for overlay-sensitive
+    /// request execution. Owns session identity, overlay context
+    /// lifecycle, and session-scoped resolved-meta cache.
+    runtime: SessionRuntime,
 }
 
 impl MetaSession {
@@ -522,6 +473,12 @@ impl MetaSession {
         self.id
     }
 
+    /// Path C C12 — this session's execution mode.
+    #[allow(dead_code)]
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+
     /// Resolve an alias to its canonical ID inside this session's overlay view.
     #[allow(dead_code)]
     pub fn resolve_alias_or_canonical(
@@ -529,24 +486,31 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<String, MetaError> {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
-            host.resolve_alias_or_canonical(canonical_or_alias)
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            runtime
+                .host()
+                .resolve_alias_or_canonical(canonical_or_alias)
         })
+    }
+
+    /// Invalidate the active overlay state when this session's overlays change.
+    /// If this session's overlays were applied to the host, revert them so the
+    /// host returns to base state. The next query re-applies the updated overlays.
+    fn invalidate_active_overlays(&self) {
+        if self
+            .project
+            .active_overlay_session
+            .compare_exchange(self.id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.runtime.revert_other_session_overlays(self.id);
+        }
+        self.runtime.invalidate_session_caches();
     }
 
     /// Store a file overlay in this session.
     pub fn upsert(&self, canonical_id: &str, source: String) -> Result<(), MetaError> {
         self.check_alive()?;
-
-        let mut gate = self
-            .project
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-        if gate.active_session == Some(self.id) {
-            self.project.revert_session_overlays(self.id);
-            gate.active_session = None;
-        }
 
         let mut sessions = self.project.sessions.write();
         let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
@@ -554,7 +518,9 @@ impl MetaSession {
             .overlays
             .insert(canonical_id.to_string(), SessionOverlay::Upsert { source });
         state.generation += 1;
+        drop(sessions);
 
+        self.invalidate_active_overlays();
         Ok(())
     }
 
@@ -562,23 +528,15 @@ impl MetaSession {
     pub fn delete(&self, canonical_id: &str) -> Result<(), MetaError> {
         self.check_alive()?;
 
-        let mut gate = self
-            .project
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-        if gate.active_session == Some(self.id) {
-            self.project.revert_session_overlays(self.id);
-            gate.active_session = None;
-        }
-
         let mut sessions = self.project.sessions.write();
         let state = sessions.get_mut(&self.id).ok_or(MetaError::SessionClosed)?;
         state
             .overlays
             .insert(canonical_id.to_string(), SessionOverlay::Delete);
         state.generation += 1;
+        drop(sessions);
 
+        self.invalidate_active_overlays();
         Ok(())
     }
 
@@ -587,14 +545,16 @@ impl MetaSession {
     pub fn reset(&self, canonical_id: &str) -> Result<(), MetaError> {
         self.check_alive()?;
 
-        let mut gate = self
+        // Revert BEFORE removing overlay from state — the revert reads
+        // the overlay map to know which files to restore.
+        let has_overlay = self
             .project
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-        if gate.active_session == Some(self.id) {
-            self.project.revert_session_overlays(self.id);
-            gate.active_session = None;
+            .sessions
+            .read()
+            .get(&self.id)
+            .is_some_and(|s| s.overlays.contains_key(canonical_id));
+        if has_overlay {
+            self.invalidate_active_overlays();
         }
 
         let mut sessions = self.project.sessions.write();
@@ -612,8 +572,8 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
-            host.get_analysis(canonical_or_alias)
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            runtime.host().get_analysis(canonical_or_alias)
         })
     }
 
@@ -625,8 +585,8 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
     {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
-            host.evaluate_types(canonical_or_alias)
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            runtime.host().evaluate_types(canonical_or_alias)
         })
     }
 
@@ -640,8 +600,8 @@ impl MetaSession {
     ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
     {
         self.check_alive()?;
-        let resolved = self.with_overlay_target_context(canonical_or_alias, |host| {
-            host.get_component_meta_with_resolution(canonical_or_alias)
+        let resolved = self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            runtime.get_component_meta_with_resolution(canonical_or_alias)
         })?;
 
         match resolved {
@@ -658,6 +618,64 @@ impl MetaSession {
             }
             None => Ok(None),
         }
+    }
+
+    /// Path C C13 — Batch-mode fan-out for N independent component-meta
+    /// queries through the scheduler's CPU pool.
+    ///
+    /// Constructs one [`SchedulerJobKind::ComponentMeta`] per requested
+    /// canonical id and submits the batch to
+    /// [`Scheduler::dispatch_meta_jobs`], which runs each query in
+    /// parallel on the scheduler's Rayon pool. Returns per-id results
+    /// in submission order. Use this from test harnesses, the MCP
+    /// server, and any other Batch-mode caller that has more than one
+    /// independent component-meta query in flight at a time.
+    ///
+    /// Interactive callers (LSP, single-request SFC fetches) should
+    /// continue using [`Self::get_component_meta`] — the single-request
+    /// synchronous path is the lowest-latency option for one query and
+    /// avoids the Rayon scheduling overhead Batch mode introduces.
+    ///
+    /// Returns `Err(MetaError::Shutdown)` when the project has been
+    /// shut down. Per-query budget errors surface in the per-result
+    /// `Result` slot, so the caller can inspect each query
+    /// independently.
+    #[allow(dead_code)]
+    pub fn get_component_meta_batch(
+        &self,
+        canonical_or_aliases: &[String],
+    ) -> Result<
+        Vec<
+            Result<
+                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                MetaError,
+            >,
+        >,
+        MetaError,
+    > {
+        use std::sync::Arc;
+        self.check_alive()?;
+        let scheduler = self.project.host().scheduler();
+        let jobs: Vec<verter_scheduler::stage::SchedulerJobKind> = canonical_or_aliases
+            .iter()
+            .map(
+                |canonical| verter_scheduler::stage::SchedulerJobKind::ComponentMeta {
+                    canonical_id: Arc::from(canonical.as_str()),
+                },
+            )
+            .collect();
+        // Self-borrow for the closure — scheduler.dispatch_meta_jobs
+        // requires `Sync + Send` on the executor. `&MetaSession` is
+        // `Sync` because all interior shared state goes through
+        // `Arc`/atomics. The closure body re-enters the synchronous
+        // `get_component_meta` path so overlay-aware resolution stays
+        // identical to the Interactive path.
+        let session_ref = self;
+        let results = scheduler.dispatch_meta_jobs(jobs, |job| {
+            let verter_scheduler::stage::SchedulerJobKind::ComponentMeta { canonical_id } = job;
+            session_ref.get_component_meta(canonical_id.as_ref())
+        });
+        Ok(results)
     }
 
     /// Single native declared-surface component-meta query through this
@@ -688,9 +706,10 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-            let Some(resolved) = host
+            let Some(resolved) = runtime
                 .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
             else {
                 return Ok(None);
@@ -729,8 +748,8 @@ impl MetaSession {
         MetaError,
     > {
         self.check_alive()?;
-        let resolved = self.with_overlay_target_context(canonical_or_alias, |host| {
-            host.get_component_meta_with_resolution(canonical_or_alias)
+        let resolved = self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            runtime.get_component_meta_with_resolution(canonical_or_alias)
         })?;
         match resolved {
             Some((analysis, resolved)) => {
@@ -765,10 +784,10 @@ impl MetaSession {
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use std::sync::atomic::Ordering::Relaxed;
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-            // Attempt payload cache hit
             if let Some(cached) = host.try_get_cached_meta_payload(
                 canonical.as_str(),
                 crate::types::MetaPayloadKind::Declared,
@@ -778,8 +797,7 @@ impl MetaSession {
             }
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
-            // Miss — compute from scratch
-            let Some(resolved) = host
+            let Some(resolved) = runtime
                 .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
             else {
                 return Ok(None);
@@ -802,7 +820,6 @@ impl MetaSession {
             let payload = encode_fn(analysis, &resolved);
             host.provenance().payload_encodes.fetch_add(1, Relaxed);
 
-            // Store in cache
             host.store_meta_payload(
                 canonical.as_str(),
                 crate::types::MetaPayloadKind::Declared,
@@ -829,10 +846,10 @@ impl MetaSession {
     ) -> Result<Option<Vec<u8>>, MetaError> {
         use std::sync::atomic::Ordering::Relaxed;
         self.check_alive()?;
-        self.with_overlay_target_context(canonical_or_alias, |host| {
+        self.with_overlay_target_context(canonical_or_alias, |runtime| {
+            let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-            // Attempt payload cache hit (Full reuses the same slot as Resolved)
             if let Some(cached) = host.try_get_cached_meta_payload(
                 canonical.as_str(),
                 crate::types::MetaPayloadKind::Full,
@@ -842,15 +859,12 @@ impl MetaSession {
             }
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
-            // Miss — resolve + build with fallthrough.
-            let Some(resolved) = host
+            let Some(resolved) = runtime
                 .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
             else {
                 return Ok(None);
             };
 
-            // Build full analysis with fallthrough and capture the fallthrough
-            // fact versions for the payload cache key.
             let (analysis, fallthrough_fact_versions) =
                 crate::host_manage::extract_component_meta_from_resolved_with_facts(
                     host,
@@ -869,8 +883,6 @@ impl MetaSession {
             let payload = encode_fn(analysis, &resolved);
             host.provenance().payload_encodes.fetch_add(1, Relaxed);
 
-            // Store with fallthrough fact versions — these include both
-            // resolved-state facts and child-component dependency facts.
             let facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
             host.store_meta_payload(
                 canonical.as_str(),
@@ -961,7 +973,7 @@ impl MetaSession {
         {
             return; // Already closed
         }
-        self.project.release_session(self.id);
+        self.project.release_session(self.id, &self.runtime);
     }
 
     /// Whether this session has been closed.
@@ -973,43 +985,66 @@ impl MetaSession {
     // Internal: run a closure with this session's overlay context applied
     // -----------------------------------------------------------------------
 
+    /// Run a closure with this session's overlay context applied.
+    ///
+    /// Uses compare_exchange to atomically claim the active overlay slot,
+    /// preventing TOCTOU races between concurrent sessions.
     fn with_overlay_target_context<T>(
         &self,
         canonical_or_alias: &str,
-        f: impl FnOnce(&VerterHost) -> T,
+        f: impl FnOnce(&SessionRuntime) -> T,
     ) -> Result<T, MetaError> {
-        let mut gate = self
-            .project
-            .overlay_gate
-            .lock()
-            .map_err(|_| MetaError::Host("overlay lock poisoned".into()))?;
-
         let has_overlays = self.project.session_has_overlays(self.id);
 
-        if !has_overlays {
-            if let Some(prev_id) = gate.active_session.take() {
-                self.project.revert_session_overlays(prev_id);
+        if has_overlays {
+            loop {
+                let current = self.project.active_overlay_session.load(Ordering::Acquire);
+                if current == self.id {
+                    break;
+                }
+                // Atomically claim: CAS current → self.id.
+                if self
+                    .project
+                    .active_overlay_session
+                    .compare_exchange(current, self.id, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    if current != 0 {
+                        self.runtime.revert_other_session_overlays(current);
+                    }
+                    self.runtime.apply_own_overlays();
+                    break;
+                }
+                // CAS failed — another session raced us; retry.
             }
-        } else {
-            let owner_needs_reapply = gate.active_session != Some(self.id);
-            self.project.ensure_session_context(&mut gate, self.id);
-            if owner_needs_reapply && !canonical_or_alias.is_empty() {
-                // Session overlays come from a HashMap, so the owner file can be
-                // upserted before its overlay-only helpers. Reapplying the owner
-                // after the session switch keeps its cached import/dependency
-                // state aligned with the already-applied helper overlays.
+            if !canonical_or_alias.is_empty() {
                 let canonical = self
                     .project
                     .host
                     .resolve_alias_or_canonical(canonical_or_alias);
-                self.project
-                    .reapply_overlay_target(self.id, canonical.as_str());
+                self.runtime.reapply_overlay_target(canonical.as_str());
+            }
+        } else {
+            loop {
+                let current = self.project.active_overlay_session.load(Ordering::Acquire);
+                if current == 0 {
+                    break;
+                }
+                // Atomically clear: CAS current → 0.
+                if self
+                    .project
+                    .active_overlay_session
+                    .compare_exchange(current, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    self.runtime.revert_other_session_overlays(current);
+                    break;
+                }
             }
         }
 
-        // Post-cut: resolver hot path probes live-host state directly through
-        // the project-global caches (validated by `HostFenceValidator`).
-        Ok(f(&self.project.host))
+        self.runtime.refresh_view();
+        Ok(f(&self.runtime))
     }
 }
 

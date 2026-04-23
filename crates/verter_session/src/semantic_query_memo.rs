@@ -35,21 +35,36 @@ use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 use crate::semantic_query::{
-    CacheRead, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey, NodeScopeId,
-    OriginEdge, OriginEdgeKind, PathSegment, ProjectionMode, QueryError, QueryResult,
+    CacheRead, DeclIdentity, DepSignature, HostResolvedNamedTypeKey, IndexKey, MapperKey,
+    NodeScopeId, OriginEdge, OriginEdgeKind, PathSegment, ProjectionMode, QueryError, QueryResult,
     ResolveDeclKey, SemanticGraphRead, SemanticGraphStats, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey, ValueRootKey,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
-// Node arena — append-only, stable ids
+// Node arena — structurally interning, sharded dedup, stable ids
 // ──────────────────────────────────────────────────────────────────────────
 //
 // The arena pairs each interned [`SemanticNodeData`] with an **origin-scope
 // sidecar** (plan §7.10 + C1). Both the node vec and the parallel scope
-// vec live inside one [`Mutex<ArenaInner>`] so every push takes a **single
-// lock** (same cost as the pre-C1 baseline) and `(nodes, scopes)` stay
-// index-aligned atomically under every concurrent read.
+// vec live inside one `RwLock<ArenaInner>` so reads (`node_data`,
+// `node_scope`) are concurrent while writes (intern-miss) serialize.
+//
+// **Path C C7 — structural interning.** Two callers that construct the
+// same `SemanticNodeData::Primitive(Number)` in the same scope share one
+// [`SemanticNodeId`] — preventing the semantic graph from growing unbounded
+// under repeated structural construction. Cross-scope same-payload
+// interns stay distinct.
+//
+// **Path C C17 — sharded dedup index (plan §2 Stage 9).** The dedup index
+// moved off `ArenaInner` onto `[Mutex<ShardIndex>; NUM_SHARDS]`. Payload
+// hash + scope hash route to a specific shard; intern-hits (the steady-
+// state hot path) take only that shard's Mutex — so `K` threads interning
+// payloads that route to distinct shards proceed in parallel. Intern-misses
+// acquire the shard Mutex, then briefly acquire `inner.write()` to allocate
+// the next sequential id and push the node. Storage stays global and dense
+// so `id.0 as usize` indexing + `a.0 + 1 == b.0` serial-id invariant are
+// preserved.
 //
 // Dispatch builders query the sidecar via [`SemanticGraphStore::node_scope`]
 // to route per-base-scope lookups through the correct
@@ -59,21 +74,27 @@ use crate::semantic_query::{
 // **Exempt variants.** `SemanticNodeData::VueMacroElements` nodes store
 // `None` in the sidecar slot — they live on the parser's refcount-only hot
 // path and are never consumed by dispatch builders that walk `node_scope`.
-// The exemption is enforced structurally inside `push_impl` so callers can't
-// accidentally populate a sidecar entry for a vue-macro node, even via
-// [`SemanticGraphStore::intern_node_with_scope`].
-//
-// **Write cost invariant (plan §7.10).** `insert_resolved_named_type` on
-// the parser's refcount-only hot path pays exactly one
-// [`Mutex::lock`](parking_lot::Mutex::lock) on the arena (plus the
-// pre-existing `DashMap::insert` on the resolved-named-type index). The
-// combined [`ArenaInner`] preserves that invariant — the parallel scope
-// vec's push is absorbed into the same critical section as the node
-// vec's, so there is no second lock acquisition for either exempt or
-// non-exempt writes.
+// The exemption is enforced structurally inside `push_impl` so callers
+// can't accidentally populate a sidecar entry for a vue-macro node, even
+// via [`SemanticGraphStore::intern_node_with_scope`]. C17 preserves C7's
+// short-circuit: `VueMacroElements` bypasses both the shard index and the
+// shard Mutex entirely, acquiring only `inner.write()` for the sequential
+// id allocation.
 
-/// Interior state of [`NodeArena`]. Held behind a single [`Mutex`] so
-/// `(nodes, scopes)` stay index-aligned under every concurrent read.
+const NUM_SHARDS: usize = 16;
+const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
+
+/// Path C C17 — per-shard dedup index. Routes keyed by
+/// `hash(payload, scope) & SHARD_MASK`. Same payload + scope → same
+/// shard, so intern-hits never race across shards.
+#[derive(Default)]
+struct ShardIndex {
+    index: FxHashMap<(SemanticNodeData, NodeScopeId), SemanticNodeId>,
+}
+
+/// Interior state of [`NodeArena`]. Held behind an `RwLock` so reads of
+/// `(nodes, scopes)` (non-hot-path) are concurrent while the allocating
+/// intern-miss path serializes on the writer.
 #[derive(Default)]
 struct ArenaInner {
     nodes: Vec<Arc<SemanticNodeData>>,
@@ -85,9 +106,41 @@ struct ArenaInner {
     scopes: Vec<Option<NodeScopeId>>,
 }
 
-#[derive(Default)]
+/// Path C C17 shard routing — deterministic `hash((data, scope)) & mask`.
+/// Same `(data, scope)` pair always routes to the same shard, regardless
+/// of the calling thread. FxHash picked for speed; the dedup key's own
+/// `Eq` implementation disambiguates collisions within a shard.
+fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    data.hash(&mut hasher);
+    scope.hash(&mut hasher);
+    (hasher.finish() & SHARD_MASK) as usize
+}
+
 struct NodeArena {
-    inner: Mutex<ArenaInner>,
+    /// Global dense storage for node data + sidecar. `RwLock` so readers
+    /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
+    /// serialize to push a fresh slot.
+    inner: parking_lot::RwLock<ArenaInner>,
+    /// Path C C17 — sharded dedup indexes. Each shard owns the key-range
+    /// whose `hash(payload, scope) & mask` lands on it.
+    shards: [parking_lot::Mutex<ShardIndex>; NUM_SHARDS],
+    /// Path C C1 instrumentation. When present, `push_impl` records per-call
+    /// counters and inner.write() wait time so subsequent passes (C7, C17)
+    /// have evidence-grade contention data without retro-fitting telemetry.
+    /// `None` for the test-default arenas constructed via `Default::default()`.
+    provenance: Option<Arc<crate::types::MetaProvenance>>,
+}
+
+impl Default for NodeArena {
+    fn default() -> Self {
+        Self {
+            inner: parking_lot::RwLock::new(ArenaInner::default()),
+            shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
+            provenance: None,
+        }
+    }
 }
 
 impl NodeArena {
@@ -110,24 +163,85 @@ impl NodeArena {
         // `node_scope` returns `None` rather than `Some(Global)` for those
         // nodes. The exemption is structural so even
         // `intern_node_with_scope(VueMacroElements, Some(scope))` yields
-        // `None` in the sidecar slot.
-        let sidecar_entry = match &data {
-            SemanticNodeData::VueMacroElements(_) => None,
-            _ => Some(scope),
+        // `None` in the sidecar slot. Path C C7/C17 additionally short-
+        // circuits `VueMacroElements` past the sharded dedup — identity-
+        // carriers must allocate fresh slots on every insert so the
+        // `NamedTypeCache` latest-insert-wins contract stays observable.
+        let is_vue_macro = matches!(data, SemanticNodeData::VueMacroElements(_));
+
+        // Path C C1 instrumentation. Capture the discriminant before
+        // moving `data` so we can bucket per-variant pushes.
+        let discriminant = data.discriminant_index();
+
+        // Path C C17 — sharded dedup hot path. VueMacroElements bypasses
+        // the shard index entirely (fresh slot every call). Other variants
+        // route to their shard, check for an existing id; miss path
+        // acquires inner.write() briefly to push the new slot.
+        let (id, is_miss, write_wait_ns) = if is_vue_macro {
+            let write_start = std::time::Instant::now();
+            let mut inner = self.inner.write();
+            let wait = write_start.elapsed().as_nanos() as u64;
+            let id = SemanticNodeId(inner.nodes.len() as u64);
+            inner.nodes.push(Arc::new(data));
+            inner.scopes.push(None);
+            (id, true, wait)
+        } else {
+            let shard_idx = shard_index_for(&data, &scope);
+            let key = (data, scope);
+            // Fast path: shard-hit. Shard Mutex is short-lived; parallel
+            // across shards.
+            {
+                let shard = self.shards[shard_idx].lock();
+                if let Some(&existing) = shard.index.get(&key) {
+                    (existing, false, 0u64)
+                } else {
+                    drop(shard);
+                    // Miss: re-acquire the shard (to serialize concurrent
+                    // misses for the same key on this shard) and then
+                    // briefly acquire inner.write() to allocate.
+                    let mut shard = self.shards[shard_idx].lock();
+                    if let Some(&existing) = shard.index.get(&key) {
+                        // Another thread beat us to it.
+                        (existing, false, 0u64)
+                    } else {
+                        let write_start = std::time::Instant::now();
+                        let mut inner = self.inner.write();
+                        let wait = write_start.elapsed().as_nanos() as u64;
+                        let id = SemanticNodeId(inner.nodes.len() as u64);
+                        inner.nodes.push(Arc::new(key.0.clone()));
+                        inner.scopes.push(Some(key.1.clone()));
+                        drop(inner);
+                        shard.index.insert(key, id);
+                        (id, true, wait)
+                    }
+                }
+            }
         };
 
-        // Single lock for both vecs: same cost as pre-C1 baseline for
-        // `insert_resolved_named_type`'s refcount-only hot path (plan §7.10
-        // write-cost invariant).
-        let mut inner = self.inner.lock();
-        let id = SemanticNodeId(inner.nodes.len() as u64);
-        inner.nodes.push(Arc::new(data));
-        inner.scopes.push(sidecar_entry);
+        if let Some(prov) = self.provenance.as_ref() {
+            use std::sync::atomic::Ordering::Relaxed;
+            prov.node_arena_pushes.fetch_add(1, Relaxed);
+            if is_miss {
+                prov.node_arena_intern_miss.fetch_add(1, Relaxed);
+            }
+            prov.node_arena_inner_write_wait_ns
+                .fetch_add(write_wait_ns, Relaxed);
+            if discriminant < prov.node_arena_pushes_per_discriminant.len() {
+                prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
+            } else {
+                debug_assert!(
+                    false,
+                    "SemanticNodeData::discriminant_index() returned {} >= SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT",
+                    discriminant
+                );
+            }
+        }
+
         id
     }
 
     fn get(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        let inner = self.inner.lock();
+        let inner = self.inner.read();
         inner.nodes.get(id.0 as usize).cloned()
     }
 
@@ -135,12 +249,12 @@ impl NodeArena {
     /// (or invalid ids), `Some(scope)` for everything else. Exempt slots
     /// are `VueMacroElements` nodes (plan §7.10).
     fn scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
-        let inner = self.inner.lock();
+        let inner = self.inner.read();
         inner.scopes.get(id.0 as usize).cloned().flatten()
     }
 
     fn len(&self) -> usize {
-        self.inner.lock().nodes.len()
+        self.inner.read().nodes.len()
     }
 }
 
@@ -335,6 +449,15 @@ pub struct SemanticGraphStore {
     /// and `execute_cooperative` short-circuits straight to the build
     /// closure for that variant.
     named_type_index: DashMap<HostResolvedNamedTypeKey, SemanticNodeId>,
+    /// Relation-engine memo (plan §2 + §3 Change S). Added in Phase D §5.4
+    /// WIP-S. Maps `(source, target)` semantic-node pairs to the tri-state
+    /// [`RelationResult`](crate::semantic_query::RelationResult) plus the
+    /// dep-signature used for warm-hit revalidation. Separate from the
+    /// family memo because relation identity is pairwise, not single-node.
+    relation_memo: DashMap<
+        (SemanticNodeId, SemanticNodeId),
+        (DepSignature, crate::semantic_query::RelationResult),
+    >,
     /// Sibling derivation/origin layer (plan B2 + Derivation/Origin Layer
     /// Contract). Edges are keyed by `(result_node, kind)`; multiple
     /// derivations of the same structural result store multiple edges per
@@ -345,6 +468,12 @@ pub struct SemanticGraphStore {
     /// [`Self::stats_snapshot`] into the public [`SemanticGraphStats`]
     /// surface.
     stats: AtomicSemanticGraphStats,
+    /// Path C C1 contention instrumentation. Mirrors the arena's
+    /// `provenance` field: `Some` for stores wired up by the host, `None`
+    /// for the test-default stores constructed via `Default`. Used by
+    /// `execute_cooperative` to bucket owner vs joiner paths and held
+    /// time on `MetaProvenance`.
+    provenance: Option<Arc<crate::types::MetaProvenance>>,
 }
 
 impl std::fmt::Debug for SemanticGraphStore {
@@ -379,7 +508,7 @@ struct MemoEntry {
 enum FamilyKey {
     ResolveDecl(ResolveDeclKey),
     Instantiate {
-        base: SemanticNodeId,
+        base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
     },
     ProjectMember {
@@ -744,7 +873,7 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         }
         SemanticQueryKey::Instantiate { base, args } => (
             FamilyKey::Instantiate {
-                base: *base,
+                base: base.clone(),
                 args: Arc::clone(args),
             },
             ModeSlot::Single,
@@ -818,6 +947,18 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
+        // Phase D §5.4 WIP-S: `Relate` bypasses the family memo entirely —
+        // it stores its tri-state result in the dedicated `relation_memo`
+        // DashMap. `family_and_slot` returning a placeholder is safe
+        // because `execute_cooperative` admission short-circuits `Relate`
+        // before this function is consulted.
+        SemanticQueryKey::Relate { source, target } => (
+            FamilyKey::IndexedAccess {
+                base: *source,
+                index: crate::semantic_query::IndexKey::TypeNode(*target),
+            },
+            ModeSlot::Single,
+        ),
     }
 }
 
@@ -856,6 +997,24 @@ impl SemanticGraphStore {
         Self::default()
     }
 
+    /// Construct a store wired to the host's
+    /// [`MetaProvenance`](crate::types::MetaProvenance) so the underlying
+    /// [`NodeArena`] and `execute_cooperative` path record Path C C1
+    /// instrumentation. Test-only direct constructions keep using
+    /// [`Self::new`] / [`Self::default`] (provenance stays `None`).
+    ///
+    /// The constructor installs provenance via field mutation on a
+    /// `Default`-built store so it stays compatible with the d-cutover
+    /// characterization tests that require single-owner cardinality for
+    /// `arena: NodeArena` and `relation_memo: DashMap` in production code.
+    #[must_use]
+    pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
+        let mut store = Self::default();
+        store.arena.provenance = Some(Arc::clone(&provenance));
+        store.provenance = Some(provenance);
+        store
+    }
+
     /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
     ///
     /// The interned node records [`NodeScopeId::Global`] in the origin
@@ -887,6 +1046,32 @@ impl SemanticGraphStore {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
+        self.arena.push_with_scope(data, scope)
+    }
+
+    /// Intern a rebuilt shell `data` while preserving the scope of an
+    /// `origin` shell (Path C C6a items 4-5).
+    ///
+    /// **Invariant** (per Claude Code R2): when a rebuilt shell `X'`
+    /// is derived from `X` with substituted sub-expressions,
+    /// `node_scope(X') == node_scope(X)`. Used by
+    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
+    /// and any other shell-rebuild site that previously called the
+    /// scope-less `intern_node` and would otherwise drop the origin
+    /// scope under C7's compound `(payload, scope)` interning.
+    ///
+    /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
+    /// is empty (e.g., the origin is a `VueMacroElements` exempt
+    /// slot, or `origin` is out of bounds). The fallback preserves
+    /// pre-C6a behaviour for these cases — they were already
+    /// scope-less.
+    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+    pub fn intern_preserving_scope(
+        &self,
+        origin: SemanticNodeId,
+        data: SemanticNodeData,
+    ) -> SemanticNodeId {
+        let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
         self.arena.push_with_scope(data, scope)
     }
 
@@ -1118,6 +1303,52 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn resolved_named_type_count(&self) -> usize {
         self.named_type_index.len()
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Relation memo (plan §2 + §3 Change S)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Warm-hit read of a cached relation judgement for `(source, target)`.
+    /// Returns the tri-state [`RelationResult`](crate::semantic_query::RelationResult)
+    /// plus the `DepSignature` recorded at publish so warm hits can
+    /// revalidate under content changes via
+    /// [`HostFenceValidator`](crate::resolver_core::host_fence_validator::HostFenceValidator).
+    #[must_use]
+    pub fn get_relation(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(DepSignature, crate::semantic_query::RelationResult)> {
+        self.relation_memo
+            .get(&(source, target))
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Publish a relation judgement for `(source, target)`. Writes to the
+    /// dedicated relation memo DashMap, separate from the family memo so
+    /// pairwise identity does not inflate the single-node keyspace.
+    pub fn insert_relation(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        fence: DepSignature,
+        result: crate::semantic_query::RelationResult,
+    ) {
+        self.relation_memo.insert((source, target), (fence, result));
+    }
+
+    /// Count of relation memo entries. Useful for tests and counters.
+    #[must_use]
+    pub fn relation_memo_count(&self) -> usize {
+        self.relation_memo.len()
+    }
+
+    /// Drop every entry in the relation memo. Invoked on
+    /// project-generation bumps so warm relation judgements cannot leak
+    /// across a version boundary.
+    pub fn clear_relation_memo(&self) {
+        self.relation_memo.clear();
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1459,6 +1690,10 @@ impl SemanticGraphStore {
                     )))
                 });
                 let dep_signature = state.dep_signature.clone().unwrap_or_else(empty_signature);
+                if let Some(prov) = self.provenance.as_ref() {
+                    prov.execute_cooperative_joiner_path
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 return CacheRead {
                     value: result,
                     dep_signature,
@@ -1474,6 +1709,10 @@ impl SemanticGraphStore {
         // drop so a panic in the cold build cannot leak the counter.
         self.stats.record_in_flight_enter();
         let _inflight_stats_guard = InFlightStatsGuard { stats: &self.stats };
+        if let Some(prov) = self.provenance.as_ref() {
+            prov.execute_cooperative_owner_path
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         // 4. Execute the cold build. Both the recursion stack entry and
         //    the in-flight admission are protected by RAII guards so a
@@ -1481,10 +1720,16 @@ impl SemanticGraphStore {
         let _recursion_guard = RecursionStackGuard::push(key.clone());
         let mut panic_guard =
             InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, key.clone());
+        let build_start = std::time::Instant::now();
         let (result, dep_signature) = build();
+        let build_held_ns = build_start.elapsed().as_nanos() as u64;
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(_recursion_guard);
+        if let Some(prov) = self.provenance.as_ref() {
+            prov.execute_cooperative_held_ns
+                .fetch_add(build_held_ns, Ordering::Relaxed);
+        }
 
         // 5. Warm-publish only successful values; errors and recursion
         //    sentinels never become shared-cache entries (plan §2 cache
@@ -1628,6 +1873,70 @@ mod tests {
         assert_eq!(a.0 + 1, b.0);
     }
 
+    /// Path C C7 positive invariant — two `intern_node_with_scope` calls
+    /// for the same `(payload, scope)` pair share one
+    /// [`SemanticNodeId`]. Under the pre-C7 append-only allocator the two
+    /// calls returned distinct ids (plan §14.3 positive discriminator).
+    #[test]
+    fn intern_dedups_structural_values_across_contexts() {
+        let store = SemanticGraphStore::new();
+        let first = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            NodeScopeId::Global,
+        );
+        let second = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            NodeScopeId::Global,
+        );
+        assert_eq!(
+            first, second,
+            "structurally-identical (payload, scope) pairs must dedup \
+             to one SemanticNodeId under C7 compound-key interning",
+        );
+
+        // Scope axis still disambiguates: same payload in a different
+        // scope produces a distinct id.
+        let scoped = store.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            NodeScopeId::File {
+                canonical_id: Arc::from("/w/a.ts"),
+                whole_hash: [0u8; 16],
+                local_scope: None,
+            },
+        );
+        assert_ne!(
+            first, scoped,
+            "cross-scope same-payload interns must stay distinct — C7 \
+             preserves the scope disambiguation axis",
+        );
+    }
+
+    /// Path C C7 negative invariant — `VueMacroElements` is an
+    /// identity-carrier with latest-insert-wins semantics (see
+    /// [`SemanticGraphStore::insert_resolved_named_type`]). Two
+    /// `intern_node` calls for the same `Arc<ResolvedElements>` payload
+    /// must still return distinct [`SemanticNodeId`]s so fresh inserts
+    /// under the same `HostResolvedNamedTypeKey` do not alias with prior
+    /// payloads. Under naive structural dedup this would collapse — the
+    /// exemption in `push_impl` short-circuits the dedup index.
+    #[test]
+    fn intern_does_not_dedup_vue_macro_elements_identity_carrier() {
+        use verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements;
+        let store = SemanticGraphStore::new();
+        let payload = Arc::new(ResolvedElements::default());
+        let a = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
+        let b = store.intern_node(SemanticNodeData::VueMacroElements(Arc::clone(&payload)));
+        assert_ne!(
+            a, b,
+            "VueMacroElements must allocate fresh slots on every insert — \
+             identity-carrier contract requires latest-insert-wins semantics",
+        );
+        // Sidecar stays `None` for both slots — exempt from origin-scope
+        // tracking per plan §7.10.
+        assert_eq!(store.node_scope(a), None);
+        assert_eq!(store.node_scope(b), None);
+    }
+
     #[test]
     fn node_data_is_readable_via_graph_read_trait() {
         let store = SemanticGraphStore::new();
@@ -1638,6 +1947,63 @@ mod tests {
             *data,
             SemanticNodeData::Primitive(PrimitiveKind::Boolean)
         ));
+    }
+
+    /// Path C C17 — sharded dedup produces the same `SemanticNodeId`
+    /// across threads for identical `(payload, scope)` pairs. The
+    /// invariant is strong: two threads interning the same payload at
+    /// the same scope must observe equal ids immediately (no visibility
+    /// gap from C17's per-shard Mutex). The threads race; the second
+    /// arrival finds the first's entry in the shard index and returns
+    /// the same id rather than allocating a duplicate.
+    #[test]
+    fn intern_identity_invariant_holds_across_threads() {
+        use std::thread;
+        let store = Arc::new(SemanticGraphStore::new());
+        let store_a = Arc::clone(&store);
+        let store_b = Arc::clone(&store);
+        let handle_a = thread::spawn(move || {
+            store_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))
+        });
+        let handle_b = thread::spawn(move || {
+            store_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))
+        });
+        let id_a = handle_a.join().expect("thread A joined");
+        let id_b = handle_b.join().expect("thread B joined");
+        assert_eq!(
+            id_a, id_b,
+            "C17 sharded intern must produce identical SemanticNodeId across \
+             threads for the same (payload, scope) pair — found {id_a:?} vs {id_b:?}",
+        );
+    }
+
+    /// Path C C17 — `shard_index_for` is deterministic: identical
+    /// `(data, scope)` pairs route to the same shard regardless of
+    /// calling thread or program run. This is load-bearing for the
+    /// sharded-dedup correctness: a payload's shard must not drift
+    /// across invocations or the second intern would land on a
+    /// different shard and allocate a duplicate id.
+    #[test]
+    fn shard_routing_is_deterministic_per_payload_and_scope() {
+        let data_a = SemanticNodeData::Primitive(PrimitiveKind::String);
+        let data_b = SemanticNodeData::Primitive(PrimitiveKind::String);
+        let scope_global = NodeScopeId::Global;
+        let scope_file = NodeScopeId::File {
+            canonical_id: Arc::from("/w/x.ts"),
+            whole_hash: [0u8; 16],
+            local_scope: None,
+        };
+        assert_eq!(
+            shard_index_for(&data_a, &scope_global),
+            shard_index_for(&data_b, &scope_global),
+            "shard routing must be stable for identical payloads at identical scopes",
+        );
+        // Different scope → may route differently, but the result is
+        // still deterministic per call.
+        let s1 = shard_index_for(&data_a, &scope_file);
+        let s2 = shard_index_for(&data_a, &scope_file);
+        assert_eq!(s1, s2, "shard routing must be stable across repeat calls");
+        assert!(s1 < NUM_SHARDS, "shard index must stay within NUM_SHARDS");
     }
 
     #[test]
@@ -1896,7 +2262,7 @@ mod tests {
     #[test]
     fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
         let store = SemanticGraphStore::new();
-        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
         let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let key = SemanticQueryKey::Instantiate {
             base,
@@ -1930,7 +2296,7 @@ mod tests {
     #[test]
     fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
         let store = SemanticGraphStore::new();
-        let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let base = crate::semantic_query::DeclIdentity::synthetic("Foo");
         let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let key = SemanticQueryKey::Instantiate {
             base,
@@ -3228,16 +3594,55 @@ mod tests {
     /// from the derivation store directly — no separate sample
     /// reservoir is needed because the store already records the full
     /// per-node edge layout.
+    ///
+    /// **Fixture rewrite (Path C C7 / plan §14.3, §14.4).** Pre-C7 this
+    /// test minted 10 "distinct" nodes by calling `intern_node(Primitive(Number))`
+    /// ten times and relied on the append-only allocator to return fresh
+    /// ids for each call. Under C7's structural dedup that mechanism is
+    /// invalid: all 10 calls converge on one [`SemanticNodeId`] and the
+    /// per-node edge counts collapse into a single `[1, 2, …, 10]`-edge
+    /// list on one node.
+    ///
+    /// The rewrite interns ten structurally-distinct payloads so the
+    /// post-C7 implementation still produces ten result nodes with a
+    /// `(1, 2, …, 10)` edge distribution. The assertion-intent — that
+    /// `origin_edges_per_node_p50/p95` derive correctly across N
+    /// distinct result nodes — is preserved; only the setup technique
+    /// changed.
     #[test]
     fn origin_edges_per_node_percentiles_derive_from_derivation_store() {
+        use verter_semantic::analysis::type_expr::LiteralValue;
         let store = SemanticGraphStore::new();
         let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        // 10 result nodes each with a different number of origin edges:
-        // node[i] gets (i + 1) edges. After insertion the per-node
-        // counts sorted ascending are [1, 2, 3, …, 10] → p50 = 6, p95 = 10.
-        for i in 0..10u32 {
-            let result = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-            for _ in 0..=i {
+        // Ten structurally-distinct payloads. Under C7 compound-key
+        // interning each returns its own [`SemanticNodeId`]. The same
+        // assertion-intent is preserved: per-node edge counts sorted
+        // ascending are [1, 2, …, 10] → p50 = 6, p95 = 10.
+        let distinct_payloads: [SemanticNodeData; 10] = [
+            SemanticNodeData::Primitive(PrimitiveKind::Number),
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean),
+            SemanticNodeData::Primitive(PrimitiveKind::Symbol),
+            SemanticNodeData::Primitive(PrimitiveKind::BigInt),
+            SemanticNodeData::Primitive(PrimitiveKind::Never),
+            SemanticNodeData::Literal(LiteralValue::String(String::from("a"))),
+            SemanticNodeData::Literal(LiteralValue::String(String::from("b"))),
+            SemanticNodeData::Literal(LiteralValue::Number(1.0)),
+            SemanticNodeData::Literal(LiteralValue::Boolean(true)),
+            SemanticNodeData::Literal(LiteralValue::Boolean(false)),
+        ];
+        let mut seen_ids: Vec<SemanticNodeId> = Vec::with_capacity(10);
+        for (i, payload) in distinct_payloads.into_iter().enumerate() {
+            let result = store.intern_node(payload);
+            // Guard: the mechanism requires distinct ids. If any pair
+            // aliases, the assertion below would silently pass because
+            // origin-edge counts would cluster differently.
+            assert!(
+                !seen_ids.contains(&result),
+                "fixture payload #{i} collided with an earlier one — \
+                 rewrite invalid",
+            );
+            seen_ids.push(result);
+            for _ in 0..=(i as u32) {
                 store.record_origin_edge(
                     result,
                     OriginEdgeKind::Instantiate,

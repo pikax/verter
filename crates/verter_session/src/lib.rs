@@ -56,6 +56,8 @@ pub mod component_meta_audit;
 pub mod component_meta_host;
 pub mod component_meta_result_db;
 pub mod cross_file;
+#[cfg(test)]
+mod d_cutover_characterization_tests;
 mod deps;
 mod hash;
 pub mod host_executor;
@@ -77,6 +79,7 @@ mod resolver_store;
 pub mod scheduler_shim;
 pub mod semantic_query;
 pub mod semantic_query_memo;
+pub(crate) mod session_runtime;
 mod shared;
 pub(crate) mod source_map_remap;
 pub mod template_convert;
@@ -299,6 +302,24 @@ impl VerterHost {
     /// The workspace provides file reads, import resolution, and edge recording
     /// through the [`WorkspaceAccess`](verter_workspace::WorkspaceAccess) trait.
     pub fn new(config: HostConfig, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) -> Self {
+        Self::new_with_scheduler_config(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+        )
+    }
+
+    /// Create a new host with an explicit [`SchedulerConfig`].
+    ///
+    /// Path C C12 (per plan §14.5): test harnesses construct hosts with
+    /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
+    /// to avoid CPU oversubscription when many parallel test threads each
+    /// spin up their own scheduler thread pools (see plan §13 diagnosis).
+    pub fn new_with_scheduler_config(
+        config: HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+    ) -> Self {
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
         let scheduler = {
@@ -312,7 +333,7 @@ impl VerterHost {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 verter_scheduler::scheduler::Scheduler::with_executor(
-                    verter_scheduler::scheduler::SchedulerConfig::default(),
+                    scheduler_config,
                     loader,
                     executor,
                 )
@@ -320,13 +341,17 @@ impl VerterHost {
             #[cfg(target_arch = "wasm32")]
             {
                 verter_scheduler::scheduler::Scheduler::new_sync_with_executor(
-                    verter_scheduler::scheduler::SchedulerConfig::default(),
+                    scheduler_config,
                     loader,
                     executor,
                 )
             }
         };
 
+        let provenance = Arc::new(MetaProvenance::default());
+        let project_type_store = Arc::new(
+            crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
+        );
         Self {
             instance_id: next_host_instance_id(),
             config,
@@ -340,7 +365,7 @@ impl VerterHost {
             metrics: HostMetrics::default(),
             scheduler,
             compile_cache: dashmap::DashMap::new(),
-            provenance: Arc::new(MetaProvenance::default()),
+            provenance,
             resolved_type_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             resolver: HostResolverState::new(),
             eval_env_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
@@ -348,7 +373,7 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(verter_semantic::profile::QueryProfile::Build),
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
-            project_type_store: Arc::new(crate::project_type_store::ProjectTypeStore::new()),
+            project_type_store,
         }
     }
 
@@ -362,6 +387,20 @@ impl VerterHost {
             verter_workspace::MemoryOptions::default(),
         ));
         Self::new(config, workspace)
+    }
+
+    /// Create a standalone host with an explicit [`SchedulerConfig`].
+    ///
+    /// Path C C12 test-harness entry point — see
+    /// [`Self::new_with_scheduler_config`] for the rationale.
+    pub fn new_standalone_with_scheduler_config(
+        config: HostConfig,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+    ) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config(config, workspace, scheduler_config)
     }
 
     /// Get a clone of the workspace Arc.
@@ -670,6 +709,7 @@ impl VerterHost {
 
     /// Snapshot provenance counters, including VFS counters from the active workspace.
     pub fn provenance_snapshot(&self) -> MetaProvenanceSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
         let mut snapshot = self.provenance.snapshot();
         let vfs = self.ws().vfs_provenance_snapshot();
         snapshot.import_resolution_cache_hit_count = vfs.import_resolution_cache_hit_count;
@@ -679,6 +719,14 @@ impl VerterHost {
         snapshot.dir_index_dirty_rescan_count = vfs.dir_index_dirty_rescan_count;
         snapshot.native_fs_read_dir_count = vfs.native_fs_read_dir_count;
         snapshot.native_fs_read_file_miss_count = vfs.native_fs_read_file_miss_count;
+        // Path C C1 aggregation: the scheduler owns its own counters in the
+        // `verter_scheduler` crate; mirror them into the session-facing
+        // snapshot so callers have a single observation surface.
+        let sched_counters = self.scheduler.counters();
+        snapshot.scheduler_submit_count = sched_counters.submit_count.load(Relaxed);
+        snapshot.scheduler_inbox_depth_max = sched_counters.inbox_depth_max.load(Relaxed);
+        // Path C C12 (per plan §14.5) retired `HEAVY_COMPONENT_META_TEST_*`
+        // counters along with the mutex itself; nothing to mirror here.
         snapshot
     }
 
@@ -1188,6 +1236,8 @@ impl VerterHost {
     /// materializes native-side lifecycle state from the committed scheduler
     /// snapshots without re-submitting the source.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.provenance.ensure_loaded_calls.fetch_add(1, Relaxed);
         let normalized_canonical = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical.as_ref();
         // Fast path: already in host and not evicted. Also verify the
@@ -1233,12 +1283,28 @@ impl VerterHost {
             // Wait for the scheduler to reach Analysis. `wait_or_drive` drives
             // stages inline on WASM (no driver thread); on native it delegates
             // to `handle.wait()` when the driver thread is installed.
+            // Path C C1 instrumentation: split wait (scheduler drive) vs
+            // work (integrate_scheduler_snapshot) so C2's diagnosis can
+            // tell load-path contention from post-load processing.
+            let wait_start = std::time::Instant::now();
             match self.scheduler.wait_or_drive(&handle) {
                 CompletionState::Ready(_) => {}
-                _ => return false,
+                _ => {
+                    self.provenance
+                        .ensure_loaded_wait_ns
+                        .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
+                    return false;
+                }
             }
+            self.provenance
+                .ensure_loaded_wait_ns
+                .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
 
+            let work_start = std::time::Instant::now();
             let loaded = self.integrate_scheduler_snapshot(canonical_id);
+            self.provenance
+                .ensure_loaded_work_ns
+                .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
             // First-time loads are purely additive: they populate host state for a
             // file that no previously-captured view tracks, so they cannot invalidate
             // any existing snapshot's facts. Only re-loads (content reload after an

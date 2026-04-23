@@ -278,6 +278,24 @@ When encountering issues during implementation:
 - Never apply a dirty fix that contradicts architectural rules just to make tests pass
 - A clean TODO with a follow-up plan is always better than a quick patch that accumulates debt
 
+### Stub Prevention (CRITICAL)
+
+Do not use empty test bodies, trivially-passing stubs, or "deferred to follow-up commit" placeholders to satisfy a named contract — a gate check, a characterization test, a plan invariant, a review obligation, or a declared completion criterion. A stub that happens to pass is a gate-bypass, not a pass.
+
+**Concrete anti-patterns, all forbidden on landed/mainline commits:**
+
+- **Empty `#[test]` bodies.** `#[test] fn verifies_cycle_guard_terminates_on_recursion() {}` passes trivially and proves nothing. An un-ignored empty-body test is worse than an `#[ignore]`'d one — it falsely advertises coverage. If the test body cannot be written yet, keep `#[ignore]` on the test until the implementation lands.
+- **Unconditional "unknown" / "default" returns as "scaffolding".** `fn relate_nodes(...) -> RelationResult::Unknown` that always returns Unknown is not a relation-engine scaffold; it is a nop. `fn resolve(...) -> Opaque(Miss)` that always returns Miss is the same defect. Either write real logic, or use `todo!()` / `unimplemented!()` so callers panic loudly and the nop is obvious from any first call.
+- **"Real body deferred to follow-up commit."** A commit that claims to satisfy a gate via a stub, with the plan of a later commit "fleshing it out", is bypassing the gate, not passing it. The gate reflects implementation state on the tree under review, not future intent.
+- **Always-true assertions.** `assert!(true)`, `assert_eq!(1, 1)`, `assert!(result.is_ok() || true)` — any predicate that holds regardless of the code under test is a stub in disguise.
+- **Characterization tests that do not discriminate.** A characterization test must be writable such that it FAILS against the pre-change codebase AND PASSES against the post-change codebase. If that property does not hold, the test is not characterizing anything.
+
+**Rule of thumb:** for every assertion you commit, ask "would this test catch the bug the cutover was written to fix?". If no, the test is a stub.
+
+**WIP exemption.** Scratch branches that will be squashed (e.g., `staging/*` → squash-merge to mainline) may contain `todo!()` bodies, empty tests, and placeholder returns — that is their purpose. The rule applies to the squashed/landed commit, to any PR branch, and to any gate evaluated on the final tree. A landed commit message cannot cite "stub satisfies gate mechanically" as a legitimate state; that statement itself is a self-identified gate-bypass.
+
+**Self-review obligation.** Before concluding a step that un-ignores or adds tests, re-open each test file and verify bodies are non-empty and assertions are discriminating. Before concluding a step that implements a function, verify the body exercises its inputs (branches on them, calls through to real logic) rather than returning a constant.
+
 ### Agent Feedback Capture
 
 During work sessions, agents MUST continuously log feedback to a per-conversation file at `.claude/feedback/feedback-{YYYY-MM-DD}-{short-id}.md`. The `.claude/feedback/` directory is gitignored.

@@ -318,7 +318,10 @@ mod tests {
     impl TestView {
         fn accepting_all(token: u64) -> Self {
             Self {
-                token: StoreViewCompatToken(token),
+                token: StoreViewCompatToken {
+                    epoch: token,
+                    session: None,
+                },
             }
         }
     }

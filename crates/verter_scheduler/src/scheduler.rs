@@ -26,6 +26,21 @@ use crate::queue::{AgingConfig, JobIndex, JobKey, QueueEntry};
 use crate::source_loader::{FileKind as SourceFileKind, SourceLoader};
 use crate::stage::{Priority, TargetStage, TaskKind};
 
+/// Path C C1 contention instrumentation for the scheduler. Owned by
+/// [`Scheduler`]; surfaced via
+/// [`Scheduler::counters`](Scheduler::counters) so host-level provenance
+/// snapshots (verter_session's `MetaProvenanceSnapshot`) can aggregate
+/// them without introducing a cross-crate dependency on `MetaProvenance`.
+///
+/// All fields are plain `AtomicU64`; reads are `Relaxed`.
+#[derive(Default, Debug)]
+pub struct SchedulerCounters {
+    /// Submissions entering the inbox via `submit_request`.
+    pub submit_count: AtomicU64,
+    /// Peak inbox depth observed (monotonic increase via `fetch_max`).
+    pub inbox_depth_max: AtomicU64,
+}
+
 /// Configuration for the scheduler.
 #[derive(Clone, Debug)]
 pub struct SchedulerConfig {
@@ -72,6 +87,18 @@ pub struct Request {
     pub priority: Priority,
     pub source: Option<Arc<str>>,
     pub file_kind: Option<SourceFileKind>,
+}
+
+/// Path C C12 — batch submission handle (plan §2 Stage 7 Pass C12).
+///
+/// Produced by [`Scheduler::submit_batch`]; drained via
+/// [`Scheduler::wait_batch`]. Callers submit N independent requests
+/// before any waits; the scheduler fans them out onto its Rayon pool.
+/// The handle carries one [`CompletionHandle`] per submitted request
+/// in submission order so `wait_batch` can surface results in the
+/// same order.
+pub struct BatchHandle {
+    pub(crate) handles: Vec<CompletionHandle<RequestResult>>,
 }
 
 /// The main scheduler.
@@ -125,6 +152,8 @@ pub struct Scheduler {
     /// Driver thread handle (native only).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) driver_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Path C C1 contention instrumentation.
+    pub(crate) counters: SchedulerCounters,
 }
 
 impl Scheduler {
@@ -168,6 +197,7 @@ impl Scheduler {
             removal_epoch: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
+            counters: SchedulerCounters::default(),
         });
 
         // Driver holds Weak so it doesn't prevent Drop.
@@ -226,6 +256,7 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
+            counters: SchedulerCounters::default(),
         })
     }
 
@@ -244,13 +275,106 @@ impl Scheduler {
             submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
         };
         match self.inbox.sender.send(submission) {
-            Ok(()) => handle,
+            Ok(()) => {
+                // Path C C1 instrumentation: record the submission + update
+                // the peak inbox depth observed.
+                self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
+                let depth = self.inbox.sender.len() as u64;
+                let prev_max = self.counters.inbox_depth_max.load(Ordering::Relaxed);
+                if depth > prev_max {
+                    let _ = self
+                        .counters
+                        .inbox_depth_max
+                        .fetch_max(depth, Ordering::Relaxed);
+                }
+                handle
+            }
             Err(_) => {
                 // Inbox closed (scheduler shutting down)
                 sender.send(CompletionState::Shutdown);
                 handle
             }
         }
+    }
+
+    /// Path C C12 — batch submit. Submits N requests without
+    /// individual waits so the scheduler can coalesce drain and fan-
+    /// out onto its Rayon pool. Returns a [`BatchHandle`] that carries
+    /// one completion handle per request in submission order.
+    pub fn submit_batch(&self, requests: Vec<Request>) -> BatchHandle {
+        let mut handles = Vec::with_capacity(requests.len());
+        for request in requests {
+            handles.push(self.submit_request(request));
+        }
+        BatchHandle { handles }
+    }
+
+    /// Path C C12 — wait for a submitted batch to complete. Drains
+    /// each [`CompletionHandle`] in submission order. The caller
+    /// receives per-request results as they arrive; the scheduler
+    /// fans out the work across its configured CPU pool.
+    ///
+    /// Uses `wait_or_drive` so both native (driver thread) and
+    /// single-threaded callers share the same completion semantics.
+    pub fn wait_batch(
+        self: &Arc<Self>,
+        batch: BatchHandle,
+    ) -> Vec<crate::job::CompletionState<RequestResult>> {
+        batch
+            .handles
+            .iter()
+            .map(|handle| self.wait_or_drive(handle))
+            .collect()
+    }
+
+    /// Path C C13 — dispatch a batch of non-staged scheduler jobs
+    /// (per-job-kind work that does not flow through the
+    /// Source → Analysis → Artifact lifecycle). Each job runs as a
+    /// closure on the scheduler's CPU pool and the function returns
+    /// per-job results in submission order.
+    ///
+    /// Used by `MetaSession::get_component_meta_batch` to fan out N
+    /// independent component-meta queries onto the Rayon pool when
+    /// the session is in [`crate::scheduler::SchedulerConfig`]'s
+    /// Batch execution mode. Interactive callers continue to use the
+    /// single-request synchronous path through
+    /// `MetaSession::get_component_meta`.
+    ///
+    /// Counter side effect: each dispatched job increments
+    /// `counters.submit_count` so contention instrumentation can
+    /// observe Batch-mode parallelism.
+    ///
+    /// On WASM (single-threaded), runs sequentially on the calling
+    /// thread — same observable behaviour, no Rayon fan-out.
+    pub fn dispatch_meta_jobs<F, R>(
+        self: &Arc<Self>,
+        jobs: Vec<crate::stage::SchedulerJobKind>,
+        executor: F,
+    ) -> Vec<R>
+    where
+        F: Fn(&crate::stage::SchedulerJobKind) -> R + Sync + Send,
+        R: Send,
+    {
+        for _ in &jobs {
+            self.counters
+                .submit_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            self.cpu_pool
+                .install(|| jobs.par_iter().map(&executor).collect())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            jobs.iter().map(&executor).collect()
+        }
+    }
+
+    /// Access Path C C1 contention instrumentation counters.
+    pub fn counters(&self) -> &SchedulerCounters {
+        &self.counters
     }
 
     // ── Sync Fast-Path Reads ──

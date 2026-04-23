@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
 //! Self-contained component-meta hotpath profiler.
 //!
 //! Generates a synthetic Vue project with local node_modules packages that

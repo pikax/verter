@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use verter_semantic::analysis::types::AnalyzedMacro;
 
-const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
+pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 fn next_component_meta_audit_request_id() -> u64 {
     static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -229,6 +229,125 @@ impl ComponentMetaRequestHost for VerterHost {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SessionRequestHost — session-scoped ComponentMetaRequestHost (Path C C14)
+// ---------------------------------------------------------------------------
+
+/// Session-scoped request host that routes reads through the session
+/// runtime and writes to the session-scoped resolved-meta cache.
+///
+/// Replaces `impl ComponentMetaRequestHost for VerterHost` for all
+/// session-scoped callers. The generic executor at
+/// `component_meta_request.rs` calls these methods on the trait object,
+/// so every axis is session-aware end to end.
+pub struct SessionRequestHost<'a> {
+    pub(crate) runtime: &'a crate::session_runtime::SessionRuntime,
+}
+
+impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
+    type View = crate::resolver_store::HostStoreView;
+    type Mode = ResolverMode;
+    type Resolution = ResolvedComponentMetaState;
+    type CapturedInputs = CapturedComponentMetaInputs;
+
+    fn cache_key(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+    ) -> crate::resolver_core::ResolutionNodeKey {
+        resolved_meta_cache_key(canonical, mode)
+    }
+
+    fn snapshot_store_view(&self) -> Self::View {
+        let view = self.runtime.current_view();
+        crate::resolver_store::HostStoreView::from_session(&view, self.runtime.host())
+    }
+
+    fn view_mutation_epoch(&self, store_view: &Self::View) -> u64 {
+        store_view.mutation_epoch()
+    }
+
+    fn current_store_view_epoch(&self) -> u64 {
+        self.runtime.current_store_view_epoch()
+    }
+
+    fn capture_component_meta_inputs(
+        &self,
+        canonical: &str,
+        _view: &Self::View,
+    ) -> Option<Self::CapturedInputs> {
+        let host = self.runtime.host();
+        let audit_enabled = host.config.audit_enabled;
+        let capture_started = audit_enabled.then(Instant::now);
+        let store_read_started = audit_enabled.then(Instant::now);
+        let _trace = component_meta_trace_scope!(
+            "session_capture_component_meta_inputs",
+            format!("owner={} session={}", canonical, self.runtime.session_id()),
+        );
+        let snapshot = host.get_raw_analysis_snapshot(canonical)?;
+        let facts = host.ensure_indexed_ready(canonical)?;
+        let whole_hash = facts.whole_hash;
+        let store_read_ms = store_read_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let owner_eval_source =
+            VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
+        let direct_import_started = audit_enabled.then(Instant::now);
+        let direct_dependency_candidates =
+            host.cache_dependency_candidates_from_snapshot(canonical, &snapshot);
+        let direct_import_proof_ms = direct_import_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let capture_inputs_ms = capture_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        Some(CapturedComponentMetaInputs {
+            whole_hash,
+            snapshot,
+            owner_eval_source: Some(owner_eval_source),
+            direct_dependency_candidates,
+            audit_capture_inputs_ms: capture_inputs_ms,
+            audit_store_read_ms: store_read_ms,
+            audit_direct_import_proof_ms: direct_import_proof_ms,
+        })
+    }
+
+    fn try_get_cached_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        _store_view: &Self::View,
+    ) -> Option<Self::Resolution> {
+        self.runtime.try_get_cached_resolved_meta(canonical, mode)
+    }
+
+    fn compute_component_meta(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        captured: Option<&Self::CapturedInputs>,
+        _store_view: Option<&Self::View>,
+    ) -> Option<Self::Resolution> {
+        let host = self.runtime.host();
+        if let Some(captured) = captured {
+            return host.compute_component_meta_state_from_captured(canonical, mode, captured);
+        }
+        let whole_hash = host
+            .current_or_read_whole_hash(canonical)
+            .unwrap_or_default();
+        host.compute_component_meta_state(canonical, mode, whole_hash)
+    }
+
+    fn store_component_meta_result(
+        &self,
+        canonical: &str,
+        mode: Self::Mode,
+        result: &Self::Resolution,
+    ) {
+        self.runtime.store_resolved_meta(canonical, mode, result);
+    }
+}
+
 /// Native declaration kind for the resolved pre-expansion type.
 pub type ResolvedDeclarationKind = crate::resolver_core::ResolvedDeclarationKind;
 
@@ -299,6 +418,20 @@ fn collect_expanded_slot_binding_param_types<'a>(
                 out.push(&first.ty);
             }
         }
+        // Path C C11-residual-A: deferred Conditional whose extends has
+        // `infer X` in a Function position represents a TS conditional
+        // that the dispatch couldn't decide (typically due to an
+        // in-flight sentinel during the upstream evaluation context).
+        // For slot-binding extraction we use the conventional
+        // TS-truthy semantics: walk the true_type as the slot-shape
+        // contributor. The infer bindings extracted from the check's
+        // matching Function position are folded into the true_type via
+        // `decide_typeexpr_conditional_with_function_extends`, which
+        // the caller (`enrich_missing_slot_bindings`) invokes before
+        // collection.
+        verter_semantic::analysis::type_expr::TypeExpr::Conditional { true_type, .. } => {
+            collect_expanded_slot_binding_param_types(true_type, out);
+        }
         verter_semantic::analysis::type_expr::TypeExpr::Object(obj) => {
             for member in &obj.properties {
                 match member {
@@ -322,6 +455,276 @@ fn collect_expanded_slot_binding_param_types<'a>(
         }
         _ => {}
     }
+}
+
+/// Path C C11-residual-B: shallow substitution for owner-local generic
+/// alias refs at the registry-publish boundary. When a registry entry's
+/// raw body is `Ref { name, [args..] }` and the alias is declared in the
+/// SAME canonical scope as the registry consumer, look up the alias's
+/// prepared body. If the body is an Object, substitute the type
+/// arguments into its members and return the substituted Object. The
+/// substituted Object preserves owner-local helper Refs (e.g.,
+/// `ComponentVariants<T>` stays as `Ref { name: "ComponentVariants", ..}`)
+/// rather than recursively expanding them — the registry consumer can
+/// follow the helper Refs through the registry.
+///
+/// Returns `None` when the raw body is not a Ref, the alias is
+/// cross-file, the alias has no prepared body, or the body is not an
+/// Object.
+fn component_meta_owner_local_shallow_substituted_alias_body(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    raw_body: Option<&verter_semantic::analysis::type_expr::TypeExpr>,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = raw_body?
+    else {
+        return None;
+    };
+    if type_arguments.is_empty() {
+        return None;
+    }
+    let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
+    let target_canonical = if declaration.canonical_source.is_empty() {
+        scope_canonical_id.to_string()
+    } else {
+        declaration.canonical_source.clone()
+    };
+    if target_canonical != scope_canonical_id {
+        // Cross-file alias — let the imported_generic_alias_root path
+        // handle it via materialisation + per-member refinement.
+        return None;
+    }
+    let resolved_name = if declaration.resolved_name.is_empty() {
+        name.as_ref().to_string()
+    } else {
+        declaration.resolved_name.clone()
+    };
+    let prepared = query_engine.prepared_type_decl(&target_canonical, &resolved_name)?;
+    if prepared.type_parameters.len() < type_arguments.len() {
+        return None;
+    }
+    let mut substitutions: rustc_hash::FxHashMap<String, TypeExpr> =
+        rustc_hash::FxHashMap::default();
+    for (index, param) in prepared.type_parameters.iter().enumerate() {
+        let arg = type_arguments
+            .get(index)
+            .or(param.default.as_deref())
+            .cloned();
+        if let Some(arg) = arg {
+            substitutions.insert(param.name.clone(), arg);
+        }
+        // Partial substitution still useful when later params have no
+        // arg and no default — leave them unsubstituted in the body.
+    }
+    let body = &prepared.body;
+    let TypeExpr::Object(_) = body else {
+        return None;
+    };
+    Some(component_meta_substitute_typeexpr(body, &substitutions))
+}
+
+/// Recursive TypeExpr substitution walker. Walks every variant and
+/// delegates leaf replacement to `try_replace`: return `Some(expr)` to
+/// replace, `None` to recurse structurally.
+fn walk_substitute_typeexpr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    try_replace: &impl Fn(
+        &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::{
+        FunctionExpr, FunctionParam, IndexSignature, MethodSignature, ObjectExpr, ObjectMember,
+        ObjectProperty, TupleElement, TypeExpr,
+    };
+    if let Some(replaced) = try_replace(expr) {
+        return replaced;
+    }
+    let recurse = |e: &TypeExpr| -> TypeExpr { walk_substitute_typeexpr(e, try_replace) };
+    let recurse_fn = |f: &FunctionExpr| -> FunctionExpr {
+        FunctionExpr {
+            parameters: f
+                .parameters
+                .iter()
+                .map(|fp| FunctionParam {
+                    name: fp.name.clone(),
+                    ty: recurse(&fp.ty),
+                    optional: fp.optional,
+                    rest: fp.rest,
+                })
+                .collect(),
+            return_type: f
+                .return_type
+                .as_ref()
+                .map(|rt| std::sync::Arc::new(recurse(rt))),
+            type_parameters: f.type_parameters.clone(),
+        }
+    };
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => TypeExpr::Ref {
+            name: name.clone(),
+            type_arguments: std::sync::Arc::from(
+                type_arguments.iter().map(&recurse).collect::<Vec<_>>(),
+            ),
+        },
+        TypeExpr::Parenthesized(inner) => {
+            TypeExpr::Parenthesized(std::sync::Arc::new(recurse(inner)))
+        }
+        TypeExpr::Union(parts) => TypeExpr::Union(std::sync::Arc::from(
+            parts.iter().map(&recurse).collect::<Vec<_>>(),
+        )),
+        TypeExpr::Intersection(parts) => TypeExpr::Intersection(std::sync::Arc::from(
+            parts.iter().map(&recurse).collect::<Vec<_>>(),
+        )),
+        TypeExpr::Array { element, readonly } => TypeExpr::Array {
+            element: std::sync::Arc::new(recurse(element)),
+            readonly: *readonly,
+        },
+        TypeExpr::Tuple { elements, readonly } => TypeExpr::Tuple {
+            elements: std::sync::Arc::from(
+                elements
+                    .iter()
+                    .map(|element| TupleElement {
+                        label: element.label.clone(),
+                        ty: recurse(&element.ty),
+                        optional: element.optional,
+                        rest: element.rest,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            readonly: *readonly,
+        },
+        TypeExpr::Object(obj) => TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
+            properties: obj
+                .properties
+                .iter()
+                .map(|member| match member {
+                    ObjectMember::Property(p) => ObjectMember::Property(ObjectProperty {
+                        name: p.name.clone(),
+                        ty: recurse(&p.ty),
+                        optional: p.optional,
+                        readonly: p.readonly,
+                    }),
+                    ObjectMember::Method(m) => ObjectMember::Method(MethodSignature {
+                        name: m.name.clone(),
+                        function: recurse_fn(&m.function),
+                        optional: m.optional,
+                    }),
+                    ObjectMember::CallSignature(f) => ObjectMember::CallSignature(recurse_fn(f)),
+                    ObjectMember::ConstructSignature(f) => {
+                        ObjectMember::ConstructSignature(recurse_fn(f))
+                    }
+                    ObjectMember::IndexSignature(sig) => {
+                        ObjectMember::IndexSignature(IndexSignature {
+                            key_name: sig.key_name.clone(),
+                            key_type: recurse(&sig.key_type),
+                            value_type: recurse(&sig.value_type),
+                            readonly: sig.readonly,
+                        })
+                    }
+                })
+                .collect(),
+        })),
+        TypeExpr::Function(func) => TypeExpr::Function(std::sync::Arc::new(recurse_fn(func))),
+        _ => expr.clone(),
+    }
+}
+
+fn component_meta_substitute_typeexpr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    substitutions: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+    walk_substitute_typeexpr(expr, &|e| match e {
+        TypeExpr::TypeParameter(param) => substitutions.get(&param.name).cloned(),
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => substitutions.get(name.as_ref()).cloned(),
+        _ => None,
+    })
+}
+
+/// TypeExpr-level conditional decision (Path C C11-residual-A workaround).
+///
+/// When the dispatch fails to decide a `T extends (props: infer P) => any
+/// ? F<P, ...> : ...` pattern at evaluation time (typically because a
+/// same-path sentinel suppressed the cross-file `T[K]` evaluation), the
+/// resulting `slot.ty` is left as a deferred `TypeExpr::Conditional`.
+/// This helper applies the same nested-Function-Infer reduction that
+/// `build_conditional`'s C11a path performs, but at the `TypeExpr`
+/// level so slot-binding extraction can proceed without re-running the
+/// dispatch.
+///
+/// Returns:
+/// - `Some(decided_true_type_with_infer_substituted)` when the
+///   conditional has a concrete Function check, a Function extends with
+///   at least one `infer X` position, and the corresponding check
+///   parameter types can be bound to those infer names.
+/// - `None` when the conditional cannot be decided at this layer (no
+///   infer-bearing Function extends, no Function check, or empty
+///   bindings).
+fn decide_typeexpr_conditional_with_function_extends(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+    let TypeExpr::Conditional {
+        check,
+        extends,
+        true_type,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let TypeExpr::Function(check_fn) = check.as_ref() else {
+        return None;
+    };
+    let TypeExpr::Function(extends_fn) = extends.as_ref() else {
+        return None;
+    };
+    let mut bindings: rustc_hash::FxHashMap<String, TypeExpr> = rustc_hash::FxHashMap::default();
+    for (e_param, c_param) in extends_fn.parameters.iter().zip(check_fn.parameters.iter()) {
+        if let TypeExpr::Infer { name } = &e_param.ty {
+            bindings.insert(name.clone(), c_param.ty.clone());
+        }
+    }
+    if let (Some(TypeExpr::Infer { name }), Some(check_ret)) = (
+        extends_fn.return_type.as_deref(),
+        check_fn.return_type.as_deref(),
+    ) {
+        bindings.insert(name.clone(), check_ret.clone());
+    }
+    if bindings.is_empty() {
+        return None;
+    }
+    Some(substitute_infer_in_typeexpr(true_type, &bindings))
+}
+
+fn substitute_infer_in_typeexpr(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    bindings: &rustc_hash::FxHashMap<String, verter_semantic::analysis::type_expr::TypeExpr>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use verter_semantic::analysis::type_expr::TypeExpr;
+    walk_substitute_typeexpr(expr, &|e| match e {
+        TypeExpr::Infer { name } => bindings.get(name).cloned(),
+        // Replace `semanticMiss` sentinel with the unique bound infer
+        // when there is exactly one — recovers an inferred prop whose
+        // SemanticNode-level position was lost during dispatch.
+        TypeExpr::Unknown { raw }
+            if raw == crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS
+                && bindings.len() == 1 =>
+        {
+            bindings.values().next().cloned()
+        }
+        _ => None,
+    })
 }
 
 fn collect_expanded_slot_bindings_from_object_type(
@@ -367,8 +770,29 @@ fn enrich_missing_slot_bindings(
 
     for entry in &evaluated_types.define_slots {
         for slot in &entry.result.value.properties {
+            // Path C C11-residual-A: normalize a deferred Conditional
+            // slot.ty by performing TS truthy-branch reduction at the
+            // TypeExpr level before extracting binding params. The
+            // dispatch may have left a deferred Conditional in the
+            // slot value when an upstream sentinel suppressed
+            // evaluation; recovering the true_type here lets the
+            // caller's `collect_expanded_slot_bindings_from_object_type`
+            // reach into the Function param and surface the binding
+            // names.
+            let normalized_ty;
+            let slot_ty_for_collect = if let Some(decided) =
+                decide_typeexpr_conditional_with_function_extends(&slot.ty)
+            {
+                normalized_ty = decided;
+                &normalized_ty
+            } else {
+                &slot.ty
+            };
             let mut binding_param_types = Vec::new();
-            collect_expanded_slot_binding_param_types(&slot.ty, &mut binding_param_types);
+            collect_expanded_slot_binding_param_types(
+                slot_ty_for_collect,
+                &mut binding_param_types,
+            );
             if binding_param_types.is_empty() {
                 continue;
             }
@@ -1008,9 +1432,13 @@ pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
         declaration.resolved_name
     };
     let body = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())?;
+    // D-Cutover §5.8: `project_type_surface_expr` now routes the full
+    // projection through dispatch (`dispatch_projected_surface` →
+    // `dispatch_root_instantiated` → Instantiate). The pre-§5.8
+    // `solve_scoped` fallback was a duplicate solver path and is
+    // retired with the solver subsystem.
     let materialized_body = engine
         .project_type_surface_expr(scope_canonical_id, root_name.as_str())
-        .or_else(|| engine.solve_scoped(scope_canonical_id, root_name.as_str()))
         .or_else(|| {
             let materialized = materialize_component_meta_type_expr_until_stable(
                 &body,
@@ -1240,9 +1668,7 @@ fn field_should_preserve_shallow_symbolic_raw_type(
         verter_semantic::analysis::type_expr::TypeExpr::TypeOf(_)
         | verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_) => false,
         _ => {
-            query_engine
-                .owner_engine_mut()
-                .should_preserve_shallow_field_expr(&raw)
+            query_engine.should_preserve_shallow_field_expr(scope_canonical_id, &raw)
                 && !type_expr_needs_member_route_materialization(
                     &raw,
                     scope_canonical_id,
@@ -2195,7 +2621,11 @@ fn materialize_component_meta_field_types(
                         rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str())
                     })
                     .or_else(|| {
-                        query_engine.solve_scoped(target_scope.as_str(), target_name.as_str())
+                        // D-Cutover §5.8: route through dispatch's
+                        // surface projection; the pre-§5.8
+                        // `solve_scoped` solver fallback is retired.
+                        query_engine
+                            .project_type_surface_expr(target_scope.as_str(), target_name.as_str())
                     })
                     .unwrap_or_else(|| {
                         materialize_component_meta_type_expr_until_stable(
@@ -2472,7 +2902,7 @@ fn produce_macro_object_shapes_for_purpose(
     let mut projection_hits = 0u32;
     let mut solver_fallbacks = 0u32;
     let shapes_started = std::time::Instant::now();
-    let solves_before = query_engine.solve_count();
+    let solves_before = 0u32;
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         if !mac.is_type_based {
@@ -3002,7 +3432,7 @@ fn produce_macro_object_shapes_for_purpose(
         }
     }
 
-    let solves_after = query_engine.solve_count();
+    let solves_after = 0u32;
     component_meta_trace_event!(
         "produce_macro_object_shapes",
         format!(
@@ -3960,8 +4390,11 @@ fn produce_one_macro_object_shape(
             } else {
                 declaration.resolved_name.clone()
             };
+            // D-Cutover §5.8: route through dispatch's surface
+            // projection — the pre-§5.8 `solve_scoped` solver path
+            // is retired.
             query_engine
-                .solve_scoped(defining_canonical.as_str(), defining_name.as_str())
+                .project_type_surface_expr(defining_canonical.as_str(), defining_name.as_str())
                 .and_then(|solved_expr| {
                     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(
                         &solved_expr,
@@ -3975,9 +4408,28 @@ fn produce_one_macro_object_shape(
         }
         _ => None,
     };
+    // D-Cutover §5.8: the retired solver's `owner_engine.solve` is gone.
+    // Route through dispatch's surface projection + the dispatch-backed
+    // `deep_resolve_slot_function_refs` on CMQE (replacement for the
+    // retired solver-backed pass), treating the result as an
+    // exact-concrete SolverResult so `solver_result_to_object_expansion`
+    // still derives the expansion.
     let solver_result = scoped_solver_result.unwrap_or_else(|| {
-        let solved = query_engine.owner_engine_mut().solve(lowered);
-        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved)
+        // D-Cutover §5.8: dispatch's `project_expr_surface_expr` is the
+        // sole solve path. Empty-path `ProjectPath` with mode Expanded
+        // now expands terminal DeclAnchors via `Instantiate(anchor, [])`
+        // so non-generic aliases (including namespace-qualified
+        // `Types.Props` → `Props`) emit their body surface here.
+        let projected = query_engine
+            .project_expr_surface_expr(owner_canonical, lowered)
+            .unwrap_or_else(|| lowered.clone());
+        let deeply_resolved =
+            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected);
+        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
+            verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
+                deeply_resolved,
+            ),
+        )
     });
     let solver_count = shape_surface_count(&solver_result);
     let rescue_projection = solver_count == 0
@@ -4260,14 +4712,36 @@ fn produce_one_macro_object_shape_for_slots(
         }
     }
 
-    // ── Non-object body: solver first, then projection on warm caches ─
-    let mut solved = query_engine.owner_engine_mut().solve(lowered);
-    solved.value = verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
-        &solved.value,
-        query_engine.owner_engine_mut(),
+    // ── Non-object body: dispatch projection first, then projection on warm caches ─
+    // D-Cutover §5.8: dispatch's `project_expr_surface_expr` replaces
+    // `owner_engine.solve`; `CMQE::deep_resolve_slot_function_refs`
+    // replaces the retired `type_eval_build::deep_resolve_slot_function_refs`
+    // pass. Both route through the shared dispatch memo so caches stay
+    // path-independent.
+    //
+    // Path C C11-residual-A: when the strict `project_expr_surface_expr`
+    // returns `None` because a compound-shape sibling is still a
+    // deferred shell (e.g. `{ explicit slots } & DynamicSlots<...>` —
+    // the `DynamicSlots` arm is a Mapped that can't enumerate keys
+    // when the type parameters are unresolved), fall back to the
+    // lenient `project_expr_surface_expr_with_compound_objects` so the
+    // explicit Object arm's properties still reach
+    // `solver_result_to_object_expansion`. The expansion's existing
+    // Intersection-merging in [`type_expr_to_expanded_shape`] then
+    // collects the explicit slot members from the compound shape.
+    let projected_body = query_engine
+        .project_expr_surface_expr(owner_canonical, lowered)
+        .or_else(|| {
+            query_engine.project_expr_surface_expr_with_compound_objects(owner_canonical, lowered)
+        })
+        .unwrap_or_else(|| lowered.clone());
+    let deeply_resolved =
+        query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_body);
+    let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
+        verter_semantic::analysis::type_solver::result::SolverResult::exact_concrete(
+            deeply_resolved,
+        ),
     );
-    let solver_result =
-        verter_semantic::analysis::type_expand::solver_result_to_object_expansion(solved);
     let solver_count = shape_surface_count(&solver_result);
 
     let projected = query_engine
@@ -4275,10 +4749,7 @@ fn produce_one_macro_object_shape_for_slots(
         .and_then(|shape| {
             let projected_expr = expanded_shape_to_type_expr(&shape);
             let resolved_expr =
-                verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
-                    &projected_expr,
-                    query_engine.owner_engine_mut(),
-                );
+                query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
             registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
                 has_shape_surface(&resolved_shape).then(|| {
                     verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
@@ -4296,10 +4767,7 @@ fn produce_one_macro_object_shape_for_slots(
     .and_then(|shape| {
         let projected_expr = expanded_shape_to_type_expr(&shape.value);
         let resolved_expr =
-            verter_semantic::analysis::type_eval_build::deep_resolve_slot_function_refs(
-                &projected_expr,
-                query_engine.owner_engine_mut(),
-            );
+            query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
         registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
             has_shape_surface(&resolved_shape).then(|| {
                 verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
@@ -4861,18 +5329,10 @@ impl VerterHost {
                 snapshot.script_flags,
             ),
         );
-        let owner_solver_host =
-            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-                self, canonical,
-            );
-        let mut resolver_host = HostComponentMetaResolver {
-            host: self,
-            shared_owner_engine: Some(std::cell::RefCell::new(
-                verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                    &owner_solver_host,
-                ),
-            )),
-        };
+        // D-Cutover §5.8 WIP-W: retired `shared_owner_engine` /
+        // `SessionSolverHost` pair; the resolver host is now a thin
+        // wrapper around `VerterHost`.
+        let resolver_host = HostComponentMetaResolver { host: self };
         let parts_started = audit_enabled.then(Instant::now);
         let parts = {
             let _trace = component_meta_trace_scope!(
@@ -4906,20 +5366,9 @@ impl VerterHost {
         let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
         let should_produce_macro_object_shapes = mode == ResolverMode::Expanded;
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
-            let owner_engine = resolver_host
-                .shared_owner_engine
-                .take()
-                .map(std::cell::RefCell::into_inner)
-                .unwrap_or_else(|| {
-                    verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(
-                        &owner_solver_host,
-                    )
-                });
-            let mut query_engine =
-                crate::resolver_core::ComponentMetaQueryEngine::from_owner_engine(
-                    self,
-                    owner_engine,
-                );
+            // D-Cutover §5.8 WIP-W: the retired `shared_owner_engine`
+            // is gone — dispatch owns all solve-like operations now.
+            let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
             if should_materialize_registry {
                 let _trace = component_meta_trace_scope!(
                     "append_component_meta_registry_entries",
@@ -5025,27 +5474,14 @@ impl VerterHost {
                 }
             }
             {
-                let ts = query_engine.trace_summary();
+                // D-Cutover §5.8 WIP-W: the retired owner_engine's
+                // `trace_summary` is gone. Telemetry is zeroed here;
+                // §5.9 moves observability to `SemanticGraphStats`.
                 crate::host_manage::component_meta_trace_event!(
                     "solver_trace_summary",
                     format!(
-                        "owner={} steps={} solves={} refs={} host_lookups={} indexed_access={} unions={} intersections={} objects={} conditionals={} mapped={} inst_cache_hits={} inst_cache_misses={} proj_cache_hits={} arena_high_water={} scoped_cache={}",
+                        "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 arena_high_water=0 scoped_cache=0",
                         canonical,
-                        query_engine.total_steps(),
-                        query_engine.solve_count(),
-                        ts.resolve_ref_count,
-                        ts.resolve_ref_host_lookups,
-                        ts.resolve_indexed_access_count,
-                        ts.resolve_union_count,
-                        ts.resolve_intersection_count,
-                        ts.resolve_object_count,
-                        ts.resolve_conditional_count,
-                        ts.resolve_mapped_count,
-                        ts.instantiation_cache_hits,
-                        ts.instantiation_cache_misses,
-                        ts.projection_cache_hits,
-                        ts.arena_high_water,
-                        query_engine.scoped_cache_len(),
                     ),
                 );
             }
@@ -5061,14 +5497,14 @@ impl VerterHost {
                 }
             }
             crate::component_meta_audit::RustSolverAudit {
-                total_resolve_steps: query_engine.total_steps(),
-                solve_count: query_engine.solve_count(),
+                total_resolve_steps: 0u64,
+                solve_count: 0u32,
             }
         } else {
             crate::host_manage::component_meta_trace_event!(
                 "solver_trace_summary",
                 format!(
-                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 proj_cache_hits=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped macro_shapes=skipped",
+                    "owner={} steps=0 solves=0 refs=0 host_lookups=0 indexed_access=0 unions=0 intersections=0 objects=0 conditionals=0 mapped=0 inst_cache_hits=0 inst_cache_misses=0 arena_high_water=0 scoped_cache=0 registry_materialization=skipped macro_shapes=skipped",
                     canonical,
                 ),
             );
@@ -5204,6 +5640,32 @@ impl VerterHost {
                 }
             });
             let imported_generic_alias_root = imported_generic_alias_scope.is_some();
+
+            // Path C C11-residual-B: owner-local generic Refs preserve
+            // helper-Ref structure. When `Button = ComponentConfig<typeof theme>`
+            // is declared in the SAME file as `ComponentConfig` (owner-
+            // local), the registry should publish Button as the SHALLOW
+            // substituted body — `{ variants: ComponentVariants<...>,
+            // slots: ComponentSlots<...>, ui: ComponentUI<...> }` —
+            // rather than fully materialising every helper. This keeps
+            // the registry consumer's Ref-to-helper navigation path
+            // queryable rather than collapsing helper identities into
+            // their concrete shapes.
+            //
+            // Distinct from the imported-alias path
+            // (`maybe_refine_imported_generic_alias_object` above) which
+            // DOES materialise cross-file aliases (because the consumer
+            // can't follow Refs to a cross-file helper through the
+            // registry directly).
+            if !imported_generic_alias_root {
+                if let Some(shallow) = component_meta_owner_local_shallow_substituted_alias_body(
+                    query_engine,
+                    scope_canonical_id,
+                    raw_body,
+                ) {
+                    return Some(shallow);
+                }
+            }
 
             let maybe_refine_imported_generic_alias_object =
                 |candidate: TypeExpr,
@@ -6678,7 +7140,7 @@ impl VerterHost {
         Some(cached.state.as_ref().clone())
     }
 
-    fn store_cached_resolved_meta(
+    pub(crate) fn store_cached_resolved_meta(
         &self,
         canonical: &str,
         mode: ResolverMode,
@@ -9744,11 +10206,6 @@ fn resolved_meta_cache_key(
 
 struct HostComponentMetaResolver<'a> {
     host: &'a VerterHost,
-    shared_owner_engine: Option<
-        std::cell::RefCell<
-            verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine<'a>,
-        >,
-    >,
 }
 
 impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaResolver<'_> {
@@ -9913,41 +10370,18 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
                 }),
         );
         let compute_eval_start = component_meta_debug_enabled().then(Instant::now);
-        // Always run the solver-host macro path. The solver resolves cross-file
-        // types on demand from the host's prepared-decl cache.
-        let computed_eval_types = if let Some(engine) = &self.shared_owner_engine {
-            let eval_source = eval_context
-                .and_then(|captured| captured.owner_eval_source.as_deref())
-                .map(str::to_string)
-                .or_else(|| {
-                    self.host
-                        .ensure_indexed_ready(owner_canonical)
-                        .map(|facts| {
-                            VerterHost::build_eval_script_source(
-                                &facts.raw_source,
-                                facts.cached_parse.as_deref(),
-                            )
-                        })
-                });
-            eval_source.and_then(|eval_source| {
-                let mut engine = engine.borrow_mut();
-                self.host.compute_evaluated_types_from_owner_context(
-                    owner_canonical,
-                    snapshot,
-                    &eval_source,
-                    purpose,
-                    Some(&mut *engine),
-                )
-            })
-        } else {
-            self.host
-                .compute_evaluated_types_with_tracking_from_owner_context(
-                    owner_canonical,
-                    snapshot,
-                    eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
-                    purpose,
-                )
-        };
+        // D-Cutover §5.8 WIP-W: the retired `shared_owner_engine` path
+        // is gone; all callers go through
+        // `compute_evaluated_types_with_tracking_from_owner_context`
+        // which internally builds any needed host bridge.
+        let computed_eval_types = self
+            .host
+            .compute_evaluated_types_with_tracking_from_owner_context(
+                owner_canonical,
+                snapshot,
+                eval_context.and_then(|captured| captured.owner_eval_source.as_deref()),
+                purpose,
+            );
         if let Some(compute_eval_start) = compute_eval_start {
             let elapsed = compute_eval_start.elapsed();
             component_meta_debug(format!(
@@ -10039,13 +10473,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             return Vec::new();
         }
 
-        let owner_solver_host =
-            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-                self.host,
-                owner_canonical,
-            );
-        let mut query_engine =
-            crate::resolver_core::ComponentMetaQueryEngine::new(self.host, &owner_solver_host);
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
 
         candidate_roots
             .into_iter()
@@ -10074,13 +10502,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
-        let owner_solver_host =
-            crate::resolver_core::solver_host::SessionSolverHost::with_declaration_scope(
-                self.host,
-                owner_canonical,
-            );
-        let mut query_engine =
-            crate::resolver_core::ComponentMetaQueryEngine::new(self.host, &owner_solver_host);
+        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
         let shape = query_engine.project_prepared_type_surface_shape(owner_canonical, root_name)?;
         Some(
             crate::resolver_core::component_meta::project_macro_surfaces_from_expanded_shape(
@@ -10180,10 +10602,7 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let resolver = HostComponentMetaResolver {
-        host,
-        shared_owner_engine: None,
-    };
+    let resolver = HostComponentMetaResolver { host };
     let key =
         crate::resolver_core::symbol_resolver::declaration_node_key(dep_canonical, requested_name);
     let mut ctx = crate::resolver_core::symbol_resolver::ResolveContext::new();
@@ -10366,19 +10785,24 @@ fn resolve_jsdoc_tag_type(
         parsed
     };
 
-    // Ensure module facts are materialized so the solver host can resolve imports.
+    // Ensure module facts are materialized so the dispatch path can
+    // resolve imports through host-owned caches.
     let _facts = host.ensure_indexed_ready(canonical_source)?;
     tracked_deps.extend(
         host.imported_symbol_dependencies_for_expr(canonical_source, &parsed)
             .into_iter()
             .map(|dependency| dependency.canonical_id),
     );
-    let solver_host =
-        crate::resolver_core::SessionSolverHost::with_declaration_scope(host, canonical_source);
-    let mut engine =
-        verter_semantic::analysis::type_solver::query_engine::TypeQueryEngine::new(&solver_host);
-    let resolved = engine.solve(&parsed);
-    Some(resolved.value)
+    // D-Cutover §5.8: route through CMQE (dispatch-backed) instead of
+    // the retired SessionSolverHost + TypeQueryEngine. Falls back to
+    // the raw parsed annotation when projection misses so the caller
+    // still receives the unresolved TypeExpr rather than `None`.
+    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+    Some(
+        engine
+            .project_expr_surface_expr(canonical_source, &parsed)
+            .unwrap_or(parsed),
+    )
 }
 
 #[cfg(test)]

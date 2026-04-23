@@ -368,18 +368,75 @@ When a budget trips, the system returns a structured `BudgetExceededFailure` wit
 | `crates/verter_session/src/host_resolve.rs` | HostFrontierAdapter, resolve_external_type_from_loaded_files() |
 | `crates/verter_session/src/frontier_tests.rs` | Behavioral invariant tests (diamond dedup, barrel ordering, cycle termination, budget enforcement, etc.) |
 
-## Native Type Solver
+## Semantic Dispatch (Post Phase-D authority)
 
-`verter_semantic::analysis::type_solver` is the sole authority for all type expansion. It handles `defineProps<T>()`, `defineEmits<T>()`, component-meta type resolution, and cross-file generic instantiation.
+**Plan §2 architectural decision:** `ProjectSemanticDispatch` + `SemanticGraphStore` are the canonical lazy semantic layer and the sole authority for every reusable type-resolution operation. The former `verter_semantic::analysis::type_solver` walker (`resolve_node`, `resolve_indexed_access`, `resolve_conditional`, `collect_structural_property_descriptors_inner`, etc.) demotes to **per-request scratch for TypeExpr lowering and Vue macro parsing only** — it no longer serves as a reusable semantic authority.
 
-**Architecture -- two separate structs to avoid cloning:**
+The reusable semantic layer lives in `crates/verter_session/src/project_semantic_dispatch/` (module tree split in Phase D §5.2). Each sub-module owns a distinct responsibility:
 
-- `QueryArena` -- append-only immutable node store. Nodes are interned as `NodeId` (u32). Once allocated, nodes are never mutated.
-- `SolverCaches` -- mutable memoization tables (relation, instantiation, keyspace, member). Separate from arena so the relation engine can hold `&QueryArena` and `&mut SolverCaches` simultaneously.
+- `mod.rs` — `ProjectSemanticDispatch` struct + `SemanticQueryApi::execute` impl
+- `build.rs` — `build_instantiate`, `build_mapped_type`, `build_conditional`, `build_key_of`, `build_project_path`, `build_typeof`, `build_builtin_utility`
+- `walk.rs` — `PathWalker` + `walk_path` (iterative worklist per plan §2)
+- `guards.rs` — `SubstitutionGuard`, `EvaluationGuard`, `WalkGuard`, `KeyEnumerationGuard`, `RelationGuard` (per-call RAII cycle detection)
+- `enumerate.rs` — `KeyEnumeration`, `EnumeratedKey`, `key_names_*` helpers
+- `relation.rs` — `relate_nodes` + full relation engine (plan §2 Relation engine)
+- `lower.rs` — `shallow_lower_type_expr` (TypeExpr → `SemanticNodeId`)
+- `substitute.rs` — `substitute_semantic_type_param` (guarded)
+- `evaluate.rs` — `evaluate_deferred_semantic_node` (guarded)
+- `origin.rs` — origin-edge emitters
 
-**Pipeline:** `TypeExpr -> lower -> QueryArena -> resolve_node -> project_to_type_expr -> TypeExpr`
+`SemanticGraphStore` (crate `verter_session::semantic_query_memo`) owns all reusable semantic identity via two parallel memos:
 
-**Host boundary:** `TypeSolverHost` trait (in `type_solver::host`) is the seam between `verter_session` (file readiness, frontier, caches) and the solver (arena, relations, projections). The solver never reopens route discovery -- it only accepts resolved root identities. Two implementations exist: `SessionSolverHost` in `resolver_core/solver_host.rs` (production, bridges host caches) and `EvalEnvSolverHost` in `type_solver/host.rs` (standalone, wraps an `EvalEnv`'s type_symbols for local-only resolution without a session).
+- **Node memo** — mode-erased `FamilyKey` → `FamilySlots` map for single-node queries (`ResolveDecl`, `Instantiate`, `KeyOf`, `MappedType`, `Conditional`, `ProjectPath`, `TypeOf`, `NormalizeUnion`, `NormalizeIntersection`, `ResolvedNamedType`).
+- **Relation memo** — `DashMap<(SemanticNodeId, SemanticNodeId), (DepSignature, RelationResult)>` for pairwise `Relate` judgements (plan §2). Added in Phase D §5.4. `RelationResult` is `{ Assignable { bindings }, NotAssignable, Unknown }`; all three cache-with-fence.
+
+**Canonical deferred forms** (plan §2 — only these variants cross any cache boundary):
+
+- `SemanticNodeData::Mapped { source, mapper }` — deferred mapped type
+- `SemanticNodeData::Conditional { check, extends, true_branch_ref, false_branch_ref, distributive }` — deferred conditional
+- `SemanticNodeData::IndexedAccess { object, index }` — deferred indexed access
+- `SemanticNodeData::KeyOf { base }` — deferred keyof
+- `SemanticNodeData::TypeOf { value_root, path }` — deferred typeof
+- `SemanticNodeData::TypeParam { name }` — open type parameter reference
+- `SemanticNodeData::Alias(target)` — alias identity preservation (target must be `DeclAnchor`-identifiable — plan Change B)
+- `SemanticNodeData::Opaque(err)` — genuine projection miss or structured budget failure
+- `SemanticNodeData::Function { params, return_type, type_parameters }` — function shape (plan §2 "the only new variant" — added in §5.6 WIP-L; class/interface lower to `Object` with heritage merged)
+
+All surrogate encodings are retired: `Alias(KeyOf(source))` (replaced by canonical `Mapped` shell with `KeyEnumeration::Unresolvable` branch), arena `Node::Error { description }` used as a materialisation sentinel, `Primitive(Undefined)` returned from failed solver projections.
+
+**No hard caps in the semantic layer.** Three legacy caps deleted or reclassified:
+
+- `evaluate_deferred_semantic_node`'s `for _ in 0..32` — DELETED (§5.3 WIP-R); replaced by stack-local `EvaluationGuard` cycle detection.
+- `PathWalker::max_depth = 64` — DELETED (§5.3 WIP-R); replaced by `WalkGuard` cycle detection.
+- Parser-level `MAX_TYPE_RESOLUTION_DEPTH = 64` — RENAMED (§5.10 WIP-P) to `PARSER_SYNTACTIC_DEPTH_LIMIT = 256` and documented as syntactic stack-safety, not a semantic budget.
+
+**Bounded-loop annotation convention.** Any bounded loop in `crates/verter_session/src/project_semantic_dispatch/` MUST be annotated `// bounded-loop: <reason>` on the preceding line. The only currently-approved reason is `fence-retry` (CLAUDE.md completion-fence 3-retry rule).
+
+**Recursion guard contract.** Per-call `in_flight: FxHashSet<SemanticNodeId>` + RAII pop + completion memo. Stack-local; dies with the call; NOT a host-owned cache:
+
+| Function | Cycle sentinel | Publishable | Publication surface |
+| --- | --- | --- | --- |
+| `substitute_semantic_type_param` | input node unchanged | yes | Caller's `SemanticQueryKey` memo |
+| `evaluate_deferred_semantic_node` | current node (fix-point) | yes | Caller's `SemanticQueryKey` memo |
+| `walk_path` | `Opaque(QueryError::AliasCycle { chain })` | yes | Originating `ProjectPath` memo |
+| `key_names_from_base_node` / `_keyspace_node` | `KeyEnumeration::Unresolvable` | no (Rust-local) | Caller publishes canonical `Mapped` shell |
+| `relate_nodes` | `RelationResult::Unknown` | yes (cache-with-fence) | `RelationMemo` entry with dep-fence |
+
+**Parser → semantic graph integration.** No new adapter struct. The existing `HostNamedTypeCacheAdapter` in `crates/verter_session/src/host_manage.rs` (implements `verter_parser`'s `NamedTypeCache` trait) reads/writes `SemanticGraphStore` directly via `get_resolved_named_type` / `insert_resolved_named_type` and drives deep type reduction through `ProjectSemanticDispatch::execute`.
+
+**Authority-uniqueness contract** (normative, mechanically enforced by §6.5 gate tests):
+
+- A second `impl SemanticQueryApi for ...` — FORBIDDEN (besides `ProjectSemanticDispatch`).
+- A second `fn relate_nodes` — FORBIDDEN (besides `project_semantic_dispatch::relation`).
+- A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
+- A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
+- A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
+
+## Legacy Native Type Solver (demoted to per-request scratch)
+
+The arena-based `verter_semantic::analysis::type_solver` that previously owned reusable type expansion is demoted to per-request TypeExpr lowering scratch + Vue macro parsing only. Its `TypeSolverHost` trait, `EvalEnvSolverHost` struct, `SessionSolverHost` struct, and `TypeQueryEngine` struct are scheduled for deletion in Phase D §5.8 WIP-W. Call-sites that previously used those APIs migrate to `ProjectSemanticDispatch::execute(SemanticQueryKey::...)` per plan §9 appendix.
+
+Historical pipeline (retained for TypeExpr → arena lowering only): `TypeExpr -> lower -> QueryArena -> project_to_type_expr -> TypeExpr`.
 
 **Request-scoped engine ownership:** `TypeQueryEngine` is the single request-scoped mutable solver owner for component-meta queries. One engine is created per `get_component_meta()` request and shared across all solves in that request. Declaration-scoped solves reuse the shared engine via `TypeQueryEngine::solve_scoped()` -- they share the arena, instantiation cache, and solver caches while using a different `TypeSolverHost` (scoped to the declaration file). The `solve_scoped` method partitions the op-cache key and bare-name root_identity cache by `scope_canonical_id` so results from one declaration scope do not alias with results from another scope. Do not construct fresh `TypeQueryEngine` instances for declaration-scoped solves.
 
