@@ -27,6 +27,24 @@ describe("parseTraceTimingsFromContent", () => {
     );
 
     expect(timings.traceResolveMs).toBeNull();
+    expect(timings.traceComputeMs).toBeNull();
+    expect(timings.traceMaterializeMs).toBeNull();
     expect(timings.traceQueryMs).toBeNull();
+  });
+
+  it("captures session-path compute and materialize root spans", () => {
+    const content = [
+      '[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="session_capture_component_meta_inputs" detail="owner=/src/Accordion.vue session=1" dur_ms=11.249',
+      '[verter-meta-trace] event=end trace=36 span=36 parent=- request=36 subrequest=36 caller=- depth=0 thread=ThreadId(1) name="compute_component_meta_state" detail="owner=/src/Accordion.vue mode=Expanded" dur_ms=807.485',
+      '[verter-meta-trace] event=end trace=2536 span=2536 parent=- request=2536 subrequest=2536 caller=- depth=0 thread=ThreadId(1) name="extract_component_meta" detail="owner=/src/Accordion.vue has_evaluated_types=true" dur_ms=0.320',
+      '[verter-meta-trace] event=end trace=2539 span=2539 parent=- request=2539 subrequest=2539 caller=- depth=0 thread=ThreadId(1) name="rematerialize_public_component_meta_types" detail="owner=/src/Accordion.vue props=13 slots=5" dur_ms=854.407',
+    ].join("\n");
+
+    const timings = parseTraceTimingsFromContent(content);
+
+    expect(timings.traceResolveMs).toBeNull();
+    expect(timings.traceComputeMs).toBe(807.485);
+    expect(timings.traceMaterializeMs).toBe(854.407);
+    expect(timings.traceQueryMs).toBeCloseTo(11.249 + 807.485 + 0.32 + 854.407, 5);
   });
 });

@@ -383,6 +383,46 @@ describe("buildSummary", () => {
     expect(summary.declaredSurface).toEqual({ props: 5, events: 2, slots: 3 });
     expect(summary.hasEvaluatedTypes).toBe(true);
   });
+
+  it("sums session-path root spans into totalDurationMs when host span is absent", () => {
+    const sessionTrace = [
+      `[verter-meta-trace] event=start trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="session_capture_component_meta_inputs" detail="owner=src/Test.vue session=1"`,
+      `[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="session_capture_component_meta_inputs" detail="owner=src/Test.vue session=1" dur_ms=10.0`,
+      `[verter-meta-trace] event=start trace=36 span=36 parent=- request=36 subrequest=36 caller=- depth=0 thread=ThreadId(1) name="compute_component_meta_state" detail="owner=src/Test.vue mode=Expanded captured=true store_view=false"`,
+      `[verter-meta-trace] event=end trace=36 span=36 parent=- request=36 subrequest=36 caller=- depth=0 thread=ThreadId(1) name="compute_component_meta_state" detail="owner=src/Test.vue mode=Expanded captured=true store_view=false" dur_ms=800.0`,
+      `[verter-meta-trace] event=start trace=2536 span=2536 parent=- request=2536 subrequest=2536 caller=- depth=0 thread=ThreadId(1) name="extract_component_meta" detail="owner=src/Test.vue macros=4 has_evaluated_types=true"`,
+      `[verter-meta-trace] event=end trace=2536 span=2536 parent=- request=2536 subrequest=2536 caller=- depth=0 thread=ThreadId(1) name="extract_component_meta" detail="owner=src/Test.vue macros=4 has_evaluated_types=true" dur_ms=0.5`,
+      `[verter-meta-trace] event=start trace=2539 span=2539 parent=- request=2539 subrequest=2539 caller=- depth=0 thread=ThreadId(1) name="rematerialize_public_component_meta_types" detail="owner=src/Test.vue props=13 slots=5"`,
+      `[verter-meta-trace] event=end trace=2539 span=2539 parent=- request=2539 subrequest=2539 caller=- depth=0 thread=ThreadId(1) name="rematerialize_public_component_meta_types" detail="owner=src/Test.vue props=13 slots=5" dur_ms=850.0`,
+    ].join("\n");
+    const { events, coreEvents } = parseTraceLog(sessionTrace);
+    const summary = buildSummary(events, coreEvents);
+    expect(summary.totalDurationMs).toBeCloseTo(10 + 800 + 0.5 + 850, 5);
+    expect(summary.hasEvaluatedTypes).toBe(true);
+  });
+
+  it("recognizes has_evaluated_types on session-path extract_component_meta", () => {
+    const trace = [
+      `[verter-meta-trace] event=start trace=2536 span=2536 parent=- request=2536 subrequest=2536 caller=- depth=0 thread=ThreadId(1) name="extract_component_meta" detail="owner=src/Test.vue macros=4 has_evaluated_types=true"`,
+      `[verter-meta-trace] event=end trace=2536 span=2536 parent=- request=2536 subrequest=2536 caller=- depth=0 thread=ThreadId(1) name="extract_component_meta" detail="owner=src/Test.vue macros=4 has_evaluated_types=true" dur_ms=0.3`,
+    ].join("\n");
+    const { events, coreEvents } = parseTraceLog(trace);
+    const summary = buildSummary(events, coreEvents);
+    expect(summary.hasEvaluatedTypes).toBe(true);
+  });
+
+  it("does not double-count host duration when session-path spans also appear as children", () => {
+    // If both paths are present, prefer the host total; do not add session totals on top
+    const mixedTrace = [
+      `[verter-meta-trace] event=start trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded"`,
+      // compute_component_meta_state nested under resolve_component_meta (parent != "-") — must NOT be counted
+      `[verter-meta-trace] event=end trace=1 span=2 parent=1 request=1 subrequest=2 caller=1 depth=1 thread=ThreadId(1) name="compute_component_meta_state" detail="owner=src/Test.vue mode=Expanded" dur_ms=200.0`,
+      `[verter-meta-trace] event=end trace=1 span=1 parent=- request=1 subrequest=1 caller=- depth=0 thread=ThreadId(1) name="resolve_component_meta" detail="owner=src/Test.vue mode=Expanded" dur_ms=300.0`,
+    ].join("\n");
+    const { events, coreEvents } = parseTraceLog(mixedTrace);
+    const summary = buildSummary(events, coreEvents);
+    expect(summary.totalDurationMs).toBeCloseTo(300);
+  });
 });
 
 describe("loadTraceSpec", () => {

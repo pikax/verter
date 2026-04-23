@@ -120,7 +120,7 @@ function killProcessTree(pid) {
 function parseStdoutFields(stdout) {
   const doneMatch = stdout.match(/^Done in (\d+)ms/m);
   const sawDoneLine = doneMatch !== null;
-  const sawClosedLine = /^Closed /m.test(stdout);
+  const sawClosedLine = /^Closed\b/m.test(stdout);
   return {
     queryMsFromStdout: doneMatch ? Number.parseInt(doneMatch[1], 10) : null,
     sawDoneLine,
@@ -146,6 +146,8 @@ const TRACE_END_LINE_RE =
 
 export function parseTraceTimingsFromContent(content) {
   let traceResolveMs = null;
+  let traceComputeMs = null;
+  let traceMaterializeMs = null;
   let traceQueryMs = 0;
   let sawRootSpan = false;
 
@@ -165,22 +167,40 @@ export function parseTraceTimingsFromContent(content) {
     if (name === "resolve_component_meta" && traceResolveMs === null) {
       traceResolveMs = durMs;
     }
+    if (name === "compute_component_meta_state" && traceComputeMs === null) {
+      traceComputeMs = durMs;
+    }
+    if (name === "rematerialize_public_component_meta_types" && traceMaterializeMs === null) {
+      traceMaterializeMs = durMs;
+    }
   }
 
   return {
     traceResolveMs,
+    traceComputeMs,
+    traceMaterializeMs,
     traceQueryMs: sawRootSpan ? traceQueryMs : null,
   };
 }
 
 export function parseTraceTimings(tracePath) {
   if (!existsSync(tracePath)) {
-    return { traceResolveMs: null, traceQueryMs: null };
+    return {
+      traceResolveMs: null,
+      traceComputeMs: null,
+      traceMaterializeMs: null,
+      traceQueryMs: null,
+    };
   }
   try {
     return parseTraceTimingsFromContent(readFileSync(tracePath, "utf8"));
   } catch {
-    return { traceResolveMs: null, traceQueryMs: null };
+    return {
+      traceResolveMs: null,
+      traceComputeMs: null,
+      traceMaterializeMs: null,
+      traceQueryMs: null,
+    };
   }
 }
 
@@ -305,7 +325,8 @@ async function runComponent(componentRelPath, componentToken, config) {
     sawClosedLine: stdoutFields.sawClosedLine,
   });
 
-  const { traceResolveMs, traceQueryMs } = parseTraceTimings(tracePath);
+  const { traceResolveMs, traceComputeMs, traceMaterializeMs, traceQueryMs } =
+    parseTraceTimings(tracePath);
 
   return {
     component: componentRelPath,
@@ -313,6 +334,8 @@ async function runComponent(componentRelPath, componentToken, config) {
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
     trace_resolve_ms: traceResolveMs,
+    trace_compute_ms: traceComputeMs,
+    trace_materialize_ms: traceMaterializeMs,
     trace_query_ms: traceQueryMs,
     exit_code: exitCode,
     signal,

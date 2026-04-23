@@ -29,6 +29,8 @@ export interface CorpusTraceResult {
   wall_ms: number;
   query_ms_from_stdout: number | null;
   trace_resolve_ms: number | null;
+  trace_compute_ms: number | null;
+  trace_materialize_ms: number | null;
   trace_query_ms: number | null;
   exit_code: number | null;
   signal: string | null;
@@ -91,7 +93,7 @@ export interface StdoutFields {
 }
 
 const DONE_LINE_RE = /^Done in (\d+)ms/m;
-const CLOSED_LINE_RE = /^Closed /m;
+const CLOSED_LINE_RE = /^Closed\b/m;
 
 export function parseStdoutFields(stdout: string): StdoutFields {
   const doneMatch = stdout.match(DONE_LINE_RE);
@@ -266,6 +268,8 @@ export async function runComponentInIsolation(
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
     trace_resolve_ms: null, // Populated by trace log parsing if needed
+    trace_compute_ms: null, // Populated by trace log parsing if needed
+    trace_materialize_ms: null, // Populated by trace log parsing if needed
     trace_query_ms: null, // Populated by trace log parsing if needed
     exit_code: normalizedExitCode,
     signal,

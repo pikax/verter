@@ -132,8 +132,6 @@ function main() {
   const typeSourceMissCounts = new Map();
   const typeDependencyHitCounts = new Map();
   const typeDependencyMissCounts = new Map();
-  const hostDependencyHitCounts = new Map();
-  const hostDependencyMissCounts = new Map();
 
   for (const line of lines) {
     if (!line.includes("[verter-meta-trace]")) {
@@ -208,21 +206,6 @@ function main() {
       }
       continue;
     }
-
-    if (name === "cached_dependency_resolution_in_view_result") {
-      const owner = extractDetailValue(detail, "owner");
-      const importSource = extractDetailValue(detail, "import");
-      const source = extractDetailValue(detail, "source");
-      const key = `${owner} -> ${importSource}`;
-      if (!shouldKeepOwner(owner, ownerFilter)) {
-        continue;
-      }
-      if (source === "miss") {
-        increment(hostDependencyMissCounts, key);
-      } else {
-        increment(hostDependencyHitCounts, `${key} [${source}]`);
-      }
-    }
   }
 
   const sections = [
@@ -235,8 +218,6 @@ function main() {
     ["Type Resolution Source Cache Misses", typeSourceMissCounts],
     ["Type Resolution Dependency Cache Hits", typeDependencyHitCounts],
     ["Type Resolution Dependency Cache Misses", typeDependencyMissCounts],
-    ["Host Dependency Resolution Hits", hostDependencyHitCounts],
-    ["Host Dependency Resolution Misses", hostDependencyMissCounts],
   ];
 
   console.log(`# Trace Summary`);

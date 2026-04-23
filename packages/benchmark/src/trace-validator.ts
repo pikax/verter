@@ -251,13 +251,30 @@ export function buildSummary(events: ParsedTraceEvent[], coreEvents: CoreEvent[]
     eventCounts.set(key, (eventCounts.get(key) ?? 0) + 1);
   }
 
-  // Find total duration from resolve_component_meta
-  let totalDurationMs = 0;
+  // Find total duration. Two paths emit different root spans:
+  //   - host path: a single `resolve_component_meta` span wraps the entire request
+  //   - session path: separate root spans for capture/compute/extract/materialize
+  // Prefer the host-path single span when present; otherwise sum the session-path roots
+  // (parent === "-") so the total reflects all top-level work for the request.
+  const SESSION_ROOT_SPANS = new Set([
+    "session_capture_component_meta_inputs",
+    "compute_component_meta_state",
+    "extract_component_meta",
+    "rematerialize_public_component_meta_types",
+  ]);
+  let hostTotalMs = 0;
+  let sessionTotalMs = 0;
   for (const e of events) {
-    if (e.name === "resolve_component_meta" && e.type === "end" && e.durMs !== undefined) {
-      totalDurationMs = Math.max(totalDurationMs, e.durMs);
+    if (e.type !== "end" || e.durMs === undefined) continue;
+    if (e.name === "resolve_component_meta") {
+      hostTotalMs = Math.max(hostTotalMs, e.durMs);
+      continue;
+    }
+    if (e.parent === "-" && SESSION_ROOT_SPANS.has(e.name)) {
+      sessionTotalMs += e.durMs;
     }
   }
+  const totalDurationMs = hostTotalMs > 0 ? hostTotalMs : sessionTotalMs;
 
   // Extract declared surface from extract_component_meta_declared_surface
   let declaredSurface: { props: number; events: number; slots: number } | undefined;
@@ -276,11 +293,13 @@ export function buildSummary(events: ParsedTraceEvent[], coreEvents: CoreEvent[]
     }
   }
 
-  // Check for has_evaluated_types in resolve_component_meta_result
+  // Check for has_evaluated_types. The host path emits this on
+  // `resolve_component_meta_result`; the session path emits it on the root
+  // `extract_component_meta` span. Either is sufficient.
   let hasEvaluatedTypes = false;
   for (const e of events) {
     if (
-      e.name === "resolve_component_meta_result" &&
+      (e.name === "resolve_component_meta_result" || e.name === "extract_component_meta") &&
       e.detail.includes("has_evaluated_types=true")
     ) {
       hasEvaluatedTypes = true;
