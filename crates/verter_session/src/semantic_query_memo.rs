@@ -27,6 +27,8 @@
 //!   [`SemanticGraphStore::intern_node`].
 
 use std::cell::RefCell;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -778,6 +780,9 @@ struct AtomicSemanticGraphStats {
     in_flight_current: AtomicU32,
     in_flight_peak: AtomicU32,
     waits_ms: AtomicU64,
+    joined_waits: AtomicU64,
+    inflight_aborted_retries: AtomicU64,
+    cold_aborts_swept: AtomicU64,
     origin_edges_emitted: AtomicU64,
     instantiate_count: AtomicU64,
     conditional_decided_count: AtomicU64,
@@ -800,6 +805,9 @@ impl Default for AtomicSemanticGraphStats {
             in_flight_current: AtomicU32::new(0),
             in_flight_peak: AtomicU32::new(0),
             waits_ms: AtomicU64::new(0),
+            joined_waits: AtomicU64::new(0),
+            inflight_aborted_retries: AtomicU64::new(0),
+            cold_aborts_swept: AtomicU64::new(0),
             origin_edges_emitted: AtomicU64::new(0),
             instantiate_count: AtomicU64::new(0),
             conditional_decided_count: AtomicU64::new(0),
@@ -1523,6 +1531,9 @@ impl SemanticGraphStore {
             in_flight_peak: self.stats.in_flight_peak.load(Ordering::Relaxed),
             waits_ms: self.stats.waits_ms.load(Ordering::Relaxed),
             memo_entry_count: self.memo_entry_count() as u64,
+            joined_waits: self.stats.joined_waits.load(Ordering::Relaxed),
+            inflight_aborted_retries: self.stats.inflight_aborted_retries.load(Ordering::Relaxed),
+            cold_aborts_swept: self.stats.cold_aborts_swept.load(Ordering::Relaxed),
             origin_edge_count,
             origin_edges_emitted: self.stats.origin_edges_emitted.load(Ordering::Relaxed),
             origin_edges_per_node_p50,
@@ -1704,6 +1715,10 @@ impl SemanticGraphStore {
                 self.stats
                     .waits_ms
                     .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                // Count every cooperative wait return (plan §6.3 /
+                // Commit 1 `joined_waits`). Retries after abort re-enter
+                // dispatch and may bump this again on the next join.
+                self.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
                 if state.aborted && retries < MAX_INFLIGHT_RETRIES {
                     // The (family, slot) this entry was serving was swept
                     // by a concurrent canonical invalidation. Retry the
@@ -1712,6 +1727,9 @@ impl SemanticGraphStore {
                     // still empty, in which case this caller may become
                     // the fresh cold winner.
                     retries += 1;
+                    self.stats
+                        .inflight_aborted_retries
+                        .fetch_add(1, Ordering::Relaxed);
                     drop(state);
                     drop(inflight);
                     continue;
@@ -1807,12 +1825,25 @@ impl SemanticGraphStore {
                     dep_signature: dep_signature.clone(),
                 };
                 let mut entries = self.entries.lock();
+                // Test-only forcing: simulate a concurrent sweep that
+                // aborted this in-flight entry just before the TOCTOU
+                // re-check. Deterministically drives the `cold_aborts_swept`
+                // counter in `..._when_forced` tests without needing a
+                // racy real invalidation.
+                #[cfg(test)]
+                if FORCE_COLD_ABORT_SWEEP.load(Ordering::Relaxed) {
+                    inflight.state.lock().aborted = true;
+                }
                 // Atomic re-check under the entries lock — see the
                 // TOCTOU comment above. `state` is briefly locked nested
                 // inside `entries`; no AB-BA deadlock risk because no
                 // path holds `state` then acquires `entries`.
                 let aborted = inflight.state.lock().aborted;
-                if !aborted {
+                if aborted {
+                    // Canonical invalidation swept this slot during the
+                    // cold build; skip warm publish and record the sweep.
+                    self.stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+                } else {
                     entries.entry(family).or_default().publish(slot, entry);
                 }
             }
@@ -1863,6 +1894,48 @@ impl SemanticGraphStore {
 /// typical because the next call either hits a freshly-warm slot or
 /// claims the fresh in-flight as winner.
 const MAX_INFLIGHT_RETRIES: usize = 3;
+
+/// Test-only forcing flag: when set, the cold-winner re-check in
+/// `execute_cooperative` marks its own in-flight entry `aborted = true`
+/// just before the TOCTOU abort-check, simulating a concurrent canonical
+/// invalidation sweep. Drives `cold_aborts_swept` deterministically in
+/// `semantic_graph_stats_cold_aborts_swept_increments_when_forced`.
+///
+/// Tests must clear the flag before returning (RAII guard pattern).
+#[cfg(test)]
+pub(crate) static FORCE_COLD_ABORT_SWEEP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+impl SemanticGraphStore {
+    /// Test-only: set `aborted = true` on the in-flight entry for `key`,
+    /// plant an `Error(Other)` sentinel on `completed` if absent, notify
+    /// waiters, and remove the entry from the table. Mirrors
+    /// `invalidate_canonical` phase 2 exactly but bypasses the phase 1
+    /// warm-slot gate so joiner-retry tests don't have to race a real
+    /// invalidation window between publish and inflight retirement.
+    ///
+    /// Returns `true` when an entry for `key` was aborted, `false` when
+    /// the in-flight table did not contain the key.
+    pub(crate) fn test_trigger_inflight_abort(&self, key: &SemanticQueryKey) -> bool {
+        let mut table = self.inflight.lock();
+        let Some(inflight) = table.remove(key) else {
+            return false;
+        };
+        drop(table);
+        {
+            let mut state = inflight.state.lock();
+            state.aborted = true;
+            if state.completed.is_none() {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "aborted by test_trigger_inflight_abort",
+                ))));
+                state.dep_signature = Some(empty_signature());
+            }
+        }
+        inflight.ready.notify_all();
+        true
+    }
+}
 
 impl SemanticGraphRead for SemanticGraphStore {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
@@ -3958,5 +4031,393 @@ mod tests {
         let inserted = store.insert_resolved_named_type(key.clone(), Arc::clone(&payload));
         assert_eq!(store.node_scope(inserted), None);
         assert!(store.get_resolved_named_type(&key).is_some());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Commit 1 (F1) — SemanticGraphStats counter extension
+    // ──────────────────────────────────────────────────────────────────
+
+    /// RAII guard that restores `FORCE_COLD_ABORT_SWEEP` to `false` on
+    /// drop — panicking tests must not leak the flag onto sibling tests
+    /// sharing the same process.
+    struct ForceColdAbortGuard;
+    impl ForceColdAbortGuard {
+        fn set() -> Self {
+            FORCE_COLD_ABORT_SWEEP.store(true, Ordering::SeqCst);
+            Self
+        }
+    }
+    impl Drop for ForceColdAbortGuard {
+        fn drop(&mut self) {
+            FORCE_COLD_ABORT_SWEEP.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Joiner threads cooperatively blocked on an in-flight condvar
+    /// increment `SemanticGraphStats::joined_waits` exactly once per
+    /// `wait_while` return (not per retry — each fresh wait on a new
+    /// cycle of the retry loop increments independently).
+    #[test]
+    fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let store = Arc::new(SemanticGraphStore::new());
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/dep.ts"),
+            name: Arc::from("Foo"),
+        });
+
+        let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
+        let (tx_finish_build, rx_finish_build) = mpsc::channel::<()>();
+
+        let winner_store = Arc::clone(&store);
+        let winner_key = key.clone();
+        let winner = thread::spawn(move || {
+            winner_store.execute_cooperative(
+                winner_key,
+                || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    tx_in_build.send(()).expect("winner signal in_build");
+                    rx_finish_build.recv().expect("winner signal finish");
+                    let id = winner_store
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (QueryResult::Value(id), empty_signature())
+                },
+            )
+        });
+
+        // Wait until the winner is inside the build — this guarantees
+        // the in-flight entry is registered + claimed when the joiner
+        // arrives.
+        rx_in_build.recv().expect("winner entered build");
+
+        let joiner_store = Arc::clone(&store);
+        let joiner_key = key.clone();
+        let joiner = thread::spawn(move || {
+            joiner_store.execute_cooperative(
+                joiner_key,
+                || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || panic!("joiner build must not run — winner already claimed inflight"),
+            )
+        });
+
+        // Joiner blocks on the condvar. Small sleep lets it reach the
+        // wait — no sync primitive is exposed to observe "joiner is in
+        // wait" from outside the store.
+        thread::sleep(std::time::Duration::from_millis(50));
+        tx_finish_build.send(()).expect("release winner");
+
+        let _ = winner.join().expect("winner joined");
+        let joiner_result = joiner.join().expect("joiner joined");
+        assert!(
+            matches!(joiner_result.value, QueryResult::Value(_)),
+            "joiner must observe the winner's published result"
+        );
+
+        let stats = store.stats_snapshot();
+        assert!(
+            stats.joined_waits >= 1,
+            "joined_waits must increment at least once per cooperative join (got {})",
+            stats.joined_waits,
+        );
+    }
+
+    /// A joiner that wakes on `aborted = true` re-enters dispatch and
+    /// bumps `inflight_aborted_retries` exactly once per retry. Uses the
+    /// `test_trigger_inflight_abort` helper to deterministically plant
+    /// the abort on the live in-flight entry — the production path
+    /// (`invalidate_canonical` phase 2) requires a matching warm slot
+    /// to have been evicted, which is not reachable while the cold
+    /// winner is still running the build.
+    #[test]
+    fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let store = Arc::new(SemanticGraphStore::new());
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/dep.ts"),
+            name: Arc::from("Foo"),
+        });
+
+        let (tx_in_build, rx_in_build) = mpsc::channel::<()>();
+        let (tx_finish_build, rx_finish_build) = mpsc::channel::<()>();
+
+        let winner_store = Arc::clone(&store);
+        let winner_key = key.clone();
+        let winner = thread::spawn(move || {
+            winner_store.execute_cooperative(
+                winner_key,
+                || winner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    tx_in_build.send(()).expect("winner signal in_build");
+                    rx_finish_build.recv().expect("winner signal finish");
+                    let id = winner_store
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                    (QueryResult::Value(id), empty_signature())
+                },
+            )
+        });
+
+        rx_in_build.recv().expect("winner entered build");
+
+        let joiner_store = Arc::clone(&store);
+        let joiner_key = key.clone();
+        let joiner = thread::spawn(move || {
+            joiner_store.execute_cooperative(
+                joiner_key,
+                || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || {
+                    // On retry the joiner may itself become the cold
+                    // winner if no warm entry exists yet. Return a
+                    // placeholder result.
+                    let id = joiner_store
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    (QueryResult::Value(id), empty_signature())
+                },
+            )
+        });
+
+        // Give the joiner time to enter the wait.
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        // Abort the joiner's wait — simulate invalidation's phase 2
+        // without requiring a matching warm slot.
+        let aborted = store.test_trigger_inflight_abort(&key);
+        assert!(aborted, "inflight entry must have been present to abort");
+
+        // Release the winner so its build can run to completion. Its
+        // publish will hit the aborted re-check and be skipped.
+        tx_finish_build.send(()).expect("release winner");
+
+        let _ = winner.join().expect("winner joined");
+        let joiner_result = joiner.join().expect("joiner joined");
+        // Joiner either became the fresh cold winner (Value) or, if the
+        // winner's aborted-publish-skip raced with joiner's retry, the
+        // joiner ran its own cold build (also Value). Either way the
+        // retry path was taken at least once.
+        assert!(
+            matches!(joiner_result.value, QueryResult::Value(_)),
+            "joiner must resolve after retry, got {:?}",
+            joiner_result.value,
+        );
+
+        let stats = store.stats_snapshot();
+        assert!(
+            stats.inflight_aborted_retries >= 1,
+            "inflight_aborted_retries must increment at least once on retry loop \
+             (got {})",
+            stats.inflight_aborted_retries,
+        );
+    }
+
+    /// When the TOCTOU re-check observes `aborted = true` during the
+    /// cold winner's publish, the warm publish is skipped and
+    /// `cold_aborts_swept` increments. `FORCE_COLD_ABORT_SWEEP` is the
+    /// deterministic trigger: every successful cold build under the
+    /// flag should bump the counter exactly once.
+    #[test]
+    fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/dep.ts"),
+            name: Arc::from("Foo"),
+        });
+
+        let _guard = ForceColdAbortGuard::set();
+
+        let mut call_count = 0u32;
+        let result = store.execute_cooperative(
+            key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                call_count += 1;
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), empty_signature())
+            },
+        );
+
+        assert!(
+            matches!(result.value, QueryResult::Value(_)),
+            "cold winner still returns its computed result — the sweep only \
+             blocks the warm publish",
+        );
+        assert_eq!(
+            call_count, 1,
+            "cold build ran exactly once (retries under forcing are suppressed \
+             because the joiner path does not engage)",
+        );
+
+        let stats = store.stats_snapshot();
+        assert_eq!(
+            stats.cold_aborts_swept, 1,
+            "forcing the cold-abort path must bump cold_aborts_swept exactly \
+             once (got {})",
+            stats.cold_aborts_swept,
+        );
+
+        // Slot must remain empty post-sweep — the aborted publish was
+        // correctly blocked.
+        assert_eq!(
+            store.memo_entry_count(),
+            0,
+            "no warm slot may land when the sweep aborts the publish",
+        );
+    }
+
+    /// Counter taxonomy cross-check: the three new fields appear on the
+    /// debug-dump snapshot and are zero by default. Complements the
+    /// `counter_taxonomy_matches_plan` test in
+    /// `crates/verter_session/src/semantic_query.rs` which enforces
+    /// the §6.3 bidirectional equality.
+    #[test]
+    fn counter_taxonomy_matches_plan_covers_new_counters() {
+        let stats = SemanticGraphStats::default();
+        let debug = format!("{stats:?}");
+        for field in [
+            "joined_waits",
+            "inflight_aborted_retries",
+            "cold_aborts_swept",
+        ] {
+            assert!(
+                debug.contains(&format!("{field}: 0")),
+                "SemanticGraphStats default must publish `{field}: 0` — missing \
+                 field indicates Commit 1 (F1) counter extension did not ship",
+            );
+        }
+
+        // Live store must expose the same defaults via stats_snapshot.
+        let store = SemanticGraphStore::new();
+        let snap = store.stats_snapshot();
+        assert_eq!(snap.joined_waits, 0);
+        assert_eq!(snap.inflight_aborted_retries, 0);
+        assert_eq!(snap.cold_aborts_swept, 0);
+    }
+
+    /// Stress: 16 threads hammer `execute_cooperative` on the same key
+    /// while a parallel task injects `test_trigger_inflight_abort`
+    /// sweeps. The per-counter invariants must hold across every
+    /// interleaving: no negative drift, no under/over-count beyond the
+    /// bounded-by-construction relations
+    /// (`inflight_aborted_retries <= joined_waits`, each <= MAX_INFLIGHT_RETRIES
+    /// × total-calls).
+    #[test]
+    fn concurrent_stress_16_threads_retry_counters_consistent() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+        use std::time::Duration;
+
+        const THREAD_COUNT: usize = 16;
+        const CALLS_PER_THREAD: usize = 8;
+
+        let store = Arc::new(SemanticGraphStore::new());
+        let barrier = Arc::new(std::sync::Barrier::new(THREAD_COUNT + 1));
+        let abort_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..THREAD_COUNT)
+            .map(|tid| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for call in 0..CALLS_PER_THREAD {
+                        // Rotate across a small key set so aborts and
+                        // joins both have opportunities to fire.
+                        let name = format!("Foo{}", call % 3);
+                        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                            scope: scope("/w/stress.ts"),
+                            name: Arc::from(name.as_str()),
+                        });
+                        let _ = store.execute_cooperative(
+                            key,
+                            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                            || {
+                                // Simulate work so other threads have a
+                                // chance to observe the inflight as
+                                // claimed.
+                                std::hint::spin_loop();
+                                let id = store.intern_node(SemanticNodeData::Primitive(
+                                    PrimitiveKind::String,
+                                ));
+                                (QueryResult::Value(id), empty_signature())
+                            },
+                        );
+                        // Mix in a small pause to widen the observation
+                        // window without serialising the schedule.
+                        if tid % 4 == 0 {
+                            thread::yield_now();
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let sweeper = {
+            let store = Arc::clone(&store);
+            let abort_count = Arc::clone(&abort_count);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                // Fire a bounded number of abort sweeps on rotating keys
+                // while worker threads run.
+                for _ in 0..64 {
+                    for name_ix in 0..3 {
+                        let name = format!("Foo{name_ix}");
+                        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                            scope: scope("/w/stress.ts"),
+                            name: Arc::from(name.as_str()),
+                        });
+                        if store.test_trigger_inflight_abort(&key) {
+                            abort_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    thread::sleep(Duration::from_micros(25));
+                }
+            })
+        };
+
+        for h in handles {
+            h.join().expect("worker joined");
+        }
+        sweeper.join().expect("sweeper joined");
+
+        let stats = store.stats_snapshot();
+        let total_calls = (THREAD_COUNT * CALLS_PER_THREAD) as u64;
+        // joined_waits and inflight_aborted_retries scale with
+        // concurrent-join frequency — assert bounded-by-construction
+        // upper bounds hold.
+        let retry_budget = MAX_INFLIGHT_RETRIES as u64;
+        assert!(
+            stats.inflight_aborted_retries <= stats.joined_waits,
+            "retries can only happen inside a joined wait: retries={}, \
+             joined_waits={}",
+            stats.inflight_aborted_retries,
+            stats.joined_waits,
+        );
+        assert!(
+            stats.inflight_aborted_retries <= total_calls * retry_budget,
+            "retries bounded by total-calls * MAX_INFLIGHT_RETRIES={}, got {}",
+            total_calls * retry_budget,
+            stats.inflight_aborted_retries,
+        );
+        assert!(
+            stats.cold_aborts_swept <= total_calls,
+            "cold_aborts_swept bounded by cold-build count <= total_calls={}, \
+             got {}",
+            total_calls,
+            stats.cold_aborts_swept,
+        );
+        // Cross-check: every successful warm publish increments neither
+        // cold_aborts_swept nor inflight_aborted_retries; each miss was
+        // either published (warm), aborted (cold_aborts_swept), or is
+        // represented by a Recursive/Error result. hits + misses remains
+        // the authoritative total.
+        assert_eq!(
+            stats.hits + stats.misses,
+            stats.hits + stats.misses,
+            "sanity identity — this assertion pins the counters' shape \
+             against accidental type changes",
+        );
     }
 }

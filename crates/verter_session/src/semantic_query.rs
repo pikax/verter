@@ -568,6 +568,17 @@ pub struct SemanticGraphStats {
     pub in_flight_peak: u32,
     pub waits_ms: u64,
     pub memo_entry_count: u64,
+    /// Number of times a joiner thread cooperatively blocked on an
+    /// in-flight entry's condvar (one increment per `wait_while` return,
+    /// including subsequent waits after an abort-retry).
+    pub joined_waits: u64,
+    /// Number of times a joiner re-entered dispatch because its in-flight
+    /// entry was aborted by a canonical-invalidation sweep. Bounded per
+    /// joined call by [`MAX_INFLIGHT_RETRIES`].
+    pub inflight_aborted_retries: u64,
+    /// Number of times a cold winner observed its in-flight entry
+    /// aborted by a concurrent sweep and skipped the warm publish.
+    pub cold_aborts_swept: u64,
     // ── Derivation / origin counters ─────────────────────────────────
     pub origin_edge_count: u64,
     pub origin_edges_emitted: u64,
@@ -1557,7 +1568,8 @@ mod tests {
     ///   projection_depth_p50, projection_depth_p95,
     ///   origin_edges_per_node_p50, origin_edges_per_node_p95,
     ///   decl_subexpression_lowering_count, relation_check_count.
-    /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns.
+    /// - Exceptional-path: budget_fallback_count, same_path_sentinel_returns,
+    ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
     fn counter_taxonomy_matches_plan() {
         let stats = SemanticGraphStats::default();
@@ -1597,7 +1609,13 @@ mod tests {
         // Exceptional-path counters (legitimately zero on the corpus;
         // §6.2 forcing tests prove they exist and increment under
         // dedicated fixtures).
-        let exceptional_path = ["budget_fallback_count", "same_path_sentinel_returns"];
+        let exceptional_path = [
+            "budget_fallback_count",
+            "same_path_sentinel_returns",
+            "joined_waits",
+            "inflight_aborted_retries",
+            "cold_aborts_swept",
+        ];
         for field in exceptional_path {
             assert!(
                 debug.contains(&format!("{field}: ")),
