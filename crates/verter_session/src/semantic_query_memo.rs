@@ -696,6 +696,15 @@ impl DerivationStore {
     fn edge_count(&self) -> usize {
         self.edges.values().map(Vec::len).sum()
     }
+
+    fn all_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
+        self.edges
+            .iter()
+            .flat_map(|((node, kind), edges)| {
+                edges.iter().map(move |edge| (*node, *kind, edge.clone()))
+            })
+            .collect()
+    }
 }
 
 /// Pick the percentile-`p` value out of an already-sorted ascending
@@ -1436,6 +1445,10 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn origin_edge_count(&self) -> usize {
         self.derivation.lock().edge_count()
+    }
+
+    pub fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
+        self.derivation.lock().all_edges()
     }
 
     /// Dispatch-side origin walk: visits every edge on `node` and merges

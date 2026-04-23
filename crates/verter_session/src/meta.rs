@@ -710,7 +710,7 @@ impl MetaSession {
             let host = runtime.host();
             let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
             let Some(resolved) = runtime
-                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
             else {
                 return Ok(None);
             };
@@ -798,7 +798,7 @@ impl MetaSession {
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
             let Some(resolved) = runtime
-                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
             else {
                 return Ok(None);
             };
@@ -860,7 +860,7 @@ impl MetaSession {
             host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
             let Some(resolved) = runtime
-                .resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)
+                .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
             else {
                 return Ok(None);
             };

@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 
 use crate::meta::{MetaProject, SessionOverlay};
 use crate::meta_resolve::ResolvedComponentMetaState;
-use crate::types::{FileKind, ResolverMode, UpsertRequest};
+use crate::types::{FileKind, ProjectionMode, UpsertRequest};
 
 /// Session identity — unique per session within a `MetaProject`.
 pub type SessionId = u64;
@@ -54,7 +54,8 @@ pub(crate) struct SessionRuntime {
     /// stable-request executor go here instead of the host's shared
     /// caches, preventing overlay-derived state from leaking across
     /// concurrent sessions.
-    resolved_meta_cache: RwLock<FxHashMap<(String, ResolverMode), Arc<ResolvedComponentMetaState>>>,
+    resolved_meta_cache:
+        RwLock<FxHashMap<(String, ProjectionMode), Arc<ResolvedComponentMetaState>>>,
 
     /// Current SessionView as an atomically-swappable snapshot (C15).
     /// Readers: `current_view()` via `ArcSwap::load` — lock-free.
@@ -219,7 +220,7 @@ impl SessionRuntime {
     pub fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         // Session-scoped cache is only authoritative when the session has
         // overlays. Overlay-free sessions rely on the host's fact-validated
@@ -240,7 +241,7 @@ impl SessionRuntime {
     pub fn store_resolved_meta(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         result: &ResolvedComponentMetaState,
     ) {
         if self.project.session_has_overlays(self.session_id) {
@@ -270,7 +271,7 @@ impl SessionRuntime {
     pub fn resolve_component_meta(
         &self,
         canonical_or_alias: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         let host = self.host();
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
@@ -329,7 +330,7 @@ impl SessionRuntime {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
 
-        let resolved = self.resolve_component_meta(canonical.as_str(), ResolverMode::Expanded)?;
+        let resolved = self.resolve_component_meta(canonical.as_str(), ProjectionMode::Expanded)?;
         let analysis = crate::host_manage::extract_component_meta_from_resolved(
             host,
             canonical.as_str(),
@@ -352,7 +353,7 @@ impl SessionRuntime {
     )> {
         let host = self.host();
         let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-        let resolved = self.resolve_component_meta(canonical.as_str(), ResolverMode::Expanded)?;
+        let resolved = self.resolve_component_meta(canonical.as_str(), ProjectionMode::Expanded)?;
         let (analysis, fallthrough_fact_versions) =
             crate::host_manage::extract_component_meta_from_resolved_with_facts(
                 host,

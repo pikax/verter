@@ -1,7 +1,7 @@
 //! Shared materialization and resolved-meta owner for component-meta.
 //!
 //! This module owns:
-//! - mode selection (`ResolverMode::Type` vs `ResolverMode::Expanded`)
+//! - mode selection (`ProjectionMode::Identity` vs `ProjectionMode::Expanded`)
 //! - materialized resolved outputs (`ResolvedComponentMetaState`)
 //! - mode-aware caching
 //! - JSDoc attachment and typed-tag resolution
@@ -27,7 +27,7 @@ use crate::resolver_core::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
     SingleflightRole,
 };
-use crate::types::{FileAnalysisSnapshot, Hash16, ResolverMode};
+use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -91,7 +91,7 @@ pub struct CapturedComponentMetaInputs {
 
 impl ComponentMetaRequestHost for VerterHost {
     type View = crate::resolver_store::HostStoreView;
-    type Mode = ResolverMode;
+    type Mode = ProjectionMode;
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
 
@@ -246,7 +246,7 @@ pub struct SessionRequestHost<'a> {
 
 impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
     type View = crate::resolver_store::HostStoreView;
-    type Mode = ResolverMode;
+    type Mode = ProjectionMode;
     type Resolution = ResolvedComponentMetaState;
     type CapturedInputs = CapturedComponentMetaInputs;
 
@@ -375,7 +375,7 @@ pub struct ResolvedComponentMetaState {
     /// The raw analysis snapshot (never mutated for enrichment).
     pub snapshot: FileAnalysisSnapshot,
     /// Which mode was used to produce this state.
-    pub mode: ResolverMode,
+    pub mode: ProjectionMode,
     /// Content hash of the owner file at resolution time.
     pub whole_hash: Hash16,
     /// Resolved macro metadata from cross-file traversal.
@@ -391,6 +391,9 @@ pub struct ResolvedComponentMetaState {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
+    /// Origin subgraph for semantic results. Populated in `Expanded` mode
+    /// by walking the `SemanticGraphStore` after dispatch resolution.
+    pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5094,7 +5097,7 @@ impl VerterHost {
     pub fn resolve_component_meta(
         &self,
         canonical_or_alias: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         self.resolve_component_meta_with_view(canonical_or_alias, mode)
     }
@@ -5102,7 +5105,7 @@ impl VerterHost {
     fn resolve_component_meta_with_view(
         &self,
         canonical_or_alias: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -5235,7 +5238,7 @@ impl VerterHost {
     pub(crate) fn compute_component_meta_state(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         whole_hash: Hash16,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
@@ -5251,7 +5254,7 @@ impl VerterHost {
     fn compute_component_meta_state_from_captured(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         captured: &CapturedComponentMetaInputs,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
@@ -5271,7 +5274,7 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
-            ResolverMode::Expanded,
+            ProjectionMode::Expanded,
             whole_hash,
             None,
             crate::resolver_core::ComponentMetaResolutionPurpose::Fallthrough,
@@ -5282,7 +5285,7 @@ impl VerterHost {
     fn compute_component_meta_state_inner(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         whole_hash: Hash16,
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
@@ -5340,7 +5343,7 @@ impl VerterHost {
                 format!(
                     "owner={} expanded={} captured={} purpose={:?}",
                     canonical,
-                    mode == ResolverMode::Expanded,
+                    mode == ProjectionMode::Expanded,
                     captured.is_some(),
                     purpose,
                 ),
@@ -5349,7 +5352,7 @@ impl VerterHost {
                 &resolver_host,
                 canonical,
                 &snapshot,
-                mode == ResolverMode::Expanded,
+                mode == ProjectionMode::Expanded,
                 captured,
                 purpose,
             )
@@ -5364,7 +5367,7 @@ impl VerterHost {
         let registry_before = parts.resolved_type_registry.len();
         let append_start = std::time::Instant::now();
         let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
-        let should_produce_macro_object_shapes = mode == ResolverMode::Expanded;
+        let should_produce_macro_object_shapes = mode == ProjectionMode::Expanded;
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
             // D-Cutover §5.8 WIP-W: the retired `shared_owner_engine`
             // is gone — dispatch owns all solve-like operations now.
@@ -5560,6 +5563,17 @@ impl VerterHost {
                 timings: audit_timings,
                 solver: solver_audit,
             }),
+            origin_graph: if mode == ProjectionMode::Expanded {
+                let graph = self.project_type_store.semantic_graph();
+                let dto = build_origin_graph(graph);
+                if dto.edges.is_empty() {
+                    None
+                } else {
+                    Some(dto)
+                }
+            } else {
+                None
+            },
         };
         Some(state)
     }
@@ -7096,7 +7110,7 @@ impl VerterHost {
     pub(crate) fn try_get_cached_resolved_meta(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
     ) -> Option<ResolvedComponentMetaState> {
         let cache_key = resolved_meta_cache_key(canonical, mode);
         let view_for_get = self.resolver_store_view();
@@ -7137,7 +7151,7 @@ impl VerterHost {
     pub(crate) fn store_cached_resolved_meta(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         state: &ResolvedComponentMetaState,
         fact_versions: &[crate::resolver_core::FactVersionRef],
     ) {
@@ -7164,7 +7178,7 @@ impl VerterHost {
     fn mirror_cached_resolved_meta_arc(
         &self,
         canonical: &str,
-        mode: ResolverMode,
+        mode: ProjectionMode,
         state: Arc<ResolvedComponentMetaState>,
     ) {
         let cached = crate::types::ResolvedComponentMetaCacheEntry {
@@ -10181,9 +10195,102 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
     result
 }
 
+fn build_origin_graph(
+    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+) -> verter_protocol::types::OriginGraphDto {
+    use crate::semantic_query::OriginEdgeKind;
+    use rustc_hash::FxHashMap;
+    use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+
+    let all_edges = graph.export_all_origin_edges();
+    if all_edges.is_empty() {
+        return OriginGraphDto::default();
+    }
+
+    let mut node_index: FxHashMap<crate::semantic_query::SemanticNodeId, u32> =
+        FxHashMap::default();
+    let mut nodes: Vec<OriginNodeDto> = Vec::new();
+    let mut meta_strings: Vec<String> = Vec::new();
+    let mut meta_index_map: FxHashMap<String, u32> = FxHashMap::default();
+
+    let mut intern_node = |id: crate::semantic_query::SemanticNodeId,
+                           graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>|
+     -> u32 {
+        if let Some(&idx) = node_index.get(&id) {
+            return idx;
+        }
+        let idx = nodes.len() as u32;
+        let kind = graph
+            .node_data(id)
+            .map(|d| {
+                format!("{:?}", &*d).split_once('{').map_or_else(
+                    || {
+                        format!("{:?}", &*d)
+                            .split_once('(')
+                            .map_or_else(|| format!("{:?}", &*d), |(name, _)| name.to_string())
+                    },
+                    |(name, _)| name.to_string(),
+                )
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        nodes.push(OriginNodeDto {
+            id: idx,
+            kind,
+            label: None,
+        });
+        node_index.insert(id, idx);
+        idx
+    };
+
+    let mut edges_dto: Vec<OriginEdgeDto> = Vec::new();
+    for (target_node, kind, edge) in &all_edges {
+        let target_idx = intern_node(*target_node, graph);
+        let edge_kind = match kind {
+            OriginEdgeKind::Instantiate => "instantiate",
+            OriginEdgeKind::SubstituteTypeParam => "substituteTypeParam",
+            OriginEdgeKind::ConditionalSelect => "conditionalSelect",
+            OriginEdgeKind::InferBind => "inferBind",
+            OriginEdgeKind::ProjectMember => "projectMember",
+            OriginEdgeKind::ProjectIndex => "projectIndex",
+            OriginEdgeKind::ProjectPath => "projectPath",
+            OriginEdgeKind::Normalize => "normalize",
+            OriginEdgeKind::AliasResolve => "aliasResolve",
+        };
+        let meta_str = format!("{:?}", edge.meta);
+        let meta_idx = if meta_str == "None" {
+            None
+        } else {
+            let idx = if let Some(&existing) = meta_index_map.get(&meta_str) {
+                existing
+            } else {
+                let idx = meta_strings.len() as u32;
+                meta_strings.push(meta_str.clone());
+                meta_index_map.insert(meta_str, idx);
+                idx
+            };
+            Some(idx)
+        };
+        for source in edge.sources.iter() {
+            let source_idx = intern_node(*source, graph);
+            edges_dto.push(OriginEdgeDto {
+                source: source_idx,
+                target: target_idx,
+                kind: edge_kind.to_string(),
+                meta_index: meta_idx,
+            });
+        }
+    }
+
+    OriginGraphDto {
+        nodes,
+        edges: edges_dto,
+        meta_strings,
+    }
+}
+
 fn resolved_meta_cache_key(
     canonical: &str,
-    mode: ResolverMode,
+    mode: ProjectionMode,
 ) -> crate::resolver_core::ResolutionNodeKey {
     crate::resolver_core::ResolutionNodeKey {
         symbol_id: canonical.to_string(),
@@ -10192,8 +10299,10 @@ fn resolved_meta_cache_key(
         member_path_hash: 0,
         type_args_hash: 0,
         behavior_flags: match mode {
-            ResolverMode::Type => 1,
-            ResolverMode::Expanded => 2,
+            ProjectionMode::Identity => 1,
+            ProjectionMode::Navigate => 2,
+            ProjectionMode::Shallow => 3,
+            ProjectionMode::Expanded => 4,
         },
     }
 }
@@ -10347,7 +10456,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             component_meta_debug(format!(
                 "resolve_component_meta owner={} mode={:?} step=evaluated_types:start imports={} macro_type_deps={}",
                 owner_canonical,
-                ResolverMode::Expanded,
+                ProjectionMode::Expanded,
                 snapshot.imports.len(),
                 snapshot.macro_type_deps.len(),
             ));
@@ -10393,7 +10502,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             component_meta_debug(format!(
                 "resolve_component_meta owner={} mode={:?} evaluated_types took {:?} has_output={}",
                 owner_canonical,
-                ResolverMode::Expanded,
+                ProjectionMode::Expanded,
                 eval_started.elapsed(),
                 evaluated_types
                     .as_ref()
@@ -10561,9 +10670,9 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             canonical_source,
             span,
             if expanded {
-                ResolverMode::Expanded
+                ProjectionMode::Expanded
             } else {
-                ResolverMode::Type
+                ProjectionMode::Identity
             },
             tracked_deps,
             cache,
@@ -10644,7 +10753,7 @@ fn resolve_jsdoc_block(
     host: &VerterHost,
     canonical_source: &str,
     span: verter_span::Span,
-    mode: ResolverMode,
+    mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
     cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     visiting: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -10685,7 +10794,7 @@ fn resolve_jsdoc_block(
 fn map_jsdoc_tag(
     host: &VerterHost,
     canonical_source: &str,
-    mode: ResolverMode,
+    mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
     _cache: &mut crate::resolver_core::ExternalTypeBodyCache,
     _visiting: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -10693,7 +10802,7 @@ fn map_jsdoc_tag(
     tag: verter_semantic::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
-    let resolved_type = if mode == ResolverMode::Expanded {
+    let resolved_type = if mode == ProjectionMode::Expanded {
         raw_type.as_deref().and_then(|raw_type| {
             resolve_jsdoc_tag_type(host, canonical_source, raw_type, tracked_deps)
         })

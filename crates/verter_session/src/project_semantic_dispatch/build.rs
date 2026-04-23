@@ -1315,10 +1315,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `never` bottom, exact node identity, and the obvious
     /// non-assignability cases. Object / union / intersection / generic
     /// relations stay deferred — the full solver routing lands via the
-    /// `resolve_conditional` dispatch handoff in D-Cutover. `infer`
-    /// bindings require the full relation engine integration and remain
-    /// symbolic (no `InferBind` edges) until the solver handoff is wired
-    /// — the two `infer_*` C2 tests stay `#[ignore]` per plan §3 C2.
+    /// `resolve_conditional` dispatch handoff in D-Cutover. Bare-infer
+    /// bindings (`T extends infer X`) are handled by the shortcut below;
+    /// nested-infer in complex patterns defers to the relation engine.
     pub(super) fn build_conditional(
         &self,
         check: SemanticNodeId,

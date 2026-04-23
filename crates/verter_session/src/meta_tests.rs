@@ -274,7 +274,7 @@ fn assert_route_union_surface(expr: &TypeExpr) {
 fn cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
-    mode: crate::types::ResolverMode,
+    mode: crate::types::ProjectionMode,
 ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -305,7 +305,7 @@ fn cached_resolved_state(
 fn clear_legacy_cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
-    mode: crate::types::ResolverMode,
+    mode: crate::types::ProjectionMode,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -800,7 +800,7 @@ defineProps<{ ui: typeof theme }>()
     // on the compile cache.
     let _ = project
         .host()
-        .resolve_component_meta("/Comp.vue", crate::types::ResolverMode::Type);
+        .resolve_component_meta("/Comp.vue", crate::types::ProjectionMode::Identity);
 
     let facts = project
         .host()
@@ -1500,12 +1500,12 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
     );
 
     let first_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
             .expect("first evaluation should populate the cache");
 
     let second = session.evaluate_types("Comp.vue").unwrap().unwrap();
     let second_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
             .expect("second evaluation should reuse the cache");
 
     assert_eq!(first.props.len(), second.props.len());
@@ -1516,7 +1516,7 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
         .unwrap();
     let third = session.evaluate_types("Comp.vue").unwrap().unwrap();
     let third_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
             .expect("updated file should repopulate the cache");
 
     assert!(third.props.iter().any(|field| field.name == "label"));
@@ -1532,25 +1532,30 @@ fn resolved_meta_reuses_resolver_cache_after_legacy_slot_is_cleared() {
 
     let _ = project
         .host()
-        .resolve_component_meta("Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("initial resolve should succeed");
     let first_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
             .expect("initial resolve should populate legacy cache mirror");
 
-    clear_legacy_cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded);
+    clear_legacy_cached_resolved_state(
+        &project,
+        "Comp.vue",
+        crate::types::ProjectionMode::Expanded,
+    );
     assert!(
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded).is_none(),
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
+            .is_none(),
         "legacy cache slot should be cleared before the second lookup"
     );
 
     project.host().provenance().reset();
     let _ = project
         .host()
-        .resolve_component_meta("Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("second resolve should succeed from resolver-owned cache");
     let second_cache =
-        cached_resolved_state(&project, "Comp.vue", crate::types::ResolverMode::Expanded)
+        cached_resolved_state(&project, "Comp.vue", crate::types::ProjectionMode::Expanded)
             .expect("resolver-owned cache hit should mirror back into the legacy slot");
 
     assert!(Arc::ptr_eq(&first_cache, &second_cache));
@@ -5323,9 +5328,12 @@ defineProps<{
 
     let session = project.open_session_batch().unwrap();
     let first = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let first_cache =
-        cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
-            .expect("first evaluation should populate the cache");
+    let first_cache = cached_resolved_state(
+        &project,
+        "/Comp.vue",
+        crate::types::ProjectionMode::Expanded,
+    )
+    .expect("first evaluation should populate the cache");
     let first_meta = session
         .get_component_meta("/Comp.vue")
         .unwrap()
@@ -5373,9 +5381,12 @@ defineProps<{
         .unwrap();
 
     let second = session.evaluate_types("/Comp.vue").unwrap().unwrap();
-    let second_cache =
-        cached_resolved_state(&project, "/Comp.vue", crate::types::ResolverMode::Expanded)
-            .expect("dependency update should repopulate the cache");
+    let second_cache = cached_resolved_state(
+        &project,
+        "/Comp.vue",
+        crate::types::ProjectionMode::Expanded,
+    )
+    .expect("dependency update should repopulate the cache");
     let second_meta = session
         .get_component_meta("/Comp.vue")
         .unwrap()
@@ -5586,7 +5597,7 @@ fn evaluate_types_returns_consistent_results_for_repeated_calls() {
 
 #[test]
 fn resolve_component_meta_expanded_returns_consistent_results_on_repeated_calls() {
-    use crate::types::ResolverMode;
+    use crate::types::ProjectionMode;
 
     let project = make_project();
     project
@@ -5622,13 +5633,13 @@ defineProps<Props>()
     // First call
     let first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolve_component_meta should succeed");
 
     // Second call — should return consistent results
     let second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolve_component_meta should succeed");
 
     // Assert+: both calls return the same resolved macros
@@ -5641,11 +5652,11 @@ defineProps<Props>()
     // Assert+: resolved macros have consistent prop counts
     assert!(
         !first.resolved_macros.is_empty(),
-        "`ResolverMode::Expanded` should resolve cross-file macro types on first call"
+        "`ProjectionMode::Expanded` should resolve cross-file macro types on first call"
     );
     assert!(
         !second.resolved_macros.is_empty(),
-        "`ResolverMode::Expanded` should resolve cross-file macro types on second call"
+        "`ProjectionMode::Expanded` should resolve cross-file macro types on second call"
     );
     assert_eq!(
         first.resolved_macros[0].props.len(),
@@ -5654,13 +5665,13 @@ defineProps<Props>()
     );
 
     // Assert-: mode is Expanded, not Type
-    assert_eq!(first.mode, ResolverMode::Expanded);
-    assert_ne!(first.mode, ResolverMode::Type);
+    assert_eq!(first.mode, ProjectionMode::Expanded);
+    assert_ne!(first.mode, ProjectionMode::Identity);
 }
 
 #[test]
 fn resolve_component_meta_expanded_returns_updated_results_after_owner_change() {
-    use crate::types::ResolverMode;
+    use crate::types::ProjectionMode;
 
     let project = make_project();
     project
@@ -5670,7 +5681,7 @@ fn resolve_component_meta_expanded_returns_updated_results_after_owner_change() 
     // First call — inline props should be resolved
     let first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolve_component_meta should succeed");
 
     let first_snap_props = prop_names(&first.snapshot);
@@ -5689,7 +5700,7 @@ fn resolve_component_meta_expanded_returns_updated_results_after_owner_change() 
     // Second call — should see the updated props
     let second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolve_component_meta should succeed after owner change");
 
     let second_snap_props = prop_names(&second.snapshot);
@@ -5719,7 +5730,7 @@ fn resolve_component_meta_expanded_returns_updated_results_after_owner_change() 
 
 #[test]
 fn resolve_component_meta_expanded_returns_updated_results_after_dependency_change() {
-    use crate::types::ResolverMode;
+    use crate::types::ProjectionMode;
 
     let project = make_project();
     project
@@ -5752,12 +5763,12 @@ defineProps<Props>()
     // First call — should resolve props a, b via resolved_macros
     let first = project
         .host()
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", ProjectionMode::Expanded)
         .expect("first resolve_component_meta should succeed");
 
     assert!(
         !first.resolved_macros.is_empty(),
-        "`ResolverMode::Expanded` should resolve cross-file macro types"
+        "`ProjectionMode::Expanded` should resolve cross-file macro types"
     );
     let first_prop_names: Vec<&str> = first.resolved_macros[0]
         .props
@@ -5781,7 +5792,7 @@ defineProps<Props>()
     // Second call — should reflect the dependency change
     let second = project
         .host()
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", ProjectionMode::Expanded)
         .expect("resolve_component_meta should succeed after dependency change");
 
     assert!(
@@ -5905,7 +5916,7 @@ defineProps<Props>()
     assert!(
         project
             .host()
-            .resolve_component_meta("/src/types.ts", crate::types::ResolverMode::Type)
+            .resolve_component_meta("/src/types.ts", crate::types::ProjectionMode::Identity)
             .is_none(),
         "removed dependency should not be resolvable via resolve_component_meta"
     );
@@ -6985,7 +6996,7 @@ defineProps<Props>()
         .host()
         .resolve_component_meta(
             "/workspace/src/Link.vue",
-            crate::types::ResolverMode::Expanded,
+            crate::types::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
     // Type alias assertions removed — cached_eval_inputs deleted with the legacy walker.
@@ -7080,7 +7091,7 @@ defineSlots<ButtonSlots>()
         .host()
         .resolve_component_meta(
             "/workspace/src/App.vue",
-            crate::types::ResolverMode::Expanded,
+            crate::types::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
 
@@ -7186,7 +7197,7 @@ defineProps<{
         .host()
         .resolve_component_meta(
             "/workspace/src/App.vue",
-            crate::types::ResolverMode::Expanded,
+            crate::types::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
 
@@ -7286,7 +7297,7 @@ defineProps<Props<T, VK>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let registry_names: std::collections::BTreeSet<_> = resolved
@@ -7371,7 +7382,7 @@ defineProps<Props>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let published_names: std::collections::BTreeSet<_> = resolved
         .resolved_type_registry
@@ -7428,7 +7439,7 @@ defineProps<LinkProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let route = resolved
@@ -7550,7 +7561,7 @@ defineProps<Props>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -7632,7 +7643,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     // Button and ComponentSlots are not published as separate registry entries;
@@ -7685,7 +7696,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let registry_names: Vec<&str> = resolved
@@ -7746,7 +7757,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let registry_names: Vec<&str> = resolved
@@ -7811,7 +7822,7 @@ defineProps<Props>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let registry_names: std::collections::BTreeSet<_> = resolved
         .resolved_type_registry
@@ -7902,7 +7913,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -8107,7 +8118,7 @@ defineSlots<ButtonSlots>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -8244,7 +8255,7 @@ defineSlots<ButtonSlots>()
         crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -8346,7 +8357,7 @@ defineSlots<ButtonSlots>()
         crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -8451,7 +8462,7 @@ defineSlots<ButtonSlots>()
         crate::resolver_core::component_meta_query_engine::forbid_structural_slow_lane_for_tests();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     assert!(
@@ -8552,7 +8563,7 @@ defineSlots<ButtonSlots>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     assert!(
@@ -8687,7 +8698,7 @@ defineProps<ButtonProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let button_entry = resolved
@@ -8849,7 +8860,7 @@ defineProps<ButtonProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     // Avatar is not published as a separate registry entry;
@@ -8968,7 +8979,7 @@ defineProps<ButtonProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let local_config = resolved
@@ -9052,7 +9063,7 @@ defineProps<ButtonProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     // LocalInner is not published as a separate registry entry;
@@ -9118,7 +9129,7 @@ defineProps<ButtonProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let config_entry = resolved
@@ -10003,7 +10014,7 @@ defineEmits<Emits>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let meta = crate::host_manage::extract_component_meta_from_resolved(
@@ -10250,7 +10261,7 @@ defineSlots<TabsSlots<T>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::host_manage::extract_component_meta_from_resolved(
         project.host(),
@@ -10528,7 +10539,7 @@ defineSlots<TabsSlots<T>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::host_manage::extract_component_meta_from_resolved(
         project.host(),
@@ -10736,7 +10747,7 @@ defineSlots<TabsSlots<T>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::host_manage::extract_component_meta_from_resolved(
         project.host(),
@@ -10981,7 +10992,7 @@ defineSlots<TabsSlots<T>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::host_manage::extract_component_meta_from_resolved(
         project.host(),
@@ -11080,7 +11091,7 @@ defineProps<{
     let started = std::time::Instant::now();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let elapsed = started.elapsed();
 
@@ -11167,7 +11178,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let started = std::time::Instant::now();
     let meta = crate::host_manage::extract_component_meta_from_resolved(
@@ -11266,7 +11277,7 @@ defineSlots<Slots<M>>()
     let started = std::time::Instant::now();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let meta = crate::host_manage::extract_component_meta_from_resolved(
         project.host(),
@@ -11747,7 +11758,7 @@ defineProps<ChildProps>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("expanded state should resolve");
     let button = resolved
         .resolved_macros
@@ -11890,7 +11901,7 @@ defineSlots<ButtonSlots>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
     let button_slots = resolved
@@ -12006,7 +12017,7 @@ defineSlots<ButtonSlots>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("should resolve component meta state");
 
     let button_slots = resolved
@@ -12136,7 +12147,7 @@ defineSlots<MenuSlots>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let registry_names: std::collections::BTreeSet<_> = resolved
@@ -12251,7 +12262,7 @@ defineSlots<ButtonSlots>()
 
     project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("component meta resolution should warm the prepared-decl route");
 
     let _store_view = project.host().resolver_store_view();
@@ -12925,7 +12936,7 @@ defineProps<{
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let registry_names: Vec<&str> = resolved
         .resolved_type_registry
@@ -12990,7 +13001,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let editor_field = resolved
         .evaluated_types
@@ -13049,7 +13060,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let editor_field = resolved
         .evaluated_types
@@ -13118,7 +13129,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let state_field = resolved
         .evaluated_types
@@ -13240,7 +13251,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let groups_field = resolved
         .evaluated_types
@@ -13309,7 +13320,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let external_field = resolved
         .evaluated_types
@@ -13367,7 +13378,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let tooltip_field = resolved
         .evaluated_types
@@ -13469,7 +13480,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let tooltip_field = resolved
         .evaluated_types
@@ -13884,7 +13895,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let close_field = resolved
         .evaluated_types
@@ -13991,7 +14002,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let title_field = resolved
         .evaluated_types
@@ -14090,7 +14101,7 @@ defineProps<{
 
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
     let string_or_vnode = resolved

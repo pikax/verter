@@ -1260,7 +1260,7 @@ import Link from './Link.vue'
         let _store_view = host.host().resolver_store_view();
         let resolved = host
             .host()
-            .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+            .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
             .expect("button resolved state should exist for the captured store view");
 
         host.upsert_base("/src/Link.vue", "<script setup lang=\"ts\"></script>")

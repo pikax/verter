@@ -1620,20 +1620,134 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
 }
 
 /// `infer` inside a closed conditional binds via the shared relation
-/// engine and emits `InferBind` edges. C2 does not wire the full
-/// relation engine yet — the solver hand-off lands in D2. Stay
-/// ignored until then; F1 un-ignores at track end.
+/// engine and emits `InferBind` edges. Worked Example C: bare-infer
+/// extends always closes the conditional, substituting `check` into
+/// the true branch and emitting an `InferBind` origin edge.
 #[test]
-#[ignore = "pending D2 (solver conditional hand-off through dispatch)"]
-fn infer_in_closed_conditional_binds_via_relation() {}
+fn infer_in_closed_conditional_binds_via_relation() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Fixture: `number extends infer X ? X : never`
+    // The bare-infer path in build_conditional recognises `extends == Infer`
+    // and always selects True, substituting X → check (number).
+    let check = primitive(&graph, PrimitiveKind::Number);
+    let infer_x = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+    });
+    let true_branch = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+    });
+    let false_branch = primitive(&graph, PrimitiveKind::Never);
+
+    let result = match dispatch.execute(SemanticQueryKey::Conditional {
+        check,
+        extends: infer_x,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+
+    // The infer binding substitutes X → number, so the result is `number`.
+    assert_eq!(
+        result, check,
+        "bare-infer conditional must return check (number) via substitution"
+    );
+
+    // An InferBind origin edge must be present carrying the binding name.
+    let edges = graph.origins_of_kind(result, OriginEdgeKind::InferBind);
+    assert!(
+        !edges.is_empty(),
+        "closed infer conditional must emit at least one InferBind edge"
+    );
+    let has_infer_x = edges
+        .iter()
+        .any(|e| matches!(&e.meta, OriginMeta::SubstitutedParam(name) if name.as_ref() == "X"));
+    assert!(
+        has_infer_x,
+        "InferBind edge must carry SubstitutedParam(\"X\") meta"
+    );
+
+    // No Conditional shell — the result is the substituted true branch directly.
+    let data = graph.node_data(result).expect("result node");
+    assert!(
+        !matches!(&*data, SemanticNodeData::Conditional { .. }),
+        "closed infer conditional must NOT produce a Conditional shell"
+    );
+}
 
 /// `infer` inside an open conditional must stay symbolic: no
 /// `InferBind` edge is emitted because the check could not decide.
-/// Requires the D2 solver integration to prove the negative
-/// (no edge) through a real infer-path fixture.
+/// Worked Example E variant: when `extends` is a complex pattern
+/// containing `infer` (not bare Infer), and the check is a TypeParam,
+/// the relation engine returns Unknown — the conditional stays
+/// deferred and no InferBind fires.
 #[test]
-#[ignore = "pending D2 (solver conditional hand-off through dispatch)"]
-fn infer_in_open_conditional_stays_symbolic_without_private_bind() {}
+fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Fixture: `T extends { a: infer X } ? X : never` where T is unbound.
+    // The `extends` is an Object (not bare Infer), so the bare-infer
+    // shortcut does not fire. The relation engine evaluates
+    // `TypeParam extends Object` → Unknown, keeping the conditional open.
+    let check = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let infer_x = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+    });
+    let extends = simple_object(&graph, &[("a", infer_x)]);
+    let true_branch = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+    });
+    let false_branch = primitive(&graph, PrimitiveKind::Never);
+
+    let result = match dispatch.execute(SemanticQueryKey::Conditional {
+        check,
+        extends,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+
+    // The conditional must stay deferred (Conditional shell).
+    let data = graph.node_data(result).expect("result node");
+    assert!(
+        matches!(&*data, SemanticNodeData::Conditional { .. }),
+        "open conditional with nested infer must produce a deferred Conditional shell, got {data:?}"
+    );
+
+    // No InferBind edges — the infer was never bound.
+    let infer_edges = graph.origins_of_kind(result, OriginEdgeKind::InferBind);
+    assert!(
+        infer_edges.is_empty(),
+        "open conditional must NOT emit InferBind edges; got {} edges",
+        infer_edges.len()
+    );
+
+    // Deferred ConditionalSelect edge must be present.
+    let cond_edges = graph.origins_of_kind(result, OriginEdgeKind::ConditionalSelect);
+    let has_deferred = cond_edges
+        .iter()
+        .any(|e| matches!(&e.meta, OriginMeta::Branch(BranchSelection::Deferred)));
+    assert!(
+        has_deferred,
+        "deferred conditional must emit ConditionalSelect(Branch::Deferred)"
+    );
+}
 
 /// Distinct projections into the same open conditional materialise
 /// only the visited subexpressions. C3's path walker distributes
@@ -2351,21 +2465,12 @@ fn key_of_records_source_members() {
     );
 }
 
-/// `ResolveDecl` on an aliased declaration (`type X = Y`) emits an
-/// `AliasResolve` edge — requires unwrapping behaviour in
-/// `build_resolve_decl` that the current `DeclAnchor`-only builder
-/// intentionally does not provide. Deferred until C-phase follow-up
-/// work adds alias unwrapping to declaration resolution.
-#[test]
-#[ignore = "pending alias unwrap in resolve_decl (C-phase follow-up)"]
-fn resolve_decl_alias_emits_alias_resolve_edge() {}
-
-/// Barrel alias chain (`barrel.ts` re-exports X from `types.ts`):
-/// each hop emits its own `AliasResolve` edge. Requires resolve_decl
-/// alias unwrap + per-hop emission (see previous test note).
-#[test]
-#[ignore = "pending alias unwrap in resolve_decl (C-phase follow-up)"]
-fn barrel_alias_chain_emits_one_edge_per_hop() {}
+// resolve_decl_alias_emits_alias_resolve_edge and
+// barrel_alias_chain_emits_one_edge_per_hop were deleted in F1:
+// resolve_decl returns DeclPlaceholder by design (C16). Alias unwrap
+// happens in the path-walk layer, covered by
+// `alias_unwrap_during_path_walk_emits_alias_resolve` and
+// `alias_identity_extraction_uses_target_not_current`.
 
 // ──────────────────────────────────────────────────────────────────
 // C6 — build_mapped_type (plan §3 C6 + §2 lazy block)

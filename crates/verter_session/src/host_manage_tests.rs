@@ -2204,7 +2204,7 @@ import Child from './Child.vue'
     let resolved = host
         .compute_component_meta_state(
             "/src/App.vue",
-            crate::types::ResolverMode::Expanded,
+            crate::types::ProjectionMode::Expanded,
             host.get_whole_hash("/src/App.vue")
                 .expect("whole hash should exist for App.vue"),
         )
@@ -2303,7 +2303,7 @@ import { shared } from './shared'
     host.provenance().reset();
 
     let resolved = host
-        .resolve_component_meta("/src/Button.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved meta should be computed from the captured view");
 
     let meta = extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true);
@@ -3866,7 +3866,7 @@ fn resolve_expanded_state(
     host: &VerterHost,
     canonical_or_alias: &str,
 ) -> crate::meta_resolve::ResolvedComponentMetaState {
-    host.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)
+    host.resolve_component_meta(canonical_or_alias, crate::types::ProjectionMode::Expanded)
         .expect("expanded resolved state should exist")
 }
 
@@ -4122,7 +4122,7 @@ defineProps<Props>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let props: Vec<&str> = state
         .resolved_macros
@@ -4167,7 +4167,7 @@ defineProps<A & B>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let names: Vec<&str> = state
         .resolved_macros
@@ -4199,7 +4199,7 @@ defineEmits<Events>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let emits: Vec<_> = state
         .resolved_macros
@@ -4236,7 +4236,7 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let slots: Vec<_> = state
         .resolved_macros
@@ -4281,7 +4281,7 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let slot_names: Vec<&str> = state
         .resolved_macros
@@ -4323,7 +4323,7 @@ defineProps<Props>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let prop_names: Vec<&str> = state
         .resolved_macros
@@ -4368,7 +4368,7 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let slots: Vec<_> = state
         .resolved_macros
@@ -8534,7 +8534,7 @@ export interface UnusedProps {
 
     ws.reset_reads();
     let resolved = host
-        .resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Expanded)
         .expect("expanded component meta should resolve");
 
     let prop_names: std::collections::BTreeSet<_> = resolved
@@ -9476,7 +9476,7 @@ defineProps<ImportedProps>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ResolverMode::Expanded)
+        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
         .expect("should return resolved state");
     let props: Vec<&str> = state
         .resolved_macros

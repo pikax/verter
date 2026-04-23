@@ -17,10 +17,8 @@
 #
 # Allowlist (whole-line scan; if any of these appear on the line, the line is exempt):
 #   - ProjectionMode::{Identity,Navigate,Shallow,Expanded}
-# Transitional allowlist (scope-bounded windows defined in the plan):
-#   - A1b → E1:   ResolverMode::Type, ResolverMode::Expanded
-# E1 removes the transitional set in the same commit it retires the
-# ResolverMode enum (§4 item 20).
+# E1 retired the A1b→E1 transitional set (ResolverMode::Type, ResolverMode::Expanded)
+# by deleting the ResolverMode enum from the workspace (§4 item 20).
 #
 # B1a retired the A1b→B1a transitional set (ExpandMode::, SemanticQueryKey::Expand,
 # build_expand) by deleting those identifiers from the workspace, so this
@@ -63,7 +61,6 @@ import sys
 
 ALLOWED_RX = re.compile(
     r'ProjectionMode::(?:Identity|Navigate|Shallow|Expanded)'
-    r'|ResolverMode::(?:Type|Expanded)'
 )
 
 RETIRED_RXES = [
@@ -144,8 +141,7 @@ def main() -> None:
             file=sys.stderr,
         )
         print(
-            "Transitional allowlist (A1b→E1): "
-            "ResolverMode::Type, ResolverMode::Expanded.",
+            "No transitional allowlist entries remain (E1 retired ResolverMode).",
             file=sys.stderr,
         )
         print(

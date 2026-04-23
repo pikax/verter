@@ -324,6 +324,10 @@ pub fn component_meta_analysis_to_ffi_with_resolution(
         options_api: analysis.options_api,
         file_path: analysis.file_path,
         resolution: resolved_state.map(resolved_component_meta_to_ffi),
+        origin: resolved_state
+            .and_then(|s| s.origin_graph.as_ref())
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -888,7 +892,7 @@ fn resolved_component_meta_to_ffi(
     state: &host::meta_resolve::ResolvedComponentMetaState,
 ) -> FfiComponentMetaResolution {
     FfiComponentMetaResolution {
-        mode: resolver_mode_to_string(state.mode),
+        mode: projection_mode_to_string(state.mode),
         macros: state
             .resolved_macros
             .iter()
@@ -1031,16 +1035,12 @@ fn style_lang_to_string(lang: verter_semantic::analysis::style::StyleAnalysisLan
     format!("{lang:?}")
 }
 
-// TODO(E1): emit new names once `ResolverMode` retires per plan §4
-// item 20 + §3 Phase E. Post-E1 this maps to
-// `ProjectionMode::{Identity, Shallow, Expanded}` and the wire format
-// carries `"identity"` / `"shallow"` / `"expanded"`. The A1b→E1
-// transitional allowlist entries for `ResolverMode::Type` /
-// `ResolverMode::Expanded` also retire in the same commit.
-fn resolver_mode_to_string(mode: host::ResolverMode) -> String {
+fn projection_mode_to_string(mode: host::ProjectionMode) -> String {
     match mode {
-        host::ResolverMode::Type => "type".to_string(),
-        host::ResolverMode::Expanded => "expanded".to_string(),
+        host::ProjectionMode::Identity => "identity".to_string(),
+        host::ProjectionMode::Navigate => "navigate".to_string(),
+        host::ProjectionMode::Shallow => "shallow".to_string(),
+        host::ProjectionMode::Expanded => "expanded".to_string(),
     }
 }
 
@@ -1915,6 +1915,43 @@ pub fn convert_destructured_block_meta(
 mod tests {
     use super::*;
 
+    fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+        verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+            props: Vec::new(),
+            events: Vec::new(),
+            slots: Vec::new(),
+            models: Vec::new(),
+            exposed: Vec::new(),
+            public_instance: None,
+            sfc_blocks: None,
+            type_registry: Vec::new(),
+            components: Vec::new(),
+            template_refs: Vec::new(),
+            imports: Vec::new(),
+            bindings: Vec::new(),
+            vue_api_calls: Vec::new(),
+            styles: Vec::new(),
+            flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+            root_reachability:
+                verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
+                    reason:
+                        verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                },
+            accepted_props: Vec::new(),
+            accepted_events: Vec::new(),
+            accepted_surface_completeness:
+                verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+            fallthrough_surface:
+                verter_semantic::analysis::component_meta::FallthroughSurface::None {
+                    reason:
+                        verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                },
+            macro_expansion_diagnostics: Vec::new(),
+            options_api: false,
+            file_path: String::new(),
+        }
+    }
+
     // ── Error path tests ──────────────────────────────────────────
 
     #[test]
@@ -2038,7 +2075,7 @@ mod tests {
         };
         let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
             snapshot: host::FileAnalysisSnapshot::default(),
-            mode: host::ResolverMode::Expanded,
+            mode: host::ProjectionMode::Expanded,
             whole_hash: [0; 16],
             resolved_macros: Vec::new(),
             resolved_type_registry: Vec::new(),
@@ -2057,6 +2094,7 @@ mod tests {
             evaluated_types: None,
             fact_versions: Vec::new(),
             compute_audit: None,
+            origin_graph: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -2125,7 +2163,7 @@ mod tests {
         };
         let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
             snapshot: host::FileAnalysisSnapshot::default(),
-            mode: host::ResolverMode::Expanded,
+            mode: host::ProjectionMode::Expanded,
             whole_hash: [0; 16],
             resolved_macros: Vec::new(),
             resolved_type_registry: vec![
@@ -2171,6 +2209,7 @@ mod tests {
             evaluated_types: None,
             fact_versions: Vec::new(),
             compute_audit: None,
+            origin_graph: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -3473,5 +3512,158 @@ mod tests {
         assert_eq!(utf8_to_utf32_offset(text, 1), 1); // after 'a'
         assert_eq!(utf8_to_utf32_offset(text, 5), 2); // after emoji (1 codepoint)
         assert_eq!(utf8_to_utf32_offset(text, 6), 3); // after 'b'
+    }
+
+    // ── E1 origin graph tests ────────────────────────────────────────
+
+    #[test]
+    fn ffi_payload_contains_origin_field_when_resolved_state_has_origin_graph() {
+        use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ProjectionMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            compute_audit: None,
+            origin_graph: Some(OriginGraphDto {
+                nodes: vec![
+                    OriginNodeDto {
+                        id: 0,
+                        kind: "Object".to_string(),
+                        label: None,
+                    },
+                    OriginNodeDto {
+                        id: 1,
+                        kind: "Primitive".to_string(),
+                        label: None,
+                    },
+                ],
+                edges: vec![OriginEdgeDto {
+                    source: 1,
+                    target: 0,
+                    kind: "instantiate".to_string(),
+                    meta_index: None,
+                }],
+                meta_strings: Vec::new(),
+            }),
+        };
+
+        let ffi =
+            component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+        assert!(
+            !ffi.origin.edges.is_empty(),
+            "FfiComponentMeta.origin must contain edges when resolved state has origin graph"
+        );
+        assert_eq!(ffi.origin.edges[0].kind, "instantiate");
+        assert_eq!(ffi.origin.nodes.len(), 2);
+    }
+
+    #[test]
+    fn ffi_origin_subgraph_is_empty_when_resolved_state_has_no_origin_graph() {
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ProjectionMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            compute_audit: None,
+            origin_graph: None,
+        };
+
+        let ffi =
+            component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+        assert!(
+            ffi.origin.edges.is_empty(),
+            "FfiComponentMeta.origin must be empty when no origin graph"
+        );
+    }
+
+    #[test]
+    fn ffi_edge_meta_strings_deduplicated() {
+        use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ProjectionMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            compute_audit: None,
+            origin_graph: Some(OriginGraphDto {
+                nodes: vec![
+                    OriginNodeDto {
+                        id: 0,
+                        kind: "Object".to_string(),
+                        label: None,
+                    },
+                    OriginNodeDto {
+                        id: 1,
+                        kind: "Primitive".to_string(),
+                        label: None,
+                    },
+                ],
+                edges: vec![
+                    OriginEdgeDto {
+                        source: 0,
+                        target: 1,
+                        kind: "substituteTypeParam".to_string(),
+                        meta_index: Some(0),
+                    },
+                    OriginEdgeDto {
+                        source: 1,
+                        target: 0,
+                        kind: "substituteTypeParam".to_string(),
+                        meta_index: Some(0),
+                    },
+                ],
+                meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
+            }),
+        };
+
+        let ffi =
+            component_meta_analysis_to_ffi_with_resolution(empty_analysis(), Some(&resolved_state));
+        assert_eq!(
+            ffi.origin.meta_strings.len(),
+            1,
+            "meta strings must be deduplicated"
+        );
+        assert_eq!(ffi.origin.edges.len(), 2);
+        assert_eq!(
+            ffi.origin.edges[0].meta_index, ffi.origin.edges[1].meta_index,
+            "both edges reference the same meta string"
+        );
+    }
+
+    #[test]
+    fn ffi_projection_mode_wire_format() {
+        let resolved_state = host::meta_resolve::ResolvedComponentMetaState {
+            snapshot: host::FileAnalysisSnapshot::default(),
+            mode: host::ProjectionMode::Expanded,
+            whole_hash: [0; 16],
+            resolved_macros: Vec::new(),
+            resolved_type_registry: Vec::new(),
+            resolved_type_registry_meta: Vec::new(),
+            evaluated_types: None,
+            fact_versions: Vec::new(),
+            compute_audit: None,
+            origin_graph: None,
+        };
+
+        let ffi = resolved_component_meta_to_ffi(&resolved_state);
+        assert_eq!(
+            ffi.mode, "expanded",
+            "ProjectionMode::Expanded wire format must be 'expanded'"
+        );
     }
 }

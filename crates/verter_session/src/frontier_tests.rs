@@ -828,7 +828,7 @@ defineProps<MyProps>()
 
     let meta = project.host().resolve_component_meta(
         "/workspace/src/App.vue",
-        crate::types::ResolverMode::Expanded,
+        crate::types::ProjectionMode::Expanded,
     );
     assert!(meta.is_some(), "component-meta should resolve");
 
@@ -1308,7 +1308,7 @@ defineProps<Alpha & Beta>()
 // V6: Imported alias preparation should not eagerly materialize bodies
 // ===========================================================================
 
-/// `ResolverMode::Type` and `ResolverMode::Expanded` should both resolve, with `ResolverMode::Expanded`
+/// `ProjectionMode::Identity` and `ProjectionMode::Expanded` should both resolve, with `ProjectionMode::Expanded`
 /// providing evaluated type shapes.
 #[test]
 fn type_and_expanded_modes_both_resolve() {
@@ -1335,9 +1335,9 @@ defineProps<Props>()
 
     set_dep(&host, "/src/Consumer.vue", "./types", "/src/types.ts");
 
-    // `ResolverMode::Type`: should resolve identity without full expansion
+    // `ProjectionMode::Identity`: should resolve identity without full expansion
     let meta_type =
-        host.resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Type);
+        host.resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Identity);
     assert!(
         meta_type.is_some(),
         "Type-mode component-meta should resolve"
@@ -1345,12 +1345,12 @@ defineProps<Props>()
     let type_result = meta_type.unwrap();
     assert!(
         type_result.evaluated_types.is_none(),
-        "`ResolverMode::Type` should not produce evaluated types"
+        "`ProjectionMode::Identity` should not produce evaluated types"
     );
 
-    // `ResolverMode::Expanded`: full materialization
+    // `ProjectionMode::Expanded`: full materialization
     let meta_expanded =
-        host.resolve_component_meta("/src/Consumer.vue", crate::types::ResolverMode::Expanded);
+        host.resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Expanded);
     assert!(
         meta_expanded.is_some(),
         "Expanded-mode component-meta should resolve"
@@ -1358,7 +1358,7 @@ defineProps<Props>()
     let expanded_result = meta_expanded.unwrap();
     assert!(
         expanded_result.evaluated_types.is_some(),
-        "`ResolverMode::Expanded` should produce evaluated types"
+        "`ProjectionMode::Expanded` should produce evaluated types"
     );
 }
 
@@ -2006,7 +2006,7 @@ defineEmits<AccordionRootEmits>()
     );
 
     let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
     assert!(
         meta.is_some(),
         "large cross-file component-meta should resolve"
@@ -2137,11 +2137,11 @@ defineProps<AccordionRootProps>()
     );
 
     let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
     assert!(meta.is_some(), "deeply generic Accordion should resolve");
 }
 
-/// Test 4: Component-meta resolution (`ResolverMode::Expanded`) for the Accordion
+/// Test 4: Component-meta resolution (`ProjectionMode::Expanded`) for the Accordion
 /// pattern. This is the full pipeline that was hanging.
 #[test]
 fn accordion_pattern_component_meta_expanded_does_not_hang() {
@@ -2205,7 +2205,7 @@ defineEmits<AccordionRootEmits>()
     // cross-file import resolution which may be incomplete without a live
     // workspace resolver.
     let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ResolverMode::Expanded);
+        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
     assert!(
         meta.is_some(),
         "Accordion component-meta should resolve without hanging"

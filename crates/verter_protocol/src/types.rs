@@ -5,29 +5,12 @@
 //! directly via `serde_wasm_bindgen`; NAPI maps to/from its own
 //! `#[napi(object)]` structs via zero-copy `From` impls.
 //!
-//! TODO(E1): this module receives the monolithic protocol bump per
-//! plan §3 Phase E + §5 "Breaking / protocol changes":
-//!
-//! - `VERTER_PROTOCOL_VERSION` increments.
-//! - `FfiComponentMeta` (and every payload carrying solver results)
-//!   gains `origin: OriginGraphDto` — compact wire form of the
-//!   reachable-subgraph derivation edges emitted by dispatch. Encoding
-//!   uses dense edge tables + varint-packed node ids + interned
-//!   edge-meta strings.
-//! - `ResolverMode::{Type, Expanded}` (live at `verter_session/src/types.rs`)
-//!   retires and is replaced by an explicit mapping onto
-//!   `ProjectionMode::{Identity, Shallow, Expanded}` that crosses the
-//!   FFI.
-//! - TS consumers (`@verter/language-shared`, `@verter/types`,
-//!   `@verter/native`, `@verter/wasm`, `@verter/component-meta`,
-//!   `@verter/unplugin`, playground, LSP/VSCode) migrate in the same
-//!   commit. The compat layer's `substituteTypeParametersInExpr` helper
-//!   + type-text fallback subsystem delete (plan §4 items 12 and 16).
-//!
-//! Verification matrix (plan §3 Phase E) specifies one non-trivial
-//! origin-walk test per consumer (NAPI / WASM / LSP / MCP / unplugin /
-//! Playground / component-meta compat). Every row must go green in the
-//! same commit.
+//! E1 protocol changes:
+//! - `FfiComponentMeta` carries `origin: OriginGraphDto` alongside
+//!   the primary payload. Compact wire form: dense edge table +
+//!   interned edge-meta strings + sequential node ids.
+//! - `ProjectionMode::{Identity, Shallow, Expanded}` crosses the FFI
+//!   (`Navigate` is dispatch-internal).
 
 use serde::{Deserialize, Serialize};
 
@@ -470,6 +453,38 @@ pub struct FfiElementMatch {
 // Component-meta result types (Rust → JS)
 // =============================================================================
 
+/// Compact wire form of the reachable origin subgraph for a component's
+/// semantic results. Dense edge table with sequential node indices and
+/// interned edge-meta strings.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginGraphDto {
+    pub nodes: Vec<OriginNodeDto>,
+    pub edges: Vec<OriginEdgeDto>,
+    pub meta_strings: Vec<String>,
+}
+
+/// One node in the origin subgraph.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginNodeDto {
+    pub id: u32,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// One edge in the origin subgraph.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginEdgeDto {
+    pub source: u32,
+    pub target: u32,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_index: Option<u32>,
+}
+
 /// NAPI/WASM boundary DTO for component metadata.
 /// Derived from `ComponentMetaAnalysis` in `verter_semantic::analysis::component_meta`.
 #[derive(Serialize, Clone)]
@@ -504,6 +519,12 @@ pub struct FfiComponentMeta {
     pub file_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<FfiComponentMetaResolution>,
+    #[serde(skip_serializing_if = "origin_graph_is_empty")]
+    pub origin: OriginGraphDto,
+}
+
+fn origin_graph_is_empty(g: &OriginGraphDto) -> bool {
+    g.edges.is_empty()
 }
 
 /// Macro-wide expansion diagnostics that apply to an entire macro, not to a

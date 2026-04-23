@@ -1466,6 +1466,7 @@ fn build_test_meta() -> FfiComponentMeta {
         options_api: false,
         file_path: "/src/Tree.vue".to_string(),
         resolution: None,
+        origin: OriginGraphDto::default(),
     }
 }
 

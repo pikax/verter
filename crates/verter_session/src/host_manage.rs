@@ -4897,8 +4897,8 @@ impl VerterHost {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let resolved =
-            self.resolve_component_meta(canonical_or_alias, crate::types::ResolverMode::Expanded)?;
+        let resolved = self
+            .resolve_component_meta(canonical_or_alias, crate::types::ProjectionMode::Expanded)?;
         resolved.evaluated_types
     }
 
@@ -4944,8 +4944,8 @@ impl VerterHost {
         // Cold build — install a request view for the duration of the
         // existing resolver path. Phase 4 replaces the view with fence
         // observation only.
-        let resolved =
-            self.resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)?;
+        let resolved = self
+            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
         let meta = extract_component_meta_from_resolved(
@@ -5092,8 +5092,8 @@ impl VerterHost {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        let resolved =
-            self.resolve_component_meta(canonical.as_str(), crate::types::ResolverMode::Expanded)?;
+        let resolved = self
+            .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
         let analysis = extract_component_meta_from_resolved(

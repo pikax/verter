@@ -1,7 +1,7 @@
 use super::*;
 use crate::meta::MetaProject;
 use crate::resolver_core::ComponentMetaRequestHost;
-use crate::types::{HostConfig, ResolverMode};
+use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;
 use std::sync::Arc;
 
@@ -55,7 +55,11 @@ fn slot_names_from_resolved(state: &ResolvedComponentMetaState) -> Vec<String> {
         .collect()
 }
 
-fn clear_legacy_cached_resolved_state(project: &MetaProject, canonical: &str, mode: ResolverMode) {
+fn clear_legacy_cached_resolved_state(
+    project: &MetaProject,
+    canonical: &str,
+    mode: ProjectionMode,
+) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(mut entry) = project.host().compile_cache.get_mut(canonical) {
@@ -379,7 +383,7 @@ defineProps<{ bar: number }>()
     let state = <VerterHost as ComponentMetaRequestHost>::compute_component_meta(
         project.host(),
         "/src/App.vue",
-        ResolverMode::Expanded,
+        ProjectionMode::Expanded,
         Some(&captured),
         Some(&view),
     )
@@ -613,33 +617,33 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("`ResolverMode::Type` should return a result for an existing file");
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity)
+        .expect("`ProjectionMode::Identity` should return a result for an existing file");
 
-    assert_eq!(state.mode, ResolverMode::Type);
+    assert_eq!(state.mode, ProjectionMode::Identity);
 
-    // `ResolverMode::Type`: resolved_macros should carry identity info but NOT expanded props
+    // `ProjectionMode::Identity`: resolved_macros should carry identity info but NOT expanded props
     assert!(
         !state.resolved_macros.is_empty(),
-        "`ResolverMode::Type` should still identify macro type deps"
+        "`ProjectionMode::Identity` should still identify macro type deps"
     );
     let prop_names = prop_names_from_resolved(&state);
     assert!(
         prop_names.is_empty(),
-        "`ResolverMode::Type` must NOT materialize expanded prop shapes, got: {:?}",
+        "`ProjectionMode::Identity` must NOT materialize expanded prop shapes, got: {:?}",
         prop_names
     );
 
-    // `ResolverMode::Type`: no evaluated types
+    // `ProjectionMode::Identity`: no evaluated types
     assert!(
         state.evaluated_types.is_none(),
-        "`ResolverMode::Type` must NOT compute evaluated types"
+        "`ProjectionMode::Identity` must NOT compute evaluated types"
     );
 
-    // `ResolverMode::Type`: no type registry
+    // `ProjectionMode::Identity`: no type registry
     assert!(
         state.resolved_type_registry.is_empty(),
-        "`ResolverMode::Type` must NOT populate type-registry entries"
+        "`ProjectionMode::Identity` must NOT populate type-registry entries"
     );
 }
 
@@ -665,21 +669,21 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return a result for an existing file");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return a result for an existing file");
 
-    assert_eq!(state.mode, ResolverMode::Expanded);
+    assert_eq!(state.mode, ProjectionMode::Expanded);
 
-    // `ResolverMode::Expanded`: materialized props
+    // `ProjectionMode::Expanded`: materialized props
     let prop_names = prop_names_from_resolved(&state);
     assert!(
         prop_names.contains(&"a".to_string()),
-        "`ResolverMode::Expanded` should materialize prop 'a', got: {:?}",
+        "`ProjectionMode::Expanded` should materialize prop 'a', got: {:?}",
         prop_names
     );
     assert!(
         prop_names.contains(&"b".to_string()),
-        "`ResolverMode::Expanded` should materialize prop 'b', got: {:?}",
+        "`ProjectionMode::Expanded` should materialize prop 'b', got: {:?}",
         prop_names
     );
 }
@@ -702,10 +706,10 @@ defineProps<{ x: string }>()
     // Both modes must be callable with the same file
     let _type_result = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type);
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity);
     let _expanded_result = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded);
 }
 
 #[test]
@@ -725,24 +729,24 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // Call `ResolverMode::Type` first, then Expanded
+    // Call `ProjectionMode::Identity` first, then Expanded
     let type_state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("`ResolverMode::Type` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity)
+        .expect("`ProjectionMode::Identity` should return result");
     let expanded_state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     // Type entry must NOT satisfy Expanded
     assert!(
         prop_names_from_resolved(&type_state).is_empty(),
-        "`ResolverMode::Type` result must have no expanded props"
+        "`ProjectionMode::Identity` result must have no expanded props"
     );
     assert!(
         !prop_names_from_resolved(&expanded_state).is_empty(),
-        "`ResolverMode::Expanded` result must have expanded props"
+        "`ProjectionMode::Expanded` result must have expanded props"
     );
 }
 
@@ -767,7 +771,7 @@ defineProps<Props>()
 
     let _first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolved-meta query should succeed");
     let p1 = provenance(&project);
     assert_eq!(
@@ -785,7 +789,7 @@ defineProps<Props>()
 
     let _second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolved-meta query should succeed");
     let p2 = provenance(&project);
     assert_eq!(
@@ -823,7 +827,7 @@ defineProps<Props>()
 
     let _first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolved-meta query should succeed");
     let p1 = provenance(&project);
     assert_eq!(
@@ -835,11 +839,11 @@ defineProps<Props>()
         "first query should miss the resolver-owned top-level cache once"
     );
 
-    clear_legacy_cached_resolved_state(&project, "/App.vue", ResolverMode::Expanded);
+    clear_legacy_cached_resolved_state(&project, "/App.vue", ProjectionMode::Expanded);
 
     let _second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolved-meta query should succeed");
     let p2 = provenance(&project);
 
@@ -880,47 +884,47 @@ defineProps<Props>()
 
     project.host().provenance().reset();
 
-    // `ResolverMode::Type` should NOT perform the expensive external type traversal
+    // `ProjectionMode::Identity` should NOT perform the expensive external type traversal
     let type_state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("`ResolverMode::Type` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity)
+        .expect("`ProjectionMode::Identity` should return result");
 
     let p1 = provenance(&project);
     assert_eq!(
         p1.resolved_external_type_cache_misses, 0,
-        "`ResolverMode::Type` should NOT call resolve_external_type_from_loaded_files"
+        "`ProjectionMode::Identity` should NOT call resolve_external_type_from_loaded_files"
     );
     assert_eq!(
         p1.resolved_external_type_cache_hits, 0,
-        "`ResolverMode::Type` should NOT touch the host traversal cache"
+        "`ProjectionMode::Identity` should NOT touch the host traversal cache"
     );
 
-    // `ResolverMode::Expanded` performs the traversal
+    // `ProjectionMode::Expanded` performs the traversal
     let expanded_state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let p2 = provenance(&project);
     assert!(
         prop_names_from_resolved(&type_state).is_empty(),
-        "`ResolverMode::Type` result must not include expanded props"
+        "`ProjectionMode::Identity` result must not include expanded props"
     );
     assert!(
         prop_names_from_resolved(&expanded_state).contains(&"a".to_string()),
-        "`ResolverMode::Expanded` should materialize imported props"
+        "`ProjectionMode::Expanded` should materialize imported props"
     );
     assert!(
         p2.resolver_node_cache_misses > p1.resolver_node_cache_misses,
-        "`ResolverMode::Expanded` should perform additional resolver-owned cache work"
+        "`ProjectionMode::Expanded` should perform additional resolver-owned cache work"
     );
 
     // Second Expanded call should hit the resolved-meta cache (no recompute)
     let recomputes_before = p2.component_meta_resolved_state_recomputes;
     let _third = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("repeat Expanded should succeed");
     let p3 = provenance(&project);
     assert_eq!(
@@ -955,8 +959,8 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let prop_names = prop_names_from_resolved(&state);
     assert!(
@@ -992,13 +996,13 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
     let provenance = provenance(&project);
 
     assert!(
         prop_names_from_resolved(&state).contains(&"a".to_string()),
-        "`ResolverMode::Expanded` should still materialize imported props"
+        "`ProjectionMode::Expanded` should still materialize imported props"
     );
     assert_eq!(
         provenance.resolved_external_type_cache_hits, 0,
@@ -1053,8 +1057,8 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let class_macro = state
         .resolved_macros
@@ -1160,8 +1164,8 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let interface_macro = state
         .resolved_macros
@@ -1216,8 +1220,8 @@ defineEmits<Events>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let emit_names = emit_names_from_resolved(&state);
     assert!(
@@ -1249,8 +1253,8 @@ defineSlots<Slots>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
-        .expect("`ResolverMode::Expanded` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
+        .expect("`ProjectionMode::Expanded` should return result");
 
     let slot_names = slot_names_from_resolved(&state);
     assert!(
@@ -1416,10 +1420,10 @@ defineProps<MissingType>()
         )
         .unwrap();
 
-    // `ResolverMode::Expanded` should still return a result (best-effort)
+    // `ProjectionMode::Expanded` should still return a result (best-effort)
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded);
     assert!(
         state.is_some(),
         "missing imported symbol should NOT cause total failure"
@@ -1461,7 +1465,7 @@ defineProps<Props>()
     // Should not fail even with malformed JSDoc
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded);
     assert!(
         state.is_some(),
         "malformed JSDoc should NOT prevent resolution"
@@ -1494,7 +1498,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("barrel resolution should work through shared resolver");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -1530,7 +1534,7 @@ defineProps<Bar>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("alias barrel resolution should work through shared resolver");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -1569,7 +1573,7 @@ defineProps<Bar>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("plain alias barrel resolution should work through shared resolver");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -1613,7 +1617,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("default import alias barrel resolution should work through shared resolver");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -1674,7 +1678,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     // Find the resolved macro for Props
@@ -1765,11 +1769,11 @@ defineProps<Props>()
 
     let first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolve should succeed");
     let second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolve should succeed");
 
     let first_decl = &first.resolved_macros[0].declaration;
@@ -1813,7 +1817,7 @@ defineProps<Props>()
 
     let first = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("first resolve should succeed");
     let after_first = project.host().resolver_runtime().counter_snapshot();
 
@@ -1830,7 +1834,7 @@ defineProps<Props>()
 
     let second = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("second resolve should succeed after owner-only change");
     let after_second = project.host().resolver_runtime().counter_snapshot();
 
@@ -1908,7 +1912,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     let props_macro = state
@@ -2166,7 +2170,7 @@ defineProps<{ label: string; count?: number }>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result for local inline props");
 
     // Raw snapshot should have the macro
@@ -2191,7 +2195,7 @@ defineEmits<{ change: [value: string] }>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result for local inline emits");
 
     assert!(
@@ -2254,7 +2258,7 @@ defineSlots<{ default: (props: { row: string }) => any }>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result for local inline slots");
 
     assert!(
@@ -2458,7 +2462,7 @@ defineProps<Props>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should resolve expanded component meta");
     let evaluated = resolved
         .evaluated_types
@@ -2570,7 +2574,7 @@ defineProps<Props>()
         .expect("should return component meta");
     let _resolved = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should resolve expanded component meta");
 
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
@@ -3286,7 +3290,7 @@ defineProps<DashboardSidebarCollapseProps>()
         .expect("should return component meta");
     let _resolved = project
         .host()
-        .resolve_component_meta("/workspace/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/workspace/App.vue", ProjectionMode::Expanded)
         .expect("should resolve expanded component meta");
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
     assert!(
@@ -3512,7 +3516,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let resolved = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should resolve expanded component meta");
     let evaluated = resolved
         .evaluated_types
@@ -3835,7 +3839,7 @@ const emitB = defineEmits<Events>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("duplicate imported macros should still resolve");
 
     let emit_macros: Vec<_> = state
@@ -3904,7 +3908,7 @@ defineProps<LibProps>()
 
     let state = project
         .host()
-        .resolve_component_meta("/project/App.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/project/App.vue", ProjectionMode::Expanded);
 
     // Should at least return a result (package resolution may or may not work
     // depending on workspace configuration, but it should not crash)
@@ -3965,7 +3969,7 @@ defineProps<LibProps>()
 
     let state = project
         .host()
-        .resolve_component_meta("/project/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/project/App.vue", ProjectionMode::Expanded)
         .expect("package declaration entrypoint should resolve");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -4027,7 +4031,7 @@ defineProps<LibProps>()
 
     let state = project
         .host()
-        .resolve_component_meta("/project/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/project/App.vue", ProjectionMode::Expanded)
         .expect("package declaration alias reexport should resolve");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -4071,7 +4075,7 @@ defineProps<Props>()
         .unwrap()
         .expect("get_component_meta should work regardless of deep_expansion flag");
 
-    // After the refactor, get_component_meta should always use `ResolverMode::Expanded`
+    // After the refactor, get_component_meta should always use `ProjectionMode::Expanded`
     // through resolve_component_meta, so imported props should appear
     let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
     assert!(
@@ -4100,7 +4104,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("expanded component-meta state should resolve");
 
     let registry_entry = state
@@ -4151,7 +4155,7 @@ defineProps<Props>()
     // Populate base resolved-meta cache
     let _base_state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded);
 
     // Session with overlay that changes the dependency
     let session = project.open_session().unwrap();
@@ -4180,7 +4184,7 @@ defineProps<Props>()
 }
 
 // ===========================================================================
-// Edge case: `ResolverMode::Type` cache invalidation on dependency change
+// Edge case: `ProjectionMode::Identity` cache invalidation on dependency change
 // ===========================================================================
 
 #[test]
@@ -4200,11 +4204,11 @@ defineProps<Props>()
         )
         .unwrap();
 
-    // First `ResolverMode::Type` call — populates cache
+    // First `ProjectionMode::Identity` call — populates cache
     let state1 = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("first `ResolverMode::Type` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity)
+        .expect("first `ProjectionMode::Identity` should return result");
     assert_eq!(
         state1.resolved_macros[0].declaration.canonical_source, "/types.ts",
         "should resolve to /types.ts"
@@ -4220,18 +4224,18 @@ export interface Props { a: string; b: number }"#,
         )
         .unwrap();
 
-    // Second `ResolverMode::Type` call — cache should be invalidated by dep change
+    // Second `ProjectionMode::Identity` call — cache should be invalidated by dep change
     project.host().provenance().reset();
     let state2 = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Type)
-        .expect("second `ResolverMode::Type` should return result");
+        .resolve_component_meta("/App.vue", ProjectionMode::Identity)
+        .expect("second `ProjectionMode::Identity` should return result");
 
     let p = provenance(&project);
     // Assert+: resolved state was recomputed (not served from stale cache)
     assert_eq!(
         p.component_meta_resolved_state_recomputes, 1,
-        "`ResolverMode::Type` cache should invalidate when dependency changes, got recomputes={}",
+        "`ProjectionMode::Identity` cache should invalidate when dependency changes, got recomputes={}",
         p.component_meta_resolved_state_recomputes
     );
     // Assert-: the declaration source should still be correct
@@ -4270,7 +4274,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     let decl = &state.resolved_macros[0].declaration;
@@ -4317,7 +4321,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     let decl = &state.resolved_macros[0].declaration;
@@ -4359,7 +4363,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     // Assert+: props should be resolved correctly from the type alias
@@ -4412,7 +4416,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     let jsdoc = state.resolved_macros[0].jsdoc.as_ref();
@@ -4444,7 +4448,7 @@ fn resolve_component_meta_returns_none_for_missing_file() {
 
     let result = project
         .host()
-        .resolve_component_meta("/missing.vue", ResolverMode::Expanded);
+        .resolve_component_meta("/missing.vue", ProjectionMode::Expanded);
     assert!(
         result.is_none(),
         "resolve_component_meta should return None for a missing file"
@@ -4452,7 +4456,7 @@ fn resolve_component_meta_returns_none_for_missing_file() {
 
     let result_type = project
         .host()
-        .resolve_component_meta("/missing.vue", ResolverMode::Type);
+        .resolve_component_meta("/missing.vue", ProjectionMode::Identity);
     assert!(
         result_type.is_none(),
         "resolve_component_meta(Type) should also return None for a missing file"
@@ -4484,7 +4488,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", ProjectionMode::Expanded)
         .expect("resolve_component_meta should return a state");
 
     assert!(
@@ -4525,7 +4529,7 @@ defineProps<SharedProps>()
 
     let state = project
         .host()
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", ProjectionMode::Expanded)
         .expect("resolve_component_meta should return a state");
     let audit = state
         .compute_audit
@@ -4567,7 +4571,7 @@ defineProps<Props>()
 
     let state = project
         .host()
-        .resolve_component_meta("/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/App.vue", ProjectionMode::Expanded)
         .expect("should return result");
 
     let prop_names = prop_names_from_resolved(&state);
@@ -5774,7 +5778,7 @@ defineSlots<Slots<T>>()
         .expect("whole hash should exist for the owner");
 
     let full = host
-        .compute_component_meta_state("/src/App.vue", super::ResolverMode::Expanded, whole_hash)
+        .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
         .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
@@ -5849,7 +5853,7 @@ defineExpose({ exposed })
         .expect("whole hash should exist for the owner");
 
     let full = host
-        .compute_component_meta_state("/src/App.vue", super::ResolverMode::Expanded, whole_hash)
+        .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
         .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
@@ -5978,7 +5982,7 @@ defineEmits<Emits>()
         .expect("whole hash should exist for the owner");
 
     let full = host
-        .compute_component_meta_state("/src/App.vue", super::ResolverMode::Expanded, whole_hash)
+        .compute_component_meta_state("/src/App.vue", super::ProjectionMode::Expanded, whole_hash)
         .expect("full expanded state should resolve");
     let fallthrough = host
         .compute_component_meta_state_for_fallthrough("/src/App.vue", whole_hash)
@@ -8724,7 +8728,7 @@ defineProps<Props>()
 
     let host = project.host();
     let state = host
-        .resolve_component_meta("/src/App.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/App.vue", ProjectionMode::Expanded)
         .expect("component meta should resolve");
 
     let imported_entry = state
@@ -8778,7 +8782,7 @@ defineProps<TreeNode>()
 
     let host = project.host();
     let state = host
-        .resolve_component_meta("/src/Tree.vue", ResolverMode::Expanded)
+        .resolve_component_meta("/src/Tree.vue", ProjectionMode::Expanded)
         .expect("should resolve component meta");
 
     // Find TreeNode in the type registry

@@ -3824,6 +3824,7 @@ dependencies = [
  "tracing",
  "verter_compiler",
  "verter_parser",
+ "verter_protocol",
  "verter_scheduler",
  "verter_semantic",
  "verter_span",
