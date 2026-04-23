@@ -38,6 +38,7 @@
 //! 2. Snapshot (cached content)
 //! 3. Disk via `NativeFs`
 
+pub mod audit_sink;
 pub mod canonical_path;
 pub mod changes;
 #[cfg(not(target_arch = "wasm32"))]

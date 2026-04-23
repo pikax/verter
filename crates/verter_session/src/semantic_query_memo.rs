@@ -1394,20 +1394,30 @@ impl SemanticGraphStore {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: DepSignature,
     ) {
-        let mut store = self.derivation.lock();
-        let edge_dep_signature = store.intern_signature(builder_fence);
-        store.record(
-            result,
-            kind,
-            OriginEdge {
+        // Build the edge under the derivation lock, then release the
+        // lock before pushing into the accumulator — the accumulator
+        // acquires its own mutex and we must not hold the graph lock
+        // across that boundary (plan §4 Commit 4).
+        let edge = {
+            let mut store = self.derivation.lock();
+            let edge_dep_signature = store.intern_signature(builder_fence);
+            let edge = OriginEdge {
                 sources,
                 meta,
                 edge_dep_signature,
-            },
-        );
+            };
+            store.record(result, kind, edge.clone());
+            edge
+        };
         self.stats
             .origin_edges_emitted
             .fetch_add(1, Ordering::Relaxed);
+        // Plan §4 Commit 4: feed the accumulator of the active audited
+        // request so the footprint miner sees every derivation hop.
+        // No-op when no request context is installed.
+        if let Some(acc) = crate::request_context::current_accumulator() {
+            acc.push_derivation_edge(result, kind, edge);
+        }
     }
 
     /// Read-only origin walk for a result node — yields every edge

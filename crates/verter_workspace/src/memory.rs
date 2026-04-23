@@ -1,7 +1,9 @@
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::audit_sink::{SinkHandle, VfsAuditLayer, VfsAuditSink, VfsReadEvent};
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::engine::Engine;
 use crate::path_matches_prefix;
@@ -123,15 +125,52 @@ pub struct MemoryOptions {
 
 /// Memory-only workspace. All files must be injected — no disk fallback.
 /// Used by playground, WASM, and tests.
-#[derive(Debug)]
 pub struct MemoryWorkspace {
     pub(crate) engine: Engine,
+    /// Registered VFS audit sinks. Plan §2.4.
+    pub(crate) sinks: parking_lot::RwLock<Vec<(SinkHandle, Arc<dyn VfsAuditSink>)>>,
+    pub(crate) next_sink_id: AtomicU64,
+}
+
+impl std::fmt::Debug for MemoryWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryWorkspace")
+            .field("engine", &self.engine)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryWorkspace {
     pub fn new(_options: MemoryOptions) -> Self {
         Self {
             engine: Engine::new(),
+            sinks: parking_lot::RwLock::new(Vec::new()),
+            next_sink_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Fan out a `VfsReadEvent` to every registered sink.
+    fn emit_vfs_read(
+        &self,
+        canonical_id: &str,
+        layer: VfsAuditLayer,
+        cache_hit: bool,
+        bytes_read: u64,
+    ) {
+        let registered = self.sinks.read();
+        if registered.is_empty() {
+            return;
+        }
+        let event = VfsReadEvent {
+            canonical_id: Arc::from(canonical_id),
+            layer,
+            cache_hit,
+            bytes_read,
+            request_id: verter_scheduler::request_context::current_request_id(),
+            thread_id: std::thread::current().id(),
+        };
+        for (_, sink) in registered.iter() {
+            sink.on_vfs_read(&event);
         }
     }
 
@@ -188,14 +227,30 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         // 1. Check overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
             set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
+            self.emit_vfs_read(
+                canonical_id,
+                VfsAuditLayer::Overlay,
+                true,
+                content.len() as u64,
+            );
             return Some(content);
         }
         // 2. Check snapshot (no disk fallback in memory mode)
         let content = self.engine.snapshot.read().read(canonical_id);
-        if content.is_some() {
-            set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
-        } else {
-            set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
+        match content.as_ref() {
+            Some(content) => {
+                set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
+                self.emit_vfs_read(
+                    canonical_id,
+                    VfsAuditLayer::Snapshot,
+                    true,
+                    content.len() as u64,
+                );
+            }
+            None => {
+                set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
+                self.emit_vfs_read(canonical_id, VfsAuditLayer::Missing, false, 0);
+            }
         }
         content
     }
@@ -492,6 +547,29 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         let guard = self.engine.snapshot.read();
         let ids: Vec<&str> = guard.ids().collect();
         ids.iter().any(|id| id.starts_with(&prefix))
+    }
+
+    fn register_audit_sink(
+        &self,
+        sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
+    ) -> Result<SinkHandle, crate::audit_sink::AuditSinkError> {
+        let handle = SinkHandle(self.next_sink_id.fetch_add(1, Ordering::Relaxed));
+        self.sinks.write().push((handle, sink));
+        Ok(handle)
+    }
+
+    fn deregister_audit_sink(
+        &self,
+        handle: SinkHandle,
+    ) -> Result<(), crate::audit_sink::AuditSinkError> {
+        let mut sinks = self.sinks.write();
+        let len_before = sinks.len();
+        sinks.retain(|(h, _)| *h != handle);
+        if sinks.len() < len_before {
+            Ok(())
+        } else {
+            Err(crate::audit_sink::AuditSinkError::HandleNotFound)
+        }
     }
 }
 

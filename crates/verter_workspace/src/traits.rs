@@ -268,6 +268,28 @@ pub trait WorkspaceAccess: Send + Sync {
     fn is_dir(&self, _path: &str) -> bool {
         false
     }
+
+    // ── Audit sink registry (plan §2.4 / Commit 4) ──
+
+    /// Register a VFS audit sink. The returned handle is deregister-able
+    /// via [`deregister_audit_sink`]. Default: `NotSupported`.
+    /// Concrete workspaces override to maintain a per-sink registry.
+    fn register_audit_sink(
+        &self,
+        _sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
+    ) -> Result<crate::audit_sink::SinkHandle, crate::audit_sink::AuditSinkError> {
+        Err(crate::audit_sink::AuditSinkError::NotSupported)
+    }
+
+    /// Deregister a previously-registered VFS audit sink. Default:
+    /// `NotSupported`. Concrete workspaces override to complete the
+    /// RAII-style registration lifecycle.
+    fn deregister_audit_sink(
+        &self,
+        _handle: crate::audit_sink::SinkHandle,
+    ) -> Result<(), crate::audit_sink::AuditSinkError> {
+        Err(crate::audit_sink::AuditSinkError::NotSupported)
+    }
 }
 
 // ── Scheduler-oriented traits ──

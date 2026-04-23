@@ -1,47 +1,19 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
+use crate::audit_sink::{SinkHandle, VfsAuditLayer, VfsAuditSink, VfsReadEvent};
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::engine::Engine;
 use crate::project_graph::{ProjectGraph, VfsProjectConfig};
 use crate::types::{ExactResolution, ExactResolutionResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComponentMetaTraceEvent {
-    Start,
-    End,
-    Point,
-}
-
-impl ComponentMetaTraceEvent {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::End => "end",
-            Self::Point => "point",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ComponentMetaTraceContext {
-    trace_id: u64,
-    span_id: u64,
-}
-
-struct ComponentMetaTraceLine<'a> {
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &'a str,
-    detail: &'a str,
-}
-
+// Kept from the legacy trace system — callers (filesystem_tests,
+// scheduler_shim, frontier_tests) still consume the per-read detail
+// string directly. The broader `component_meta_trace_*` span tree was
+// deleted in Commit 4 (plan §0.1 clean-cut rule); the replacement is
+// the `VfsAuditSink` registry below.
 thread_local! {
-    static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
     static LAST_READ_FILE_TRACE_DETAIL: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
@@ -63,224 +35,8 @@ fn take_last_read_file_trace_detail(canonical_id: &str) -> Option<String> {
     })
 }
 
-fn component_meta_trace_output_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn component_meta_trace_next_span_id() -> u64 {
-    static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1 << 48);
-    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn component_meta_trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
-            || std::env::var_os("VERTER_META_TRACE").is_some()
-    })
-}
-
-fn component_meta_trace_output_path() -> Option<&'static std::path::PathBuf> {
-    static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-
-    PATH.get_or_init(|| {
-        std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH")
-            .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
-            .map(std::path::PathBuf::from)
-    })
-    .as_ref()
-}
-
-fn format_component_meta_trace_line(
-    event: ComponentMetaTraceEvent,
-    line: ComponentMetaTraceLine<'_>,
-    duration: Option<Duration>,
-) -> String {
-    let parent = line
-        .parent_span_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let mut line = format!(
-        "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
-        event.as_str(),
-        line.trace_id,
-        line.span_id,
-        parent,
-        line.trace_id,
-        line.span_id,
-        parent,
-        line.depth,
-        std::thread::current().id(),
-        line.name,
-        line.detail,
-    );
-    if let Some(duration) = duration {
-        line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
-    }
-    line
-}
-
-fn component_meta_trace_write_line(line: &str) {
-    use std::io::Write;
-
-    let _lock = component_meta_trace_output_lock().lock();
-    if let Some(path) = component_meta_trace_output_path() {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-            return;
-        }
-    }
-
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{line}");
-    let _ = stderr.flush();
-}
-
-struct ComponentMetaTraceGuardState {
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &'static str,
-    detail: String,
-    started: Instant,
-}
-
-struct ComponentMetaTraceGuard {
-    state: Option<ComponentMetaTraceGuardState>,
-}
-
-impl ComponentMetaTraceGuard {
-    fn noop() -> Self {
-        Self { state: None }
-    }
-}
-
-impl Drop for ComponentMetaTraceGuard {
-    fn drop(&mut self) {
-        let Some(state) = self.state.take() else {
-            return;
-        };
-
-        COMPONENT_META_TRACE_STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            let popped = stack.pop();
-            debug_assert_eq!(popped.map(|ctx| ctx.span_id), Some(state.span_id));
-        });
-
-        component_meta_trace_write_line(&format_component_meta_trace_line(
-            ComponentMetaTraceEvent::End,
-            ComponentMetaTraceLine {
-                trace_id: state.trace_id,
-                span_id: state.span_id,
-                parent_span_id: state.parent_span_id,
-                depth: state.depth,
-                name: state.name,
-                detail: &state.detail,
-            },
-            Some(state.started.elapsed()),
-        ));
-    }
-}
-
-fn component_meta_trace_scope(
-    name: &'static str,
-    detail: impl Into<String>,
-) -> ComponentMetaTraceGuard {
-    if !component_meta_trace_enabled() {
-        return ComponentMetaTraceGuard { state: None };
-    }
-
-    let detail = detail.into();
-    let span_id = component_meta_trace_next_span_id();
-    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let parent = stack.last().copied();
-        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
-        let depth = stack.len();
-        stack.push(ComponentMetaTraceContext { trace_id, span_id });
-        (trace_id, parent.map(|ctx| ctx.span_id), depth)
-    });
-
-    component_meta_trace_write_line(&format_component_meta_trace_line(
-        ComponentMetaTraceEvent::Start,
-        ComponentMetaTraceLine {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail: &detail,
-        },
-        None,
-    ));
-
-    ComponentMetaTraceGuard {
-        state: Some(ComponentMetaTraceGuardState {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail,
-            started: Instant::now(),
-        }),
-    }
-}
-
-fn component_meta_trace_event(name: &'static str, detail: impl Into<String>) {
-    if !component_meta_trace_enabled() {
-        return;
-    }
-
-    let detail = detail.into();
-    let span_id = component_meta_trace_next_span_id();
-    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
-        let stack = stack.borrow();
-        let parent = stack.last().copied();
-        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
-        (trace_id, parent.map(|ctx| ctx.span_id), stack.len())
-    });
-
-    component_meta_trace_write_line(&format_component_meta_trace_line(
-        ComponentMetaTraceEvent::Point,
-        ComponentMetaTraceLine {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail: &detail,
-        },
-        None,
-    ));
-}
-
-macro_rules! component_meta_trace_scope {
-    ($name:expr, $detail:expr $(,)?) => {{
-        if component_meta_trace_enabled() {
-            crate::filesystem::component_meta_trace_scope($name, $detail)
-        } else {
-            ComponentMetaTraceGuard::noop()
-        }
-    }};
-}
-
-macro_rules! component_meta_trace_event {
-    ($name:expr, $detail:expr $(,)?) => {{
-        if component_meta_trace_enabled() {
-            crate::filesystem::component_meta_trace_event($name, $detail);
-        }
-    }};
-}
-
+#[cfg(test)]
+#[allow(dead_code)]
 fn vfs_read_file_missing_result_detail(canonical_id: &str, indexed_negative: bool) -> String {
     if indexed_negative {
         format!(
@@ -289,6 +45,34 @@ fn vfs_read_file_missing_result_detail(canonical_id: &str, indexed_negative: boo
         )
     } else {
         format!("path={} layer=missing cache=miss bytes=0", canonical_id)
+    }
+}
+
+/// Fan out a `VfsReadEvent` to every registered sink. Reads the
+/// active `request_id` from the scheduler's TLS so a session-side
+/// sink can filter events by request without the workspace having to
+/// know about sessions.
+fn emit_vfs_read_event(
+    sinks: &parking_lot::RwLock<Vec<(SinkHandle, Arc<dyn VfsAuditSink>)>>,
+    canonical_id: &str,
+    layer: VfsAuditLayer,
+    cache_hit: bool,
+    bytes_read: u64,
+) {
+    let registered = sinks.read();
+    if registered.is_empty() {
+        return;
+    }
+    let event = VfsReadEvent {
+        canonical_id: Arc::from(canonical_id),
+        layer,
+        cache_hit,
+        bytes_read,
+        request_id: verter_scheduler::request_context::current_request_id(),
+        thread_id: std::thread::current().id(),
+    };
+    for (_, sink) in registered.iter() {
+        sink.on_vfs_read(&event);
     }
 }
 
@@ -307,12 +91,25 @@ pub struct FilesystemOptions {
 /// 1. Override (overlay) â€” active editor content
 /// 2. Snapshot (cache) â€” previously read content
 /// 3. Disk â€” fallback for cache misses (Filesystem mode only)
-#[derive(Debug)]
 pub struct FilesystemWorkspace {
     pub(crate) options: FilesystemOptions,
     pub(crate) engine: Engine,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) native_fs: crate::native_fs::NativeFs,
+    /// Registered VFS audit sinks. Sessions register one sink per
+    /// audited request and receive fan-out for every VFS read.
+    pub(crate) sinks: parking_lot::RwLock<Vec<(SinkHandle, Arc<dyn VfsAuditSink>)>>,
+    /// Monotonic id generator for sink handles.
+    pub(crate) next_sink_id: AtomicU64,
+}
+
+impl std::fmt::Debug for FilesystemWorkspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesystemWorkspace")
+            .field("options", &self.options)
+            .field("engine", &self.engine)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FilesystemWorkspace {
@@ -322,6 +119,8 @@ impl FilesystemWorkspace {
             engine: Engine::new(),
             #[cfg(not(target_arch = "wasm32"))]
             native_fs: crate::native_fs::NativeFs::new(),
+            sinks: parking_lot::RwLock::new(Vec::new()),
+            next_sink_id: AtomicU64::new(1),
         }
     }
 
@@ -456,48 +255,42 @@ impl FilesystemWorkspace {
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
-        let _trace = component_meta_trace_scope!("vfs_read_file", format!("path={canonical_id}"));
         // 1. Overlay
         if let Some(content) = self.engine.overlay.read().get(canonical_id) {
             set_last_read_file_trace_detail(canonical_id, "layer=overlay cache=hit");
-            component_meta_trace_event!(
-                "vfs_read_file_result",
-                format!(
-                    "path={} layer=overlay cache=hit bytes={}",
-                    canonical_id,
-                    content.len(),
-                ),
+            emit_vfs_read_event(
+                &self.sinks,
+                canonical_id,
+                VfsAuditLayer::Overlay,
+                true,
+                content.len() as u64,
             );
             return Some(content);
         }
         // 2. Snapshot cache
         if let Some(content) = self.engine.snapshot.read().read(canonical_id) {
             set_last_read_file_trace_detail(canonical_id, "layer=snapshot cache=hit");
-            component_meta_trace_event!(
-                "vfs_read_file_result",
-                format!(
-                    "path={} layer=snapshot cache=hit bytes={}",
-                    canonical_id,
-                    content.len(),
-                ),
+            emit_vfs_read_event(
+                &self.sinks,
+                canonical_id,
+                VfsAuditLayer::Snapshot,
+                true,
+                content.len() as u64,
             );
             return Some(content);
         }
-        // 3. Disk fallback â€” read and cache in snapshot
+        // 3. Disk fallback — read and cache in snapshot
         #[cfg(not(target_arch = "wasm32"))]
         {
             let indexed_exists = self.ensure_parent_dir_indexed(canonical_id);
-            let _disk_trace =
-                component_meta_trace_scope!("vfs_read_file_disk", format!("path={canonical_id}"));
             if matches!(indexed_exists, Some(false)) {
                 set_last_read_file_trace_detail(canonical_id, "layer=dir_index cache=negative");
-                component_meta_trace_event!(
-                    "vfs_read_file_disk_result",
-                    format!("path={} found=false bytes=0", canonical_id),
-                );
-                component_meta_trace_event!(
-                    "vfs_read_file_result",
-                    vfs_read_file_missing_result_detail(canonical_id, true),
+                emit_vfs_read_event(
+                    &self.sinks,
+                    canonical_id,
+                    VfsAuditLayer::DirIndexNegative,
+                    false,
+                    0,
                 );
                 return None;
             }
@@ -507,34 +300,22 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
                     .write()
                     .inject(canonical_id.to_string(), content.clone());
                 set_last_read_file_trace_detail(canonical_id, "layer=disk cache=miss");
-                component_meta_trace_event!(
-                    "vfs_read_file_disk_result",
-                    format!("path={} found=true bytes={}", canonical_id, content.len(),),
-                );
-                component_meta_trace_event!(
-                    "vfs_read_file_result",
-                    format!(
-                        "path={} layer=disk cache=miss bytes={}",
-                        canonical_id,
-                        content.len(),
-                    ),
+                emit_vfs_read_event(
+                    &self.sinks,
+                    canonical_id,
+                    VfsAuditLayer::Disk,
+                    false,
+                    content.len() as u64,
                 );
                 return Some(content);
             }
-            component_meta_trace_event!(
-                "vfs_read_file_disk_result",
-                format!("path={} found=false bytes=0", canonical_id),
-            );
             self.engine
                 .vfs_provenance
                 .native_fs_read_file_miss_count
                 .fetch_add(1, Ordering::Relaxed);
         }
         set_last_read_file_trace_detail(canonical_id, "layer=missing cache=miss");
-        component_meta_trace_event!(
-            "vfs_read_file_result",
-            vfs_read_file_missing_result_detail(canonical_id, false),
-        );
+        emit_vfs_read_event(&self.sinks, canonical_id, VfsAuditLayer::Missing, false, 0);
         None
     }
 
@@ -789,6 +570,29 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn is_dir(&self, path: &str) -> bool {
         self.native_fs.is_dir(path)
+    }
+
+    fn register_audit_sink(
+        &self,
+        sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
+    ) -> Result<SinkHandle, crate::audit_sink::AuditSinkError> {
+        let handle = SinkHandle(self.next_sink_id.fetch_add(1, Ordering::Relaxed));
+        self.sinks.write().push((handle, sink));
+        Ok(handle)
+    }
+
+    fn deregister_audit_sink(
+        &self,
+        handle: SinkHandle,
+    ) -> Result<(), crate::audit_sink::AuditSinkError> {
+        let mut sinks = self.sinks.write();
+        let len_before = sinks.len();
+        sinks.retain(|(h, _)| *h != handle);
+        if sinks.len() < len_before {
+            Ok(())
+        } else {
+            Err(crate::audit_sink::AuditSinkError::HandleNotFound)
+        }
     }
 }
 
