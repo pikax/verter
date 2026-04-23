@@ -52,6 +52,13 @@ sourcemap = "9"
 thiserror = "2"
 arc-swap = "1"
 parking_lot = "0.12"
+indexmap = "2"
+similar = "2"
+# ts-rs is a REGULAR dependency (not dev) so derives compile into production
+# builds — the audit record types export their TS equivalents via a normal
+# #[test], not a feature gate. Binary-size overhead (~50KB on WASM worst
+# case) is documented in plan §1.4.
+ts-rs = "10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

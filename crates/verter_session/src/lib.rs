@@ -74,6 +74,7 @@ mod parse;
 mod project_global_cache_tests;
 pub mod project_semantic_dispatch;
 pub mod project_type_store;
+pub mod request_context;
 pub mod resolver_core;
 mod resolver_store;
 pub mod scheduler_shim;
@@ -285,6 +286,14 @@ pub struct VerterHost {
     /// overhaul). Owns `IndexedReady`, `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.
     pub(crate) project_type_store: Arc<crate::project_type_store::ProjectTypeStore>,
+    /// Monotonic request-id generator for component-meta requests.
+    /// Zero is reserved for "not populated" (plan §1.4); the counter
+    /// starts at 0 and `next_request_id()` returns pre-increment + 1.
+    pub(crate) request_id_counter: std::sync::atomic::AtomicU64,
+    /// Bounded insert-ordered store of finished audit records. Per-request
+    /// inserts happen in `emit_audit_trace`; consumers retrieve via
+    /// `take_audit_record(request_id)`. Plan §2.5.
+    pub(crate) audit_records: Arc<crate::component_meta_audit::AuditRecordsStore>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
@@ -374,6 +383,8 @@ impl VerterHost {
             external_type_analysis_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             route_owned_shallow_cache: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             project_type_store,
+            request_id_counter: std::sync::atomic::AtomicU64::new(0),
+            audit_records: Arc::new(crate::component_meta_audit::AuditRecordsStore::default()),
         }
     }
 

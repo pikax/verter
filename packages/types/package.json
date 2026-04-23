@@ -6,7 +6,8 @@
     "url": "https://github.com/pikax/verter"
   },
   "files": [
-    "dist"
+    "dist",
+    "audit.generated.ts"
   ],
   "type": "module",
   "sideEffects": false,
@@ -26,6 +27,11 @@
       "types": "./dist/tsx-string-export.d.ts",
       "import": "./dist/tsx-string-export.js",
       "default": "./dist/tsx-string-export.js"
+    },
+    "./audit.generated": {
+      "types": "./audit.generated.ts",
+      "import": "./audit.generated.ts",
+      "default": "./audit.generated.ts"
     }
   },
   "scripts": {

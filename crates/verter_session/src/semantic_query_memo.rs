@@ -1669,12 +1669,23 @@ impl SemanticGraphStore {
             // 1. Warm memo hit.
             if let Some(hit) = self.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                // Per-context counter — the active request (if any)
+                // observes this hit as its own. Plan §1.4.
+                if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                    ctx.0
+                        .record_cache_event(verter_scheduler::request_context::CacheEventKind::Hit);
+                }
                 return hit;
             }
             if !miss_recorded {
                 // Count one miss per logical call, regardless of how many
                 // retries step 3 performs.
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                    ctx.0.record_cache_event(
+                        verter_scheduler::request_context::CacheEventKind::Miss,
+                    );
+                }
                 miss_recorded = true;
             }
 
@@ -1685,6 +1696,11 @@ impl SemanticGraphStore {
                 self.stats
                     .same_path_sentinel_returns
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                    ctx.0.record_cache_event(
+                        verter_scheduler::request_context::CacheEventKind::Sentinel,
+                    );
+                }
                 return CacheRead {
                     value: QueryResult::Recursive(recursion_sentinel()),
                     dep_signature: empty_signature(),
@@ -1719,6 +1735,11 @@ impl SemanticGraphStore {
                 // Commit 1 `joined_waits`). Retries after abort re-enter
                 // dispatch and may bump this again on the next join.
                 self.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                    ctx.0.record_cache_event(
+                        verter_scheduler::request_context::CacheEventKind::JoinedWait,
+                    );
+                }
                 if state.aborted && retries < MAX_INFLIGHT_RETRIES {
                     // The (family, slot) this entry was serving was swept
                     // by a concurrent canonical invalidation. Retry the
@@ -1730,6 +1751,11 @@ impl SemanticGraphStore {
                     self.stats
                         .inflight_aborted_retries
                         .fetch_add(1, Ordering::Relaxed);
+                    if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                        ctx.0.record_cache_event(
+                            verter_scheduler::request_context::CacheEventKind::InflightAbortedRetry,
+                        );
+                    }
                     drop(state);
                     drop(inflight);
                     continue;
@@ -1843,6 +1869,11 @@ impl SemanticGraphStore {
                     // Canonical invalidation swept this slot during the
                     // cold build; skip warm publish and record the sweep.
                     self.stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+                    if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                        ctx.0.record_cache_event(
+                            verter_scheduler::request_context::CacheEventKind::ColdAbortSwept,
+                        );
+                    }
                 } else {
                     entries.entry(family).or_default().publish(slot, entry);
                 }

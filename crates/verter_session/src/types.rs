@@ -136,6 +136,23 @@ pub struct HostConfig {
     /// When true, timing/memory/store snapshots are captured and emitted as
     /// structured `RustAuditRecord` data. Default: false (zero overhead).
     pub audit_enabled: bool,
+    /// Enable semantic-footprint capture. Requires `audit_enabled = true`.
+    /// When true, each audited request attaches a
+    /// `RustSemanticFootprintAudit` to its record, populated from a
+    /// per-request accumulator. Default: false.
+    pub footprint_capture: bool,
+    /// Upper bound on derivation-subgraph edges captured per request.
+    /// The miner truncates at this count and sets
+    /// `graph_completeness.has_orphan_edges = true`. Default: 10_000.
+    pub max_derivation_edges: usize,
+}
+
+/// Configuration validation errors surfaced by
+/// [`HostConfig::validate`].
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum HostConfigError {
+    #[error("footprint_capture requires audit_enabled; enable both or neither (plan §1.4)")]
+    FootprintCaptureWithoutAudit,
 }
 
 impl HostConfig {
@@ -177,6 +194,8 @@ impl Default for HostConfig {
             analysis_scope: None,
             generic_root_propagation: false,
             audit_enabled: false,
+            footprint_capture: false,
+            max_derivation_edges: 10_000,
         }
     }
 }
@@ -187,6 +206,17 @@ impl HostConfig {
     pub fn effective_scope(&self) -> verter_semantic::analysis::AnalysisScope {
         self.analysis_scope
             .unwrap_or_else(|| self.analysis_level.to_scope())
+    }
+
+    /// Validate cross-field invariants. Currently:
+    ///
+    /// - `footprint_capture` requires `audit_enabled` (the accumulator
+    ///   is attached to the audit builder and is inert without it).
+    pub fn validate(&self) -> Result<(), HostConfigError> {
+        if self.footprint_capture && !self.audit_enabled {
+            return Err(HostConfigError::FootprintCaptureWithoutAudit);
+        }
+        Ok(())
     }
 }
 

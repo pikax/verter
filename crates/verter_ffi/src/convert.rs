@@ -2095,6 +2095,7 @@ mod tests {
             fact_versions: Vec::new(),
             compute_audit: None,
             origin_graph: None,
+            request_id: 0,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -2210,6 +2211,7 @@ mod tests {
             fact_versions: Vec::new(),
             compute_audit: None,
             origin_graph: None,
+            request_id: 0,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -3551,6 +3553,7 @@ mod tests {
                 }],
                 meta_strings: Vec::new(),
             }),
+            request_id: 0,
         };
 
         let ffi =
@@ -3576,6 +3579,7 @@ mod tests {
             fact_versions: Vec::new(),
             compute_audit: None,
             origin_graph: None,
+            request_id: 0,
         };
 
         let ffi =
@@ -3629,6 +3633,7 @@ mod tests {
                 ],
                 meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
             }),
+            request_id: 0,
         };
 
         let ffi =
@@ -3658,6 +3663,7 @@ mod tests {
             fact_versions: Vec::new(),
             compute_audit: None,
             origin_graph: None,
+            request_id: 0,
         };
 
         let ffi = resolved_component_meta_to_ffi(&resolved_state);
@@ -3715,6 +3721,7 @@ mod tests {
                 ],
                 meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
             }),
+            request_id: 0,
         };
 
         let ffi =

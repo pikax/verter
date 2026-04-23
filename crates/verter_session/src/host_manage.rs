@@ -5090,10 +5090,38 @@ impl VerterHost {
         self.provenance
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Stamp a request id for this call. The `AuditedRequest`
+        // harness (Commit 6) tracks this via `REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN`
+        // so multi-request closures inside `run_custom` can be rejected.
+        let request_id = self.next_request_id();
+        crate::request_context::increment_requests_created();
+
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        let resolved = self
+        // Install a `RequestContext` when footprint capture is enabled.
+        // The guard restores the prior TLS state on drop (normal return
+        // AND panic unwind). If capture is disabled, we still create a
+        // lightweight context so `current_request_id()` works for
+        // attribution — but no accumulator is attached.
+        let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
+        let accumulator = if footprint_capture {
+            Some(std::sync::Arc::new(
+                crate::component_meta_audit::RequestFootprintAccumulator::new(),
+            ))
+        } else {
+            None
+        };
+        let ctx = crate::request_context::RequestContext::new(
+            request_id,
+            std::sync::Arc::<str>::from(canonical.as_str()),
+            footprint_capture,
+            accumulator.clone(),
+        );
+        let _ctx_guard = crate::request_context::RequestContextGuard::install(ctx);
+
+        let mut resolved = self
             .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
+        resolved.request_id = request_id;
         // Always include fallthrough — the solver path does not use walker
         // overflow as a gating signal.
         let analysis = extract_component_meta_from_resolved(
@@ -5103,6 +5131,30 @@ impl VerterHost {
             true, // include_fallthrough
         );
         Some((analysis, resolved))
+    }
+
+    /// Monotonic request-id generator. Starts at 1; zero is reserved
+    /// for "not populated" (see `ResolvedComponentMetaState::request_id`).
+    pub(crate) fn next_request_id(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.request_id_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Drain the `RustAuditRecord` matching `request_id` from the host's
+    /// bounded audit-record store. Returns `None` when the record was
+    /// never inserted (capture disabled) or already drained by a prior
+    /// `take_audit_record` call. Plan §1.4 / §2.5.
+    pub fn take_audit_record(
+        &self,
+        request_id: u64,
+    ) -> Option<crate::component_meta_audit::RustAuditRecord> {
+        self.audit_records.take(request_id)
+    }
+
+    /// Publish a finished audit record into the host's store. Typically
+    /// called by `emit_audit_trace` once per audited request.
+    pub fn publish_audit_record(&self, record: crate::component_meta_audit::RustAuditRecord) {
+        self.audit_records.insert(record);
     }
 
     /// Resolve the accepted surface for a component's fallthrough inheritance.

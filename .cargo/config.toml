@@ -1,2 +1,9 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "getrandom_wasm_js"]
+
+# ts-rs writes audit record TS bindings here (relative to this config
+# file's location, i.e. the workspace root). All `#[ts(export_to = "...")]`
+# attributes on verter_session audit types resolve under this base path.
+# Plan §1.4.
+[env]
+TS_RS_EXPORT_DIR = { value = "packages/types", relative = true }

@@ -394,6 +394,15 @@ pub struct ResolvedComponentMetaState {
     /// Origin subgraph for semantic results. Populated in `Expanded` mode
     /// by walking the `SemanticGraphStore` after dispatch resolution.
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
+    /// Request identifier stamped by the host at the entry of
+    /// `get_component_meta_with_resolution`. Non-zero. Consumers (the
+    /// `AuditedRequest` harness and NAPI/WASM/LSP wrappers) use this
+    /// to retrieve the matching `RustAuditRecord` via
+    /// `VerterHost::take_audit_record(resolution.request_id)`.
+    ///
+    /// Zero is reserved for "not populated" — emitted by internal
+    /// tests / FFI fixtures that predate the Commit 3 wiring.
+    pub request_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5574,6 +5583,7 @@ impl VerterHost {
             } else {
                 None
             },
+            request_id: 0,
         };
         Some(state)
     }
