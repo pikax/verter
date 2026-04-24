@@ -5119,7 +5119,18 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let audit = self.config.audit_enabled.then(|| {
-            let request_id = next_component_meta_audit_request_id();
+            // Prefer the request_id stamped by
+            // `get_component_meta_with_resolution` (via the installed
+            // `RequestContext`). Falls back to the global static only
+            // when no context is installed — e.g. direct callers of
+            // `resolve_component_meta` outside the audited-request
+            // path. Without this link `take_audit_record` would look
+            // up the outer id while the record is stored under the
+            // inner id, and every `AuditedRequest::resolve` would
+            // fail with `AuditRecordMissing`.
+            let request_id = crate::request_context::current_request_context()
+                .map(|ctx| ctx.request_id)
+                .unwrap_or_else(next_component_meta_audit_request_id);
             let (host_cache_before_bytes, workspace_before_bytes) =
                 self.component_meta_audit_memory_bytes();
             (
@@ -5238,7 +5249,14 @@ impl VerterHost {
                     audit_builder.record_solver(compute_audit.solver.clone());
                 }
             }
-            crate::component_meta_audit::emit_audit_trace(&audit_builder.finish());
+            let record = audit_builder.finish();
+            crate::component_meta_audit::emit_audit_trace(&record);
+            // Publish into the host's bounded audit-record store so
+            // `take_audit_record(resolution.request_id)` can drain it.
+            // Plan §2.5 — without this line the store stays empty and
+            // every `AuditedRequest::resolve` surfaces
+            // `AuditRecordMissing`.
+            self.publish_audit_record(record);
         }
 
         result.value

@@ -18,13 +18,10 @@ use std::sync::Arc;
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_workspace::WorkspaceAccess;
 
-use crate::component_meta_audit::{
-    AuditRecordsStore, RequestFootprintAccumulator, RustAuditRecord,
-};
+use crate::component_meta_audit::RustAuditRecord;
 use crate::meta_resolve::ResolvedComponentMetaState;
 use crate::request_context::{
-    current_request_context, nested_audit_in_progress, requests_created_snapshot,
-    reset_requests_created, NestedAuditGuard,
+    nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
 };
 use crate::types::AnalysisLevel;
 use crate::{HostConfig, VerterHost};
@@ -265,15 +262,4 @@ where
         .ok_or(AuditedRequestError::AuditRecordMissing)?;
 
     Ok((analysis, resolution, record))
-}
-
-/// Fire-and-forget reference to silence unused warnings for helper
-/// types the public API re-exports but doesn't consume internally.
-#[doc(hidden)]
-pub fn _touch_refs() {
-    let _ = (
-        std::any::type_name::<AuditRecordsStore>(),
-        std::any::type_name::<RequestFootprintAccumulator>(),
-        current_request_context().is_some(),
-    );
 }
