@@ -67,5 +67,5 @@ benchmark-results.json
 *.bak
 
 
-tmp/.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.lock
 tmp/
