@@ -362,6 +362,63 @@ fn audit_generated_ts_uses_string_for_every_i64_field() {
 }
 
 #[test]
+fn loaded_files_has_no_comment_rationalizing_divergence() {
+    // Plan §3.B Commit 7.B regression guard: the rationalization
+    // comment at `mod.rs:167–181` (which argued the widened three-lane
+    // union was "what the audit caller wants") was the stub-prevention
+    // violation — it camouflaged a gate-bypass as a design choice.
+    // Any future edit that reintroduces that rationalization MUST
+    // trip this test, because the TS contract and the helper name
+    // will again be lying about exactness.
+    let root = workspace_root();
+    let path = root.join("crates/verter_session/src/component_meta_audit/mod.rs");
+    let contents = fs::read_to_string(&path).unwrap();
+
+    // The `loaded_files` docblock lives just above the `pub fn
+    // loaded_files` signature. Bound the grep to the region between
+    // `impl RustSemanticFootprintAudit {` and the end of `loaded_files`
+    // so unrelated comments elsewhere in the file cannot mask a
+    // regression.
+    let impl_start = contents
+        .find("impl RustSemanticFootprintAudit {")
+        .expect("impl RustSemanticFootprintAudit block missing from mod.rs");
+    let after_impl = &contents[impl_start..];
+    // `declared_dependency_files` doc lives just after `loaded_files`
+    // body — bound there.
+    let bound_end = after_impl
+        .find("pub fn declared_dependency_files")
+        .expect("declared_dependency_files accessor missing — 7.B split not applied");
+    let loaded_files_region = &after_impl[..bound_end];
+
+    // Forbidden: the rationalization strings the reviewer flagged.
+    for forbidden in [
+        "bucket divergence",
+        "fan-out event is lost",
+        "fan-out event lost",
+        "audit caller cares about the full loaded set",
+        "Bucket-divergence",
+    ] {
+        assert!(
+            !loaded_files_region.contains(forbidden),
+            "`loaded_files` docblock re-introduced forbidden rationalization `{forbidden}`. \
+             Plan §3.B Commit 7.B forbids rationalizing bucket divergence in the \
+             `loaded_files` contract — either the helper is exact (and the divergence \
+             is a capture-site bug to fix) or the fixture wants the broader set (and \
+             should call `declared_dependency_files`)."
+        );
+    }
+
+    // Forbidden: the three-lane union body pattern. If anybody tries to
+    // quietly re-widen the helper, the method body starts matching a
+    // three-way iteration again.
+    assert!(
+        !loaded_files_region.contains("for r in &self.indexed_ready_builds"),
+        "`loaded_files` body must not iterate `indexed_ready_builds` — that belongs \
+         in `declared_dependency_files` only. Plan §3.B Commit 7.B."
+    );
+}
+
+#[test]
 fn audit_generated_ts_has_zero_bigint_occurrences() {
     // Plan §3.B Commit 7.A exit criterion 7b: after the i64
     // extension, `bigint` must never appear in audit.generated.ts.

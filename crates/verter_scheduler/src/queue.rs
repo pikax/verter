@@ -28,12 +28,26 @@ pub struct QueueEntry {
     pub enqueue_time: Instant,
     /// Priority inherited from a resolved blocker (for requeued waiters).
     pub unblock_inherited_priority: Option<Priority>,
+    /// Optional request context propagated from the parent request that
+    /// caused this job to be enqueued. Populated for auto-ingested
+    /// dependency jobs so the worker installs the parent's context as
+    /// TLS — that way VFS-sink fan-out events for the dep read carry
+    /// the parent's `request_id` and land in the audit record's
+    /// `vfs_reads`. Plan §3.B Commit 7.B capture-site audit.
+    ///
+    /// The dispatch loop prefers this context over
+    /// [`crate::node::PendingRequests::winner_context_at_generation`];
+    /// both can be `None` for background / maintenance jobs with no
+    /// audited caller.
+    pub request_context: Option<crate::request_context::OpaqueRequestContext>,
     /// Set to `true` when this entry is stale (newer generation superseded it).
     cancelled: bool,
 }
 
 impl QueueEntry {
-    /// Create a new queue entry.
+    /// Create a new queue entry with no propagated request context.
+    /// Use [`Self::with_request_context`] for auto-ingested dependency
+    /// jobs that need to inherit an audited parent's TLS context.
     pub fn new(
         job_key: JobKey,
         base_priority: Priority,
@@ -45,8 +59,20 @@ impl QueueEntry {
             base_priority,
             enqueue_time,
             unblock_inherited_priority,
+            request_context: None,
             cancelled: false,
         }
+    }
+
+    /// Attach a request context to this entry so the dispatching worker
+    /// installs it as TLS while running the job. Plan §3.B Commit 7.B.
+    #[must_use]
+    pub fn with_request_context(
+        mut self,
+        ctx: Option<crate::request_context::OpaqueRequestContext>,
+    ) -> Self {
+        self.request_context = ctx;
+        self
     }
 
     /// Compute the effective priority tier for ordering.
@@ -379,6 +405,7 @@ mod tests {
             base_priority: priority,
             enqueue_time: Instant::now(),
             unblock_inherited_priority: None,
+            request_context: None,
             cancelled: false,
         }
     }
@@ -399,6 +426,7 @@ mod tests {
             base_priority: priority,
             enqueue_time: time,
             unblock_inherited_priority: None,
+            request_context: None,
             cancelled: false,
         }
     }

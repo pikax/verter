@@ -1056,18 +1056,37 @@ impl Scheduler {
                                 let dep_gen = dep_node.bump_generation();
                                 self.nodes.insert(dep_id.clone(), dep_node);
 
+                                // Propagate the parent request's context onto
+                                // the dep's Source job so the worker re-installs
+                                // it as TLS for the dep read. Without this,
+                                // VFS-sink fan-out events for auto-ingested
+                                // deps drop because `current_request_id()`
+                                // returns None on the dep worker thread — this
+                                // handler runs on the driver thread (TLS
+                                // empty), so we must read the parent's context
+                                // off the parent node's pending_requests
+                                // (winner_context is still present at this
+                                // generation while the parent's target stage,
+                                // e.g. Analysis, is outstanding).
+                                // Plan §3.B Commit 7.B capture-site audit.
+                                let parent_ctx = node
+                                    .pending_requests
+                                    .winner_context_at_generation(generation);
                                 let mut job_index = self.job_index.lock();
-                                job_index.insert(QueueEntry::new(
-                                    JobKey {
-                                        file_id: dep_id.clone(),
-                                        generation: dep_gen,
-                                        task_kind: TaskKind::Source,
-                                    },
-                                    // Inherit priority from the dependent.
-                                    std::cmp::min(inherited_priority, Priority::Interactive),
-                                    Instant::now(),
-                                    None,
-                                ));
+                                job_index.insert(
+                                    QueueEntry::new(
+                                        JobKey {
+                                            file_id: dep_id.clone(),
+                                            generation: dep_gen,
+                                            task_kind: TaskKind::Source,
+                                        },
+                                        // Inherit priority from the dependent.
+                                        std::cmp::min(inherited_priority, Priority::Interactive),
+                                        Instant::now(),
+                                        None,
+                                    )
+                                    .with_request_context(parent_ctx),
+                                );
                             }
 
                             // Check if dep already has current analysis — if so, no blocker needed.
@@ -1220,13 +1239,19 @@ impl Scheduler {
                 continue;
             }
 
-            // Look up the winner's session-side context for this job's
-            // generation. The closure below installs it into TLS for the
-            // duration of the stage so `current_request_id()` returns
-            // the winner's request id while the worker runs.
-            let winner_ctx = node
-                .pending_requests
-                .winner_context_at_generation(generation);
+            // Look up the session-side context for this job. Preference:
+            //   1. Context propagated by an auto-ingest dep enqueue (the
+            //      parent request that caused the dep to be loaded; plan
+            //      §3.B Commit 7.B).
+            //   2. Winner context from a direct `submit_request` caller
+            //      at this generation (the original path — plan §3.A).
+            // The closure below installs the chosen context into TLS for
+            // the duration of the stage so `current_request_id()`
+            // returns the right id while the worker runs.
+            let winner_ctx = entry.request_context.clone().or_else(|| {
+                node.pending_requests
+                    .winner_context_at_generation(generation)
+            });
 
             if matches!(task_kind, TaskKind::Source) {
                 // Source jobs: I/O pool loads content, then hands off to CPU pool
@@ -3441,6 +3466,113 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, 101);
         assert!(!calls[0].2);
+    }
+
+    /// Plan §3.B Commit 7.B capture-site fix. When analysis of a
+    /// parent file extracts dep imports, the scheduler auto-ingests a
+    /// Source job for each dep. That job runs on a worker thread whose
+    /// TLS is empty by default; without the 7.B propagation fix, the
+    /// dep's stage observes `current_request_id() == None` and any
+    /// VFS-sink fan-out event for the dep read drops on the audit
+    /// floor. The fix: the auto-ingest site reads the parent node's
+    /// `winner_context_at_generation` and attaches it to the dep's
+    /// `QueueEntry`, which the dispatch loop then installs as TLS.
+    ///
+    /// This regression probe records the parent's and the dep's
+    /// observed `current_request_id()` separately via a
+    /// canonical-dispatched probe. Both must equal the parent request's
+    /// id.
+    #[test]
+    fn auto_ingested_dep_source_job_inherits_parent_request_context_as_tls() {
+        use crate::executor::ExtractedDeps;
+
+        const PARENT: &str = "/parent.vue";
+        const DEP: &str = "/dep.ts";
+        const PARENT_REQ_ID: u64 = 4242;
+
+        struct ParentAndDepProbe {
+            parent_analysis_observed: Arc<AtomicU64>,
+            dep_source_observed: Arc<AtomicU64>,
+        }
+        impl StageExecutor for ParentAndDepProbe {
+            fn extract_deps(&self, canonical_id: &str, _source: &SourceSnapshot) -> ExtractedDeps {
+                if canonical_id == PARENT {
+                    ExtractedDeps {
+                        forward_deps: vec![DEP.to_string()],
+                        blocker_ids: vec![DEP.to_string()],
+                    }
+                } else {
+                    ExtractedDeps::default()
+                }
+            }
+            fn execute_source(
+                &self,
+                canonical_id: &str,
+                _file_kind: crate::node::FileKind,
+                content: Arc<str>,
+                generation: u64,
+            ) -> Result<SourceSnapshot, crate::executor::StageError> {
+                let id = crate::request_context::current_request_id().unwrap_or(0);
+                if canonical_id == DEP {
+                    self.dep_source_observed.store(id, AtomicOrdering::SeqCst);
+                }
+                Ok(SourceSnapshot::new_empty(content, generation))
+            }
+            fn execute_analysis(
+                &self,
+                canonical_id: &str,
+                _source: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::executor::StageError> {
+                let id = crate::request_context::current_request_id().unwrap_or(0);
+                if canonical_id == PARENT {
+                    self.parent_analysis_observed
+                        .store(id, AtomicOrdering::SeqCst);
+                }
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
+        }
+
+        let parent_observed = Arc::new(AtomicU64::new(0));
+        let dep_observed = Arc::new(AtomicU64::new(0));
+
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert(PARENT.to_string(), Arc::from("<template>x</template>"));
+        loader.insert(DEP.to_string(), Arc::from("export type T = 0;"));
+
+        let executor: Arc<dyn StageExecutor> = Arc::new(ParentAndDepProbe {
+            parent_analysis_observed: Arc::clone(&parent_observed),
+            dep_source_observed: Arc::clone(&dep_observed),
+        });
+        let sched = Scheduler::with_executor(SchedulerConfig::default(), loader, executor);
+
+        let ctx = TestContext::new(PARENT_REQ_ID, true);
+        let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
+
+        let handle = sched.submit_request(Request {
+            file_id: PARENT.to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_kind: None,
+            request_context: Some(opaque),
+        });
+        let state = handle.wait();
+        assert!(state.is_ready(), "parent must complete, got {state:?}");
+
+        assert_eq!(
+            parent_observed.load(AtomicOrdering::SeqCst),
+            PARENT_REQ_ID,
+            "parent stage must observe parent's request_id via TLS",
+        );
+        assert_eq!(
+            dep_observed.load(AtomicOrdering::SeqCst),
+            PARENT_REQ_ID,
+            "auto-ingested dep Source job must observe the parent's \
+             request_id via TLS — plan §3.B Commit 7.B. Without the \
+             capture-site fix, this observes 0 because the dep worker \
+             thread has an empty TLS.",
+        );
     }
 
     /// 16-thread stress: distinct requests on distinct files must not

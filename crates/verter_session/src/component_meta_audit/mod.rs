@@ -162,23 +162,48 @@ pub struct RustSemanticFootprintAudit {
 }
 
 impl RustSemanticFootprintAudit {
-    /// Union of the canonical ids from `vfs_reads`, `shared_load_reuses`,
-    /// AND `indexed_ready_builds`, deduplicated and sorted.
+    /// Files the scheduler actually read on behalf of this request:
+    /// the union of canonical ids from `vfs_reads` and
+    /// `shared_load_reuses`, deduplicated and sorted. Exact per
+    /// plan §1.4 — this is the read-contract answer, not the
+    /// dependency-graph answer.
     ///
-    /// The plan's §1.4 wording describes `loaded_files` as
-    /// "vfs_reads + shared_load_reuses"; the `indexed_ready_builds`
-    /// lane is included here because every fresh `IndexedReady`
-    /// insertion implies the corresponding source was loaded during
-    /// the request (via the scheduler's source stage →
-    /// `WorkspaceSourceLoader::load` → `workspace.read_file`).
-    /// Bucket-divergence can occur when the scheduler's source
-    /// snapshot is populated but the fan-out event is lost
-    /// (worker-thread TLS boundary, pre-audit submission, etc.); the
-    /// audit caller cares about the full loaded set, so the union
-    /// matches intent better than the narrower read-instrumented
-    /// bucket alone. Plan §3.A Commit 7 semantics.
+    /// Use [`Self::declared_dependency_files`] for the broader set
+    /// that also includes fresh `IndexedReady` builds (dependency
+    /// cache entries populated during — or observed alongside — the
+    /// request, whether or not they were read via the instrumented
+    /// fan-out path).
     #[must_use]
     pub fn loaded_files(&self) -> Vec<Arc<str>> {
+        let mut out =
+            Vec::<Arc<str>>::with_capacity(self.vfs_reads.len() + self.shared_load_reuses.len());
+        for r in &self.vfs_reads {
+            out.push(Arc::clone(&r.canonical_id));
+        }
+        for r in &self.shared_load_reuses {
+            out.push(Arc::clone(&r.canonical_id));
+        }
+        out.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        out.dedup_by(|a, b| a.as_ref() == b.as_ref());
+        out
+    }
+
+    /// Broader "what dependencies did this request touch at the
+    /// cache-entry level" answer: the union of canonical ids from
+    /// `vfs_reads`, `shared_load_reuses`, AND `indexed_ready_builds`,
+    /// deduplicated and sorted.
+    ///
+    /// This is useful for discovery, dependency-graph rendering, and
+    /// tests that assert a superset (e.g. "the request must at least
+    /// have seen files X, Y, Z in its dependency closure"). It is
+    /// **explicitly NOT an exact-read contract** — some entries come
+    /// from `IndexedReady` snapshots populated pre-request (scheduler
+    /// prefetch, shared warmup) and were never read via the
+    /// audit-instrumented path for THIS request. Use
+    /// [`Self::loaded_files`] when the question is "which files did
+    /// the scheduler actually read during THIS request".
+    #[must_use]
+    pub fn declared_dependency_files(&self) -> Vec<Arc<str>> {
         let mut out = Vec::<Arc<str>>::with_capacity(
             self.vfs_reads.len() + self.shared_load_reuses.len() + self.indexed_ready_builds.len(),
         );

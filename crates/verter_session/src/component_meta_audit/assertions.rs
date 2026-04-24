@@ -125,6 +125,44 @@ impl RustAuditRecord {
         Err(AssertionDiff::new_loaded_files(missing, extra))
     }
 
+    /// Assert that the broader dependency set
+    /// (`vfs_reads ∪ shared_load_reuses ∪ indexed_ready_builds`)
+    /// equals `expected` exactly (set equality). Plan §3.B Commit 7.B —
+    /// use this when the fixture's intent is "the request's dependency
+    /// closure included these files", which is a distinct semantic
+    /// claim from [`Self::assert_loaded_files_exactly`]'s "the
+    /// scheduler actually read these files on behalf of this request".
+    pub fn assert_declared_dependency_files_exactly<I, S>(
+        &self,
+        expected: I,
+    ) -> Result<(), AssertionDiff>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let actual: Vec<Arc<str>> = self
+            .footprint
+            .as_ref()
+            .map(super::RustSemanticFootprintAudit::declared_dependency_files)
+            .unwrap_or_default();
+        let mut expected_sorted: Vec<String> = expected
+            .into_iter()
+            .map(|s| s.as_ref().to_string())
+            .collect();
+        expected_sorted.sort();
+        expected_sorted.dedup();
+        let actual_set: FxHashSet<&str> = actual.iter().map(|a| a.as_ref()).collect();
+        let expected_set: FxHashSet<&str> = expected_sorted.iter().map(String::as_str).collect();
+        if actual_set == expected_set {
+            return Ok(());
+        }
+        let mut missing: Vec<&str> = expected_set.difference(&actual_set).copied().collect();
+        let mut extra: Vec<&str> = actual_set.difference(&expected_set).copied().collect();
+        missing.sort();
+        extra.sort();
+        Err(AssertionDiff::new_declared_dependency_files(missing, extra))
+    }
+
     /// Walk the derivation subgraph backward starting from any node
     /// that names `canonical_id` (via [`super::NamedIdentity`]) — or,
     /// failing that, surface the `vfs_reads` and `shared_load_reuses`
@@ -362,6 +400,17 @@ impl AssertionDiff {
         }
         Self { message: out }
     }
+
+    fn new_declared_dependency_files(missing: Vec<&str>, extra: Vec<&str>) -> Self {
+        let mut out = String::from("declared_dependency_files set mismatch:\n");
+        for m in &missing {
+            out.push_str(&format!("  + {m} (expected, missing from actual)\n"));
+        }
+        for e in &extra {
+            out.push_str(&format!("  - {e} (actual, not expected)\n"));
+        }
+        Self { message: out }
+    }
 }
 
 impl std::fmt::Display for AssertionDiff {
@@ -466,6 +515,160 @@ mod tests {
         assert!(err.message.contains("/a.ts"));
         assert!(err.message.contains('+'), "missing should render with +");
         assert!(err.message.contains('-'), "extra should render with -");
+    }
+
+    #[test]
+    fn loaded_files_returns_exactly_vfs_reads_plus_shared_load_reuses_no_indexed_ready() {
+        use crate::component_meta_audit::IndexedReadyBuildRecord;
+        let fp = RustSemanticFootprintAudit {
+            vfs_reads: vec![VfsReadRecord {
+                canonical_id: Arc::from("/a.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: 1,
+                request_id: 1,
+            }],
+            shared_load_reuses: vec![SharedLoadReuseRecord {
+                canonical_id: Arc::from("/b.ts"),
+                winner_request_id: 1,
+                winner_audited: false,
+            }],
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/c.ts"),
+                whole_hash: [0u8; 16],
+            }],
+            ..Default::default()
+        };
+        let loaded = fp.loaded_files();
+        let set: std::collections::HashSet<&str> = loaded.iter().map(Arc::as_ref).collect();
+        assert_eq!(
+            set,
+            ["/a.ts", "/b.ts"]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "loaded_files must exclude indexed_ready_builds per plan §1.4 exactness",
+        );
+    }
+
+    #[test]
+    fn declared_dependency_files_returns_vfs_reads_plus_shared_load_reuses_plus_indexed_ready_builds(
+    ) {
+        use crate::component_meta_audit::IndexedReadyBuildRecord;
+        let fp = RustSemanticFootprintAudit {
+            vfs_reads: vec![VfsReadRecord {
+                canonical_id: Arc::from("/a.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: 1,
+                request_id: 1,
+            }],
+            shared_load_reuses: vec![SharedLoadReuseRecord {
+                canonical_id: Arc::from("/b.ts"),
+                winner_request_id: 1,
+                winner_audited: false,
+            }],
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/c.ts"),
+                whole_hash: [0u8; 16],
+            }],
+            ..Default::default()
+        };
+        let declared = fp.declared_dependency_files();
+        let set: std::collections::HashSet<&str> = declared.iter().map(Arc::as_ref).collect();
+        assert_eq!(
+            set,
+            ["/a.ts", "/b.ts", "/c.ts"]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            "declared_dependency_files must include all three lanes",
+        );
+    }
+
+    #[test]
+    fn loaded_files_and_declared_dependency_files_are_distinct_when_indexed_ready_has_entries_without_vfs_reads(
+    ) {
+        use crate::component_meta_audit::IndexedReadyBuildRecord;
+        // A fresh IndexedReadyBuildRecord for `/c.ts` with no matching
+        // VfsReadRecord models the "pre-request snapshot populated"
+        // case: `c.ts` entered the cache earlier (scheduler prefetch or
+        // shared warmup) and was observed by THIS request via the
+        // dependency graph, but the request itself did not trigger a
+        // read on its behalf.
+        let fp = RustSemanticFootprintAudit {
+            vfs_reads: vec![VfsReadRecord {
+                canonical_id: Arc::from("/a.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: 1,
+                request_id: 1,
+            }],
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/c.ts"),
+                whole_hash: [0u8; 16],
+            }],
+            ..Default::default()
+        };
+
+        let loaded: Vec<Arc<str>> = fp.loaded_files();
+        let declared: Vec<Arc<str>> = fp.declared_dependency_files();
+
+        // `loaded` covers only `/a.ts`.
+        let loaded_set: std::collections::HashSet<&str> = loaded.iter().map(Arc::as_ref).collect();
+        assert!(
+            !loaded_set.contains("/c.ts"),
+            "loaded_files must NOT include `/c.ts` (no VfsReadRecord for it), got {loaded_set:?}",
+        );
+        assert!(loaded_set.contains("/a.ts"));
+
+        // `declared` covers both.
+        let declared_set: std::collections::HashSet<&str> =
+            declared.iter().map(Arc::as_ref).collect();
+        assert!(
+            declared_set.contains("/c.ts"),
+            "declared_dependency_files MUST include `/c.ts` (broader dependency-cache set), got {declared_set:?}",
+        );
+        assert!(declared_set.contains("/a.ts"));
+    }
+
+    #[test]
+    fn assert_declared_dependency_files_exactly_passes_when_sets_match() {
+        use crate::component_meta_audit::IndexedReadyBuildRecord;
+        let fp = RustSemanticFootprintAudit {
+            vfs_reads: vec![VfsReadRecord {
+                canonical_id: Arc::from("/a.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: 1,
+                request_id: 1,
+            }],
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/c.ts"),
+                whole_hash: [0u8; 16],
+            }],
+            ..Default::default()
+        };
+        let r = record_with_footprint(fp);
+        r.assert_declared_dependency_files_exactly(["/a.ts", "/c.ts"])
+            .expect("set match");
+    }
+
+    #[test]
+    fn assert_declared_dependency_files_exactly_renders_diff_on_mismatch() {
+        use crate::component_meta_audit::IndexedReadyBuildRecord;
+        let fp = RustSemanticFootprintAudit {
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/c.ts"),
+                whole_hash: [0u8; 16],
+            }],
+            ..Default::default()
+        };
+        let r = record_with_footprint(fp);
+        let err = r
+            .assert_declared_dependency_files_exactly(["/x.ts"])
+            .expect_err("set must mismatch");
+        assert!(err.message.contains("declared_dependency_files"));
+        assert!(err.message.contains("/x.ts"));
+        assert!(err.message.contains("/c.ts"));
     }
 
     #[test]
