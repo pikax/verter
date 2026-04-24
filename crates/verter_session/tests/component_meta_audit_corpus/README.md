@@ -13,18 +13,12 @@ each produces one test file here.
 node scripts/gen-corpus-audit-tests.mjs
 ```
 
-## Updating pinned snapshots
-
-```bash
-node scripts/gen-corpus-audit-tests.mjs --update-snapshots
-```
-
-Use this when an intentional behavior change causes all fixture
-snapshots to drift. Reviewers should expect an audit-record schema
-change in the same PR.
-
 ## Overrides
 
 Place `overrides/<slug>.rs` to pin component-specific assertions
 the generator cannot produce automatically. Overrides replace the
-generated stub entirely for the matching slug.
+generated stub entirely for the matching slug. At landing the
+override directory is empty — the generated stubs cover the
+corpus-wide "audit record produced + footprint attached"
+invariants; author an override when a component needs sharper
+assertions that the generator cannot derive automatically.

@@ -2,7 +2,7 @@
 /**
  * Generator — corpus audit tests.
  *
- * Plan §3 Commit 12 (F10 WIP).
+ * Plan §3 Commit 12 (F10 WIP) + Commit 13 (F10 squash).
  *
  * Sweeps `.integration-tests/repos/nuxt-ui/src/runtime/components/**\/*.vue`
  * (recursive; sorted lexicographically for deterministic cross-platform
@@ -22,10 +22,14 @@
  * - `--dry-run --output-dir=<path>`: write the same generated tree to
  *   `<path>` instead of `crates/verter_session/tests/`. Used by the
  *   `corpus_generator_output_matches_committed_files` parity test.
- * - `--update-snapshots`: regenerate every override's pinned snapshot
- *   by running the test and capturing the current audit output.
- *   (Not implemented in this WIP — the override directory is empty at
- *   landing; F10 squash (Commit 13) rerenders snapshots if needed.)
+ *
+ * `--update-snapshots` is NOT offered. Per-component pinned snapshots
+ * would require running each generated test in turn and capturing
+ * the audit bundle — a meaningfully large operation beyond this
+ * generator's scope. Reviewer guidance (plan §3 Commit 13 test list
+ * item): if a reviewer needs a batch snapshot refresh, author the
+ * override manually under `overrides/<slug>.rs` and commit. The
+ * generator stays side-effect-free.
  *
  * ## Usage
  *
@@ -64,14 +68,18 @@ function parseArgs(argv) {
   const config = {
     dryRun: false,
     outputDir: DEFAULT_OUTPUT_DIR,
-    updateSnapshots: false,
   };
   for (const arg of argv) {
     if (arg === "--dry-run") config.dryRun = true;
     else if (arg.startsWith("--output-dir=")) {
       config.outputDir = resolve(arg.slice("--output-dir=".length));
     } else if (arg === "--update-snapshots") {
-      config.updateSnapshots = true;
+      console.error(
+        "error: --update-snapshots is not implemented. Author per-component overrides under " +
+          "`crates/verter_session/tests/component_meta_audit_corpus/overrides/<slug>.rs` and " +
+          "commit them. See the generator docblock for guidance.",
+      );
+      process.exit(2);
     }
   }
   return config;
@@ -217,21 +225,15 @@ each produces one test file here.
 node scripts/gen-corpus-audit-tests.mjs
 \`\`\`
 
-## Updating pinned snapshots
-
-\`\`\`bash
-node scripts/gen-corpus-audit-tests.mjs --update-snapshots
-\`\`\`
-
-Use this when an intentional behavior change causes all fixture
-snapshots to drift. Reviewers should expect an audit-record schema
-change in the same PR.
-
 ## Overrides
 
 Place \`overrides/<slug>.rs\` to pin component-specific assertions
 the generator cannot produce automatically. Overrides replace the
-generated stub entirely for the matching slug.
+generated stub entirely for the matching slug. At landing the
+override directory is empty — the generated stubs cover the
+corpus-wide "audit record produced + footprint attached"
+invariants; author an override when a component needs sharper
+assertions that the generator cannot derive automatically.
 `;
 }
 
