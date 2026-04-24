@@ -164,16 +164,33 @@ pub struct RustSemanticFootprintAudit {
 }
 
 impl RustSemanticFootprintAudit {
-    /// Union of `vfs_reads[*].canonical_id` and `shared_load_reuses[*].canonical_id`,
-    /// deduplicated and sorted.
+    /// Union of the canonical ids from `vfs_reads`, `shared_load_reuses`,
+    /// AND `indexed_ready_builds`, deduplicated and sorted.
+    ///
+    /// The plan's §1.4 wording describes `loaded_files` as
+    /// "vfs_reads + shared_load_reuses"; the `indexed_ready_builds`
+    /// lane is included here because every fresh `IndexedReady`
+    /// insertion implies the corresponding source was loaded during
+    /// the request (via the scheduler's source stage →
+    /// `WorkspaceSourceLoader::load` → `workspace.read_file`).
+    /// Bucket-divergence can occur when the scheduler's source
+    /// snapshot is populated but the fan-out event is lost
+    /// (worker-thread TLS boundary, pre-audit submission, etc.); the
+    /// audit caller cares about the full loaded set, so the union
+    /// matches intent better than the narrower read-instrumented
+    /// bucket alone. Plan §3.A Commit 7 semantics.
     #[must_use]
     pub fn loaded_files(&self) -> Vec<Arc<str>> {
-        let mut out =
-            Vec::<Arc<str>>::with_capacity(self.vfs_reads.len() + self.shared_load_reuses.len());
+        let mut out = Vec::<Arc<str>>::with_capacity(
+            self.vfs_reads.len() + self.shared_load_reuses.len() + self.indexed_ready_builds.len(),
+        );
         for r in &self.vfs_reads {
             out.push(Arc::clone(&r.canonical_id));
         }
         for r in &self.shared_load_reuses {
+            out.push(Arc::clone(&r.canonical_id));
+        }
+        for r in &self.indexed_ready_builds {
             out.push(Arc::clone(&r.canonical_id));
         }
         out.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
