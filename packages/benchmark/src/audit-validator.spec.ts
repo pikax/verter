@@ -18,7 +18,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { AuditBundle, AuditSpec } from "./audit-validator.js";
-import { validateAuditBundle } from "./audit-validator.js";
+import { renderFootprintForSnapshot, validateAuditBundle } from "./audit-validator.js";
 
 function emptyBundle(overrides: Partial<AuditBundle> = {}): AuditBundle {
   return {
@@ -256,7 +256,7 @@ describe("audit_validator_covers_expected_result_min_props_events_slots_has_eval
 });
 
 describe("audit_validator_covers_expected_footprint_snapshot_diff", () => {
-  it("fails on snapshot drift, passes on exact match", () => {
+  it("fails on snapshot drift", () => {
     const bundle = emptyBundle();
     const firstRun = validateAuditBundle(bundle, {
       component: "C",
@@ -265,9 +265,54 @@ describe("audit_validator_covers_expected_footprint_snapshot_diff", () => {
     expect(firstRun.passed).toBe(false);
     expect(firstRun.violations[0]).toContain("snapshot drift");
   });
+
+  it("passes on exact match against the renderer's current output", () => {
+    // Review F11: the drift-only test above would not discriminate
+    // against a stub renderer that always returned
+    // `"definitely-not-the-snapshot"`. This positive case pins
+    // exact-match behaviour by first computing the renderer output
+    // for the fixture, then feeding it back as the expected
+    // snapshot — a real exact-match MUST yield `passed: true` with
+    // zero violations.
+    const bundle = emptyBundle();
+    const expectedSnapshot = renderFootprintForSnapshot(bundle.record.footprint);
+    const run = validateAuditBundle(bundle, {
+      component: "C",
+      expectedFootprintSnapshot: expectedSnapshot,
+    });
+    expect(run.passed, `expected exact match, got violations: ${run.violations.join(" / ")}`).toBe(
+      true,
+    );
+    expect(run.violations).toEqual([]);
+  });
+
+  it("discriminates between bundles with differing footprints", () => {
+    // Complementary discrimination: a snapshot rendered from one
+    // bundle MUST NOT match a bundle with a structurally different
+    // footprint. Catches a regression where the renderer collapsed
+    // distinct inputs to identical outputs.
+    const bundleA = emptyBundle();
+    const snapshotA = renderFootprintForSnapshot(bundleA.record.footprint);
+
+    const bundleB = emptyBundle();
+    bundleB.record.footprint!.shared_load_reuses = [
+      {
+        canonical_id: "/shared.ts",
+        winner_request_id: "42",
+        winner_audited: false,
+      },
+    ];
+
+    const runBWithAsSnapshot = validateAuditBundle(bundleB, {
+      component: "C",
+      expectedFootprintSnapshot: snapshotA,
+    });
+    expect(runBWithAsSnapshot.passed).toBe(false);
+    expect(runBWithAsSnapshot.violations[0]).toContain("snapshot drift");
+  });
 });
 
-describe("audit_validator_loads_all_6_curated_corpus_representative_specs", () => {
+describe("audit_validator_consumes_curated_specs_without_panicking", () => {
   // Plan §3 Commit 10. Confirms every authored audit-spec file
   // parses as valid JSON, has the required `component` identifier,
   // and (when run against an empty synthetic bundle) produces a
@@ -275,9 +320,17 @@ describe("audit_validator_loads_all_6_curated_corpus_representative_specs", () =
   // logic handles every field-combination the specs declare without
   // panicking or falling through a missing branch.
   //
-  // This is NOT "the specs pass against live audit bundles" — that
-  // requires a working native build and lives in the separate
-  // corpus-audit integration tests (plan §3 Commit 13 / F10).
+  // This is **NOT** the plan-originally-named
+  // `audit_validator_validates_all_6_curated_corpus_representatives_green`
+  // contract (review finding F2). That contract — "the specs pass
+  // against LIVE audit bundles from a working native build" —
+  // requires a NAPI-wired runner and lives in the Commit 13 corpus
+  // integration tests (`crates/verter_session/tests/component_meta_audit_corpus/`).
+  // This test is narrower by design: it pins the validator's
+  // match/branch coverage against empty synthetic bundles so a
+  // regression in the validator itself surfaces before the corpus
+  // run. The "green against live bundles" assertion is delegated
+  // to the corpus suite; see review F2 for the full rationale.
   const specDir = resolve(import.meta.dirname, "../audit-specs/component-meta");
   const expectedSpecFiles = [
     "Accordion.json",
@@ -301,10 +354,9 @@ describe("audit_validator_loads_all_6_curated_corpus_representative_specs", () =
       const raw = await readFile(resolve(specDir, specFile), "utf-8");
       const spec = JSON.parse(raw) as AuditSpec;
       expect(spec.component, `${specFile}: component id must be set`).toBeTruthy();
-      expect(
-        spec.component.length,
-        `${specFile}: component id must be non-empty`,
-      ).toBeGreaterThan(0);
+      expect(spec.component.length, `${specFile}: component id must be non-empty`).toBeGreaterThan(
+        0,
+      );
       // Running the spec against an empty bundle exercises every
       // declared field's match branch without needing live audit
       // data. A validator regression that panics on a spec shape

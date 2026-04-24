@@ -299,9 +299,18 @@ describe("component-meta native aliases", () => {
     host.shutdown();
   });
 
-  it("getComponentMetaWithAudit returns a JSON Buffer when audit is enabled", () => {
-    // With audit_enabled + footprint_capture on, the binding returns
-    // a Buffer containing `{ analysis, resolution, record }` JSON.
+  it("napi_get_component_meta_with_audit_returns_populated_footprint", () => {
+    // Plan §3 Commit 8 test list entry. With audit_enabled +
+    // footprint_capture on, the binding returns a Buffer containing
+    // `{ analysis, resolution, record }` JSON — and the record's
+    // `footprint` field MUST be populated (non-null, with at least
+    // the structural record-vectors present). A regression that
+    // accidentally drops the footprint attach (e.g. miner call gets
+    // gated behind a flag that defaults off) surfaces here.
+    //
+    // Discriminating: `bundle.record.footprint === null` fails the
+    // final assertion; a footprint whose structural shape regresses
+    // (missing a record-vector) fails the per-lane assertions.
     const native = require("./index.js");
     const host = new native.ComponentMetaHost({
       auditEnabled: true,
@@ -324,6 +333,34 @@ describe("component-meta native aliases", () => {
     expect(bundle.record.request_id).toMatch(/^[0-9]+$/);
     // i64 fields likewise after §3.B Commit 7.A.
     expect(typeof bundle.record.memory.process_rss_delta_bytes).toBe("string");
+
+    // Footprint attach invariant — the plan-required test name
+    // specifies "returns populated footprint". The footprint must
+    // be non-null with every structural record-vector present as
+    // an array (empty is fine for the minimal SFC; the invariant
+    // pins the shape, not the content).
+    expect(
+      bundle.record.footprint,
+      "footprint must be attached when audit_enabled + footprint_capture are both on",
+    ).not.toBeNull();
+    const fp = bundle.record.footprint;
+    for (const lane of [
+      "vfs_reads",
+      "shared_load_reuses",
+      "indexed_ready_builds",
+      "instantiations",
+      "projections",
+      "conditional_decisions",
+      "substitutions",
+      "alias_resolutions",
+      "materializations",
+    ] as const) {
+      expect(Array.isArray(fp[lane]), `footprint.${lane} must be an array`).toBe(true);
+    }
+    expect(fp).toHaveProperty("derivation_subgraph");
+    expect(Array.isArray(fp.derivation_subgraph.nodes)).toBe(true);
+    expect(Array.isArray(fp.derivation_subgraph.edges)).toBe(true);
+
     session.close();
     host.shutdown();
   });

@@ -333,11 +333,22 @@ function validateExpectedResult(
   }
 }
 
-function renderFootprintForSnapshot(fp: RustAuditRecord["footprint"]): string {
-  // Normalized JSON for snapshot comparison. Strips VFS reads (they
-  // are incidental to cache warmth and would flap across runs) and
-  // the derivation subgraph edge metadata (kept as a count instead).
-  // This mirrors the Rust-side `mask_incidental_spans()` philosophy.
+/**
+ * Render the audit footprint as a deterministic, snapshot-friendly
+ * string. Exported so tests can pin exact-match behaviour without
+ * copy-pasting the normalization schema. Plan §3 Commit 10 + review F11.
+ */
+export function renderFootprintForSnapshot(fp: RustAuditRecord["footprint"]): string {
+  // Normalized JSON for snapshot comparison. Intentionally diverges
+  // from the Rust-side `mask_incidental_spans` helper: Rust only
+  // clears the fields named in `INCIDENTAL_FIELD_NAMES` (today:
+  // `vfs_reads`) and keeps every other record-vector as-is. This TS
+  // form collapses per-record lists to counts so snapshots are
+  // readable in a PR diff without flapping on subgraph detail —
+  // useful for bench specs, unsuitable when the exact record list
+  // matters. Use the Rust helper + `RustAuditRecord::emit_json`
+  // when you need the full structural payload. Plan §3 Commit 10 +
+  // review F9.
   if (!fp) return "null";
   const normalized = {
     indexed_ready_builds: fp.indexed_ready_builds.map((r) => r.canonical_id).sort(),
