@@ -370,19 +370,48 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
          masking affordance to survive (or the test to be updated in lock-step).",
     );
 
-    // The helper must actually mask something — currently VFS reads.
-    // A regression where the body becomes a no-op (returns the
-    // footprint unchanged) is invisible from a grep but visible from
-    // the body text: the docblock names the "VFS reads" case.
+    // The helper must actually mutate something — currently by
+    // clearing `vfs_reads`. A regression where the body becomes a
+    // no-op (returns the footprint unchanged) is invisible from a
+    // "function exists" grep but visible from the body's mutation
+    // call. We bound the window tightly (just the impl body, not
+    // the wider module) so a dead reference in a nearby docblock
+    // can't satisfy the check.
     let impl_start = audit_src
         .find("pub fn mask_incidental_spans")
         .expect("pub fn mask_incidental_spans location");
-    let window_end = (impl_start + 4_000).min(audit_src.len());
-    let window = &audit_src[impl_start..window_end];
+    let body_rel_start = audit_src[impl_start..]
+        .find('{')
+        .expect("function body open-brace");
+    let body_start = impl_start + body_rel_start + 1;
+    let mut depth: i32 = 1;
+    let mut body_end = body_start;
+    for (i, ch) in audit_src[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    body_end = body_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &audit_src[body_start..body_end];
     assert!(
-        window.contains("vfs_reads") || window.contains("VFS"),
-        "`mask_incidental_spans` no longer references `vfs_reads` — snapshot \
-         masking has been gutted and pinned snapshots may flap on cache-warmth noise.",
+        body.contains("vfs_reads"),
+        "`mask_incidental_spans` body no longer references `vfs_reads` — the masker has been \
+         gutted. Pinned Commit 7 snapshots will flap on cache-warmth noise. Plan §3 Commit 13.",
+    );
+    // The body must also perform a mutation — `.clear()`,
+    // `Vec::new()`, or `vec![]` — not merely mention `vfs_reads`
+    // in a comment. This catches the "gutted-but-documented" case.
+    assert!(
+        body.contains(".clear()") || body.contains("Vec::new()") || body.contains("vec![]"),
+        "`mask_incidental_spans` body no longer mutates any field (no `.clear()`, \
+         `Vec::new()`, or `vec![]`) — the masker is a no-op. Plan §3 Commit 13.",
     );
 
     // Additionally pin that the F6 authored fixtures are still
