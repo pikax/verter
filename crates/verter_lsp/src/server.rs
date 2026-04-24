@@ -6940,15 +6940,26 @@ impl VerterLanguageServer {
             return Some(append_markdown(hover, &payload.markdown));
         }
 
-        // Cache miss — spawn a background task. Plan §3 Commit 9
-        // "legacy payload immediately; background AuditedRequest".
+        // Cache miss — check whether the host can actually produce a
+        // useful payload BEFORE spawning. If `audit_enabled` or
+        // `footprint_capture` are off, `get_component_meta_with_resolution`
+        // would run to completion but `take_audit_record` would
+        // return None and the cache would stay empty. That means
+        // every subsequent hover would spawn another futile task.
+        // Short-circuit here so the user sees the legacy hover and
+        // no blocking-pool slots are burned on a capture-disabled
+        // host. Plan §3 Commit 9.
         let host = self.documents.host_arc();
+        if !host.config().audit_enabled || !host.config().footprint_capture {
+            return hover;
+        }
+
+        // Cache miss + capture enabled — spawn a background task.
+        // Plan §3 Commit 9 "legacy payload immediately; background
+        // AuditedRequest".
         let cache = Arc::clone(&self.hover_provenance_cache);
         let canonical_for_task = canonical_id;
         tokio::task::spawn_blocking(move || {
-            if !host.config().audit_enabled || !host.config().footprint_capture {
-                return;
-            }
             let Some((_analysis, resolution)) =
                 host.get_component_meta_with_resolution(&canonical_for_task)
             else {

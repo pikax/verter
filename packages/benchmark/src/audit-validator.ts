@@ -231,7 +231,7 @@ function matchesInstantiation(
   inst: {
     decl_canonical_id: string;
     decl_symbol_name: string;
-    args_fingerprint: number[] | string;
+    args_fingerprint: readonly number[];
   },
   req: RequireInstantiationSpec,
 ): boolean {
@@ -244,8 +244,11 @@ function matchesInstantiation(
   return true;
 }
 
-function argsFingerprintToHex(fp: number[] | string): string {
-  if (typeof fp === "string") return fp.toLowerCase();
+// `Hash16` = `[u8; 16]` on the Rust side; ts-rs emits a 16-tuple of
+// `number` in the generated TS surface. Never a string on the wire —
+// callers supplying hex strings use `argsFingerprintHex` on the spec,
+// which is handled separately above.
+function argsFingerprintToHex(fp: readonly number[]): string {
   return Array.from(fp)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");

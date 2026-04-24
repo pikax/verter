@@ -24,14 +24,17 @@ fn corpus_audit_content_content_navigation_produces_audit_record_or_documents_sk
                 record.canonical_id, "/content/ContentNavigation.vue",
                 "audit record must identify the requested canonical",
             );
-            // Non-empty footprint on a non-trivial SFC is the floor:
-            // resolution produced SOMETHING (even if the analysis is
-            // partial because some deps are missing in the hermetic
-            // setup). F10 squash (Commit 13) may pin tighter
-            // snapshots per component via overrides/.
+            // Hermetic `AuditedRequest` always enables footprint
+            // capture — the miner MUST attach a footprint on
+            // resolution success. Discriminating: fails if capture
+            // wiring regresses (plan §3 Commit 4 / F4), or if a
+            // future refactor accidentally drops the miner call for
+            // this code path. Would NOT fail for benign partial
+            // analysis (missing deps in the hermetic setup) because
+            // the footprint attaches regardless of analysis depth.
             assert!(
-                record.footprint.is_some() || !record.canonical_id.is_empty(),
-                "either footprint captured or the request ran to completion",
+                record.footprint.is_some(),
+                "hermetic AuditedRequest must attach Some(footprint) on resolution success",
             );
         }
         Err(err) => {

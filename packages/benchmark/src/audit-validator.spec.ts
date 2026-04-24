@@ -267,25 +267,54 @@ describe("audit_validator_covers_expected_footprint_snapshot_diff", () => {
   });
 });
 
-describe("audit_validator_validates_all_6_curated_corpus_representatives_green", () => {
-  // Confirms the six authored audit-specs load as JSON, parse as
-  // `AuditSpec`, and are self-consistent (component field populated,
-  // no unknown top-level keys). This does NOT run them against live
-  // audit bundles — that's Commit 13 / F10 work.
+describe("audit_validator_loads_all_6_curated_corpus_representative_specs", () => {
+  // Plan §3 Commit 10. Confirms every authored audit-spec file
+  // parses as valid JSON, has the required `component` identifier,
+  // and (when run against an empty synthetic bundle) produces a
+  // usable `ValidationResult` — i.e. the validator's match/branch
+  // logic handles every field-combination the specs declare without
+  // panicking or falling through a missing branch.
+  //
+  // This is NOT "the specs pass against live audit bundles" — that
+  // requires a working native build and lives in the separate
+  // corpus-audit integration tests (plan §3 Commit 13 / F10).
   const specDir = resolve(import.meta.dirname, "../audit-specs/component-meta");
+  const expectedSpecFiles = [
+    "Accordion.json",
+    "Alert.json",
+    "App.json",
+    "AuthForm.json",
+    "Avatar.json",
+    "AvatarGroup.json",
+  ];
 
   it("has 6 spec files named after Commit 7 corpus representatives", () => {
     const entries = readdirSync(specDir)
       .filter((n) => n.endsWith(".json"))
       .sort();
-    expect(entries).toEqual([
-      "Accordion.json",
-      "Alert.json",
-      "App.json",
-      "AuthForm.json",
-      "Avatar.json",
-      "AvatarGroup.json",
-    ]);
+    expect(entries).toEqual(expectedSpecFiles);
+  });
+
+  it("every spec parses as JSON, carries a non-empty component id, and is consumable by validateAuditBundle", async () => {
+    const { readFile } = await import("node:fs/promises");
+    for (const specFile of expectedSpecFiles) {
+      const raw = await readFile(resolve(specDir, specFile), "utf-8");
+      const spec = JSON.parse(raw) as AuditSpec;
+      expect(spec.component, `${specFile}: component id must be set`).toBeTruthy();
+      expect(
+        spec.component.length,
+        `${specFile}: component id must be non-empty`,
+      ).toBeGreaterThan(0);
+      // Running the spec against an empty bundle exercises every
+      // declared field's match branch without needing live audit
+      // data. A validator regression that panics on a spec shape
+      // surfaces here (vs. only surfacing when the CI bench runs).
+      const result = validateAuditBundle(emptyBundle(), spec);
+      expect(result, `${specFile}: validator returned a usable result`).toMatchObject({
+        passed: expect.any(Boolean),
+        violations: expect.any(Array),
+      });
+    }
   });
 });
 

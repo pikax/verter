@@ -51,17 +51,12 @@ struct AuditBundle {
 }
 
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`.
-/// Only the `record` field needs to round-trip — the other two lanes
-/// are opaque here.
+/// Only the `record` field is consumed; the `analysis` and
+/// `resolution` fields present in the JSON bundle are silently
+/// ignored by serde's default "unknown fields" handling, so the
+/// struct omits them entirely (no dead-code fields to carry).
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct AuditBundleForWalker {
-    #[serde(default)]
-    #[serde(skip)]
-    analysis: (),
-    #[serde(default)]
-    #[serde(skip)]
-    resolution: (),
     record: RustAuditRecord,
 }
 

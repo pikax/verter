@@ -38,16 +38,11 @@ struct WasmAuditBundle {
 }
 
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
-/// — only `record` round-trips through the walker path.
+/// — only `record` round-trips through the walker path. `analysis`
+/// and `resolution` fields in the JSON are silently ignored by
+/// serde's default unknown-field handling.
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct WasmAuditBundleForWalker {
-    #[serde(default)]
-    #[serde(skip)]
-    analysis: (),
-    #[serde(default)]
-    #[serde(skip)]
-    resolution: (),
     record: RustAuditRecord,
 }
 
