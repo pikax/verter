@@ -115,10 +115,8 @@ pub struct RustMemoryAudit {
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub process_rss_after_bytes: u64,
-    // `process_rss_delta_bytes` is i64 (signed) — it is NOT covered by
-    // the u64-as-string transport rule (plan §1.4) because JS's
-    // `Number.MIN_SAFE_INTEGER`/`MAX_SAFE_INTEGER` gives ±2^53 of
-    // headroom on either side, which is ample for RSS deltas.
+    #[serde(with = "crate::i64_as_decimal_string")]
+    #[ts(type = "string")]
     pub process_rss_delta_bytes: i64,
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]

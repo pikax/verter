@@ -143,7 +143,7 @@ footprint: RustSemanticFootprintAudit | null, };
 /**
  * Memory snapshots.
  */
-export type RustMemoryAudit = { process_rss_before_bytes: string, process_rss_after_bytes: string, process_rss_delta_bytes: bigint, host_cache_before_bytes: string, host_cache_after_bytes: string, workspace_before_bytes: string, workspace_after_bytes: string, };
+export type RustMemoryAudit = { process_rss_before_bytes: string, process_rss_after_bytes: string, process_rss_delta_bytes: string, host_cache_before_bytes: string, host_cache_after_bytes: string, workspace_before_bytes: string, workspace_after_bytes: string, };
 
 /**
  * Semantic footprint attached to an audited request. Populated by the

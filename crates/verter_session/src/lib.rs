@@ -65,6 +65,7 @@ pub mod host_executor;
 mod host_manage;
 mod host_resolve;
 mod host_upsert;
+pub(crate) mod i64_as_decimal_string;
 mod id;
 pub mod intrinsic_registry;
 mod meta;

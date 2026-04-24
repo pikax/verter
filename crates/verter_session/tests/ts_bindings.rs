@@ -203,7 +203,8 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
         "u64::MAX must survive as decimal string (JS Number would lose precision)"
     );
 
-    // Memory snapshots (u64) — strings; process_rss_delta_bytes (i64) — number
+    // Memory snapshots — every integer > 32 bits (signed or unsigned)
+    // is a decimal string per plan §3.B Commit 7.A (uniform transport).
     assert_eq!(
         value["memory"]["process_rss_before_bytes"].as_str(),
         Some("9999")
@@ -212,9 +213,11 @@ fn audit_record_u64_fields_serialize_as_json_strings_not_numbers() {
         value["memory"]["process_rss_after_bytes"].as_str(),
         Some("10000")
     );
-    assert!(
-        value["memory"]["process_rss_delta_bytes"].is_number(),
-        "process_rss_delta_bytes (i64) stays as JS number — plan §1.4 scope is u64 only"
+    assert_eq!(
+        value["memory"]["process_rss_delta_bytes"].as_str(),
+        Some("1"),
+        "process_rss_delta_bytes (i64) must serialize as decimal string — \
+         plan §3.B Commit 7.A extends u64-as-string to every i64 field"
     );
 
     // Full round-trip: deserialize to native, compare scalars
@@ -271,6 +274,108 @@ fn audit_ts_bindings_are_in_sync_actually_regenerates_and_diffs() {
     assert!(
         rendered.contains("deliberately mismatched"),
         "expected marker line to appear in the diff, got: {rendered}"
+    );
+}
+
+#[test]
+fn rust_memory_audit_process_rss_delta_bytes_serializes_as_json_string() {
+    // Plan §3.B Commit 7.A — the only `i64` audit field in the
+    // schema must serialize as a decimal string, including with
+    // negative values. The prior HEAD emitted a JSON number while
+    // the TS contract claimed `bigint`; that runtime-vs-type
+    // mismatch is the bug this test guards against.
+    use verter_session::component_meta_audit::{
+        RustAuditRecord, RustMemoryAudit, RustSolverAudit, RustStoreAudit, RustTimingAudit,
+    };
+
+    for delta in [-42i64, -1, 0, 1, i64::MIN, i64::MAX] {
+        let record = RustAuditRecord {
+            request_id: 1,
+            canonical_id: "/a.vue".into(),
+            timings: RustTimingAudit::default(),
+            solver: RustSolverAudit::default(),
+            store: RustStoreAudit::default(),
+            memory: RustMemoryAudit {
+                process_rss_before_bytes: 0,
+                process_rss_after_bytes: 0,
+                process_rss_delta_bytes: delta,
+                host_cache_before_bytes: 0,
+                host_cache_after_bytes: 0,
+                workspace_before_bytes: 0,
+                workspace_after_bytes: 0,
+            },
+            footprint: None,
+        };
+        let value = serde_json::to_value(&record).expect("serialize");
+        assert!(
+            value["memory"]["process_rss_delta_bytes"].is_string(),
+            "delta={delta}: process_rss_delta_bytes must be a JSON string, got {}",
+            value["memory"]["process_rss_delta_bytes"]
+        );
+        assert_eq!(
+            value["memory"]["process_rss_delta_bytes"].as_str(),
+            Some(delta.to_string().as_str()),
+            "delta={delta}: serialized string must match decimal repr"
+        );
+        // Round-trip.
+        let back: RustAuditRecord = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.memory.process_rss_delta_bytes, delta);
+    }
+}
+
+#[test]
+fn audit_generated_ts_uses_string_for_every_i64_field() {
+    // Grep-based regression guard for the i64 extension of the
+    // stringified-transport rule. Plan §3.B Commit 7.A enumerated
+    // the audit `i64` field set at exactly one entry:
+    // `RustMemoryAudit::process_rss_delta_bytes`. If a future
+    // commit adds another `i64` audit field, it must land in this
+    // list and in `crate::i64_as_decimal_string` annotations
+    // simultaneously.
+    let root = workspace_root();
+    let path = root.join("packages/types/audit.generated.ts");
+    let contents = fs::read_to_string(&path).unwrap();
+
+    let i64_fields: &[(&str, &str)] = &[("process_rss_delta_bytes", "RustMemoryAudit")];
+
+    for (name, location) in i64_fields {
+        let bigint_pat = format!("{name}: bigint");
+        let number_pat = format!("{name}: number");
+        let string_pat = format!("{name}: string");
+        assert!(
+            !contents.contains(&bigint_pat),
+            "`{name}` (location: {location}) still types as `bigint` — plan §3.B Commit 7.A \
+             requires `string` via `#[serde(with = \"crate::i64_as_decimal_string\")] \
+             #[ts(type = \"string\")]`"
+        );
+        assert!(
+            !contents.contains(&number_pat),
+            "`{name}` (location: {location}) still types as `number` — plan §3.B Commit 7.A \
+             requires `string` via `#[serde(with = \"crate::i64_as_decimal_string\")] \
+             #[ts(type = \"string\")]`"
+        );
+        assert!(
+            contents.contains(&string_pat),
+            "expected `{name}: string` to appear in audit.generated.ts (location: {location})"
+        );
+    }
+}
+
+#[test]
+fn audit_generated_ts_has_zero_bigint_occurrences() {
+    // Plan §3.B Commit 7.A exit criterion 7b: after the i64
+    // extension, `bigint` must never appear in audit.generated.ts.
+    // Every integer field > 32 bits is transported as a decimal
+    // string; every integer field ≤ 32 bits is a JS number.
+    let root = workspace_root();
+    let path = root.join("packages/types/audit.generated.ts");
+    let contents = fs::read_to_string(&path).unwrap();
+    let count = contents.matches("bigint").count();
+    assert_eq!(
+        count, 0,
+        "audit.generated.ts must contain zero `bigint` occurrences; found {count}. \
+         Every `u64`/`i64` audit field must use the decimal-string transport. \
+         Plan §3.B Commit 7.A."
     );
 }
 
