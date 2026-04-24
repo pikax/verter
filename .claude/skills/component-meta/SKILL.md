@@ -5,6 +5,25 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 
 # Component Meta
 
+## Audit & footprint (plan F1–F10)
+
+Per-request semantic footprint observability lives in
+`verter_session::component_meta_audit`. Opt-in via
+`HostConfig::audit_enabled + footprint_capture`. `RustAuditRecord`
+captures timings, solver/store/memory counters, and a deterministic
+derivation subgraph. `RustSemanticFootprintAudit::loaded_files()`
+is the exact-read answer (plan §1.4); `declared_dependency_files()`
+is the broader dependency-closure answer (plan §3.B Commit 7.B).
+NAPI + WASM + LSP consumers route through the shared Rust walker
+(`why_loaded` / `why_instantiated`) — TS helpers only render JSON.
+Benchmark correctness is validated by
+`packages/benchmark/src/audit-validator.ts` against
+`packages/benchmark/audit-specs/component-meta/*.json`; the legacy
+regex validator + trace-specs are retired.
+
+For full architecture, API reference, and debug workflows see
+[`docs/audit-footprint/`](../../docs/audit-footprint/).
+
 ## Final-Result Cache (post-rewrite)
 
 `get_component_meta(owner)` consults `ProjectTypeStore::component_meta_results()` before running the resolver. The cache is typed `ComponentMetaResultDb<ComponentMetaAnalysis>` and keyed by `(owner_canonical, owner_whole_hash, ComponentMetaQueryKind, options_fingerprint)`.

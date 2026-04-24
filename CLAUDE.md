@@ -228,6 +228,14 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
+**Component-meta audit** (plan §3 / F1–F10): Rust-first semantic
+footprint observability with deterministic per-request capture.
+Types live in `verter_session::component_meta_audit`; TS bindings
+in `packages/types/audit.generated.ts`. Opt-in via
+`HostConfig::audit_enabled + footprint_capture`. See
+[`docs/audit-footprint/`](docs/audit-footprint/) for API reference
+and the debug flow.
+
 ### VS Code Extension Testing (MANDATORY)
 
 Changes to the VS Code extension or the LSP server MUST be verified with automated tests, NOT manual testing. Unit tests (Vitest) for pure logic, E2E tests (Mocha) for LSP integration features.
