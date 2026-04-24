@@ -120,6 +120,37 @@ fn concurrent_audits_on_same_host_each_see_their_own_record() {
 }
 
 #[test]
+fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
+    // Plan §3 Commit 4 wire-up: when `footprint_capture` is enabled,
+    // the request path mines the per-request accumulator and attaches a
+    // `RustSemanticFootprintAudit` to the record. Without the
+    // `mine_footprint` call inserted in `meta_resolve.rs`, the
+    // `record.footprint` field would always be `None`.
+    let host = setup_host();
+    let (_, _resolution, record) = AuditedRequest::builder()
+        .attach_to(Arc::clone(&host))
+        .resolve("/x.vue")
+        .expect("audited resolve should succeed");
+
+    let footprint = record
+        .footprint
+        .as_ref()
+        .expect("footprint_capture=true must populate record.footprint");
+    // Cache counters are populated from the request's own atomics
+    // (plan §1.4 — kills `is_approximate`). We exercise the read path
+    // here; exact counts depend on resolver call shape and are pinned
+    // by the Commit 7 corpus snapshots.
+    let _ = footprint.cache_outcomes.cold_builds
+        + footprint.cache_outcomes.warm_hits
+        + footprint.cache_outcomes.joined_waits
+        + footprint.cache_outcomes.sentinels;
+    // The mined subgraph + indexed_ready_builds vectors must be
+    // present (even if empty for this trivial fixture).
+    let _ = footprint.derivation_subgraph.nodes.len();
+    let _ = footprint.indexed_ready_builds.len();
+}
+
+#[test]
 fn direct_resolve_without_audit_context_still_publishes_via_static_counter() {
     // Without AuditedRequest wrapping, the outer request_id counter is
     // not installed; audit must still publish via the legacy static

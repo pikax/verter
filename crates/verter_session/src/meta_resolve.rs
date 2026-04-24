@@ -5249,6 +5249,26 @@ impl VerterHost {
                     audit_builder.record_solver(compute_audit.solver.clone());
                 }
             }
+            // Mine the semantic footprint when the active request is
+            // capturing. Plan §3 Commit 4: drains the per-request
+            // accumulator and feeds the result through the deterministic
+            // miner before the builder finalises. Without this step,
+            // `RustAuditRecord.footprint` would always be `None` even
+            // for footprint-enabled requests.
+            if let Some(ctx) = crate::request_context::current_request_context() {
+                if ctx.footprint_capture {
+                    if let Some(acc) = ctx.audit_accumulator.as_ref() {
+                        let state = acc.drain();
+                        let footprint = crate::component_meta_audit::mine_footprint(
+                            self.project_type_store().semantic_graph(),
+                            state,
+                            &ctx,
+                            self.config.max_derivation_edges,
+                        );
+                        audit_builder.record_footprint(footprint);
+                    }
+                }
+            }
             let record = audit_builder.finish();
             crate::component_meta_audit::emit_audit_trace(&record);
             // Publish into the host's bounded audit-record store so
