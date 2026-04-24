@@ -11,6 +11,11 @@ export type CacheOutcomeKind = "Hit" | "Miss" | "JoinedWait" | "Sentinel" | "Col
  */
 export type CacheOutcomeTally = { cold_builds: number, warm_hits: number, joined_waits: number, sentinels: number, inflight_aborted_retries: number, cold_aborts_swept: number, };
 
+/**
+ * Why the walker stopped.
+ */
+export type ChainTermination = "Complete" | { "DepthExceeded": { cap: number, } } | { "Cycle": { at_edge: EdgeId, } } | "NotFound";
+
 export type ConditionalBranch = "True" | "False" | "Deferred";
 
 export type ConditionalRecord = { result: NodeId, branch: ConditionalBranch, };
@@ -81,6 +86,46 @@ export type OriginEdgeMetaDto = { "Instantiate": { type_params: Array<string>, }
 export type ProjectPathSegment = { "Member": { name: string, } } | { "Index": { key: string, } } | "KeyOf";
 
 export type ProjectionRecord = { result: NodeId, base: NodeId, path: Array<ProjectPathSegment>, };
+
+/**
+ * Provenance chain returned by [`RustAuditRecord::why_loaded`] /
+ * [`RustAuditRecord::why_instantiated`]. Always carries a
+ * [`ChainTermination`] so renderers can distinguish a complete walk
+ * from a depth-capped, cycle-terminated, or shared-load-redirected
+ * one.
+ */
+export type ProvenanceChain = { 
+/**
+ * In-audit `NodeId` the walk started from. `None` when the walker
+ * could not locate any matching root in the audit record.
+ */
+root: NodeId | null, 
+/**
+ * Steps in BFS order. Each step is one derivation edge whose
+ * `result` is the current frontier node; `depth` records the hop
+ * count from the root.
+ */
+steps: Array<ProvenanceStep>, 
+/**
+ * Why the walk stopped. `Complete` means the frontier exhausted
+ * without hitting any structural termination.
+ */
+terminated: ChainTermination, 
+/**
+ * Shared-load reuses observed for the queried canonical (only
+ * populated by `why_loaded`). Renderers display these as terminal
+ * branches per plan §2.7.
+ */
+shared_load_terminals: Array<SharedLoadReuseRecord>, };
+
+/**
+ * One step on a [`ProvenanceChain`].
+ */
+export type ProvenanceStep = { edge_id: EdgeId, depth: number, 
+/**
+ * `display_label` of the edge's result node.
+ */
+node_label: string, edge: DerivationEdgeRecord, };
 
 export type RequestPhaseAudit = { imported_root_proof_ms: number, };
 

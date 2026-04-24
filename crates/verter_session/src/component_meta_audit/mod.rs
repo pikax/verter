@@ -24,11 +24,16 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 pub mod accumulator;
+pub mod assertions;
 pub mod audit_records_store;
 pub mod footprint_miner;
 pub mod structured_event;
 
 pub use accumulator::{AccumulatorState, DerivationEdgeRaw, RequestFootprintAccumulator};
+pub use assertions::{
+    render_chain_text, AssertionDiff, ChainTermination, ProvenanceChain, ProvenanceStep,
+    WALKER_DEPTH_CAP,
+};
 pub use audit_records_store::{AuditRecordsStore, AUDIT_RECORDS_STORE_CAPACITY};
 pub use footprint_miner::mine_footprint;
 pub use structured_event::StructuredComponentMetaEvent;
