@@ -123,6 +123,11 @@ describe("parseStdoutFields", () => {
 // ---------------------------------------------------------------------------
 
 describe("runComponentInIsolation", () => {
+  // 15s vitest timeout on the happy path — the default 5s is tight
+  // on Windows when the suite runs in parallel (`pnpm -r --parallel
+  // run test` saturates the CPU during the spawn). The other
+  // spawn-based tests in this file already use 15s; matching them
+  // removes the flake without weakening any assertion.
   it("returns ok result for a child that exits cleanly", async () => {
     const tmpDir = mkdtempSync(resolve(tmpdir(), "verter-corpus-runner-"));
     const childScript = resolve(tmpDir, "child-ok.mjs");
@@ -152,7 +157,7 @@ describe("runComponentInIsolation", () => {
     expect(result.exit_code).toBe(0);
     expect(result.signal).toBeNull();
     expect(result.wall_ms).toBeGreaterThanOrEqual(0);
-  });
+  }, 15_000);
 
   it("returns query_timeout for a child that hangs and is killed by the parent", async () => {
     const tmpDir = mkdtempSync(resolve(tmpdir(), "verter-corpus-runner-"));
@@ -176,7 +181,14 @@ describe("runComponentInIsolation", () => {
     expect(result.wall_ms).toBeGreaterThanOrEqual(200);
     expect(result.saw_done_line).toBe(false);
     expect(result.exit_code).toBeNull();
-    expect(result.wall_ms).toBeLessThan(2_000);
+    // Upper bound is an "approximate promptness" guard, not a
+    // deterministic SLA. On Windows under `pnpm -r --parallel run
+    // test` saturation, child-process teardown can take ~2.5s+
+    // (the old 2s ceiling flaked). 5s is a generous envelope that
+    // still catches a regression where the parent-kill path is
+    // broken entirely (e.g. the busy-wait survives until the test
+    // harness times out).
+    expect(result.wall_ms).toBeLessThan(5_000);
   }, 15_000);
 
   it("returns crash for a child that exits with nonzero code", async () => {

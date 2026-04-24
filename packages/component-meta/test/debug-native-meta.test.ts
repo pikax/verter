@@ -5,10 +5,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, it, expect } from "vitest";
-import {
-  parseMetaUiBenchArgs,
-  prepareMetaUiProject,
-} from "../../benchmark/src/meta-ui-bench.ts";
+import { parseMetaUiBenchArgs, prepareMetaUiProject } from "../../benchmark/src/meta-ui-bench.ts";
 import { createCheckerByJson } from "../src/compat/checker.js";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
@@ -68,93 +65,116 @@ describe("debug: native meta output for Alert.vue", () => {
     checker.close();
   });
 
-  it("dump Alert.vue native meta for color, avatar, variant, orientation", async () => {
-    const alertPath = resolve(uiRoot, "src/runtime/components/Alert.vue");
+  // 30s timeout on this diagnostic test — creating a full
+  // nuxt-ui checker + loading Alert.vue takes longer than the
+  // default 5s when `pnpm -r --parallel run test` saturates CPU.
+  // The test is marked "DELETE after debugging" at the top of the
+  // file; bumping the timeout is a minimal flake-fix until that
+  // deletion lands.
+  it(
+    "dump Alert.vue native meta for color, avatar, variant, orientation",
+    { timeout: 30_000 },
+    async () => {
+      const alertPath = resolve(uiRoot, "src/runtime/components/Alert.vue");
 
-    // Access the internal session to get raw native meta
-    const session = (checker as any)._session;
-    expect(session).toBeDefined();
+      // Access the internal session to get raw native meta
+      const session = (checker as any)._session;
+      expect(session).toBeDefined();
 
-    const getDeclaredComponentMeta = session.getDeclaredComponentMeta ?? session.getResolvedComponentMeta ?? session.getComponentMeta;
-    const nativeMeta = getDeclaredComponentMeta.call(session, alertPath);
-    expect(nativeMeta).toBeDefined();
+      const getDeclaredComponentMeta =
+        session.getDeclaredComponentMeta ??
+        session.getResolvedComponentMeta ??
+        session.getComponentMeta;
+      const nativeMeta = getDeclaredComponentMeta.call(session, alertPath);
+      expect(nativeMeta).toBeDefined();
 
-    const targetProps = ["color", "avatar", "variant", "orientation", "actions"];
-    for (const propName of targetProps) {
-      const prop = nativeMeta.props.find((p: any) => p.name === propName);
-      if (prop) {
-        console.log(`\n=== NATIVE PROP: ${propName} ===`);
-        console.log("rawType:", prop.rawType);
-        console.log("type:", JSON.stringify(prop.type, null, 2).substring(0, 500));
-        console.log("description:", prop.description);
-        console.log("tags:", JSON.stringify(prop.tags));
-        if (prop.typeExpansion) {
-          console.log("expansion:", JSON.stringify(prop.typeExpansion));
-        }
-      } else {
-        console.log(`\n=== NATIVE PROP: ${propName} === NOT FOUND`);
-      }
-    }
-
-    // Also check type registry
-    if (nativeMeta.typeRegistry?.length > 0) {
-      console.log(`\n=== TYPE REGISTRY: ${nativeMeta.typeRegistry.length} entries ===`);
-      for (const entry of nativeMeta.typeRegistry.slice(0, 10)) {
-        console.log(`  ${entry.name}: ${JSON.stringify(entry.type).substring(0, 200)}`);
-      }
-    }
-
-    // Check resolution macros
-    if (nativeMeta.resolution?.macros?.length > 0) {
-      console.log(`\n=== RESOLUTION MACROS: ${nativeMeta.resolution.macros.length} ===`);
-      for (const macro of nativeMeta.resolution.macros) {
-        console.log(`  macro: ${macro.declaration?.canonicalSource ?? "unknown"}`);
-        console.log(`  props: ${macro.props?.length ?? 0}, nativeProps: ${macro.nativeProps?.length ?? 0}`);
-        const colorNative = macro.nativeProps?.find((p: any) => p.name === "color");
-        if (colorNative) {
-          console.log(`  color nativeProp:`, JSON.stringify(colorNative).substring(0, 500));
+      const targetProps = ["color", "avatar", "variant", "orientation", "actions"];
+      for (const propName of targetProps) {
+        const prop = nativeMeta.props.find((p: any) => p.name === propName);
+        if (prop) {
+          console.log(`\n=== NATIVE PROP: ${propName} ===`);
+          console.log("rawType:", prop.rawType);
+          console.log("type:", JSON.stringify(prop.type, null, 2).substring(0, 500));
+          console.log("description:", prop.description);
+          console.log("tags:", JSON.stringify(prop.tags));
+          if (prop.typeExpansion) {
+            console.log("expansion:", JSON.stringify(prop.typeExpansion));
+          }
+        } else {
+          console.log(`\n=== NATIVE PROP: ${propName} === NOT FOUND`);
         }
       }
-    }
 
-    const lines: string[] = [];
-    for (const propName of targetProps) {
-      const prop = nativeMeta.props.find((p: any) => p.name === propName);
-      if (prop) {
-        lines.push(`\n=== NATIVE PROP: ${propName} ===`);
-        lines.push(`rawType: ${prop.rawType}`);
-        lines.push(`type: ${JSON.stringify(prop.type, null, 2).substring(0, 800)}`);
-        lines.push(`description: ${prop.description}`);
-        lines.push(`tags: ${JSON.stringify(prop.tags)}`);
-        if (prop.typeExpansion) {
-          lines.push(`expansion: ${JSON.stringify(prop.typeExpansion)}`);
+      // Also check type registry
+      if (nativeMeta.typeRegistry?.length > 0) {
+        console.log(`\n=== TYPE REGISTRY: ${nativeMeta.typeRegistry.length} entries ===`);
+        for (const entry of nativeMeta.typeRegistry.slice(0, 10)) {
+          console.log(`  ${entry.name}: ${JSON.stringify(entry.type).substring(0, 200)}`);
         }
-      } else {
-        lines.push(`\n=== NATIVE PROP: ${propName} === NOT FOUND`);
       }
-    }
-    if (nativeMeta.typeRegistry?.length > 0) {
-      lines.push(`\n=== TYPE REGISTRY: ${nativeMeta.typeRegistry.length} entries ===`);
-      for (const entry of nativeMeta.typeRegistry) {
-        const full = JSON.stringify(entry.type);
-        lines.push(`  ${entry.name} (${full.length} chars): ${full.substring(0, 2000)}`);
+
+      // Check resolution macros
+      if (nativeMeta.resolution?.macros?.length > 0) {
+        console.log(`\n=== RESOLUTION MACROS: ${nativeMeta.resolution.macros.length} ===`);
+        for (const macro of nativeMeta.resolution.macros) {
+          console.log(`  macro: ${macro.declaration?.canonicalSource ?? "unknown"}`);
+          console.log(
+            `  props: ${macro.props?.length ?? 0}, nativeProps: ${macro.nativeProps?.length ?? 0}`,
+          );
+          const colorNative = macro.nativeProps?.find((p: any) => p.name === "color");
+          if (colorNative) {
+            console.log(`  color nativeProp:`, JSON.stringify(colorNative).substring(0, 500));
+          }
+        }
       }
-    }
-    if (nativeMeta.resolution?.macros?.length > 0) {
-      lines.push(`\n=== RESOLUTION MACROS: ${nativeMeta.resolution.macros.length} ===`);
-      for (const macro of nativeMeta.resolution.macros) {
-        lines.push(`  macro: ${macro.declaration?.canonicalSource ?? "unknown"}`);
-        lines.push(`  props: ${macro.props?.length ?? 0}, nativeProps: ${macro.nativeProps?.length ?? 0}`);
+
+      const lines: string[] = [];
+      for (const propName of targetProps) {
+        const prop = nativeMeta.props.find((p: any) => p.name === propName);
+        if (prop) {
+          lines.push(`\n=== NATIVE PROP: ${propName} ===`);
+          lines.push(`rawType: ${prop.rawType}`);
+          lines.push(`type: ${JSON.stringify(prop.type, null, 2).substring(0, 800)}`);
+          lines.push(`description: ${prop.description}`);
+          lines.push(`tags: ${JSON.stringify(prop.tags)}`);
+          if (prop.typeExpansion) {
+            lines.push(`expansion: ${JSON.stringify(prop.typeExpansion)}`);
+          }
+        } else {
+          lines.push(`\n=== NATIVE PROP: ${propName} === NOT FOUND`);
+        }
       }
-    }
-    writeFileSync(resolve(process.env.TEMP ?? "D:/tmp", "debug-alert-native.txt"), lines.join("\n"));
-    expect(true).toBe(true);
-  });
+      if (nativeMeta.typeRegistry?.length > 0) {
+        lines.push(`\n=== TYPE REGISTRY: ${nativeMeta.typeRegistry.length} entries ===`);
+        for (const entry of nativeMeta.typeRegistry) {
+          const full = JSON.stringify(entry.type);
+          lines.push(`  ${entry.name} (${full.length} chars): ${full.substring(0, 2000)}`);
+        }
+      }
+      if (nativeMeta.resolution?.macros?.length > 0) {
+        lines.push(`\n=== RESOLUTION MACROS: ${nativeMeta.resolution.macros.length} ===`);
+        for (const macro of nativeMeta.resolution.macros) {
+          lines.push(`  macro: ${macro.declaration?.canonicalSource ?? "unknown"}`);
+          lines.push(
+            `  props: ${macro.props?.length ?? 0}, nativeProps: ${macro.nativeProps?.length ?? 0}`,
+          );
+        }
+      }
+      writeFileSync(
+        resolve(process.env.TEMP ?? "D:/tmp", "debug-alert-native.txt"),
+        lines.join("\n"),
+      );
+      expect(true).toBe(true);
+    },
+  );
 
   it("dump Tooltip.vue native meta for description-missing props", async () => {
     const tooltipPath = resolve(uiRoot, "src/runtime/components/Tooltip.vue");
     const session = (checker as any)._session;
-    const getDeclaredComponentMeta = session.getDeclaredComponentMeta ?? session.getResolvedComponentMeta ?? session.getComponentMeta;
+    const getDeclaredComponentMeta =
+      session.getDeclaredComponentMeta ??
+      session.getResolvedComponentMeta ??
+      session.getComponentMeta;
     const nativeMeta = getDeclaredComponentMeta.call(session, tooltipPath);
     expect(nativeMeta).toBeDefined();
 
@@ -206,14 +226,20 @@ describe("debug: native meta output for Alert.vue", () => {
         }
       }
     }
-    writeFileSync(resolve(process.env.TEMP ?? "D:/tmp", "debug-tooltip-native.txt"), lines.join("\n"));
+    writeFileSync(
+      resolve(process.env.TEMP ?? "D:/tmp", "debug-tooltip-native.txt"),
+      lines.join("\n"),
+    );
     expect(true).toBe(true);
   });
 
   it("dump App.vue native meta for missing props (dir, nonce, scrollBody)", async () => {
     const appPath = resolve(uiRoot, "src/runtime/components/App.vue");
     const session = (checker as any)._session;
-    const getDeclaredComponentMeta = session.getDeclaredComponentMeta ?? session.getResolvedComponentMeta ?? session.getComponentMeta;
+    const getDeclaredComponentMeta =
+      session.getDeclaredComponentMeta ??
+      session.getResolvedComponentMeta ??
+      session.getComponentMeta;
     const nativeMeta = getDeclaredComponentMeta.call(session, appPath);
     expect(nativeMeta).toBeDefined();
 
