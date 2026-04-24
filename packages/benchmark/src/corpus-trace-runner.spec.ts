@@ -255,4 +255,94 @@ describe("runComponentInIsolation", () => {
     expect(existsSync(result.result_path)).toBe(true);
     expect(JSON.parse(readFileSync(result.result_path, "utf8"))).toEqual({ ok: true });
   });
+
+  it("corpus_trace_runner_emits_audit_and_analysis_json_reads_audit_only", async () => {
+    // Plan §3 Commit 10 test list. The rewritten runner passes
+    // `VERTER_COMPONENT_META_AUDIT_PATH` and
+    // `VERTER_COMPONENT_META_ANALYSIS_PATH` to the child (consumed by
+    // `_audit-component.ts`) and reports the emitted-file state on
+    // the returned result. The analyzer invoked downstream is
+    // `audit-validator.ts` — not the deleted `trace-validator.ts` —
+    // enforced via grep over the runner source.
+    //
+    // Discriminating: a regression that drops the audit path env
+    // wiring surfaces as `audit_emitted === false` below. A
+    // regression that reintroduces the regex validator surfaces as
+    // the grep hit.
+    const tmpDir = mkdtempSync(resolve(tmpdir(), "verter-corpus-runner-"));
+    const childScript = resolve(tmpDir, "child-audit-emit.mjs");
+    writeFileSync(
+      childScript,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "const auditPath = process.env.VERTER_COMPONENT_META_AUDIT_PATH;",
+        "const analysisPath = process.env.VERTER_COMPONENT_META_ANALYSIS_PATH;",
+        'if (!auditPath) throw new Error("missing VERTER_COMPONENT_META_AUDIT_PATH");',
+        'if (!analysisPath) throw new Error("missing VERTER_COMPONENT_META_ANALYSIS_PATH");',
+        // Write a minimal audit record + analysis side-car so the
+        // runner's post-condition (`audit_emitted && analysis_emitted`)
+        // reports both lanes populated.
+        "const auditJson = JSON.stringify({",
+        '  request_id: "1", canonical_id: "/C.vue",',
+        "  timings: {}, solver: {}, store: {}, memory: {}, footprint: null,",
+        "});",
+        'writeFileSync(auditPath, auditJson, "utf8");',
+        'writeFileSync(analysisPath, JSON.stringify({ props: [] }), "utf8");',
+        'console.log("Done in 5ms (0 props) audit=true setup=0ms");',
+        'console.log("Closed");',
+        "process.exit(0);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await runComponentInIsolation({
+      component: "src/runtime/components/C.vue",
+      command: process.execPath,
+      args: [childScript],
+      timeoutMs: 5_000,
+      outputDir: tmpDir,
+    });
+
+    expect(result.status).toBe("ok");
+    // Both emission paths were pre-allocated.
+    expect(result.audit_path).toBeTruthy();
+    expect(result.analysis_path).toBeTruthy();
+    expect(result.audit_path).toMatch(/\.audit\.json$/);
+    expect(result.analysis_path).toMatch(/\.analysis\.json$/);
+    // And both files were actually written by the child.
+    expect(result.audit_emitted).toBe(true);
+    expect(result.analysis_emitted).toBe(true);
+    expect(existsSync(result.audit_path)).toBe(true);
+    expect(existsSync(result.analysis_path)).toBe(true);
+    // The emitted audit payload parses as JSON with the expected
+    // top-level shape a downstream audit-validator consumer will
+    // process.
+    const emittedAudit = JSON.parse(readFileSync(result.audit_path, "utf8"));
+    expect(emittedAudit).toHaveProperty("request_id");
+    expect(emittedAudit).toHaveProperty("canonical_id");
+    const emittedAnalysis = JSON.parse(readFileSync(result.analysis_path, "utf8"));
+    expect(emittedAnalysis).toHaveProperty("props");
+  });
+
+  it("runner source invokes audit-validator, not the deleted trace-validator", async () => {
+    // Plan §3 Commit 10 exit criterion (plan §6 item 11): the
+    // runner's module must not reference the deleted regex
+    // validator. A regression that re-introduces `trace-validator`,
+    // `trace-check`, or `trace-specs/component-meta` trips here.
+    const runnerPath = resolve(import.meta.dirname, "corpus-trace-runner.ts");
+    const source = await import("node:fs/promises").then((fs) => fs.readFile(runnerPath, "utf-8"));
+    for (const forbidden of ["trace-validator", "trace-check", "trace-specs/component-meta"]) {
+      expect(
+        source.includes(forbidden),
+        `corpus-trace-runner.ts must not reference ${forbidden} — plan §3 Commit 10`,
+      ).toBe(false);
+    }
+    // The audit path fields (`audit_path`, `analysis_path`,
+    // `audit_emitted`, `analysis_emitted`) must be present — they're
+    // the runner's audit-flow contract.
+    expect(source).toContain("audit_path:");
+    expect(source).toContain("analysis_path:");
+    expect(source).toContain("audit_emitted:");
+    expect(source).toContain("analysis_emitted:");
+  });
 });

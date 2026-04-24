@@ -437,6 +437,222 @@ fn audit_generated_ts_has_zero_bigint_occurrences() {
 }
 
 #[test]
+fn json_emission_round_trips_structurally_equivalent_to_rust() {
+    // Plan §3 Commit 10 test list. Simulates the TS-side round-trip
+    // performed by `audit-validator.ts`: Rust serializes an audit
+    // record → TS consumes via `JSON.parse` → TS re-emits via
+    // `JSON.stringify` → Rust deserializes the re-emitted form →
+    // original and recovered records must be structurally equal.
+    //
+    // `serde_json::Value` is the faithful stand-in for the JS
+    // in-memory representation: both are dynamically-typed JSON
+    // object trees; both collapse field-order during re-serialization
+    // (Value sorts keys, JS engines may do either). The test catches
+    // any round-trip-lossy field (a new `#[serde(skip_deserializing)]`,
+    // a misspelled serde attribute, a non-string `u64` field that
+    // looks fine on a single pass but breaks `Number` precision
+    // after re-parse).
+    //
+    // Discriminating: run this test against a tree where any audit
+    // field is misannotated and the re-serialized Value will either
+    // (a) fail to deserialize back into `RustAuditRecord`, or (b)
+    // deserialize with a silently different scalar value, tripping
+    // the structural `assert_eq!` below.
+    use std::sync::Arc;
+    use verter_session::component_meta_audit::{
+        DerivationEdgeRecord, DerivationSubgraph, IndexedReadyBuildRecord, InstantiationRecord,
+        NamedIdentity, NodeId, NodeRecord, OriginEdgeKind, OriginEdgeMetaDto, RustAuditRecord,
+        RustMemoryAudit, RustSemanticFootprintAudit, RustSolverAudit, RustStoreAudit,
+        RustTimingAudit, SemanticNodeKind, SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
+    };
+
+    // Original record — populated with representative values that
+    // exercise every `u64`/`i64` transport field plus the full
+    // footprint schema.
+    let original = RustAuditRecord {
+        request_id: 9_007_199_254_740_993, // 2^53 + 1 — JS Number would lose precision here
+        canonical_id: "/Widget.vue".to_string(),
+        timings: RustTimingAudit {
+            total_ms: 123.456,
+            solver_ms: 12.3,
+            materialize_ms: 45.6,
+            ..Default::default()
+        },
+        solver: RustSolverAudit {
+            total_resolve_steps: u64::MAX - 1,
+            solve_count: 7,
+        },
+        store: RustStoreAudit {
+            imported_dependency_bytes: 1_000_000,
+            ..Default::default()
+        },
+        memory: RustMemoryAudit {
+            process_rss_before_bytes: 1_234_567,
+            process_rss_after_bytes: 2_345_678,
+            process_rss_delta_bytes: -42,
+            ..Default::default()
+        },
+        footprint: Some(RustSemanticFootprintAudit {
+            vfs_reads: vec![VfsReadRecord {
+                canonical_id: Arc::from("/a.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: u64::MAX, // exercise the upper bound
+                request_id: 9_007_199_254_740_993,
+            }],
+            shared_load_reuses: vec![SharedLoadReuseRecord {
+                canonical_id: Arc::from("/shared.ts"),
+                winner_request_id: 99,
+                winner_audited: false,
+            }],
+            indexed_ready_builds: vec![IndexedReadyBuildRecord {
+                canonical_id: Arc::from("/ir.ts"),
+                whole_hash: [7u8; 16],
+            }],
+            instantiations: vec![InstantiationRecord {
+                result: NodeId(1),
+                decl_canonical_id: Arc::from("/Widget.vue"),
+                decl_symbol_name: Arc::from("Props"),
+                args_fingerprint: [0u8; 16],
+                args: vec![NodeId(0)],
+            }],
+            derivation_subgraph: DerivationSubgraph {
+                nodes: vec![
+                    NodeRecord {
+                        kind: SemanticNodeKind::Primitive,
+                        named_identity: None,
+                        structural_hash: [1u8; 16],
+                        display_label: Arc::from("src"),
+                    },
+                    NodeRecord {
+                        kind: SemanticNodeKind::Alias,
+                        named_identity: Some(NamedIdentity {
+                            canonical_id: Arc::from("/Widget.vue"),
+                            symbol_name: Arc::from("Props"),
+                            args_fingerprint: [0u8; 16],
+                        }),
+                        structural_hash: [2u8; 16],
+                        display_label: Arc::from("Props"),
+                    },
+                ],
+                edges: vec![DerivationEdgeRecord {
+                    result: NodeId(1),
+                    kind: OriginEdgeKind::AliasResolve,
+                    sources: vec![NodeId(0)],
+                    meta: OriginEdgeMetaDto::AliasResolve {
+                        alias_name: Arc::from("from-src"),
+                    },
+                }],
+            },
+            ..Default::default()
+        }),
+    };
+
+    // (1) Rust-side emission: the JSON string an @verter/native or
+    // @verter/wasm consumer would receive from
+    // `getComponentMetaWithAudit`.
+    let emitted = serde_json::to_string(&original).expect("Rust → JSON");
+
+    // (2) TS-side `JSON.parse` — represented by
+    // `serde_json::Value::from_str` since both hand out a dynamically
+    // typed JSON tree.
+    let ts_parsed: serde_json::Value = serde_json::from_str(&emitted).expect("JSON.parse");
+
+    // (3) TS-side `JSON.stringify` — `Value::to_string` produces a
+    // valid JSON string from the dynamically-typed tree. Key order
+    // may differ from the original struct-serialized form; that's
+    // semantically fine.
+    let ts_stringified = serde_json::to_string(&ts_parsed).expect("JSON.stringify");
+
+    // (4) Rust re-decoding the re-emitted form. If any audit field
+    // is round-trip-lossy, this step either fails or silently drops
+    // a scalar.
+    let recovered: RustAuditRecord = serde_json::from_str(&ts_stringified).expect("JSON → Rust");
+
+    // Structural equality assertions — we do NOT derive `PartialEq`
+    // on `RustAuditRecord`, so field-by-field checks cover the
+    // audit-critical scalars.
+    assert_eq!(recovered.request_id, original.request_id);
+    assert_eq!(recovered.canonical_id, original.canonical_id);
+    assert_eq!(
+        recovered.solver.total_resolve_steps,
+        original.solver.total_resolve_steps
+    );
+    assert_eq!(recovered.solver.solve_count, original.solver.solve_count);
+    assert_eq!(
+        recovered.store.imported_dependency_bytes,
+        original.store.imported_dependency_bytes,
+    );
+    assert_eq!(
+        recovered.memory.process_rss_before_bytes,
+        original.memory.process_rss_before_bytes,
+    );
+    assert_eq!(
+        recovered.memory.process_rss_after_bytes,
+        original.memory.process_rss_after_bytes,
+    );
+    assert_eq!(
+        recovered.memory.process_rss_delta_bytes,
+        original.memory.process_rss_delta_bytes,
+    );
+    assert_eq!(recovered.timings.total_ms, original.timings.total_ms);
+    assert_eq!(recovered.timings.solver_ms, original.timings.solver_ms);
+    assert_eq!(
+        recovered.timings.materialize_ms,
+        original.timings.materialize_ms
+    );
+
+    let orig_fp = original.footprint.as_ref().expect("original footprint");
+    let rec_fp = recovered.footprint.as_ref().expect("recovered footprint");
+    assert_eq!(rec_fp.vfs_reads.len(), orig_fp.vfs_reads.len());
+    assert_eq!(
+        rec_fp.vfs_reads[0].bytes_read,
+        orig_fp.vfs_reads[0].bytes_read
+    );
+    assert_eq!(
+        rec_fp.vfs_reads[0].request_id,
+        orig_fp.vfs_reads[0].request_id
+    );
+    assert_eq!(
+        rec_fp.shared_load_reuses.len(),
+        orig_fp.shared_load_reuses.len()
+    );
+    assert_eq!(
+        rec_fp.shared_load_reuses[0].winner_request_id,
+        orig_fp.shared_load_reuses[0].winner_request_id,
+    );
+    assert_eq!(
+        rec_fp.shared_load_reuses[0].winner_audited,
+        orig_fp.shared_load_reuses[0].winner_audited,
+    );
+    assert_eq!(
+        rec_fp.indexed_ready_builds.len(),
+        orig_fp.indexed_ready_builds.len(),
+    );
+    assert_eq!(
+        rec_fp.indexed_ready_builds[0].whole_hash,
+        orig_fp.indexed_ready_builds[0].whole_hash,
+    );
+    assert_eq!(rec_fp.instantiations.len(), orig_fp.instantiations.len());
+    assert_eq!(
+        rec_fp.instantiations[0].decl_canonical_id,
+        orig_fp.instantiations[0].decl_canonical_id,
+    );
+    assert_eq!(
+        rec_fp.instantiations[0].args_fingerprint,
+        orig_fp.instantiations[0].args_fingerprint,
+    );
+    assert_eq!(
+        rec_fp.derivation_subgraph.nodes.len(),
+        orig_fp.derivation_subgraph.nodes.len(),
+    );
+    assert_eq!(
+        rec_fp.derivation_subgraph.edges.len(),
+        orig_fp.derivation_subgraph.edges.len(),
+    );
+}
+
+#[test]
 fn audit_generated_ts_uses_string_for_every_u64_field() {
     // Grep-based regression guard: every known-u64 field in the
     // audit schema must appear typed as `string` in

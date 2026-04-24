@@ -1,21 +1,32 @@
 /**
- * Repo-owned parent runner for corpus trace sweeps.
+ * Repo-owned parent runner for corpus audit sweeps.
  *
- * Runs each Vue component in an isolated child process with a hard timeout
- * enforced by SIGKILL from the parent. Results are written as structured JSON.
+ * Runs each Vue component in an isolated child process with a hard
+ * timeout enforced by SIGKILL from the parent. Each child emits BOTH
+ * a `RustAuditRecord` JSON (`<sanitized>.audit.json`) and a
+ * `ComponentMetaAnalysis` JSON (`<sanitized>.analysis.json`) via the
+ * NAPI `getComponentMetaWithAudit` binding. Results are written as a
+ * structured JSON summary.
+ *
+ * Plan §3 Commit 10 (F8). Replaces the legacy trace+regex-validator
+ * flow: the emitted audit bundles are the sole correctness authority,
+ * and the per-component analyzer is
+ * [`audit-validator.ts`](../../packages/benchmark/src/audit-validator.ts)
+ * — the legacy `trace-validator.ts`, `trace-check.ts`, and
+ * `trace-specs/component-meta/*.json` files are deleted.
  *
  * Usage:
  *   node scripts/benchmark/trace-component-corpus.mjs \
  *     --ui-root=.integration-tests/repos/nuxt-ui \
- *     --output-dir=tmp/corpus-trace \
+ *     --output-dir=tmp/corpus-audit \
  *     --timeout-ms=30000
  *
- * Each component is run via _trace-component.ts in a child process.
+ * Each component is run via `_audit-component.ts` in a child process.
  * The parent owns the timeout — the child does NOT use Promise.race.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { performance } from "node:perf_hooks";
@@ -35,7 +46,7 @@ const benchmarkRequire = createRequire(
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_UI_ROOT = resolve(repoRoot, ".integration-tests", "repos", "nuxt-ui");
-const DEFAULT_OUTPUT_DIR = resolve(repoRoot, "tmp", "corpus-trace");
+const DEFAULT_OUTPUT_DIR = resolve(repoRoot, "tmp", "corpus-audit");
 
 function parseArgs(argv) {
   const config = {
@@ -43,8 +54,6 @@ function parseArgs(argv) {
     outputDir: DEFAULT_OUTPUT_DIR,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     filter: null,
-    traceEnabled: true,
-    jsAudit: false,
     concurrency: 1,
   };
 
@@ -57,10 +66,6 @@ function parseArgs(argv) {
       config.timeoutMs = Number.parseInt(arg.slice("--timeout-ms=".length), 10);
     } else if (arg.startsWith("--filter=")) {
       config.filter = arg.slice("--filter=".length);
-    } else if (arg === "--js-audit") {
-      config.jsAudit = true;
-    } else if (arg === "--no-trace") {
-      config.traceEnabled = false;
     }
   }
 
@@ -85,7 +90,7 @@ function discoverVueFiles(rootDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Process tree killing (same as run-hard-timeout.mjs)
+// Process tree killing
 // ---------------------------------------------------------------------------
 
 function killWindowsProcessTree(pid) {
@@ -109,7 +114,9 @@ function killProcessTree(pid) {
   } catch {
     try {
       process.kill(pid, "SIGKILL");
-    } catch {}
+    } catch {
+      // Process already gone.
+    }
   }
 }
 
@@ -128,7 +135,7 @@ function parseStdoutFields(stdout) {
   };
 }
 
-function classifyExitStatus({ exitCode, signal, timedOut, sawDoneLine, sawClosedLine }) {
+function classifyExitStatus({ exitCode, signal, timedOut, sawDoneLine }) {
   if (timedOut) {
     return sawDoneLine ? "close_timeout" : "query_timeout";
   }
@@ -138,111 +145,45 @@ function classifyExitStatus({ exitCode, signal, timedOut, sawDoneLine, sawClosed
 }
 
 // ---------------------------------------------------------------------------
-// Parse trace log timings
-// ---------------------------------------------------------------------------
-
-const TRACE_END_LINE_RE =
-  /event=end\s+trace=\d+\s+span=\d+\s+parent=([^\s]+).*name="([^"]+)".*dur_ms=([0-9.]+)/;
-
-export function parseTraceTimingsFromContent(content) {
-  let traceResolveMs = null;
-  let traceComputeMs = null;
-  let traceMaterializeMs = null;
-  let traceQueryMs = 0;
-  let sawRootSpan = false;
-
-  for (const line of content.split(/\r?\n/)) {
-    const match = line.match(TRACE_END_LINE_RE);
-    if (!match) {
-      continue;
-    }
-    const [, parent, name, durMsRaw] = match;
-    const durMs = Number.parseFloat(durMsRaw);
-    if (!Number.isFinite(durMs) || parent !== "-") {
-      continue;
-    }
-
-    sawRootSpan = true;
-    traceQueryMs += durMs;
-    if (name === "resolve_component_meta" && traceResolveMs === null) {
-      traceResolveMs = durMs;
-    }
-    if (name === "compute_component_meta_state" && traceComputeMs === null) {
-      traceComputeMs = durMs;
-    }
-    if (name === "rematerialize_public_component_meta_types" && traceMaterializeMs === null) {
-      traceMaterializeMs = durMs;
-    }
-  }
-
-  return {
-    traceResolveMs,
-    traceComputeMs,
-    traceMaterializeMs,
-    traceQueryMs: sawRootSpan ? traceQueryMs : null,
-  };
-}
-
-export function parseTraceTimings(tracePath) {
-  if (!existsSync(tracePath)) {
-    return {
-      traceResolveMs: null,
-      traceComputeMs: null,
-      traceMaterializeMs: null,
-      traceQueryMs: null,
-    };
-  }
-  try {
-    return parseTraceTimingsFromContent(readFileSync(tracePath, "utf8"));
-  } catch {
-    return {
-      traceResolveMs: null,
-      traceComputeMs: null,
-      traceMaterializeMs: null,
-      traceQueryMs: null,
-    };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Run one component in isolation
+// Per-component filename sanitization
 // ---------------------------------------------------------------------------
 
 function sanitizePathComponent(component) {
   return component.replace(/[/\\]/g, "__").replace(/\.vue$/, "__vue");
 }
 
+// ---------------------------------------------------------------------------
+// Run one component in isolation
+// ---------------------------------------------------------------------------
+
 async function runComponent(componentRelPath, componentToken, config) {
   const sanitized = sanitizePathComponent(componentRelPath);
   const stdoutPath = resolve(config.outputDir, "stdout", `${sanitized}.stdout.txt`);
   const stderrPath = resolve(config.outputDir, "stderr", `${sanitized}.stderr.txt`);
-  const tracePath = resolve(config.outputDir, "traces", `${sanitized}.trace.log`);
+  const auditPath = resolve(config.outputDir, "audit", `${sanitized}.audit.json`);
+  const analysisPath = resolve(config.outputDir, "analysis", `${sanitized}.analysis.json`);
   const resultPath = resolve(config.outputDir, "results", `${componentRelPath}.json`);
 
   mkdirSync(dirname(stdoutPath), { recursive: true });
   mkdirSync(dirname(stderrPath), { recursive: true });
-  mkdirSync(dirname(tracePath), { recursive: true });
+  mkdirSync(dirname(auditPath), { recursive: true });
+  mkdirSync(dirname(analysisPath), { recursive: true });
   mkdirSync(dirname(resultPath), { recursive: true });
 
-  const traceComponentPath = resolve(
-    repoRoot,
-    "packages",
-    "benchmark",
-    "src",
-    "_trace-component.ts",
-  );
+  // Plan §3 Commit 10: audit-only worker. The legacy
+  // `_trace-component.ts` worker used the compat checker (no audit
+  // data) — the new `_audit-component.ts` worker drives the NAPI
+  // `getComponentMetaWithAudit` binding directly.
+  const auditWorkerPath = resolve(repoRoot, "packages", "benchmark", "src", "_audit-component.ts");
   const tsxLoaderPath = pathToFileURL(benchmarkRequire.resolve("tsx")).href;
 
   const env = {
     ...process.env,
     FORCE_COLOR: "0",
-    ...(config.jsAudit ? { VERTER_JS_AUDIT: "1" } : {}),
+    VERTER_COMPONENT_META_AUDIT_PATH: auditPath,
+    VERTER_COMPONENT_META_ANALYSIS_PATH: analysisPath,
+    VERTER_COMPONENT_META_RESULT_PATH: resultPath,
   };
-  if (config.traceEnabled) {
-    env.VERTER_COMPONENT_META_TRACE = "1";
-    env.VERTER_COMPONENT_META_TRACE_PATH = tracePath;
-  }
-  env.VERTER_COMPONENT_META_RESULT_PATH = resultPath;
 
   const stdoutStream = createWriteStream(stdoutPath);
   const stderrStream = createWriteStream(stderrPath);
@@ -252,7 +193,7 @@ async function runComponent(componentRelPath, componentToken, config) {
 
   const child = spawn(
     process.execPath,
-    ["--expose-gc", "--import", tsxLoaderPath, traceComponentPath, componentToken],
+    ["--expose-gc", "--import", tsxLoaderPath, auditWorkerPath, componentToken],
     {
       cwd: repoRoot,
       shell: false,
@@ -325,28 +266,95 @@ async function runComponent(componentRelPath, componentToken, config) {
     sawClosedLine: stdoutFields.sawClosedLine,
   });
 
-  const { traceResolveMs, traceComputeMs, traceMaterializeMs, traceQueryMs } =
-    parseTraceTimings(tracePath);
-
   return {
     component: componentRelPath,
     status,
     wall_ms: Math.round(wallMs),
     query_ms_from_stdout: stdoutFields.queryMsFromStdout,
-    trace_resolve_ms: traceResolveMs,
-    trace_compute_ms: traceComputeMs,
-    trace_materialize_ms: traceMaterializeMs,
-    trace_query_ms: traceQueryMs,
     exit_code: exitCode,
     signal,
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
-    trace_path: tracePath,
+    audit_path: auditPath,
+    analysis_path: analysisPath,
     result_path: resultPath,
+    audit_emitted: existsSync(auditPath),
+    analysis_emitted: existsSync(analysisPath),
     saw_done_line: stdoutFields.sawDoneLine,
     saw_closed_line: stdoutFields.sawClosedLine,
-    js_audit_path: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Audit validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Invoke the TS-side `audit-validator.ts` on each emitted audit +
+ * analysis pair. Plan §3 Commit 10 — the audit-validator is the sole
+ * correctness authority after the regex validator's deletion.
+ *
+ * The validator is loaded via `tsx` from the benchmark package; specs
+ * live under `packages/benchmark/audit-specs/component-meta/` (a
+ * curated subset matching the Commit 7 authored correctness
+ * fixtures). Components without a matching spec are skipped.
+ */
+async function validateEmissions(results, config) {
+  const specDir = resolve(repoRoot, "packages", "benchmark", "audit-specs", "component-meta");
+  if (!existsSync(specDir)) {
+    console.error(`No audit-specs directory at ${specDir}; skipping validation.`);
+    return [];
+  }
+
+  const specFiles = new Set(
+    readdirSync(specDir)
+      .filter((n) => n.endsWith(".json"))
+      .map((n) => n.replace(/\.json$/, "")),
+  );
+
+  // Load the TS validator via tsx-backed dynamic import. This keeps
+  // the TS module compilation consistent with the worker side — the
+  // .mjs never bypasses the repo's TS configuration.
+  const validatorUrl = pathToFileURL(
+    resolve(repoRoot, "packages", "benchmark", "src", "audit-validator.ts"),
+  ).href;
+  /** @type {typeof import("../../packages/benchmark/src/audit-validator.js")} */
+  // eslint-disable-next-line no-unused-vars
+  let validatorModule;
+  try {
+    validatorModule = await import(validatorUrl);
+  } catch (err) {
+    console.error(`FATAL: failed to load audit-validator.ts: ${err}`);
+    return [];
+  }
+  const { validateAuditBundle } = validatorModule;
+
+  const outputs = [];
+  for (const r of results) {
+    if (!r.audit_emitted || !r.analysis_emitted) continue;
+    const baseName = r.component.replace(/^.*\//, "").replace(/\.vue$/, "");
+    if (!specFiles.has(baseName)) continue;
+    const specPath = resolve(specDir, `${baseName}.json`);
+    const spec = JSON.parse(readFileSync(specPath, "utf-8"));
+    const bundle = {
+      analysis: JSON.parse(readFileSync(r.analysis_path, "utf-8")),
+      resolution: null,
+      record: JSON.parse(readFileSync(r.audit_path, "utf-8")),
+    };
+    const validation = validateAuditBundle(bundle, spec);
+    outputs.push({
+      component: r.component,
+      spec: baseName,
+      passed: validation.passed,
+      violations: validation.violations,
+    });
+    if (!validation.passed) {
+      console.error(`  [audit-validator] ${r.component} FAILED:`);
+      for (const v of validation.violations) console.error(`    - ${v}`);
+    }
+  }
+  void config;
+  return outputs;
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +380,7 @@ export async function main() {
   console.error(`Discovered ${vueFiles.length} Vue components`);
   console.error(`Timeout: ${config.timeoutMs}ms per component`);
   console.error(`Output: ${config.outputDir}`);
-  console.error(`Trace: ${config.traceEnabled ? "enabled" : "disabled"}`);
+  console.error("Mode: audit-only (plan §3 Commit 10)");
 
   mkdirSync(config.outputDir, { recursive: true });
 
@@ -391,7 +399,7 @@ export async function main() {
     if (result.status === "ok") {
       okCount++;
       console.error(
-        `    ${result.status} (${result.wall_ms}ms wall, ${result.query_ms_from_stdout ?? "?"}ms query)`,
+        `    ${result.status} (${result.wall_ms}ms wall, ${result.query_ms_from_stdout ?? "?"}ms query, audit=${result.audit_emitted})`,
       );
     } else {
       failCount++;
@@ -401,32 +409,43 @@ export async function main() {
     }
   }
 
-  // Write structured summary
+  // Run audit-validator over the emissions.
+  const validations = await validateEmissions(results, config);
+  const validationFailures = validations.filter((v) => !v.passed).length;
+
   const summary = {
     generated_at: Date.now(),
+    plan_reference: "§3 Commit 10 (F8) — audit-only corpus sweep",
     config: {
       ui_root: config.uiRoot,
       timeout_ms: config.timeoutMs,
-      trace_enabled: config.traceEnabled,
     },
     totals: {
       discovered: vueFiles.length,
       ok: okCount,
       failed: failCount,
+      audit_emitted: results.filter((r) => r.audit_emitted).length,
+      analysis_emitted: results.filter((r) => r.analysis_emitted).length,
+      validated: validations.length,
+      validation_failures: validationFailures,
     },
     results,
+    validations,
+    analyzer: "audit-validator",
   };
 
   const summaryPath = resolve(config.outputDir, "summary.json");
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 
-  console.error(`\nDone: ${okCount}/${vueFiles.length} ok, ${failCount} failed`);
+  console.error(
+    `\nDone: ${okCount}/${vueFiles.length} ok, ${failCount} failed, ${validationFailures} validation failures`,
+  );
   console.error(`Summary: ${summaryPath}`);
 
-  // Also write to stdout for piping
+  // Also write to stdout for piping.
   console.log(JSON.stringify(summary, null, 2));
 
-  process.exit(failCount > 0 ? 1 : 0);
+  process.exit(failCount > 0 || validationFailures > 0 ? 1 : 0);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

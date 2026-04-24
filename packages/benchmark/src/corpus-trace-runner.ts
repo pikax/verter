@@ -1,12 +1,18 @@
 /**
- * Parent-owned hard-timeout corpus trace runner.
+ * Parent-owned hard-timeout corpus runner.
  *
  * Runs each component in an isolated child process with a hard timeout
- * enforced by SIGKILL from the parent. This replaces the soft Promise.race
- * timeout model in _trace-component.ts for corpus sweeps.
+ * enforced by SIGKILL from the parent. The runner is consumed by the
+ * audit-only corpus driver in `scripts/benchmark/trace-component-corpus.mjs`
+ * (plan §3 Commit 10): each spawned worker emits BOTH the
+ * `RustAuditRecord` JSON (`audit_path`) AND the
+ * `ComponentMetaAnalysis` JSON (`analysis_path`) via the NAPI
+ * `getComponentMetaWithAudit` binding. The runner exposes these paths
+ * on the returned `CorpusTraceResult` so downstream consumers
+ * (`audit-validator.ts`) can read both artifacts without re-running.
  */
 
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
@@ -41,6 +47,35 @@ export interface CorpusTraceResult {
   saw_done_line: boolean;
   saw_closed_line: boolean;
   js_audit_path: string | null;
+  /**
+   * Path the worker MAY write the `RustAuditRecord` JSON to (env
+   * `VERTER_COMPONENT_META_AUDIT_PATH`). The runner pre-allocates the
+   * path; consumers should check `existsSync(audit_path)` before
+   * reading. Populated when the worker emits the bundle through the
+   * NAPI `getComponentMetaWithAudit` binding (plan §3 Commit 10).
+   */
+  audit_path: string;
+  /**
+   * Path the worker MAY write the `ComponentMetaAnalysis` JSON to
+   * (env `VERTER_COMPONENT_META_ANALYSIS_PATH`). The runner
+   * pre-allocates the path; consumers should check `existsSync` before
+   * reading. Mirrors `audit_path` — both come from the same
+   * `getComponentMetaWithAudit` call in the worker (plan §3 Commit 10).
+   */
+  analysis_path: string;
+  /**
+   * `true` when the worker actually wrote a file at `audit_path` —
+   * lets the parent decide whether to invoke `audit-validator` on
+   * this component. False on crash / timeout / legacy worker paths
+   * that don't emit audit data.
+   */
+  audit_emitted: boolean;
+  /**
+   * Mirror of `audit_emitted` for the analysis side-car. Both are
+   * required for `audit-validator` to run; `audit_emitted &&
+   * analysis_emitted` is the precondition.
+   */
+  analysis_emitted: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +206,8 @@ export async function runComponentInIsolation(
   const stderrPath = resolve(options.outputDir, `${sanitized}.stderr.txt`);
   const tracePath = resolve(options.outputDir, `${sanitized}.trace.log`);
   const resultPath = resolve(options.outputDir, `${sanitized}.result.json`);
+  const auditPath = resolve(options.outputDir, `${sanitized}.audit.json`);
+  const analysisPath = resolve(options.outputDir, `${sanitized}.analysis.json`);
 
   mkdirSync(dirname(stdoutPath), { recursive: true });
 
@@ -192,6 +229,8 @@ export async function runComponentInIsolation(
       ...(options.env ?? {}),
       VERTER_COMPONENT_META_TRACE_PATH: tracePath,
       VERTER_COMPONENT_META_RESULT_PATH: resultPath,
+      VERTER_COMPONENT_META_AUDIT_PATH: auditPath,
+      VERTER_COMPONENT_META_ANALYSIS_PATH: analysisPath,
     },
   });
 
@@ -280,5 +319,9 @@ export async function runComponentInIsolation(
     saw_done_line: stdoutFields.sawDoneLine,
     saw_closed_line: stdoutFields.sawClosedLine,
     js_audit_path: null,
+    audit_path: auditPath,
+    analysis_path: analysisPath,
+    audit_emitted: existsSync(auditPath),
+    analysis_emitted: existsSync(analysisPath),
   };
 }
