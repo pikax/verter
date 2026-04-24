@@ -81,7 +81,7 @@ export type NormalizeKind = "Union" | "Intersection" | "Simplify";
  */
 export type OriginEdgeKind = "Instantiate" | "SubstituteTypeParam" | "ConditionalSelect" | "InferBind" | "ProjectMember" | "ProjectIndex" | "ProjectPath" | "Normalize" | "AliasResolve" | "SharedLoadReuse";
 
-export type OriginEdgeMetaDto = { "Instantiate": { type_params: Array<string>, } } | { "SubstituteTypeParam": { param_name: string, substituted_with: NodeId, } } | { "ConditionalSelect": { branch: ConditionalBranch, } } | { "InferBind": { param_name: string, bound_to: NodeId, } } | { "ProjectMember": { member_name: string, } } | { "ProjectIndex": { index_key: string, } } | { "ProjectPath": { path: Array<ProjectPathSegment>, } } | { "Normalize": { kind: NormalizeKind, } } | { "AliasResolve": { alias_name: string, } } | { "SharedLoadReuse": { winner_request_id: bigint, winner_audited: boolean, } };
+export type OriginEdgeMetaDto = { "Instantiate": { type_params: Array<string>, } } | { "SubstituteTypeParam": { param_name: string, substituted_with: NodeId, } } | { "ConditionalSelect": { branch: ConditionalBranch, } } | { "InferBind": { param_name: string, bound_to: NodeId, } } | { "ProjectMember": { member_name: string, } } | { "ProjectIndex": { index_key: string, } } | { "ProjectPath": { path: Array<ProjectPathSegment>, } } | { "Normalize": { kind: NormalizeKind, } } | { "AliasResolve": { alias_name: string, } } | { "SharedLoadReuse": { winner_request_id: string, winner_audited: boolean, } };
 
 export type ProjectPathSegment = { "Member": { name: string, } } | { "Index": { key: string, } } | "KeyOf";
 
@@ -132,7 +132,7 @@ export type RequestPhaseAudit = { imported_root_proof_ms: number, };
 /**
  * Top-level audit record for one component-meta request.
  */
-export type RustAuditRecord = { request_id: bigint, canonical_id: string, timings: RustTimingAudit, solver: RustSolverAudit, store: RustStoreAudit, memory: RustMemoryAudit, 
+export type RustAuditRecord = { request_id: string, canonical_id: string, timings: RustTimingAudit, solver: RustSolverAudit, store: RustStoreAudit, memory: RustMemoryAudit, 
 /**
  * Optional semantic footprint. Populated when
  * `HostConfig::footprint_capture` is true and the accumulator
@@ -143,7 +143,7 @@ footprint: RustSemanticFootprintAudit | null, };
 /**
  * Memory snapshots.
  */
-export type RustMemoryAudit = { process_rss_before_bytes: bigint, process_rss_after_bytes: bigint, process_rss_delta_bytes: bigint, host_cache_before_bytes: bigint, host_cache_after_bytes: bigint, workspace_before_bytes: bigint, workspace_after_bytes: bigint, };
+export type RustMemoryAudit = { process_rss_before_bytes: string, process_rss_after_bytes: string, process_rss_delta_bytes: bigint, host_cache_before_bytes: string, host_cache_after_bytes: string, workspace_before_bytes: string, workspace_after_bytes: string, };
 
 /**
  * Semantic footprint attached to an audited request. Populated by the
@@ -154,12 +154,12 @@ export type RustSemanticFootprintAudit = { indexed_ready_builds: Array<IndexedRe
 /**
  * Solver-level counters from `SolverResult.steps`.
  */
-export type RustSolverAudit = { total_resolve_steps: bigint, solve_count: number, };
+export type RustSolverAudit = { total_resolve_steps: string, solve_count: number, };
 
 /**
  * Store/view counters.
  */
-export type RustStoreAudit = { store_view_hits: number, store_view_misses: number, structural_merges: number, imported_dependency_entries: number, imported_dependency_bytes: bigint, prepared_type_decls: number, prepared_value_decls: number, };
+export type RustStoreAudit = { store_view_hits: number, store_view_misses: number, structural_merges: number, imported_dependency_entries: number, imported_dependency_bytes: string, prepared_type_decls: number, prepared_value_decls: number, };
 
 /**
  * Phase timings in milliseconds.
@@ -173,7 +173,7 @@ export type RustTimingAudit = { total_ms: number, capture_inputs_ms: number, sto
  */
 export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Conditional" | "Union" | "Intersection" | "Tuple" | "Object" | "Array" | "Primitive" | "TypeParam" | "Opaque" | "IndexedAccess" | "KeyOf" | "TypeOf" | "Mapped" | "TemplateLiteral" | "NormalizeUnion" | "NormalizeIntersection" | { "Other": { name: string, } };
 
-export type SharedLoadReuseRecord = { canonical_id: string, winner_request_id: bigint, winner_audited: boolean, };
+export type SharedLoadReuseRecord = { canonical_id: string, winner_request_id: string, winner_audited: boolean, };
 
 /**
  * Typed structured event emitted by the component-meta call chain.
@@ -182,7 +182,7 @@ export type SharedLoadReuseRecord = { canonical_id: string, winner_request_id: b
  * to the TLS accumulator's event log and, later, to the footprint
  * miner's output without a trip through a format string.
  */
-export type StructuredComponentMetaEvent = { "RequestStart": { canonical_id: string, request_id: bigint, } } | { "RequestEnd": { request_id: bigint, success: boolean, } } | { "IndexedReadyBuilt": { canonical_id: string, whole_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], } } | { "VfsRead": { canonical_id: string, layer: VfsLayer, cache_hit: boolean, bytes_read: bigint, } } | { "SharedLoadReuse": { canonical_id: string, winner_request_id: bigint, winner_audited: boolean, } } | { "DispatchEnter": { key_kind: DispatchKeyKind, depth: number, } } | { "DispatchExit": { key_kind: DispatchKeyKind, outcome: CacheOutcomeKind, duration_ns: bigint, } } | { "MaterializeMemberRouteStart": { subject: MaterializationSubject, } } | { "MaterializeMemberRouteEnd": { subject: MaterializationSubject, duration_ns: bigint, } } | { "RematerializePublicPropTypeStart": { subject: MaterializationSubject, } } | { "RematerializePublicPropTypeEnd": { subject: MaterializationSubject, duration_ns: bigint, } } | { "MaterializeDefinePropsMember": { subject: MaterializationSubject, } } | { "FallthroughInheritanceComputed": { subject: MaterializationSubject, } } | { "ResolveImportedTypeRoot": { canonical_id: string, symbol_name: string, } } | { "CurrentEvalState": { canonical_id: string, duration_ns: bigint, } } | { "Custom": { 
+export type StructuredComponentMetaEvent = { "RequestStart": { canonical_id: string, request_id: string, } } | { "RequestEnd": { request_id: string, success: boolean, } } | { "IndexedReadyBuilt": { canonical_id: string, whole_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], } } | { "VfsRead": { canonical_id: string, layer: VfsLayer, cache_hit: boolean, bytes_read: string, } } | { "SharedLoadReuse": { canonical_id: string, winner_request_id: string, winner_audited: boolean, } } | { "DispatchEnter": { key_kind: DispatchKeyKind, depth: number, } } | { "DispatchExit": { key_kind: DispatchKeyKind, outcome: CacheOutcomeKind, duration_ns: string, } } | { "MaterializeMemberRouteStart": { subject: MaterializationSubject, } } | { "MaterializeMemberRouteEnd": { subject: MaterializationSubject, duration_ns: string, } } | { "RematerializePublicPropTypeStart": { subject: MaterializationSubject, } } | { "RematerializePublicPropTypeEnd": { subject: MaterializationSubject, duration_ns: string, } } | { "MaterializeDefinePropsMember": { subject: MaterializationSubject, } } | { "FallthroughInheritanceComputed": { subject: MaterializationSubject, } } | { "ResolveImportedTypeRoot": { canonical_id: string, symbol_name: string, } } | { "CurrentEvalState": { canonical_id: string, duration_ns: string, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */
@@ -197,6 +197,15 @@ detail: string, } };
 
 export type SubstitutionRecord = { result: NodeId, param_name: string, substituted_with: NodeId, };
 
-export type VfsLayer = "Overlay" | "Snapshot" | "Disk";
+export type VfsLayer = "Overlay" | "Snapshot" | "Disk" | "DirIndexNegative" | "Missing";
 
-export type VfsReadRecord = { canonical_id: string, layer: VfsLayer, cache_hit: boolean, bytes_read: bigint, };
+export type VfsReadRecord = { canonical_id: string, layer: VfsLayer, cache_hit: boolean, bytes_read: string, 
+/**
+ * Request-id the sink routed this event to — plan §3.A Commit 6.D.
+ * Session-side [`SessionVfsSink`] only pushes events whose
+ * [`verter_workspace::audit_sink::VfsReadEvent::request_id`]
+ * matches the request this sink was registered for, so this
+ * field mirrors that filter decision for consumers who want to
+ * sanity-check audit ownership.
+ */
+request_id: string, };

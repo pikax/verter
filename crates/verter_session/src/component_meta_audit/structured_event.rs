@@ -34,9 +34,13 @@ use crate::types::Hash16;
 pub enum StructuredComponentMetaEvent {
     RequestStart {
         canonical_id: Arc<str>,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         request_id: u64,
     },
     RequestEnd {
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         request_id: u64,
         success: bool,
     },
@@ -48,10 +52,14 @@ pub enum StructuredComponentMetaEvent {
         canonical_id: Arc<str>,
         layer: VfsLayer,
         cache_hit: bool,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         bytes_read: u64,
     },
     SharedLoadReuse {
         canonical_id: Arc<str>,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         winner_request_id: u64,
         winner_audited: bool,
     },
@@ -62,6 +70,8 @@ pub enum StructuredComponentMetaEvent {
     DispatchExit {
         key_kind: DispatchKeyKind,
         outcome: super::CacheOutcomeKind,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         duration_ns: u64,
     },
     MaterializeMemberRouteStart {
@@ -69,6 +79,8 @@ pub enum StructuredComponentMetaEvent {
     },
     MaterializeMemberRouteEnd {
         subject: MaterializationSubject,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         duration_ns: u64,
     },
     RematerializePublicPropTypeStart {
@@ -76,6 +88,8 @@ pub enum StructuredComponentMetaEvent {
     },
     RematerializePublicPropTypeEnd {
         subject: MaterializationSubject,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         duration_ns: u64,
     },
     MaterializeDefinePropsMember {
@@ -90,6 +104,8 @@ pub enum StructuredComponentMetaEvent {
     },
     CurrentEvalState {
         canonical_id: Arc<str>,
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         duration_ns: u64,
     },
     Custom {
@@ -224,9 +240,10 @@ mod tests {
 
     #[test]
     fn structured_event_custom_with_arc_str_deserializes_from_serde_json() {
+        // Custom justified: round-trip test probe — exercises the
+        // Custom variant's serde impl.
         let event = StructuredComponentMetaEvent::Custom {
             name: Arc::from("test_event"),
-            // Custom justified: round-trip test probe.
             detail: Arc::from("x=42"),
         };
         let json = serde_json::to_string(&event).expect("serialize");

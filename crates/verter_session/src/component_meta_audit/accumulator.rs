@@ -160,10 +160,12 @@ mod tests {
             layer: VfsLayer::Overlay,
             cache_hit: true,
             bytes_read: 42,
+            request_id: 7,
         });
         let st = acc.drain();
         assert_eq!(st.vfs_reads.len(), 1);
         assert_eq!(st.vfs_reads[0].bytes_read, 42);
+        assert_eq!(st.vfs_reads[0].request_id, 7);
     }
 
     #[test]

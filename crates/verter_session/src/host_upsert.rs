@@ -68,6 +68,11 @@ impl VerterHost {
             .and_then(|s| s.downcast_data::<HostSourceData>());
 
         // ── Submit to scheduler (sole parse authority) ──
+        //
+        // Thread the current thread's `OpaqueRequestContext` (if any)
+        // so worker threads install it before running stages — keeps
+        // fan-out events from the scheduler's SourceStage attributable
+        // to an outer audited request. Plan §3.A Commit 6.D.
         let handle = self
             .scheduler
             .submit_request(verter_scheduler::scheduler::Request {
@@ -79,7 +84,7 @@ impl VerterHost {
                     FileKind::VueSfc => verter_scheduler::source_loader::FileKind::VueSfc,
                     FileKind::NonSfc => verter_scheduler::source_loader::FileKind::NonSfc,
                 }),
-                request_context: None,
+                request_context: verter_scheduler::request_context::current_context(),
             });
 
         // Wait for scheduler to commit Source + Analysis snapshots.

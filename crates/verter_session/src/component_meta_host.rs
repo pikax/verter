@@ -31,7 +31,7 @@ use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
 #[cfg(test)]
 use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-use crate::host_manage::component_meta_trace_scope;
+use crate::host_manage::component_meta_trace_custom;
 use crate::VerterHost;
 
 // Path C C12 (per plan §14.5) retired `HEAVY_COMPONENT_META_TEST_MUTEX`
@@ -328,7 +328,7 @@ impl ComponentMetaSession {
         )>,
         ComponentMetaHostError,
     > {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "component_meta_session_query_with_resolution",
             canonical_or_alias
         );
@@ -364,7 +364,7 @@ impl ComponentMetaSession {
         )>,
         ComponentMetaHostError,
     > {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "component_meta_session_declared_query_with_resolution",
             canonical_or_alias
         );
@@ -381,7 +381,7 @@ impl ComponentMetaSession {
         Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "component_meta_session_query",
             format!(
                 "owner={} include_fallthrough={include_fallthrough}",

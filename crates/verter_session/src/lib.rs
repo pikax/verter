@@ -86,6 +86,7 @@ mod shared;
 pub(crate) mod source_map_remap;
 pub mod template_convert;
 mod types;
+pub(crate) mod u64_as_decimal_string;
 mod upsert;
 
 pub use types::*;
@@ -1281,7 +1282,13 @@ impl VerterHost {
                 self.scheduler.close_file(canonical_id);
             }
 
-            // Submit to scheduler â€” it loads via WorkspaceSourceLoader
+            // Submit to scheduler â€” it loads via WorkspaceSourceLoader.
+            // Thread the current-thread's `OpaqueRequestContext` (if
+            // any) into the request so worker threads install it
+            // before running stages — that way fan-out events from
+            // `workspace.read_file` during `SourceStage` carry the
+            // outer request_id and the session-side `SessionVfsSink`
+            // picks them up. Plan §3.A Commit 6.D.
             let handle = self
                 .scheduler
                 .submit_request(verter_scheduler::scheduler::Request {
@@ -1290,7 +1297,7 @@ impl VerterHost {
                     priority: verter_scheduler::stage::Priority::Interactive,
                     source: None,
                     file_kind: None,
-                    request_context: None,
+                    request_context: verter_scheduler::request_context::current_context(),
                 });
 
             // Wait for the scheduler to reach Analysis. `wait_or_drive` drives

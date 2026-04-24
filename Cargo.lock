@@ -3860,6 +3860,7 @@ dependencies = [
  "similar",
  "smallvec",
  "sourcemap",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "ts-rs",

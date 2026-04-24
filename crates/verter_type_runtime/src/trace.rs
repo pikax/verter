@@ -55,14 +55,16 @@ fn type_runtime_next_span_id() -> u64 {
 }
 
 pub fn type_runtime_trace_enabled() -> bool {
-    std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
-        || std::env::var_os("VERTER_META_TRACE").is_some()
+    // Plan §3.A Commit 6.E: legacy `VERTER_COMPONENT_META_TRACE*`
+    // env vars are deleted workspace-wide. The type-runtime trace
+    // keeps only its own `VERTER_TYPE_RUNTIME_TRACE` + the intermediate
+    // `VERTER_META_TRACE` name.
+    std::env::var_os("VERTER_META_TRACE").is_some()
         || std::env::var_os("VERTER_TYPE_RUNTIME_TRACE").is_some()
 }
 
 fn type_runtime_trace_output_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH")
-        .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
+    std::env::var_os("VERTER_META_TRACE_PATH")
         .or_else(|| std::env::var_os("VERTER_TYPE_RUNTIME_TRACE_PATH"))
         .map(std::path::PathBuf::from)
 }
@@ -390,7 +392,6 @@ mod tests {
     fn runtime_trace_macros_skip_detail_evaluation_when_disabled() {
         let _guard = trace_env_lock().lock().unwrap();
         unsafe {
-            std::env::remove_var("VERTER_COMPONENT_META_TRACE");
             std::env::remove_var("VERTER_META_TRACE");
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE");
             std::env::remove_var("VERTER_TYPE_RUNTIME_TRACE_PATH");

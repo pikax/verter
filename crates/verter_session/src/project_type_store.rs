@@ -139,6 +139,44 @@ pub struct IndexedReady {
         Arc<verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource>,
 }
 
+impl IndexedReady {
+    /// Test-only constructor producing a minimal `IndexedReady` with
+    /// stub fields. Consumers of this helper only inspect
+    /// `whole_hash`, so everything else is empty. Used by the
+    /// `legacy_trace_cutover` integration test (plan §3.A
+    /// Commit 6.E) to drive `IndexedReadyDb::insert` through the
+    /// event-emitting path.
+    pub fn new_for_test(whole_hash: Hash16) -> Self {
+        use rustc_hash::{FxHashMap, FxHashSet};
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let shallow = crate::resolver_core::shallow_file_state::ShallowFileState {
+            whole_hash,
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis: Arc::clone(&analysis),
+        };
+        Self {
+            whole_hash,
+            shallow_state: Arc::new(shallow),
+            import_routes: Arc::new(FxHashMap::default()),
+            import_route_hash: None,
+            raw_source: Arc::from(""),
+            eval_source: Arc::from(""),
+            cached_parse: None,
+            script_analysis: None,
+            export_signatures: None,
+            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            external_type_analysis: analysis,
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // AnalysisReady — scope-parameterised semantic analysis augmentation
 // ──────────────────────────────────────────────────────────────────────────
@@ -246,18 +284,17 @@ impl IndexedReadyDb {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
-            // Plan §3 Commit 5: push an `IndexedReadyBuilt` structured
-            // event into the active request's accumulator so the
-            // footprint records every fresh canonical lowered under
-            // the request. No-op when no context is installed.
-            if let Some(acc) = crate::request_context::current_accumulator() {
-                acc.push_structured_event(
-                    crate::component_meta_audit::StructuredComponentMetaEvent::IndexedReadyBuilt {
-                        canonical_id: canonical_for_event,
-                        whole_hash,
-                    },
-                );
-            }
+            // Plan §3 Commit 5 / §3.A Commit 6.E: push an
+            // `IndexedReadyBuilt` typed structured event into the
+            // active request's accumulator on every FRESH insert.
+            // Gate on fresh-insert (prev.is_none()) so overwrites
+            // after a stale-sweep do not double-emit. Also feeds
+            // `RustSemanticFootprintAudit.indexed_ready_builds` via
+            // the miner.
+            crate::component_meta_audit::record_indexed_ready_built(
+                canonical_for_event,
+                whole_hash,
+            );
         }
     }
 

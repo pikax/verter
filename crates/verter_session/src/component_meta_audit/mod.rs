@@ -26,7 +26,10 @@ use serde::{Deserialize, Serialize};
 pub mod accumulator;
 pub mod assertions;
 pub mod audit_records_store;
+#[cfg(test)]
+pub(crate) mod expected_display_snapshots;
 pub mod footprint_miner;
+pub(crate) mod session_vfs_sink;
 pub mod structured_event;
 
 pub use accumulator::{AccumulatorState, DerivationEdgeRaw, RequestFootprintAccumulator};
@@ -48,6 +51,8 @@ use crate::types::Hash16;
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustAuditRecord {
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub request_id: u64,
     pub canonical_id: String,
     pub timings: RustTimingAudit,
@@ -79,6 +84,8 @@ pub struct RustTimingAudit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustSolverAudit {
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub total_resolve_steps: u64,
     pub solve_count: u32,
 }
@@ -91,6 +98,8 @@ pub struct RustStoreAudit {
     pub store_view_misses: u32,
     pub structural_merges: u32,
     pub imported_dependency_entries: u32,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub imported_dependency_bytes: u64,
     pub prepared_type_decls: u32,
     pub prepared_value_decls: u32,
@@ -100,12 +109,28 @@ pub struct RustStoreAudit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustMemoryAudit {
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub process_rss_before_bytes: u64,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub process_rss_after_bytes: u64,
+    // `process_rss_delta_bytes` is i64 (signed) — it is NOT covered by
+    // the u64-as-string transport rule (plan §1.4) because JS's
+    // `Number.MIN_SAFE_INTEGER`/`MAX_SAFE_INTEGER` gives ±2^53 of
+    // headroom on either side, which is ample for RSS deltas.
     pub process_rss_delta_bytes: i64,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub host_cache_before_bytes: u64,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub host_cache_after_bytes: u64,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub workspace_before_bytes: u64,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub workspace_after_bytes: u64,
 }
 
@@ -183,13 +208,26 @@ pub struct VfsReadRecord {
     pub canonical_id: Arc<str>,
     pub layer: VfsLayer,
     pub cache_hit: bool,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub bytes_read: u64,
+    /// Request-id the sink routed this event to — plan §3.A Commit 6.D.
+    /// Session-side [`SessionVfsSink`] only pushes events whose
+    /// [`verter_workspace::audit_sink::VfsReadEvent::request_id`]
+    /// matches the request this sink was registered for, so this
+    /// field mirrors that filter decision for consumers who want to
+    /// sanity-check audit ownership.
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub request_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct SharedLoadReuseRecord {
     pub canonical_id: Arc<str>,
+    #[serde(with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
     pub winner_request_id: u64,
     pub winner_audited: bool,
 }
@@ -403,6 +441,8 @@ pub enum OriginEdgeMetaDto {
         alias_name: Arc<str>,
     },
     SharedLoadReuse {
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
         winner_request_id: u64,
         winner_audited: bool,
     },
@@ -467,12 +507,34 @@ pub enum CacheOutcomeKind {
     ColdAbortSwept,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum VfsLayer {
+    /// Overlay (active editor buffer).
     Overlay,
+    /// Snapshot cache hit.
     Snapshot,
+    /// Disk read.
     Disk,
+    /// Directory index returned a negative (file known not to exist).
+    /// Session-side audit mirrors
+    /// [`verter_workspace::audit_sink::VfsAuditLayer::DirIndexNegative`].
+    DirIndexNegative,
+    /// Read missed every layer — the file was not found.
+    Missing,
+}
+
+impl From<verter_workspace::audit_sink::VfsAuditLayer> for VfsLayer {
+    fn from(layer: verter_workspace::audit_sink::VfsAuditLayer) -> Self {
+        use verter_workspace::audit_sink::VfsAuditLayer as W;
+        match layer {
+            W::Overlay => VfsLayer::Overlay,
+            W::Snapshot => VfsLayer::Snapshot,
+            W::Disk => VfsLayer::Disk,
+            W::DirIndexNegative => VfsLayer::DirIndexNegative,
+            W::Missing => VfsLayer::Missing,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +834,26 @@ pub fn emit_json(record: &RustAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
 }
 
+/// Record a fresh [`IndexedReady`](crate::project_type_store::IndexedReady)
+/// insertion in the active request's accumulator. Pushes both a
+/// typed `IndexedReadyBuildRecord` (direct lane used by the miner
+/// on the happy path) and the equivalent `StructuredComponentMetaEvent`
+/// (fallback lane when the direct records vec is empty — plan
+/// §3 Commit 5 fallback semantics). No-op when no request context is
+/// installed. Plan §3 Commit 5 / §3.A Commit 6.E.
+pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: Hash16) {
+    if let Some(acc) = crate::request_context::current_accumulator() {
+        acc.push_indexed_ready_build(IndexedReadyBuildRecord {
+            canonical_id: Arc::clone(&canonical_id),
+            whole_hash,
+        });
+        acc.push_structured_event(StructuredComponentMetaEvent::IndexedReadyBuilt {
+            canonical_id,
+            whole_hash,
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -915,12 +997,14 @@ mod tests {
                     layer: VfsLayer::Overlay,
                     cache_hit: true,
                     bytes_read: 10,
+                    request_id: 1,
                 },
                 VfsReadRecord {
                     canonical_id: Arc::from("/a.ts"),
                     layer: VfsLayer::Disk,
                     cache_hit: false,
                     bytes_read: 20,
+                    request_id: 1,
                 },
             ],
             shared_load_reuses: vec![

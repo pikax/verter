@@ -34,7 +34,11 @@ fn component_meta_core_trace_lock() -> &'static Mutex<()> {
 
 fn component_meta_core_trace_path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH").map(PathBuf::from))
+    // Plan §3.A Commit 6.E: the legacy `VERTER_COMPONENT_META_TRACE*`
+    // env var names are retired. The parser's core-trace keeps its
+    // debug aid but reads the narrower `VERTER_PARSER_CORE_TRACE_PATH`
+    // so the session-crate env var surface stays clean.
+    PATH.get_or_init(|| std::env::var_os("VERTER_PARSER_CORE_TRACE_PATH").map(PathBuf::from))
         .as_ref()
 }
 

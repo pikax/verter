@@ -431,6 +431,7 @@ mod tests {
                 layer: VfsLayer::Disk,
                 cache_hit: false,
                 bytes_read: 1,
+                request_id: 1,
             }],
             shared_load_reuses: vec![SharedLoadReuseRecord {
                 canonical_id: Arc::from("/b.ts"),
@@ -452,6 +453,7 @@ mod tests {
                 layer: VfsLayer::Disk,
                 cache_hit: false,
                 bytes_read: 1,
+                request_id: 1,
             }],
             ..Default::default()
         };

@@ -30,7 +30,7 @@ use web_time::Instant;
 
 use crate::compile::{assemble_main_module, merge_external_sources};
 use crate::hash::compile_profile_hash;
-use crate::host_manage::{component_meta_trace_event, component_meta_trace_scope};
+use crate::host_manage::component_meta_trace_custom;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
 use crate::VerterHost;
@@ -236,7 +236,7 @@ fn emit_external_type_from_loaded_files_trace_result(
 ) {
     let (tracked_delta, resolution_delta, cache_delta) =
         external_type_trace_deltas(baseline, tracked_len, resolution_len, cache_len);
-    component_meta_trace_event!(
+    component_meta_trace_custom!(
         "resolve_external_type_from_loaded_files_result",
         format!(
             "owner={} import={} type={} status={} tracked_delta={} resolution_delta={} cache_delta={} visiting={} store_view={}",
@@ -620,7 +620,7 @@ impl VerterHost {
             )
         };
 
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "authoritative_import_route_result",
             format!(
                 "owner={} import={} source={} target={}",
@@ -997,7 +997,7 @@ impl VerterHost {
         Option<verter_compiler::utils::oxc::vue::resolve_type::ResolvedElements>,
         crate::types::ExternalTypeResolveError,
     > {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "resolve_external_type_from_loaded_files",
             format!(
                 "owner={} import={} type={} depth={} required_root_dep={} kind={kind:?} store_view={} cache_entries={} visiting={} use_host_cache={}",
@@ -1438,7 +1438,7 @@ impl VerterHost {
         resolution_deps: &mut std::collections::BTreeSet<String>,
         cache: &mut ExternalTypeCache,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "resolve_component_meta_macro_elements",
             format!(
                 "owner={} import={} type={} store_view={} cache_entries={}",
@@ -1590,7 +1590,7 @@ impl VerterHost {
         loop {
             let (target, had_route_cycle) = loop {
                 frontier_layer += 1;
-                component_meta_trace_event!(
+                component_meta_trace_custom!(
                     "external_type_frontier_layer_start",
                     external_type_frontier_layer_start_detail(
                         dep_canonical,
@@ -1609,7 +1609,7 @@ impl VerterHost {
                 })?;
                 let (target, had_route_cycle) =
                     frontier.final_target_for_with_cycle(&adapter, dep_canonical, type_name);
-                component_meta_trace_event!(
+                component_meta_trace_custom!(
                     "external_type_frontier_layer_result",
                     external_type_frontier_layer_result_detail(
                         dep_canonical,
@@ -2451,7 +2451,7 @@ impl VerterHost {
     ) -> Option<(String, String)> {
         let result =
             self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=false",
@@ -2469,7 +2469,7 @@ impl VerterHost {
         let result =
             self.resolve_named_type_export_target_uncached(dep_canonical, requested_name)?;
         let _ = self.ensure_indexed_ready(result.0.as_str());
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=true",
@@ -2490,7 +2490,7 @@ impl VerterHost {
         dep_canonical: &str,
         profile_hash: Option<u64>,
     ) -> Option<String> {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "read_dep_source_for_type_resolution",
             format!("owner={} store_view={}", dep_canonical, false),
         );
@@ -2501,7 +2501,7 @@ impl VerterHost {
                         state.source.as_ref(),
                         state.cached_parse.as_deref(),
                     ));
-                    component_meta_trace_event!(
+                    component_meta_trace_custom!(
                         "read_dep_source_for_type_resolution_result",
                         format!(
                             "owner={} source=effective-file-state bytes={} has_cached_parse={} whole_hash={:?}",
@@ -2517,7 +2517,7 @@ impl VerterHost {
         }
         let facts = self.ensure_indexed_ready(dep_canonical)?;
         let eval_source = Arc::clone(&facts.eval_source);
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "read_dep_source_for_type_resolution_result",
             format!(
                 "owner={} source=module-facts bytes={} has_cached_parse={} whole_hash={:?}",

@@ -20,8 +20,7 @@
 //! ```
 
 use crate::host_manage::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_event,
-    component_meta_trace_scope,
+    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
 };
 use crate::resolver_core::{
     run_component_meta_request, ComponentMetaEvalOutputs, ComponentMetaRequestHost, RequestSource,
@@ -123,12 +122,12 @@ impl ComponentMetaRequestHost for VerterHost {
         let audit_enabled = self.config.audit_enabled;
         let capture_started = audit_enabled.then(Instant::now);
         let store_read_started = audit_enabled.then(Instant::now);
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "capture_component_meta_inputs",
             format!("owner={} store_view=true", canonical),
         );
         let snapshot = self.get_raw_analysis_snapshot(canonical)?;
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "capture_component_meta_snapshot",
             format!(
                 "owner={} imports={} macros={} bindings={} has_template={}",
@@ -144,7 +143,7 @@ impl ComponentMetaRequestHost for VerterHost {
         let store_read_ms = store_read_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "capture_component_meta_eval_state",
             format!(
                 "owner={} source_len={} has_cached_parse={} whole_hash={whole_hash:?}",
@@ -164,7 +163,7 @@ impl ComponentMetaRequestHost for VerterHost {
         let capture_inputs_ms = capture_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "capture_component_meta_inputs_result",
             format!(
                 "owner={} owner_eval_source_len={} dependency_candidates={}",
@@ -190,12 +189,12 @@ impl ComponentMetaRequestHost for VerterHost {
         mode: Self::Mode,
         _store_view: &Self::View,
     ) -> Option<Self::Resolution> {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "try_get_cached_component_meta",
             format!("owner={} mode={mode:?}", canonical),
         );
         let result = self.try_get_cached_resolved_meta(canonical, mode);
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "try_get_cached_component_meta_result",
             format!("owner={} mode={mode:?} hit={}", canonical, result.is_some()),
         );
@@ -280,7 +279,7 @@ impl<'a> ComponentMetaRequestHost for SessionRequestHost<'a> {
         let audit_enabled = host.config.audit_enabled;
         let capture_started = audit_enabled.then(Instant::now);
         let store_read_started = audit_enabled.then(Instant::now);
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "session_capture_component_meta_inputs",
             format!("owner={} session={}", canonical, self.runtime.session_id()),
         );
@@ -2977,7 +2976,7 @@ fn produce_macro_object_shapes_for_purpose(
                         }
                         if let Some(shape) = shape {
                             let count = shape.value.properties.len();
-                            component_meta_trace_event!(
+                            component_meta_trace_custom!(
                                 "macro_object_shape",
                                 format!(
                                     "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
@@ -3013,7 +3012,7 @@ fn produce_macro_object_shapes_for_purpose(
                     }
                     if let Some(shape) = shape {
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
@@ -3043,7 +3042,7 @@ fn produce_macro_object_shapes_for_purpose(
                 {
                     projection_hits += 1;
                     let count = shape.value.properties.len();
-                    component_meta_trace_event!(
+                    component_meta_trace_custom!(
                         "macro_object_shape",
                         format!(
                             "owner={} macro_index={} kind=define_props source={} props={}",
@@ -3079,7 +3078,7 @@ fn produce_macro_object_shapes_for_purpose(
                     {
                         projection_hits += 1;
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_props source={} props={}",
@@ -3110,7 +3109,7 @@ fn produce_macro_object_shapes_for_purpose(
                         }
                         if let Some(shape) = shape {
                             let count = shape.value.properties.len();
-                            component_meta_trace_event!(
+                            component_meta_trace_custom!(
                                 "macro_object_shape",
                                 format!(
                                     "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
@@ -3136,7 +3135,7 @@ fn produce_macro_object_shapes_for_purpose(
                     ) {
                         registry_hits += 1;
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_props source={} props={}",
@@ -3167,7 +3166,7 @@ fn produce_macro_object_shapes_for_purpose(
                         }
                         if let Some(shape) = shape {
                             let count = shape.value.properties.len();
-                            component_meta_trace_event!(
+                            component_meta_trace_custom!(
                                 "macro_object_shape",
                                 format!(
                                     "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
@@ -3198,7 +3197,7 @@ fn produce_macro_object_shapes_for_purpose(
                     }
                     if let Some(shape) = shape {
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_props source={} props={} took={:?}",
@@ -3234,7 +3233,7 @@ fn produce_macro_object_shapes_for_purpose(
                 {
                     projection_hits += 1;
                     let count = shape.value.properties.len() + shape.value.call_signatures.len();
-                    component_meta_trace_event!(
+                    component_meta_trace_custom!(
                         "macro_object_shape",
                         format!(
                             "owner={} macro_index={} kind=define_emits source={} surface={}",
@@ -3260,7 +3259,7 @@ fn produce_macro_object_shapes_for_purpose(
                         registry_hits += 1;
                         let count =
                             shape.value.properties.len() + shape.value.call_signatures.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_emits source={} surface={}",
@@ -3292,7 +3291,7 @@ fn produce_macro_object_shapes_for_purpose(
                         if let Some(shape) = shape {
                             let count =
                                 shape.value.properties.len() + shape.value.call_signatures.len();
-                            component_meta_trace_event!(
+                            component_meta_trace_custom!(
                                 "macro_object_shape",
                                 format!(
                                     "owner={} macro_index={} kind=define_emits source={} surface={} took={:?}",
@@ -3326,7 +3325,7 @@ fn produce_macro_object_shapes_for_purpose(
                     ) {
                         projection_hits += 1;
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_slots source={} slots={}",
@@ -3352,7 +3351,7 @@ fn produce_macro_object_shapes_for_purpose(
                     }) {
                         registry_hits += 1;
                         let count = shape.value.properties.len();
-                        component_meta_trace_event!(
+                        component_meta_trace_custom!(
                             "macro_object_shape",
                             format!(
                                 "owner={} macro_index={} kind=define_slots source={} slots={}",
@@ -3388,7 +3387,7 @@ fn produce_macro_object_shapes_for_purpose(
                             if let Some(shape) = shape {
                                 if !shape.value.properties.is_empty() {
                                     let count = shape.value.properties.len();
-                                    component_meta_trace_event!(
+                                    component_meta_trace_custom!(
                                         "macro_object_shape",
                                         format!(
                                             "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
@@ -3421,7 +3420,7 @@ fn produce_macro_object_shapes_for_purpose(
                     if let Some(shape) = shape {
                         if !shape.value.properties.is_empty() {
                             let count = shape.value.properties.len();
-                            component_meta_trace_event!(
+                            component_meta_trace_custom!(
                                 "macro_object_shape",
                                 format!(
                                     "owner={} macro_index={} kind=define_slots source={} slots={} took={:?}",
@@ -3445,7 +3444,7 @@ fn produce_macro_object_shapes_for_purpose(
     }
 
     let solves_after = 0u32;
-    component_meta_trace_event!(
+    component_meta_trace_custom!(
         "produce_macro_object_shapes",
         format!(
             "owner={} define_props={} define_emits={} define_slots={} registry_hits={} projection_hits={} solver_fallbacks={} solves_delta={} took={:?}",
@@ -5141,7 +5140,7 @@ impl VerterHost {
                 workspace_before_bytes,
             )
         });
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "resolve_component_meta",
             format!("owner={} mode={mode:?}", canonical),
         );
@@ -5204,7 +5203,7 @@ impl VerterHost {
         }
 
         if let Some(resolved) = result.value.as_ref() {
-            component_meta_trace_event!(
+            component_meta_trace_custom!(
                 "resolve_component_meta_result",
                 format!(
                     "owner={} mode={mode:?} source={} attempts={} macros={} resolved_types={} has_evaluated_types={} fact_versions={}",
@@ -5351,7 +5350,7 @@ impl VerterHost {
         } else {
             crate::component_meta_audit::RustTimingAudit::default()
         };
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "compute_component_meta_state",
             format!(
                 "owner={} mode={mode:?} captured={} store_view={} whole_hash={whole_hash:?}",
@@ -5367,7 +5366,7 @@ impl VerterHost {
         let snapshot = captured
             .map(|captured| captured.snapshot.clone())
             .or_else(|| self.get_raw_analysis_snapshot(canonical))?;
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "component_meta_snapshot",
             format!(
                 "owner={} imports={} macros={} bindings={} has_template={} script_flags={}",
@@ -5385,7 +5384,7 @@ impl VerterHost {
         let resolver_host = HostComponentMetaResolver { host: self };
         let parts_started = audit_enabled.then(Instant::now);
         let parts = {
-            let _trace = component_meta_trace_scope!(
+            component_meta_trace_custom!(
                 "resolve_component_meta_parts",
                 format!(
                     "owner={} expanded={} captured={} purpose={:?}",
@@ -5420,7 +5419,7 @@ impl VerterHost {
             // is gone — dispatch owns all solve-like operations now.
             let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
             if should_materialize_registry {
-                let _trace = component_meta_trace_scope!(
+                component_meta_trace_custom!(
                     "append_component_meta_registry_entries",
                     format!(
                         "owner={} evaluated_types={} existing_registry={}",
@@ -5454,7 +5453,7 @@ impl VerterHost {
                 {
                     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
                     {
-                        let _trace = component_meta_trace_scope!(
+                        component_meta_trace_custom!(
                             "produce_macro_object_shapes_for_purpose",
                             format!(
                                 "owner={} resolved_macros={} registry={} purpose={:?}",
@@ -5477,7 +5476,7 @@ impl VerterHost {
                         );
                     }
                     {
-                        let _trace = component_meta_trace_scope!(
+                        component_meta_trace_custom!(
                             "materialize_component_meta_macro_shape_member_types",
                             format!(
                                 "owner={} props={} slot_bindings={} define_props={} define_slots={}",
@@ -5499,7 +5498,7 @@ impl VerterHost {
                     if !evaluated_types.is_empty() {
                         enrich_missing_slot_bindings(&parts.resolved_macros, &mut evaluated_types);
                         {
-                            let _trace = component_meta_trace_scope!(
+                            component_meta_trace_custom!(
                                 "materialize_component_meta_field_types",
                                 format!(
                                     "owner={} props={} events={} slot_bindings={} bindings={}",
@@ -5524,14 +5523,14 @@ impl VerterHost {
                 }
             }
             {
-                crate::host_manage::component_meta_trace_event!(
+                crate::host_manage::component_meta_trace_custom!(
                     "semantic_graph_stats",
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
-                    crate::host_manage::component_meta_trace_event!(
+                    crate::host_manage::component_meta_trace_custom!(
                         "fuse_tripped",
                         format!(
                             "owner={} fuse={} budget={} actual={}",
@@ -5545,7 +5544,7 @@ impl VerterHost {
                 solve_count: 0u32,
             }
         } else {
-            crate::host_manage::component_meta_trace_event!(
+            crate::host_manage::component_meta_trace_custom!(
                 "semantic_graph_stats",
                 format!(
                     "owner={} registry_materialization=skipped macro_shapes=skipped",
@@ -5586,7 +5585,7 @@ impl VerterHost {
                 append_elapsed.as_secs_f64() * 1000.0,
             ));
         }
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "component_meta_parts",
             format!(
                 "owner={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} fact_versions={}",
@@ -6996,7 +6995,7 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<FileAnalysisSnapshot> {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "get_raw_analysis_snapshot",
             format!("owner={} store_view={}", canonical, false),
         );
@@ -7052,7 +7051,7 @@ impl VerterHost {
                 if self.config.effective_scope().needs_template_analysis() {
                     self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                 }
-                component_meta_trace_event!(
+                component_meta_trace_custom!(
                     "get_raw_analysis_snapshot_result",
                     format!(
                         "owner={} imports={} macros={} bindings={} has_template={} source=scheduler",
@@ -7083,7 +7082,7 @@ impl VerterHost {
                 if self.config.effective_scope().needs_template_analysis() {
                     self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                 }
-                component_meta_trace_event!(
+                component_meta_trace_custom!(
                     "get_raw_analysis_snapshot_result",
                     format!(
                         "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_snapshot_cache",
@@ -7118,7 +7117,7 @@ impl VerterHost {
                 if self.config.effective_scope().needs_template_analysis() {
                     self.compute_template_analysis_if_missing(canonical, &mut snapshot);
                 }
-                component_meta_trace_event!(
+                component_meta_trace_custom!(
                     "get_raw_analysis_snapshot_result",
                     format!(
                         "owner={} imports={} macros={} bindings={} has_template={} source=route_owned_cache",
@@ -7141,7 +7140,7 @@ impl VerterHost {
         if self.config.effective_scope().needs_template_analysis() {
             self.compute_template_analysis_if_missing(canonical, &mut snapshot);
         }
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "get_raw_analysis_snapshot_result",
             format!(
                 "owner={} imports={} macros={} bindings={} has_template={} source=indexed_ready",
@@ -7176,7 +7175,7 @@ impl VerterHost {
         let view = self.resolver_store_view();
         let invalid_details = view.invalid_fact_details(&cached.fact_versions, 6);
         if !invalid_details.is_empty() {
-            component_meta_trace_event!(
+            component_meta_trace_custom!(
                 "try_get_cached_component_meta_invalid",
                 format!(
                     "owner={} mode={mode:?} cache=legacy facts={} invalid={} details=[{}]",
@@ -7203,7 +7202,7 @@ impl VerterHost {
         state: &ResolvedComponentMetaState,
         fact_versions: &[crate::resolver_core::FactVersionRef],
     ) {
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "store_cached_component_meta_result",
             format!(
                 "owner={} mode={mode:?} facts={} macros={} resolved_types={} has_evaluated_types={}",
@@ -7709,7 +7708,7 @@ fn materialize_component_meta_macro_shape_member_types(
                                 {
                                     continue;
                                 }
-                                let _trace = component_meta_trace_scope!(
+                                component_meta_trace_custom!(
                                     "materialize_define_props_member",
                                     format!(
                                         "owner={} name={} ty={:?}",
@@ -7778,7 +7777,7 @@ fn materialize_component_meta_macro_shape_member_types(
                                 ) {
                                     continue;
                                 }
-                                let _trace = component_meta_trace_scope!(
+                                component_meta_trace_custom!(
                                     "materialize_define_emits_member",
                                     format!(
                                         "owner={} name={} ty={:?}",
@@ -7866,7 +7865,7 @@ fn materialize_component_meta_macro_shape_member_types(
                                 {
                                     continue;
                                 }
-                                let _trace = component_meta_trace_scope!(
+                                component_meta_trace_custom!(
                                     "materialize_define_slots_member",
                                     format!(
                                         "owner={} name={} ty={:?}",
@@ -8021,7 +8020,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     };
     let inline_route_candidate = current_is_route_expr
         .then(|| {
-            let _trace = component_meta_trace_scope!(
+            component_meta_trace_custom!(
                 "materialize_member_route_inline_candidate",
                 format!(
                     "owner={} member={} current={:?}",
@@ -8053,7 +8052,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         })
         .flatten();
     if let Some(candidate) = &inline_route_candidate {
-        component_meta_trace_event!(
+        component_meta_trace_custom!(
             "materialize_member_route_inline_candidate_result",
             format!(
                 "owner={} member={} candidate={:?}",
@@ -8064,7 +8063,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     let current_materialized = if inline_route_candidate.is_some() {
         inline_route_candidate.clone().unwrap()
     } else {
-        let _trace = component_meta_trace_scope!(
+        component_meta_trace_custom!(
             "materialize_member_route_current",
             format!(
                 "owner={} member={} current={:?}",
@@ -8077,7 +8076,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             query_engine,
         )
     };
-    component_meta_trace_event!(
+    component_meta_trace_custom!(
         "materialize_member_route_current_result",
         format!(
             "owner={} member={} current_materialized={:?}",
@@ -8104,7 +8103,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     }
     if current_is_route_expr {
         let alias_route_candidate = {
-            let _trace = component_meta_trace_scope!(
+            component_meta_trace_custom!(
                 "materialize_member_route_alias_candidate",
                 format!(
                     "owner={} member={} current={:?}",
@@ -8136,7 +8135,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
 
     for candidate_scope in route_scope_candidates {
         let projected_candidate = {
-            let _trace = component_meta_trace_scope!(
+            component_meta_trace_custom!(
                 "materialize_member_route_projected_candidate",
                 format!(
                     "owner={} member={} candidate_scope={} route={:?}",
@@ -8146,7 +8145,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             query_engine.project_expr_surface_expr(candidate_scope.as_str(), &route_expr)
         };
         let solved_candidate = {
-            let _trace = component_meta_trace_scope!(
+            component_meta_trace_custom!(
                 "materialize_member_route_solved_candidate",
                 format!(
                     "owner={} member={} candidate_scope={} route={:?}",
@@ -8169,7 +8168,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                 continue;
             }
             let candidate_materialized = {
-                let _trace = component_meta_trace_scope!(
+                component_meta_trace_custom!(
                     "materialize_member_route_candidate_materialized",
                     format!(
                         "owner={} member={} candidate={:?}",

@@ -151,6 +151,185 @@ fn audited_request_record_carries_populated_footprint_when_capture_enabled() {
 }
 
 #[test]
+fn audited_request_resolve_produces_non_empty_vfs_reads_for_trivial_vue_sfc() {
+    // Plan §3.A Commit 6.D exit criterion. Proves SessionVfsSink
+    // is registered and routing events for the audit window.
+    //
+    // Critical fixture detail: `host.upsert` submits a scheduler
+    // request with `source = Some(raw)`, so the source stage
+    // never calls `workspace.read_file` for the upserted file.
+    // Worse, during upsert's analysis pass the resolver EAGERLY
+    // loads relative type imports via `ensure_loaded`, and those
+    // reads happen BEFORE the audit window opens — the sink is
+    // not yet registered.
+    //
+    // To guarantee ALL reads happen inside the audit window, we
+    // inject BOTH files directly into the memory workspace and
+    // skip `upsert` entirely. The resolver's first touch of
+    // `/c.vue` now goes through `ensure_loaded` → scheduler
+    // source stage → `workspace.read_file` — which fans into our
+    // registered sink with `current_request_id()` set.
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.inject_file(
+        "/c.vue".into(),
+        Arc::from(
+            "<script setup lang=\"ts\">\n\
+             import type { Props } from './types';\n\
+             defineProps<Props>();\n\
+             </script>\n\
+             <template><div>{{ label }}</div></template>\n",
+        ),
+    );
+    workspace.inject_file(
+        "/types.ts".into(),
+        Arc::from("export interface Props { label: string }\n"),
+    );
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+        ws_access,
+    ));
+
+    let (_, resolution, record) = AuditedRequest::builder()
+        .attach_to(Arc::clone(&host))
+        .resolve("/c.vue")
+        .expect("audited resolve succeeds");
+
+    let footprint = record
+        .footprint
+        .as_ref()
+        .expect("footprint_capture=true must populate footprint");
+
+    // Because the run_custom closure body (outside
+    // get_component_meta_with_resolution) no longer has the
+    // request context installed, the SFC must be constructed so
+    // that resolution itself performs at least one ws().read_file.
+    // Our fixture relies on the indexer/pre-indexer touching
+    // workspace files during get_component_meta's own call chain.
+    //
+    // If this assertion is empty, the sink path is broken. Emit a
+    // diagnostic dump to make triage easier.
+    if footprint.vfs_reads.is_empty() {
+        eprintln!(
+            "vfs_reads empty; record:\n  request_id={}\n  \
+             imported_dep_entries={}\n  indexed_ready_builds.len={}\n  \
+             loaded_files={:?}",
+            record.request_id,
+            record.store.imported_dependency_entries,
+            footprint.indexed_ready_builds.len(),
+            footprint.loaded_files(),
+        );
+    }
+    assert!(
+        !footprint.vfs_reads.is_empty(),
+        "SessionVfsSink must route VFS read events into footprint.vfs_reads — \
+         empty means the sink registration broke (plan §3.A Commit 6.D)",
+    );
+    for r in &footprint.vfs_reads {
+        assert_eq!(
+            r.request_id, resolution.request_id,
+            "every routed VFS read must carry the resolution request_id",
+        );
+    }
+}
+
+#[test]
+fn session_vfs_sink_drops_reads_outside_get_component_meta_window() {
+    // Negative-scope test: a `workspace.read_file` performed in
+    // the `run_custom` closure AFTER
+    // `get_component_meta_with_resolution` returns is outside the
+    // per-call `RequestContextGuard` scope. Scheduler TLS no
+    // longer carries our request_id; the sink (already
+    // deregistered when the guard dropped) sees no event.
+    //
+    // Protects against a reviewer proposing "just keep the sink
+    // registered across the whole run_custom closure" — that
+    // would attribute unrelated reads to the same audit.
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.inject_file("/aux.ts".into(), Arc::from("export const AUX = 1;\n"));
+    workspace.inject_file(
+        "/c.vue".into(),
+        Arc::from(
+            "<script setup lang=\"ts\">defineProps<{x:string}>();</script>\
+             <template>{{x}}</template>",
+        ),
+    );
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+        ws_access,
+    ));
+
+    let ws_read = workspace.clone();
+    let (_, _resolution, record) = AuditedRequest::builder()
+        .attach_to(Arc::clone(&host))
+        .run_custom(|h| {
+            let res = h.get_component_meta_with_resolution("/c.vue")?;
+            // By this point the per-request guard has dropped.
+            // This read must NOT appear in footprint.vfs_reads.
+            let _ = ws_read.read_file("/aux.ts");
+            Some(res)
+        })
+        .expect("audited run_custom succeeds");
+
+    let footprint = record.footprint.as_ref().expect("footprint populated");
+    for r in &footprint.vfs_reads {
+        assert_ne!(
+            r.canonical_id.as_ref(),
+            "/aux.ts",
+            "reads performed after get_component_meta_with_resolution returns MUST NOT be \
+             captured — the RequestContextGuard has already dropped, so scheduler TLS \
+             no longer carries our request_id",
+        );
+    }
+}
+
+#[test]
+fn concurrent_attach_to_on_same_host_16_threads_each_audit_sees_only_its_own_vfs_reads() {
+    // Stress the fan-out filter: N concurrent audits on one host,
+    // each registering its own sink, must NOT see each other's
+    // events (the SessionVfsSink filters by request_id).
+    use std::thread;
+    let host = setup_host();
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let host = Arc::clone(&host);
+        handles.push(thread::spawn(move || {
+            let (_, resolution, record) = AuditedRequest::builder()
+                .attach_to(host)
+                .resolve("/x.vue")
+                .expect("audit ok");
+            let fp = record.footprint.as_ref().expect("footprint present");
+            for r in &fp.vfs_reads {
+                assert_eq!(
+                    r.request_id, resolution.request_id,
+                    "thread's audit must only see events routed to its own request_id",
+                );
+            }
+            resolution.request_id
+        }));
+    }
+    let ids: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    // All request_ids distinct.
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        ids.len(),
+        sorted.len(),
+        "concurrent audits must receive distinct request_ids"
+    );
+}
+
+#[test]
 fn direct_resolve_without_audit_context_still_publishes_via_static_counter() {
     // Without AuditedRequest wrapping, the outer request_id counter is
     // not installed; audit must still publish via the legacy static
