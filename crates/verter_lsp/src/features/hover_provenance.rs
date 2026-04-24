@@ -127,6 +127,15 @@ impl HoverProvenanceCache {
         self.inner.lock().len()
     }
 
+    /// Test / diagnostics helper — `true` when no entries are cached.
+    /// Paired with `len()` to satisfy clippy `len_without_is_empty`
+    /// and to document the canonical emptiness check (cache is empty
+    /// if and only if `len() == 0`).
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
+    }
+
     /// Test helper — check if a key is present without refreshing LRU.
     #[cfg(test)]
     pub fn contains(&self, key: &HoverProvenanceKey) -> bool {
@@ -204,15 +213,29 @@ mod tests {
 
     #[test]
     fn hover_provenance_disabled_by_default_returns_legacy_payload() {
-        // The option surface defaults to `false`. This test pins the
-        // default constant; any refactor that flips it inverts the
-        // opt-in contract (plan §3 Commit 9).
-        // (The server-side `AtomicBool` initial value is `false`;
-        // this constant mirrors the intent.)
-        const PROVENANCE_DEFAULT: bool = false;
+        // The option surface defaults to `false` — the enrichment is
+        // opt-in (plan §3 Commit 9). Exercises the real
+        // `HoverOptions::default()` AND the parse path on an empty
+        // init payload. A regression that flips the default inverts
+        // the opt-in contract — both assertions below fail in that
+        // case. Discriminating against a constant flip OR a
+        // silently-true `.unwrap_or(true)` fallback in the parser.
+        use crate::config::{parse_hover_init_options, HoverOptions};
+
         assert!(
-            !PROVENANCE_DEFAULT,
-            "HoverOptions.provenance must default to false — opt-in only",
+            !HoverOptions::default().provenance,
+            "HoverOptions::default().provenance must be false — plan §3 Commit 9 opt-in",
+        );
+        let parsed_empty = parse_hover_init_options(&serde_json::json!({}));
+        assert!(
+            !parsed_empty.provenance,
+            "parse_hover_init_options on an empty payload must produce provenance=false",
+        );
+        let parsed_missing_hover_key =
+            parse_hover_init_options(&serde_json::json!({ "other": true }));
+        assert!(
+            !parsed_missing_hover_key.provenance,
+            "parse_hover_init_options with a foreign key must fall back to default=false",
         );
     }
 

@@ -6,6 +6,11 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use verter_scheduler::executor::{ExtractedDeps, StageError, StageExecutor};
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, FileKind, SnapshotData, SourceSnapshot,
@@ -153,7 +158,7 @@ impl StageExecutor for HostStageExecutor {
             FileKind::NonSfc => crate::types::FileKind::NonSfc,
         };
 
-        let parse_start = std::time::Instant::now();
+        let parse_start = Instant::now();
 
         if is_vue {
             let (parse_snapshot, parsed_sfc) = crate::parse::parse_vue_snapshot(

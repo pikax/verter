@@ -30,7 +30,12 @@ use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use verter_semantic::analysis::types::AnalyzedMacro;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
@@ -2912,7 +2917,7 @@ fn produce_macro_object_shapes_for_purpose(
     let mut registry_hits = 0u32;
     let mut projection_hits = 0u32;
     let mut solver_fallbacks = 0u32;
-    let shapes_started = std::time::Instant::now();
+    let shapes_started = Instant::now();
     let solves_before = 0u32;
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
@@ -2962,7 +2967,7 @@ fn produce_macro_object_shapes_for_purpose(
                     });
                 if define_props_prefers_prepared_projection {
                     if let Some(lowered) = define_props_lowered {
-                        let item_started = std::time::Instant::now();
+                        let item_started = Instant::now();
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
@@ -2998,7 +3003,7 @@ fn produce_macro_object_shapes_for_purpose(
                         verter_semantic::analysis::type_expr::TypeExpr::Ref { .. }
                     ) && !define_props_has_matching_resolved_root
                 }) {
-                    let item_started = std::time::Instant::now();
+                    let item_started = Instant::now();
                     let (shape, source) = produce_one_macro_object_shape(
                         query_engine,
                         owner_canonical,
@@ -3095,7 +3100,7 @@ fn produce_macro_object_shapes_for_purpose(
                             },
                         );
                     } else if let Some(lowered) = params.define_props.get(define_props_index) {
-                        let item_started = std::time::Instant::now();
+                        let item_started = Instant::now();
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
@@ -3152,7 +3157,7 @@ fn produce_macro_object_shapes_for_purpose(
                             },
                         );
                     } else if let Some(lowered) = define_props_lowered {
-                        let item_started = std::time::Instant::now();
+                        let item_started = Instant::now();
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
@@ -3183,7 +3188,7 @@ fn produce_macro_object_shapes_for_purpose(
                         }
                     }
                 } else if let Some(lowered) = define_props_lowered {
-                    let item_started = std::time::Instant::now();
+                    let item_started = Instant::now();
                     let (shape, source) = produce_one_macro_object_shape(
                         query_engine,
                         owner_canonical,
@@ -3276,7 +3281,7 @@ fn produce_macro_object_shapes_for_purpose(
                             },
                         );
                     } else {
-                        let item_started = std::time::Instant::now();
+                        let item_started = Instant::now();
                         let (shape, source) = produce_one_macro_object_shape(
                             query_engine,
                             owner_canonical,
@@ -3373,7 +3378,7 @@ fn produce_macro_object_shapes_for_purpose(
                         // In that case the lowered-type path still owns the real
                         // defineSlots object shape.
                         if define_slots_owner_surface_incomplete {
-                            let item_started = std::time::Instant::now();
+                            let item_started = Instant::now();
                             let (shape, source) = produce_one_macro_object_shape_for_slots(
                                 query_engine,
                                 owner_canonical,
@@ -3406,7 +3411,7 @@ fn produce_macro_object_shapes_for_purpose(
                         }
                     }
                 } else if let Some(lowered) = define_slots_lowered {
-                    let item_started = std::time::Instant::now();
+                    let item_started = Instant::now();
                     let (shape, source) = produce_one_macro_object_shape_for_slots(
                         query_engine,
                         owner_canonical,
@@ -5411,7 +5416,7 @@ impl VerterHost {
             enrich_missing_slot_bindings(&parts.resolved_macros, evaluated_types);
         }
         let registry_before = parts.resolved_type_registry.len();
-        let append_start = std::time::Instant::now();
+        let append_start = Instant::now();
         let should_materialize_registry = registry_materialization == RegistryMaterialization::Full;
         let should_produce_macro_object_shapes = mode == ProjectionMode::Expanded;
         let solver_audit = if should_materialize_registry || should_produce_macro_object_shapes {
@@ -6269,9 +6274,9 @@ impl VerterHost {
             }
         }
         let debug_enabled = crate::host_manage::component_meta_debug_enabled();
-        let import_refresh_started = debug_enabled.then(std::time::Instant::now);
+        let import_refresh_started = debug_enabled.then(Instant::now);
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
-            let _entry_started = debug_enabled.then(std::time::Instant::now);
+            let _entry_started = debug_enabled.then(Instant::now);
             let Some(meta) = resolved_type_registry_meta.get_mut(index) else {
                 continue;
             };
@@ -6357,7 +6362,7 @@ impl VerterHost {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
-        let public_field_collect_started = debug_enabled.then(std::time::Instant::now);
+        let public_field_collect_started = debug_enabled.then(Instant::now);
         if let Some(evaluated_types) = evaluated_types {
             for field in &evaluated_types.props {
                 collect_component_meta_registry_public_field_refs(
@@ -6399,7 +6404,7 @@ impl VerterHost {
         let public_field_collect_elapsed_ms = public_field_collect_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or_default();
-        let seed_scan_started = debug_enabled.then(std::time::Instant::now);
+        let seed_scan_started = debug_enabled.then(Instant::now);
         for (index, entry) in resolved_type_registry.iter().enumerate() {
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
@@ -6481,14 +6486,14 @@ impl VerterHost {
         };
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
-        let _loop_start = std::time::Instant::now();
+        let _loop_start = Instant::now();
         while let Some(pending) = referenced_names.pop_front() {
             _loop_iterations += 1;
             if !query_engine.allow_registry_deepening() {
                 break;
             }
             let _pending_started =
-                crate::host_manage::component_meta_debug_enabled().then(std::time::Instant::now);
+                crate::host_manage::component_meta_debug_enabled().then(Instant::now);
             let PendingComponentMetaRegistryRef {
                 name: type_name,
                 source_hint: pending_source_hint_owned,
@@ -6559,8 +6564,8 @@ impl VerterHost {
                     continue;
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
-                let _imported_pending_started = crate::host_manage::component_meta_debug_enabled()
-                    .then(std::time::Instant::now);
+                let _imported_pending_started =
+                    crate::host_manage::component_meta_debug_enabled().then(Instant::now);
                 let _resolved_import = query_engine
                     .resolve_imported_registry_symbol(source_hint, requested_exported_name);
                 if crate::host_manage::component_meta_debug_enabled() && _resolved_import.is_none()
@@ -6586,8 +6591,8 @@ impl VerterHost {
                             dependency.as_str(),
                         );
                     }
-                    let declaration_started = crate::host_manage::component_meta_debug_enabled()
-                        .then(std::time::Instant::now);
+                    let declaration_started =
+                        crate::host_manage::component_meta_debug_enabled().then(Instant::now);
                     let mut declaration =
                         if matches!(pending_route, crate::resolver_core::RouteDemand::Whole) {
                             query_engine.resolve_type_declaration(
@@ -6667,8 +6672,8 @@ impl VerterHost {
                         owner_canonical,
                         declaration.canonical_source.as_str(),
                     );
-                    let surface_started = crate::host_manage::component_meta_debug_enabled()
-                        .then(std::time::Instant::now);
+                    let surface_started =
+                        crate::host_manage::component_meta_debug_enabled().then(Instant::now);
                     let type_expr = materialize_component_meta_registry_candidate_for_route(
                         query_engine,
                         resolved.canonical_id.as_str(),
@@ -6891,14 +6896,14 @@ impl VerterHost {
                 ));
         }
         let loop_elapsed_ms = _loop_start.elapsed().as_secs_f64() * 1000.0;
-        let enrich_started = debug_enabled.then(std::time::Instant::now);
+        let enrich_started = debug_enabled.then(Instant::now);
 
         // Registry enrichment: materialize imported type expressions through
         // the shared request-scoped engine so projection/instantiation caches
         // are reused across all registry entries in one request.
         for (index, entry) in resolved_type_registry.iter_mut().enumerate() {
             let _entry_started =
-                crate::host_manage::component_meta_debug_enabled().then(std::time::Instant::now);
+                crate::host_manage::component_meta_debug_enabled().then(Instant::now);
             let Some(meta) = resolved_type_registry_meta.get(index) else {
                 continue;
             };

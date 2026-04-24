@@ -32,6 +32,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
@@ -180,7 +185,7 @@ impl NodeArena {
         // route to their shard, check for an existing id; miss path
         // acquires inner.write() briefly to push the new slot.
         let (id, is_miss, write_wait_ns) = if is_vue_macro {
-            let write_start = std::time::Instant::now();
+            let write_start = Instant::now();
             let mut inner = self.inner.write();
             let wait = write_start.elapsed().as_nanos() as u64;
             let id = SemanticNodeId(inner.nodes.len() as u64);
@@ -206,7 +211,7 @@ impl NodeArena {
                         // Another thread beat us to it.
                         (existing, false, 0u64)
                     } else {
-                        let write_start = std::time::Instant::now();
+                        let write_start = Instant::now();
                         let mut inner = self.inner.write();
                         let wait = write_start.elapsed().as_nanos() as u64;
                         let id = SemanticNodeId(inner.nodes.len() as u64);
@@ -1734,7 +1739,7 @@ impl SemanticGraphStore {
                 // canonical-invalidation sweep. Joiners never busy-spin.
                 // Account wait time on the stats surface so the F3 corpus
                 // benchmark surfaces non-zero `waits_ms` (plan §6.3).
-                let wait_start = std::time::Instant::now();
+                let wait_start = Instant::now();
                 inflight
                     .ready
                     .wait_while(&mut state, |s| s.completed.is_none() && !s.aborted);
@@ -1806,7 +1811,7 @@ impl SemanticGraphStore {
         let _recursion_guard = RecursionStackGuard::push(key.clone());
         let mut panic_guard =
             InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, key.clone());
-        let build_start = std::time::Instant::now();
+        let build_start = Instant::now();
         let (result, dep_signature) = build();
         let build_held_ns = build_start.elapsed().as_nanos() as u64;
         panic_guard.mark_finished();

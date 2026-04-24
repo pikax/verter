@@ -312,19 +312,25 @@ async function validateEmissions(results, config) {
       .map((n) => n.replace(/\.json$/, "")),
   );
 
-  // Load the TS validator via tsx-backed dynamic import. This keeps
-  // the TS module compilation consistent with the worker side — the
-  // .mjs never bypasses the repo's TS configuration.
-  const validatorUrl = pathToFileURL(
-    resolve(repoRoot, "packages", "benchmark", "src", "audit-validator.ts"),
-  ).href;
-  /** @type {typeof import("../../packages/benchmark/src/audit-validator.js")} */
-  // eslint-disable-next-line no-unused-vars
+  // Load the TS validator via `tsx.tsImport` — portable across Node
+  // versions (older Node without native `--experimental-strip-types`
+  // can't `import()` a `.ts` file directly). `tsx` is already a
+  // benchmark-package dep (used by the child workers via
+  // `--import tsx`); we reuse it here for the parent-process load.
+  const tsxApiUrl = pathToFileURL(benchmarkRequire.resolve("tsx/esm/api")).href;
+  let tsImport;
+  try {
+    ({ tsImport } = await import(tsxApiUrl));
+  } catch (err) {
+    console.error(`FATAL: failed to load tsx API: ${err}`);
+    return [];
+  }
+  const validatorPath = resolve(repoRoot, "packages", "benchmark", "src", "audit-validator.ts");
   let validatorModule;
   try {
-    validatorModule = await import(validatorUrl);
+    validatorModule = await tsImport(pathToFileURL(validatorPath).href, import.meta.url);
   } catch (err) {
-    console.error(`FATAL: failed to load audit-validator.ts: ${err}`);
+    console.error(`FATAL: failed to load audit-validator.ts via tsx: ${err}`);
     return [];
   }
   const { validateAuditBundle } = validatorModule;

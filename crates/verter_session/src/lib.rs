@@ -105,6 +105,11 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use id::canonicalize_id;
 pub use id::resolve_external;
 use rustc_hash::FxHashMap;
@@ -1316,7 +1321,7 @@ impl VerterHost {
             // Path C C1 instrumentation: split wait (scheduler drive) vs
             // work (integrate_scheduler_snapshot) so C2's diagnosis can
             // tell load-path contention from post-load processing.
-            let wait_start = std::time::Instant::now();
+            let wait_start = Instant::now();
             match self.scheduler.wait_or_drive(&handle) {
                 CompletionState::Ready(_) => {}
                 _ => {
@@ -1330,7 +1335,7 @@ impl VerterHost {
                 .ensure_loaded_wait_ns
                 .fetch_add(wait_start.elapsed().as_nanos() as u64, Relaxed);
 
-            let work_start = std::time::Instant::now();
+            let work_start = Instant::now();
             let loaded = self.integrate_scheduler_snapshot(canonical_id);
             self.provenance
                 .ensure_loaded_work_ns

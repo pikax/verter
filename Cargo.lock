@@ -3855,6 +3855,7 @@ dependencies = [
  "verter_parser",
  "verter_span",
  "verter_workspace",
+ "web-time",
 ]
 
 [[package]]

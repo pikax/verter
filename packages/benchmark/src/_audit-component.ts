@@ -8,7 +8,18 @@
  * JSON and the accompanying `ComponentMetaAnalysis` JSON to disk so
  * the parent can hand them to `audit-validator.ts`.
  *
- * Env contract:
+ * ## Multi-file dependency handling
+ *
+ * The worker backs the `ComponentMetaHost` with a `Workspace` rooted
+ * at the fixture's `uiRoot`. The workspace auto-discovers `tsconfig`
+ * files, builds the project graph, and resolves imports against the
+ * real dependency tree — so components that import types from other
+ * files (the majority of real nuxt-ui components) get a full audit
+ * bundle instead of a degenerate single-file view. `ensureLoaded()`
+ * pulls the target canonical through the workspace path before the
+ * audit call.
+ *
+ * ## Env contract
  *
  * - `VERTER_COMPONENT_META_AUDIT_PATH` (required) — destination for
  *   `JSON.stringify(record)`.
@@ -68,13 +79,23 @@ try {
 }
 
 const canonical = "/" + relative(uiRoot, componentFile).replace(/\\/g, "/");
-const source = readFileSync(componentFile, "utf-8");
 
-const project = new native.ComponentMetaHost({
-  auditEnabled: true,
-  footprintCapture: true,
-});
-project.upsertBase(canonical, source);
+// Workspace-backed host: auto-discovers tsconfig + builds project
+// graph, so cross-file imports resolve against the real dependency
+// tree. `ensureLoaded` pulls the target file through the workspace
+// before the audit request; if the workspace misses (rare — e.g.
+// the fixture has no matching tsconfig), we fall back to a direct
+// source upsert so the worker still produces an audit record.
+const workspace = new native.Workspace([uiRoot]);
+const project = native.ComponentMetaHost.withWorkspace(
+  { auditEnabled: true, footprintCapture: true },
+  workspace,
+);
+const loaded = project.ensureLoaded(canonical);
+if (!loaded) {
+  const source = readFileSync(componentFile, "utf-8");
+  project.upsertBase(canonical, source);
+}
 
 const session = project.openSession();
 
