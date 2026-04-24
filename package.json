@@ -18,7 +18,7 @@
   },
   "main": "index.js",
   "scripts": {
-    "test": "pnpm --filter @verter/types exec vitest --run",
+    "test": "pnpm -r --parallel run test",
     "test:e2e": "pnpm --filter verter-vscode test:e2e:matrix",
     "test:e2e:single": "pnpm --filter verter-vscode test:e2e",
     "fmt": "oxfmt",

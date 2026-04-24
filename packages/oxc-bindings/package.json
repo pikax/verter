@@ -28,7 +28,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^25.4.0",

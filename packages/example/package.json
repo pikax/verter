@@ -7,7 +7,8 @@
   "author": "pikax",
   "main": "index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "echo 'example package has no test surface'"
   },
   "dependencies": {
     "@verter/typescript-plugin": "workspace:^",

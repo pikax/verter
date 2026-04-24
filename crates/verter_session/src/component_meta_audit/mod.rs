@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Rust-first native audit surface for component-meta requests.
 //!
 //! Gated by `HostConfig::audit_enabled`. When off, the runtime stays on the
@@ -51,13 +52,21 @@ use crate::types::Hash16;
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustAuditRecord {
+    /// Monotonic request id set at
+    /// `get_component_meta_with_resolution` entry. Decimal-string
+    /// transport (plan §1.4) — non-zero, unique per audited request.
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub request_id: u64,
+    /// Canonical file id the request resolved.
     pub canonical_id: String,
+    /// Per-phase wall-clock timings (ms).
     pub timings: RustTimingAudit,
+    /// Solver-level counters aggregated over the request.
     pub solver: RustSolverAudit,
+    /// Store/view counters.
     pub store: RustStoreAudit,
+    /// Process memory snapshots (before/after/delta).
     pub memory: RustMemoryAudit,
     /// Optional semantic footprint. Populated when
     /// `HostConfig::footprint_capture` is true and the accumulator
@@ -69,14 +78,23 @@ pub struct RustAuditRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustTimingAudit {
+    /// End-to-end wall-clock for the request.
     pub total_ms: f64,
+    /// Time spent capturing inputs (request args, config).
     pub capture_inputs_ms: f64,
+    /// Time spent reading the project type store.
     pub store_read_ms: f64,
+    /// Time spent merging new store data with the overlay view.
     pub store_merge_ms: f64,
+    /// Time spent proving direct imports from the owner file.
     pub direct_import_proof_ms: f64,
+    /// Time spent proving transitively-imported type roots.
     pub imported_root_proof_ms: f64,
+    /// Time spent inside the type solver.
     pub solver_ms: f64,
+    /// Time spent materializing member routes + public types.
     pub materialize_ms: f64,
+    /// Time spent serializing the final component-meta payload.
     pub serialize_ms: f64,
 }
 
@@ -84,9 +102,11 @@ pub struct RustTimingAudit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustSolverAudit {
+    /// Total solver resolve-steps issued across all invocations.
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub total_resolve_steps: u64,
+    /// Number of solver invocations.
     pub solve_count: u32,
 }
 
@@ -94,14 +114,21 @@ pub struct RustSolverAudit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustStoreAudit {
+    /// Store-view cache hits.
     pub store_view_hits: u32,
+    /// Store-view cache misses.
     pub store_view_misses: u32,
+    /// Structural-merge count.
     pub structural_merges: u32,
+    /// Imported-dependency entries touched.
     pub imported_dependency_entries: u32,
+    /// Imported-dependency byte total.
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub imported_dependency_bytes: u64,
+    /// Prepared type declarations.
     pub prepared_type_decls: u32,
+    /// Prepared value declarations.
     pub prepared_value_decls: u32,
 }
 
@@ -109,32 +136,46 @@ pub struct RustStoreAudit {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustMemoryAudit {
+    /// Process RSS before request start (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub process_rss_before_bytes: u64,
+    /// Process RSS after request completion (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub process_rss_after_bytes: u64,
+    /// Signed delta = after − before (bytes).
     #[serde(with = "crate::i64_as_decimal_string")]
     #[ts(type = "string")]
     pub process_rss_delta_bytes: i64,
+    /// Host cache memory footprint before the request (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub host_cache_before_bytes: u64,
+    /// Host cache memory footprint after the request (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub host_cache_after_bytes: u64,
+    /// Workspace memory footprint before the request (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub workspace_before_bytes: u64,
+    /// Workspace memory footprint after the request (bytes).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub workspace_after_bytes: u64,
 }
 
+/// Phase-specific audit data threaded through TLS via
+/// [`RequestAuditGuard`]. Currently only the imported-root-proof
+/// phase is instrumented in detail.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RequestPhaseAudit {
+    /// Total milliseconds spent inside the imported-root-proof phase
+    /// for the current request. Accumulated by
+    /// [`record_imported_root_proof_ms`] against the top-of-stack
+    /// TLS entry.
     pub imported_root_proof_ms: f64,
 }
 
@@ -144,20 +185,38 @@ pub struct RequestPhaseAudit {
 
 /// Semantic footprint attached to an audited request. Populated by the
 /// footprint miner (Commit 4) from the accumulator's raw events.
+/// Field docs are carried by the individual record-vector type
+/// declarations below.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct RustSemanticFootprintAudit {
+    /// Fresh `IndexedReady` builds observed during the request.
     pub indexed_ready_builds: Vec<IndexedReadyBuildRecord>,
+    /// VFS reads fanned out from the workspace's audit sink to this
+    /// request's accumulator.
     pub vfs_reads: Vec<VfsReadRecord>,
+    /// Records where this request joined a winner's in-flight cache
+    /// slot instead of starting from cold.
     pub shared_load_reuses: Vec<SharedLoadReuseRecord>,
+    /// Type-instantiation steps observed.
     pub instantiations: Vec<InstantiationRecord>,
+    /// Projection steps observed (member / index / keyof / path).
     pub projections: Vec<ProjectionRecord>,
+    /// Conditional-type branch decisions.
     pub conditional_decisions: Vec<ConditionalRecord>,
+    /// Type-parameter substitution steps.
     pub substitutions: Vec<SubstitutionRecord>,
+    /// Alias-resolve hops (`type A = B` traversal).
     pub alias_resolutions: Vec<AliasResolveRecord>,
+    /// Materialization envelopes (member routes, public prop types,
+    /// fallthrough inheritance, etc.).
     pub materializations: Vec<MaterializationRecord>,
+    /// Per-context cache-event tally (exact under concurrency).
     pub cache_outcomes: CacheOutcomeTally,
+    /// Report covering derivation-subgraph truncation / orphan-edge
+    /// markers.
     pub graph_completeness: GraphCompletenessReport,
+    /// Canonicalized derivation subgraph (`NodeRecord`s + edges).
     pub derivation_subgraph: DerivationSubgraph,
 }
 
@@ -235,19 +294,34 @@ impl RustSemanticFootprintAudit {
     }
 }
 
+/// Fresh `IndexedReady` build observed during the request. Emitted
+/// by the `IndexedReadyBuilt` structured event and surfaced by the
+/// miner into `RustSemanticFootprintAudit::indexed_ready_builds`.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct IndexedReadyBuildRecord {
+    /// Canonical id of the file whose `IndexedReady` entry was freshly
+    /// populated during the request.
     pub canonical_id: Arc<str>,
+    /// Content hash of the build's source snapshot — the `IndexedReady`
+    /// store's identity key.
     pub whole_hash: Hash16,
 }
 
+/// One VFS read fanned out from the workspace sink to this request's
+/// accumulator. See the workspace `VfsAuditSink` trait.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct VfsReadRecord {
+    /// Canonical id of the file that was read.
     pub canonical_id: Arc<str>,
+    /// Which VFS layer served the read (overlay / snapshot / disk /
+    /// directory-index-negative / missing).
     pub layer: VfsLayer,
+    /// `true` when the read resolved from an in-memory cache (overlay
+    /// or snapshot) without touching the disk layer.
     pub cache_hit: bool,
+    /// Number of bytes returned (0 for `DirIndexNegative` / `Missing`).
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub bytes_read: u64,
@@ -262,60 +336,93 @@ pub struct VfsReadRecord {
     pub request_id: u64,
 }
 
+/// Joiner record — this request attached to a winner's in-flight
+/// cache slot instead of starting fresh. Plan §2.7.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct SharedLoadReuseRecord {
+    /// Canonical id of the shared artifact.
     pub canonical_id: Arc<str>,
+    /// Request id of the winning (first-to-arrive) request that owns
+    /// the in-flight slot.
     #[serde(with = "crate::u64_as_decimal_string")]
     #[ts(type = "string")]
     pub winner_request_id: u64,
+    /// `true` when the winner's request was itself audited (so its
+    /// `RustAuditRecord` can be cross-referenced). Consumers render
+    /// a different chain-terminal based on this flag.
     pub winner_audited: bool,
 }
 
+/// One type-instantiation step in the derivation subgraph.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct InstantiationRecord {
+    /// In-audit `NodeId` of the instantiated type.
     pub result: NodeId,
+    /// Canonical id of the file declaring the generic.
     pub decl_canonical_id: Arc<str>,
+    /// Symbol name of the generic declaration.
     pub decl_symbol_name: Arc<str>,
+    /// Fingerprint over the type arguments — part of identity for
+    /// dedup and cache keying.
     pub args_fingerprint: Hash16,
+    /// NodeIds of the argument types, in declaration order.
     pub args: Vec<NodeId>,
 }
 
+/// One projection step (indexed-access / member-access / keyof / …).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct ProjectionRecord {
+    /// In-audit `NodeId` of the projected result.
     pub result: NodeId,
+    /// In-audit `NodeId` of the base being projected from.
     pub base: NodeId,
+    /// Path segments applied from base → result, in order.
     pub path: Vec<ProjectPathSegment>,
 }
 
+/// One conditional-select decision (`T extends U ? X : Y`).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct ConditionalRecord {
+    /// In-audit `NodeId` of the selected branch's result.
     pub result: NodeId,
+    /// Which branch the solver selected (`True` / `False` / `Deferred`).
     pub branch: ConditionalBranch,
 }
 
+/// One type-parameter substitution step.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct SubstitutionRecord {
+    /// In-audit `NodeId` of the post-substitution type.
     pub result: NodeId,
+    /// Name of the type parameter being substituted.
     pub param_name: Arc<str>,
+    /// In-audit `NodeId` of the concrete argument substituted in.
     pub substituted_with: NodeId,
 }
 
+/// One alias-resolve step (`type A = B` traversal).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct AliasResolveRecord {
+    /// In-audit `NodeId` of the type on the right-hand side of the alias.
     pub result: NodeId,
+    /// Name of the alias that was followed.
     pub alias_name: Arc<str>,
 }
 
+/// One materialization envelope (member route / public prop type /
+/// fallthrough inheritance / etc.).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct MaterializationRecord {
+    /// What was being materialized — see [`MaterializationSubject`].
     pub subject: MaterializationSubject,
+    /// Wall-clock duration of the envelope in milliseconds.
     pub duration_ms: f64,
 }
 
@@ -325,14 +432,24 @@ pub struct MaterializationRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct CacheOutcomeTally {
+    /// Cold builds this request triggered (no cache hit, no in-flight
+    /// peer to join).
     pub cold_builds: u32,
+    /// Warm cache hits.
     pub warm_hits: u32,
+    /// Times this request joined a peer's in-flight artifact.
     pub joined_waits: u32,
+    /// Sentinel observations (placeholder entries that collapse to
+    /// a real artifact later).
     pub sentinels: u32,
+    /// In-flight aborts followed by a retry loop.
     pub inflight_aborted_retries: u32,
+    /// Cold entries reaped during generation reconciliation.
     pub cold_aborts_swept: u32,
 }
 
+/// Report covering derivation-subgraph completeness (truncation
+/// markers, orphan-edge flags).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct GraphCompletenessReport {
@@ -340,6 +457,7 @@ pub struct GraphCompletenessReport {
     /// `HostConfig::max_derivation_edges`. Walker invocations that
     /// cross the truncation boundary report truncated ancestry.
     pub has_orphan_edges: bool,
+    /// Count of edges dropped during truncation.
     pub edges_truncated: u32,
 }
 
@@ -353,12 +471,18 @@ pub struct GraphCompletenessReport {
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct NodeId(pub u32);
 
+/// In-audit opaque edge id. Assigned by the miner from the sorted
+/// canonicalisation of edges so identical requests produce identical
+/// serialised footprints.
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct EdgeId(pub u32);
 
+/// Derivation subgraph captured by the audit. Nodes and edges are
+/// assigned stable opaque ids by the miner. Field docs below name the
+/// sort keys.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct DerivationSubgraph {
@@ -370,22 +494,36 @@ pub struct DerivationSubgraph {
     pub edges: Vec<DerivationEdgeRecord>,
 }
 
+/// One node entry in the derivation subgraph. Identity fields
+/// (`kind`, `named_identity`, `structural_hash`) participate in the
+/// deterministic NodeId assignment (plan §1.4).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct NodeRecord {
+    /// Structural kind (union / intersection / alias / instantiated /
+    /// etc.). See [`SemanticNodeKind`].
     pub kind: SemanticNodeKind,
+    /// Named-type identity projection, when this node corresponds to
+    /// an exported type symbol. `None` for anonymous nodes.
     pub named_identity: Option<NamedIdentity>,
     /// Content-deterministic hash distinguishing anonymous nodes.
     /// Commit 4 computes this from the semantic graph's node data.
     pub structural_hash: Hash16,
+    /// Short human-readable label for the node — used by walker /
+    /// chain renderers.
     pub display_label: Arc<str>,
 }
 
+/// Named-type identity projection — `(canonical, symbol, args)` triple
+/// used to key instantiation equality.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct NamedIdentity {
+    /// Canonical id of the file declaring the type symbol.
     pub canonical_id: Arc<str>,
+    /// Declared symbol name.
     pub symbol_name: Arc<str>,
+    /// Fingerprint over the type arguments applied to the symbol.
     pub args_fingerprint: Hash16,
 }
 
@@ -396,34 +534,69 @@ pub struct NamedIdentity {
 #[ts(export, export_to = "audit.generated.ts")]
 #[non_exhaustive]
 pub enum SemanticNodeKind {
+    /// Anchor node for a declaration — used as the root of a
+    /// derivation starting from an exported type.
     DeclAnchor,
+    /// Instantiation of a generic with concrete arguments.
     Instantiated,
+    /// Alias target (`type A = B`).
     Alias,
+    /// Conditional type (`T extends U ? X : Y`).
     Conditional,
+    /// Union type (`A | B`).
     Union,
+    /// Intersection type (`A & B`).
     Intersection,
+    /// Tuple type.
     Tuple,
+    /// Object literal type.
     Object,
+    /// Array / readonly-array type.
     Array,
+    /// Primitive (`string`, `number`, `boolean`, etc.).
     Primitive,
+    /// Unbound type parameter.
     TypeParam,
+    /// Opaque placeholder (e.g. a miss / unknown).
     Opaque,
+    /// Indexed-access type (`T[K]`).
     IndexedAccess,
+    /// `keyof T`.
     KeyOf,
+    /// `typeof expr`.
     TypeOf,
+    /// Mapped type (`{ [K in ...] : ... }`).
     Mapped,
+    /// Template-literal type.
     TemplateLiteral,
+    /// Normalized union (post-flatten).
     NormalizeUnion,
+    /// Normalized intersection (post-flatten).
     NormalizeIntersection,
-    Other { name: Arc<str> },
+    /// Catch-all for variants added to the semantic graph after
+    /// Commit 3. The plan uses `#[non_exhaustive]` so future
+    /// variants can land without breaking the audit consumer
+    /// contract.
+    Other {
+        /// Name of the unrecognized variant — preserved verbatim for
+        /// human inspection.
+        name: Arc<str>,
+    },
 }
 
+/// One derivation edge. `result` is the node produced; `sources` are
+/// the nodes consumed; `meta` carries kind-specific payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct DerivationEdgeRecord {
+    /// NodeId of the node produced by this edge.
     pub result: NodeId,
+    /// Kind of derivation step (see [`OriginEdgeKind`]).
     pub kind: OriginEdgeKind,
+    /// NodeIds of the input nodes consumed to produce `result`.
     pub sources: Vec<NodeId>,
+    /// Kind-specific payload (substitution names, projection
+    /// segments, etc.). See [`OriginEdgeMetaDto`].
     pub meta: OriginEdgeMetaDto,
 }
 
@@ -436,117 +609,218 @@ pub struct DerivationEdgeRecord {
 )]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum OriginEdgeKind {
+    /// Instantiation of a generic with concrete arguments.
     Instantiate,
+    /// Substitution of a type parameter with an argument.
     SubstituteTypeParam,
+    /// Selected branch of a conditional type.
     ConditionalSelect,
+    /// Binding of an `infer` clause.
     InferBind,
+    /// Member projection (`T["name"]` or `.name`).
     ProjectMember,
+    /// Indexed projection (`T[K]`).
     ProjectIndex,
+    /// Multi-segment path projection.
     ProjectPath,
+    /// Normalization step (union / intersection flatten, simplify).
     Normalize,
+    /// Alias-resolve hop.
     AliasResolve,
+    /// Audit-only edge — this request joined a winner's in-flight
+    /// artifact via scheduler dedup. Terminates chain walks into
+    /// `shared_load_terminals`.
     SharedLoadReuse,
 }
 
+/// Kind-specific payload attached to a `DerivationEdgeRecord`.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum OriginEdgeMetaDto {
+    /// Instantiation — carries the names of the generic's type
+    /// parameters, in declaration order, to aid display rendering.
     Instantiate {
+        /// Names of the declared type parameters.
         type_params: Vec<Arc<str>>,
     },
+    /// Type-parameter substitution.
     SubstituteTypeParam {
+        /// Name of the parameter being substituted.
         param_name: Arc<str>,
+        /// NodeId of the substituted-in type.
         substituted_with: NodeId,
     },
+    /// Conditional-type branch selection.
     ConditionalSelect {
+        /// Which branch the solver chose.
         branch: ConditionalBranch,
     },
+    /// `infer` binding.
     InferBind {
+        /// Name of the inferred parameter.
         param_name: Arc<str>,
+        /// NodeId the parameter was bound to.
         bound_to: NodeId,
     },
+    /// Single-segment member projection.
     ProjectMember {
+        /// Member name that was projected out.
         member_name: Arc<str>,
     },
+    /// Single-segment indexed projection.
     ProjectIndex {
+        /// Index key that was projected out.
         index_key: Arc<str>,
     },
+    /// Multi-segment path projection.
     ProjectPath {
+        /// Path segments, in traversal order.
         path: Vec<ProjectPathSegment>,
     },
+    /// Normalization pass (union/intersection flatten, simplify).
     Normalize {
+        /// Specific normalization kind performed.
         kind: NormalizeKind,
     },
+    /// Alias-resolve hop.
     AliasResolve {
+        /// Name of the alias that was followed.
         alias_name: Arc<str>,
     },
+    /// Audit-only edge — this request joined a winner's slot.
+    /// Terminates chain walks.
     SharedLoadReuse {
+        /// Winning request's id.
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         winner_request_id: u64,
+        /// `true` when the winner's own request was audited so its
+        /// record can be consulted.
         winner_audited: bool,
     },
 }
 
+/// Conditional-select branch discriminator.
 #[derive(
     Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, ts_rs::TS,
 )]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum ConditionalBranch {
+    /// The `extends U` clause was proved true — `X` was selected.
     True,
+    /// The `extends U` clause was proved false — `Y` was selected.
     False,
+    /// The conditional stayed unresolved (open over a type parameter)
+    /// — both arms survive into the result.
     Deferred,
 }
 
+/// One step in a projection path (member / index / keyof).
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum ProjectPathSegment {
-    Member { name: Arc<str> },
-    Index { key: Arc<str> },
+    /// `.<name>` member access.
+    Member {
+        /// Member name.
+        name: Arc<str>,
+    },
+    /// `[<key>]` indexed access.
+    Index {
+        /// Literal key used as the index.
+        key: Arc<str>,
+    },
+    /// `keyof T` — yields the union of keys.
     KeyOf,
 }
 
+/// Kind of normalization performed (union-flatten, intersection-
+/// flatten, or a simplification pass).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum NormalizeKind {
+    /// Union flattening / dedup pass.
     Union,
+    /// Intersection flattening / dedup pass.
     Intersection,
+    /// Miscellaneous simplify pass.
     Simplify,
 }
 
+/// Subject of a materialization envelope — which owner+member
+/// (or other identity) the envelope covers.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum MaterializationSubject {
-    MemberRoute { owner: Arc<str>, member: Arc<str> },
-    PublicPropType { owner: Arc<str>, prop: Arc<str> },
-    DefinePropsMember { owner: Arc<str>, member: Arc<str> },
-    FallthroughInheritance { owner: Arc<str> },
+    /// Member-route materialization (owner's public member lookup).
+    MemberRoute {
+        /// Owner file's canonical id.
+        owner: Arc<str>,
+        /// Member name being materialized.
+        member: Arc<str>,
+    },
+    /// Public prop type materialization.
+    PublicPropType {
+        /// Owner file's canonical id.
+        owner: Arc<str>,
+        /// Prop name being materialized.
+        prop: Arc<str>,
+    },
+    /// `defineProps<…>()` member materialization.
+    DefinePropsMember {
+        /// Owner file's canonical id.
+        owner: Arc<str>,
+        /// Member name being materialized.
+        member: Arc<str>,
+    },
+    /// Fallthrough-inheritance resolver envelope.
+    FallthroughInheritance {
+        /// Owner file's canonical id.
+        owner: Arc<str>,
+    },
 }
 
+/// Dispatch key kind — semantic-query cache key discriminator.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum DispatchKeyKind {
+    /// Resolve a declaration (`typeof …`, `type A = …`).
     ResolveDecl,
+    /// Instantiate a generic.
     Instantiate,
+    /// Member projection.
     ProjectMember,
+    /// Indexed projection.
     ProjectIndex,
+    /// Multi-segment path projection.
     ProjectPath,
+    /// Normalization pass.
     Normalize,
+    /// Resolved named-type key (see Vue macro resolution).
     ResolvedNamedType,
 }
 
+/// Cache-outcome discriminator for per-event tallies.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum CacheOutcomeKind {
+    /// Warm cache hit.
     Hit,
+    /// Cache miss (no entry present).
     Miss,
+    /// Joined a peer's in-flight slot and waited.
     JoinedWait,
+    /// Observed a sentinel (placeholder) entry.
     Sentinel,
+    /// Performed a cold build from source.
     ColdBuild,
+    /// Retry loop after an in-flight slot was aborted.
     InflightAbortedRetry,
+    /// Cold entry reaped during generation reconciliation.
     ColdAbortSwept,
 }
 
+/// Which VFS layer served the read — mirrored from the workspace's
+/// own `VfsAuditLayer`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum VfsLayer {
@@ -596,6 +870,9 @@ pub struct AuditBuilder {
 }
 
 impl AuditBuilder {
+    /// Construct a new builder stamped with `request_id` and the
+    /// resolved `canonical_id`. Captures the current process RSS for
+    /// the memory-delta baseline.
     pub fn new(request_id: u64, canonical_id: String) -> Self {
         let now = Instant::now();
         let rss = current_process_rss();
@@ -631,15 +908,18 @@ impl AuditBuilder {
         self.phase_start = Instant::now();
     }
 
+    /// Record `steps` solver resolve-steps and bump the solve-count.
     pub fn record_solver_steps(&mut self, steps: u64) {
         self.solver.total_resolve_steps += steps;
         self.solver.solve_count += 1;
     }
 
+    /// Replace the store-counter block.
     pub fn record_store(&mut self, store: RustStoreAudit) {
         self.store = store;
     }
 
+    /// Record host-cache + workspace memory snapshots (before/after).
     pub fn record_memory_snapshots(
         &mut self,
         host_cache_before_bytes: u64,
@@ -653,10 +933,12 @@ impl AuditBuilder {
         self.memory.workspace_after_bytes = workspace_after_bytes;
     }
 
+    /// Replace the timings block.
     pub fn record_timings(&mut self, timings: RustTimingAudit) {
         self.timings = timings;
     }
 
+    /// Replace the solver-counter block.
     pub fn record_solver(&mut self, solver: RustSolverAudit) {
         self.solver = solver;
     }
@@ -666,6 +948,9 @@ impl AuditBuilder {
         self.footprint = Some(footprint);
     }
 
+    /// Finalize the builder into a [`RustAuditRecord`] — captures the
+    /// request-end RSS, computes the signed delta, and fills the
+    /// `total_ms` wall-clock.
     pub fn finish(mut self) -> RustAuditRecord {
         self.timings.total_ms = self.request_start.elapsed().as_secs_f64() * 1000.0;
         self.memory.process_rss_after_bytes = current_process_rss();
@@ -687,13 +972,21 @@ impl AuditBuilder {
 /// Named phases for timing capture.
 #[derive(Debug, Clone, Copy)]
 pub enum AuditPhase {
+    /// Capture inputs (request args, config snapshot).
     CaptureInputs,
+    /// Read the project type store.
     StoreRead,
+    /// Merge store data with the overlay view.
     StoreMerge,
+    /// Prove direct imports.
     DirectImportProof,
+    /// Prove transitively-imported type roots.
     ImportedRootProof,
+    /// Type solver invocation.
     Solver,
+    /// Member-route / public-type materialization.
     Materialize,
+    /// Serialize the final component-meta payload.
     Serialize,
 }
 
@@ -702,11 +995,16 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
+/// RAII guard returned by [`begin_request_audit`]. Drops the
+/// corresponding entry from the `ACTIVE_REQUEST_AUDIT` TLS stack on
+/// scope exit.
 pub struct RequestAuditGuard {
     request_id: u64,
 }
 
 impl RequestAuditGuard {
+    /// Snapshot the phase-audit state for this request without
+    /// removing it from the stack.
     pub fn snapshot(&self) -> RequestPhaseAudit {
         ACTIVE_REQUEST_AUDIT.with(|stack| {
             stack
@@ -734,6 +1032,8 @@ impl Drop for RequestAuditGuard {
     }
 }
 
+/// Push a new [`RequestPhaseAudit`] entry for `request_id` onto the
+/// TLS stack and return the RAII guard that removes it on drop.
 pub fn begin_request_audit(request_id: u64) -> RequestAuditGuard {
     ACTIVE_REQUEST_AUDIT.with(|stack| {
         stack
@@ -743,6 +1043,9 @@ pub fn begin_request_audit(request_id: u64) -> RequestAuditGuard {
     RequestAuditGuard { request_id }
 }
 
+/// Accumulate `elapsed_ms` into the current request's imported-root
+/// proof phase. Zero or negative values are dropped (defensive guard
+/// against timer skew).
 pub fn record_imported_root_proof_ms(elapsed_ms: f64) {
     if elapsed_ms <= 0.0 {
         return;
@@ -754,6 +1057,9 @@ pub fn record_imported_root_proof_ms(elapsed_ms: f64) {
     });
 }
 
+/// Snapshot the top-of-stack request's phase-audit without removing
+/// it. Used by consumers that need a sidecar view without owning a
+/// guard.
 pub fn current_request_audit_snapshot() -> RequestPhaseAudit {
     ACTIVE_REQUEST_AUDIT.with(|stack| {
         stack

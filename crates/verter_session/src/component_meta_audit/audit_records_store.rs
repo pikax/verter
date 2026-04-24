@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Bounded insert-ordered store for finished audit records.
 //!
 //! Plan §2.5. `VerterHost` owns a single `AuditRecordsStore` instance;
@@ -31,6 +32,9 @@ impl Default for AuditRecordsStore {
 }
 
 impl AuditRecordsStore {
+    /// Construct a store bounded to `capacity` entries (oldest-by-
+    /// insertion is evicted on overflow). A capacity below 1 is
+    /// clamped to 1.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(IndexMap::with_capacity(capacity.max(1))),

@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! `StructuredComponentMetaEvent` — typed replacement for the legacy
 //! free-form `component_meta_trace_event!` / `component_meta_trace_scope!`
 //! macro format strings.
@@ -32,82 +33,131 @@ use crate::types::Hash16;
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub enum StructuredComponentMetaEvent {
+    /// Emitted at the entry of `get_component_meta_with_resolution`.
     RequestStart {
+        /// Canonical id being resolved.
         canonical_id: Arc<str>,
+        /// Stamped request id (decimal-string transport).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         request_id: u64,
     },
+    /// Emitted when `get_component_meta_with_resolution` returns.
     RequestEnd {
+        /// Request id this event closes.
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         request_id: u64,
+        /// `true` when the resolution produced `Some(...)`; `false`
+        /// on a `None`/error return.
         success: bool,
     },
+    /// A fresh `IndexedReady` entry was installed.
     IndexedReadyBuilt {
+        /// Canonical id of the newly-built entry.
         canonical_id: Arc<str>,
+        /// Content hash of the source snapshot.
         whole_hash: Hash16,
     },
+    /// One VFS read was observed by the session-side sink.
     VfsRead {
+        /// Canonical id that was read.
         canonical_id: Arc<str>,
+        /// VFS layer that served the read.
         layer: VfsLayer,
+        /// `true` when served by an in-memory cache (overlay / snapshot).
         cache_hit: bool,
+        /// Number of bytes returned.
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         bytes_read: u64,
     },
+    /// This request attached to a winner's in-flight slot.
     SharedLoadReuse {
+        /// Canonical id of the shared artifact.
         canonical_id: Arc<str>,
+        /// Winning request's id.
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         winner_request_id: u64,
+        /// `true` when the winner was itself audited.
         winner_audited: bool,
     },
+    /// Entering a semantic-query dispatch envelope.
     DispatchEnter {
+        /// Kind of dispatch key being resolved.
         key_kind: DispatchKeyKind,
+        /// Nesting depth within the envelope stack.
         depth: u16,
     },
+    /// Leaving a semantic-query dispatch envelope.
     DispatchExit {
+        /// Kind of dispatch key that was resolved.
         key_kind: DispatchKeyKind,
+        /// Cache outcome recorded for the dispatch.
         outcome: super::CacheOutcomeKind,
+        /// Wall-clock duration in nanoseconds (decimal-string transport).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         duration_ns: u64,
     },
+    /// Start envelope for member-route materialization.
     MaterializeMemberRouteStart {
+        /// What is being materialized.
         subject: MaterializationSubject,
     },
+    /// End envelope with captured duration.
     MaterializeMemberRouteEnd {
+        /// Subject this event closes.
         subject: MaterializationSubject,
+        /// Wall-clock duration (ns).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         duration_ns: u64,
     },
+    /// Start envelope for public-prop-type rematerialization.
     RematerializePublicPropTypeStart {
+        /// Subject (owner + prop).
         subject: MaterializationSubject,
     },
+    /// End envelope with captured duration.
     RematerializePublicPropTypeEnd {
+        /// Subject this event closes.
         subject: MaterializationSubject,
+        /// Wall-clock duration (ns).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         duration_ns: u64,
     },
+    /// `defineProps<…>()` member materialization event.
     MaterializeDefinePropsMember {
+        /// Subject (owner + member).
         subject: MaterializationSubject,
     },
+    /// Fallthrough-inheritance was computed for an owner file.
     FallthroughInheritanceComputed {
+        /// Subject (owner).
         subject: MaterializationSubject,
     },
+    /// Imported type-root resolution hop.
     ResolveImportedTypeRoot {
+        /// Canonical id of the declaring file.
         canonical_id: Arc<str>,
+        /// Symbol name that was being resolved.
         symbol_name: Arc<str>,
     },
+    /// Eval-state checkpoint with captured duration.
     CurrentEvalState {
+        /// Canonical id whose eval state was captured.
         canonical_id: Arc<str>,
+        /// Wall-clock duration (ns).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         duration_ns: u64,
     },
+    /// Escape hatch for ad-hoc events. Every construction site MUST
+    /// carry a `// Custom justified: <reason>` comment — the grep
+    /// test in Commit 5 enforces this.
     Custom {
         /// Short identifier for the event kind.
         name: Arc<str>,

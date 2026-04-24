@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! `AuditedRequest` harness — plan §2.6.
 //!
 //! The harness wraps one `get_component_meta_with_resolution` call in
@@ -76,11 +77,17 @@ impl std::error::Error for AuditedRequestError {}
 pub struct AuditedRequest;
 
 impl AuditedRequest {
+    /// Start a new builder. The default is hermetic (fresh host per
+    /// resolution); call `attach_to(host)` to run against an existing
+    /// host instead.
     pub fn builder() -> AuditedRequestBuilder {
         AuditedRequestBuilder::default()
     }
 }
 
+/// Builder accumulator for [`AuditedRequest`]. Construct via
+/// [`AuditedRequest::builder`] and terminate with [`Self::resolve`]
+/// or [`Self::run_custom`].
 #[derive(Default)]
 pub struct AuditedRequestBuilder {
     workspace: Option<Arc<dyn WorkspaceAccess>>,
@@ -94,11 +101,16 @@ pub struct AuditedRequestBuilder {
 }
 
 impl AuditedRequestBuilder {
+    /// Attach an external workspace. Defaults to an in-memory
+    /// workspace populated from [`Self::files`].
     pub fn workspace(mut self, ws: Arc<dyn WorkspaceAccess>) -> Self {
         self.workspace = Some(ws);
         self
     }
 
+    /// Inject a set of `(canonical_id, source)` pairs into the
+    /// hermetic host's workspace. Ignored when attached to an
+    /// external host.
     pub fn files<I, S1, S2>(mut self, files: I) -> Self
     where
         I: IntoIterator<Item = (S1, S2)>,
@@ -112,11 +124,16 @@ impl AuditedRequestBuilder {
         self
     }
 
+    /// Override the default `AnalysisLevel::Full` for the hermetic
+    /// host.
     pub fn analysis_level(mut self, level: AnalysisLevel) -> Self {
         self.analysis_level = Some(level);
         self
     }
 
+    /// Supply an explicit [`HostConfig`] base. The harness still
+    /// forces `audit_enabled = true + footprint_capture = true` on
+    /// the hermetic path.
     pub fn host_config(mut self, config: HostConfig) -> Self {
         self.host_config = Some(config);
         self

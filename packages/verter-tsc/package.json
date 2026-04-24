@@ -23,7 +23,8 @@
     "bin"
   ],
   "scripts": {
-    "build": "echo 'no build step — binary is distributed via optionalDependencies'"
+    "build": "echo 'no build step — binary is distributed via optionalDependencies'",
+    "test": "echo 'no tests — binary-only distribution'"
   },
   "optionalDependencies": {
     "@verter/tsc-darwin-arm64": "workspace:*",

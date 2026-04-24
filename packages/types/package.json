@@ -35,10 +35,12 @@
     }
   },
   "scripts": {
-    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs"
+    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs",
+    "test": "vitest --run"
   },
   "devDependencies": {
     "typescript": "6.0.0-beta",
+    "vitest": "^4.1.0",
     "vue": "^3.5.30"
   }
 }

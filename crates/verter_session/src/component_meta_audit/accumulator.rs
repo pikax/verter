@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Request-scoped footprint accumulator.
 //!
 //! Plan §2.5. One `RequestFootprintAccumulator` is built per audited
@@ -29,8 +30,12 @@ use crate::semantic_query::{OriginEdge, OriginEdgeKind, SemanticNodeId};
 /// assignment.
 #[derive(Debug, Clone)]
 pub struct DerivationEdgeRaw {
+    /// Live semantic-node id of the node the edge produces.
     pub result: SemanticNodeId,
+    /// Semantic-graph edge kind (union, alias-resolve, etc.).
     pub kind: OriginEdgeKind,
+    /// The live `OriginEdge` — sources + meta preserved verbatim for
+    /// the miner's canonicalisation pass.
     pub edge: OriginEdge,
 }
 
@@ -38,16 +43,31 @@ pub struct DerivationEdgeRaw {
 /// so the footprint-miner sees a consistent snapshot when it drains.
 #[derive(Debug, Default)]
 pub struct AccumulatorState {
+    /// Fresh `IndexedReady` build events observed during the request.
     pub indexed_ready_builds: Vec<IndexedReadyBuildRecord>,
+    /// VFS reads pushed by the session-side audit sink (fan-out from
+    /// the workspace's `VfsAuditSink`).
     pub vfs_reads: Vec<VfsReadRecord>,
+    /// Records where this request joined a winner's in-flight slot
+    /// instead of starting cold (plan §2.7).
     pub shared_load_reuses: Vec<SharedLoadReuseRecord>,
+    /// Type-instantiation steps observed during solver / materialization.
     pub instantiations: Vec<InstantiationRecord>,
+    /// Projection steps observed.
     pub projections: Vec<ProjectionRecord>,
+    /// Conditional-type branch decisions.
     pub conditional_decisions: Vec<ConditionalRecord>,
+    /// Type-parameter substitutions.
     pub substitutions: Vec<SubstitutionRecord>,
+    /// Alias-resolve hops.
     pub alias_resolutions: Vec<AliasResolveRecord>,
+    /// Materialization envelopes with captured durations.
     pub materializations: Vec<MaterializationRecord>,
+    /// Structured events emitted via `component_meta_trace_structured!`
+    /// — retained verbatim for snapshot-exact assertions.
     pub structured_events: Vec<StructuredComponentMetaEvent>,
+    /// Raw derivation edges captured by the `record_origin_edge` hook
+    /// before the miner canonicalises them.
     pub derivation_edges_raw: Vec<DerivationEdgeRaw>,
 }
 
@@ -59,6 +79,7 @@ pub struct RequestFootprintAccumulator {
 }
 
 impl RequestFootprintAccumulator {
+    /// Construct an empty accumulator. One per audited request.
     pub fn new() -> Self {
         Self::default()
     }
@@ -70,14 +91,19 @@ impl RequestFootprintAccumulator {
         std::mem::take(&mut *st)
     }
 
+    /// Append a fresh-`IndexedReady` build record.
     pub fn push_indexed_ready_build(&self, record: IndexedReadyBuildRecord) {
         self.state.lock().indexed_ready_builds.push(record);
     }
 
+    /// Append a VFS-read event (usually fanned out from the
+    /// workspace's `VfsAuditSink`).
     pub fn push_vfs_read(&self, record: VfsReadRecord) {
         self.state.lock().vfs_reads.push(record);
     }
 
+    /// Append a shared-load reuse record from the scheduler's
+    /// dedup hook (`on_dedup_joiner`).
     pub fn push_shared_load_reuse(
         &self,
         canonical_id: Arc<str>,
@@ -94,34 +120,44 @@ impl RequestFootprintAccumulator {
             });
     }
 
+    /// Append an instantiation step.
     pub fn push_instantiation(&self, record: InstantiationRecord) {
         self.state.lock().instantiations.push(record);
     }
 
+    /// Append a projection step.
     pub fn push_projection(&self, record: ProjectionRecord) {
         self.state.lock().projections.push(record);
     }
 
+    /// Append a conditional-branch decision.
     pub fn push_conditional(&self, record: ConditionalRecord) {
         self.state.lock().conditional_decisions.push(record);
     }
 
+    /// Append a type-parameter substitution step.
     pub fn push_substitution(&self, record: SubstitutionRecord) {
         self.state.lock().substitutions.push(record);
     }
 
+    /// Append an alias-resolve step.
     pub fn push_alias_resolution(&self, record: AliasResolveRecord) {
         self.state.lock().alias_resolutions.push(record);
     }
 
+    /// Append a materialization envelope.
     pub fn push_materialization(&self, record: MaterializationRecord) {
         self.state.lock().materializations.push(record);
     }
 
+    /// Append a structured event emitted by
+    /// `component_meta_trace_structured!`.
     pub fn push_structured_event(&self, event: StructuredComponentMetaEvent) {
         self.state.lock().structured_events.push(event);
     }
 
+    /// Append a raw derivation edge captured by the
+    /// `record_origin_edge` hook (plan §3 Commit 4).
     pub fn push_derivation_edge(
         &self,
         result: SemanticNodeId,

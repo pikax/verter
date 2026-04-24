@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Footprint miner — converts a drained `AccumulatorState` plus a
 //! reference to the live [`SemanticGraphStore`] into a deterministic
 //! [`RustSemanticFootprintAudit`].

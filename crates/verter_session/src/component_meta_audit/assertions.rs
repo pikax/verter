@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Inherent assertions + iterative walker for [`RustAuditRecord`].
 //!
 //! Plan §2.8 + §3 Commit 6. Public surface:
@@ -62,10 +63,15 @@ pub struct ProvenanceChain {
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "audit.generated.ts")]
 pub struct ProvenanceStep {
+    /// EdgeId of the derivation edge visited at this step.
     pub edge_id: EdgeId,
+    /// Distance from the walker's root node (BFS depth).
     pub depth: u16,
     /// `display_label` of the edge's result node.
     pub node_label: Arc<str>,
+    /// The full derivation edge (result / sources / meta) captured
+    /// verbatim so the TS-side renderer doesn't need to re-resolve
+    /// edges against the source audit.
     pub edge: DerivationEdgeRecord,
 }
 
@@ -78,10 +84,16 @@ pub enum ChainTermination {
     Complete,
     /// The walker reached [`WALKER_DEPTH_CAP`] and terminated the
     /// affected branch.
-    DepthExceeded { cap: u16 },
+    DepthExceeded {
+        /// Depth cap that was exceeded.
+        cap: u16,
+    },
     /// A previously-visited [`EdgeId`] was re-encountered. The walker
     /// terminates that branch and records the cycle anchor.
-    Cycle { at_edge: EdgeId },
+    Cycle {
+        /// EdgeId where the walker detected the cycle.
+        at_edge: EdgeId,
+    },
     /// The walker's root could not be located in the audit record.
     NotFound,
 }
@@ -386,6 +398,7 @@ pub fn render_chain_text(chain: &ProvenanceChain) -> String {
 /// Unified-diff style assertion failure.
 #[derive(Debug, Clone)]
 pub struct AssertionDiff {
+    /// Rendered unified-diff message for display.
     pub message: String,
 }
 

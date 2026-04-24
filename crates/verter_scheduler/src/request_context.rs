@@ -6,6 +6,7 @@
 //! ([`RequestContextLike`]) that the scheduler can store in `Request`,
 //! install into worker TLS, and call back into on dedup / cache-event
 //! boundaries.
+#![deny(missing_docs)]
 //!
 //! Lifecycle:
 //!

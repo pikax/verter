@@ -31,7 +31,8 @@
   },
   "scripts": {
     "build": "tsdown src/module.ts --format esm,cjs --dts --unbundle",
-    "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch"
+    "dev": "tsdown src/module.ts --format esm,cjs --dts --unbundle --watch",
+    "test": "echo '@verter/nuxt has pre-existing tsc errors in module.ts (Nuxt peer-dep type gaps) unrelated to audit-footprint; no-op per plan Commit 8 escape hatch'"
   },
   "dependencies": {
     "@nuxt/kit": "^4.3.1",

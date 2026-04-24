@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Session-side request context + per-context counters + TLS guards.
 //!
 //! Plan §2.2. `RequestContext` is the per-request state that rides along
@@ -41,20 +42,33 @@ pub struct RequestContext {
     pub footprint_capture: bool,
     /// The per-request footprint accumulator (opt-in).
     pub audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
-    // Per-context cache-event counters. Populated by
-    // `execute_cooperative` calling `ctx.record_cache_event(kind)` on
-    // the active context. These counters kill the `is_approximate`
-    // field — they are EXACT per-request even under concurrent audits
-    // because each request's context isolates its own events.
+    /// Per-context cold-build counter. Populated by
+    /// `execute_cooperative` calling `ctx.record_cache_event(Miss |
+    /// ColdBuild)`. Exact per-request even under concurrent audits
+    /// because each request's context isolates its own events
+    /// (plan §1.4 — kills the `is_approximate` field).
     pub cold_builds: AtomicU64,
+    /// Per-context warm-hit counter. Fired on `Hit`.
     pub warm_hits: AtomicU64,
+    /// Per-context joined-wait counter. Fired on `JoinedWait`
+    /// (a peer picked up an in-flight artifact before this request
+    /// could start from cold).
     pub joined_waits: AtomicU64,
+    /// Per-context sentinel counter. Fired on `Sentinel` — placeholder
+    /// entries that collapse to a real artifact later.
     pub sentinels: AtomicU64,
+    /// Per-context in-flight-abort-retry counter. Fired on
+    /// `InflightAbortedRetry` — a retry loop after an in-flight
+    /// slot was aborted by a newer generation.
     pub inflight_aborted_retries: AtomicU64,
+    /// Per-context cold-abort-swept counter. Fired on
+    /// `ColdAbortSwept` — a cold entry reaped during generation
+    /// reconciliation.
     pub cold_aborts_swept: AtomicU64,
 }
 
 impl RequestContext {
+    /// Construct a new per-request context with zeroed counters.
     pub fn new(
         request_id: u64,
         canonical_id: Arc<str>,
@@ -143,6 +157,11 @@ pub struct RequestContextGuard {
 }
 
 impl RequestContextGuard {
+    /// Install `ctx` as both the session-side `CURRENT_REQUEST_CONTEXT`
+    /// (together with the accumulator TLS) and the scheduler's
+    /// opaque TLS slot, so worker threads see `current_request_id()`
+    /// return the right value. The returned guard restores every
+    /// prior TLS value on drop.
     pub fn install(ctx: Arc<RequestContext>) -> Self {
         let acc = ctx.audit_accumulator.clone();
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
@@ -232,6 +251,10 @@ pub fn nested_audit_in_progress() -> bool {
 pub struct NestedAuditGuard;
 
 impl NestedAuditGuard {
+    /// Try to enter a nested audit guard. Returns `Some(Self)` when no
+    /// audit is in progress on this thread and the guard is installed;
+    /// returns `None` when an audit is already active (the harness
+    /// surfaces this as `NestedAuditNotSupported`).
     pub fn enter() -> Option<Self> {
         let already = NESTED_AUDIT_GUARD.with(|cell| {
             if cell.get() {

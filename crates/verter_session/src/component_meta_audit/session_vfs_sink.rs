@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Session-side adapter bridging workspace fan-out
 //! ([`verter_workspace::audit_sink::VfsAuditSink`]) into the active
 //! request's [`RequestFootprintAccumulator`].
