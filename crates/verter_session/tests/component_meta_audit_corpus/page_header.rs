@@ -3,11 +3,13 @@
 //! Plan §3 Commit 13 (F10). Corpus coverage for the nuxt-ui
 //! runtime component at `/PageHeader.vue`. The assertion posture is
 //! minimal but discriminating: the audit record must be produced
-//! and the footprint must carry a non-empty derivation subgraph
-//! when resolution succeeds, OR the resolution returns `None` and
-//! the test surfaces that as a known-skip rather than crashing.
+//! and the footprint attached when resolution succeeds; the ONLY
+//! tolerated error variant is `ResolutionFailed` (hermetic setup
+//! missing transitive deps). Any other `AuditedRequestError`
+//! variant is a genuine audit-wiring regression and panics the
+//! test — see review finding F1 for the pre-fix stub pattern.
 
-use verter_session::audited_request::AuditedRequest;
+use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 
 #[test]
 fn corpus_audit_page_header_produces_audit_record_or_documents_skip() {
@@ -37,10 +39,19 @@ fn corpus_audit_page_header_produces_audit_record_or_documents_skip() {
                 "hermetic AuditedRequest must attach Some(footprint) on resolution success",
             );
         }
-        Err(err) => {
+        Err(AuditedRequestError::ResolutionFailed) => {
+            // Benign: hermetic fixture lacks transitive deps, so
+            // `get_component_meta_with_resolution` returned
+            // `None`. This is the ONLY error variant we treat as
+            // skip — every other variant is a genuine regression
+            // (nested-audit guard, multi-request counter, audit
+            // record missing from store, config validation).
             eprintln!(
-                "corpus_audit_page_header: resolution returned an error — documenting skip: {err:?}",
+                "corpus_audit_page_header: hermetic resolution returned None (missing deps) — documenting skip",
             );
         }
+        Err(other) => panic!(
+            "corpus_audit_page_header: unexpected audit error — this indicates an audit-wiring regression, not a hermetic-dep gap: {other:?}",
+        ),
     }
 }
