@@ -353,6 +353,118 @@ describe("component-meta native aliases", () => {
     session.close();
     host.shutdown();
   });
+
+  it("napi_audit_json_round_trips_through_typescript_json_parse_stringify", () => {
+    // Plan §3 Commit 8 test list. The audit JSON round-trip through
+    // `JSON.parse`/`JSON.stringify` is the path the hover / playground
+    // consumers take — they stringify, ship over a transport, parse,
+    // re-stringify before handing to `whyLoadedFromAuditJson`. This
+    // test simulates the round-trip and then exercises the walker.
+    //
+    // Discriminating: if any field in the audit record fails to
+    // round-trip as valid JSON (e.g. a Rust-side change drops a
+    // `#[serde(skip)]` onto a required field, or a `u64` is
+    // accidentally serialized as a non-string JavaScript Number that
+    // loses precision), the re-stringified payload handed to the
+    // walker deserializes to a `RustAuditRecord` with missing / wrong
+    // fields and the walker either throws or produces a surprise
+    // chain shape.
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost({
+      auditEnabled: true,
+      footprintCapture: true,
+    });
+    host.upsertBase(
+      "/Widget.vue",
+      '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
+    );
+    const session = host.openSession();
+    const buffer = session.getComponentMetaWithAudit("/Widget.vue");
+    expect(buffer, "audit binding must return a Buffer payload").toBeTruthy();
+    const originalJson = (buffer as Buffer).toString("utf-8");
+
+    // Round-trip: parse → stringify.
+    const parsed = JSON.parse(originalJson);
+    const reStringified = JSON.stringify(parsed);
+
+    // Structural parity: re-parsing the re-stringified form must
+    // produce a value deeply equal to the first parse. If the
+    // serializer used any non-deterministic key ordering JSON.stringify
+    // would collapse it — we still want to guarantee deep equality.
+    const reParsed = JSON.parse(reStringified);
+    expect(reParsed).toEqual(parsed);
+
+    // The u64-as-string invariant must survive the round-trip.
+    expect(typeof reParsed.record.request_id).toBe("string");
+    expect(reParsed.record.request_id).toMatch(/^[0-9]+$/);
+
+    // The walker must consume the re-stringified form and produce a
+    // ProvenanceChain with the documented shape.
+    const chainJson = session.whyLoadedFromAuditJson(reStringified, "/Widget.vue");
+    const chain = JSON.parse(chainJson);
+    expect(chain).toHaveProperty("steps");
+    expect(chain).toHaveProperty("terminated");
+    expect(chain).toHaveProperty("shared_load_terminals");
+    expect(Array.isArray(chain.steps)).toBe(true);
+    expect(Array.isArray(chain.shared_load_terminals)).toBe(true);
+
+    session.close();
+    host.shutdown();
+  });
+
+  it("napi_take_audit_record_called_synchronously_before_promise_resolves", () => {
+    // Plan §3 Commit 8 binding-shape decision 1: the audit NAPI
+    // methods are SYNCHRONOUS. The plan's phrase "Promise resolves
+    // synchronously" meant that the binding hands the audit record
+    // back on the same call that produced it — NOT that the binding
+    // uses `async fn`. This test pins that decision: the Buffer must
+    // be observable on the same microtask as the call that produced
+    // it, with no Promise-resolution dance required.
+    //
+    // Discriminating: if someone ships a future refactor that wraps
+    // the Rust side in `tokio::spawn` or replaces the sync NAPI
+    // binding with an `#[napi(async)]` method, the return type
+    // changes from `Buffer | null` to `Promise<Buffer | null>` and
+    // the synchronous `instanceof Buffer` check below fails before
+    // any `await` resolves.
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost({
+      auditEnabled: true,
+      footprintCapture: true,
+    });
+    host.upsertBase(
+      "/Sync.vue",
+      '<script setup lang="ts">\nconst m: number = 2\n</script>\n<template><div>{{ m }}</div></template>',
+    );
+    const session = host.openSession();
+
+    const result = session.getComponentMetaWithAudit("/Sync.vue");
+
+    // The return value MUST be a Buffer (or null), never a Promise.
+    expect(result).not.toBeInstanceOf(Promise);
+    expect(
+      result === null || Buffer.isBuffer(result),
+      "sync NAPI must return Buffer | null on the same tick",
+    ).toBe(true);
+
+    // The walker binding on the same session must also be sync.
+    const auditJson = (result as Buffer).toString("utf-8");
+    const walkerResult = session.whyLoadedFromAuditJson(auditJson, "/Sync.vue");
+    expect(walkerResult).not.toBeInstanceOf(Promise);
+    expect(typeof walkerResult).toBe("string");
+
+    const walkerInst = session.whyInstantiatedFromAuditJson(
+      auditJson,
+      "/Sync.vue",
+      "Sync",
+      "0".repeat(32),
+    );
+    expect(walkerInst).not.toBeInstanceOf(Promise);
+    expect(typeof walkerInst).toBe("string");
+
+    session.close();
+    host.shutdown();
+  });
 });
 
 describe("VerterHost type declarations in sync with native binary", () => {

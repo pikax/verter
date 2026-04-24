@@ -899,6 +899,78 @@ mod tests {
     }
 
     #[test]
+    fn shared_load_reuse_with_winner_audited_false_renders_fallback_text_via_rust_walker() {
+        // Plan §3 Commit 8 test list entry. End-to-end: construct a
+        // footprint with an empty derivation graph but a
+        // `SharedLoadReuseRecord` where `winner_audited == false` (the
+        // SharedLoadReuse case where the winning request was NOT
+        // audited), call `why_loaded` — the walker must return
+        // `ChainTermination::Complete` with the shared-load terminal
+        // carried through to the chain, and `render_chain_text` must
+        // emit the fallback wording documented in plan §2.7.
+        //
+        // Discriminating: if `why_loaded` regressed to returning
+        // `NotFound` when only a shared-load terminal exists, or if
+        // `render_chain_text` dropped the `winner_audited == false`
+        // branch, the assertions below fail with clear diffs.
+        let fp = RustSemanticFootprintAudit {
+            vfs_reads: Vec::new(),
+            shared_load_reuses: vec![SharedLoadReuseRecord {
+                canonical_id: Arc::from("/shared.ts"),
+                winner_request_id: 99,
+                winner_audited: false,
+            }],
+            derivation_subgraph: DerivationSubgraph {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let record = record_with_footprint(fp);
+
+        let chain = record.why_loaded("/shared.ts");
+
+        assert!(
+            matches!(chain.terminated, ChainTermination::Complete),
+            "walker must terminate Complete when a shared-load terminal exists, got {:?}",
+            chain.terminated,
+        );
+        assert_eq!(
+            chain.shared_load_terminals.len(),
+            1,
+            "walker must carry the SharedLoadReuseRecord into the chain",
+        );
+        assert!(
+            !chain.shared_load_terminals[0].winner_audited,
+            "winner_audited=false must survive the walker",
+        );
+        assert_eq!(
+            chain.shared_load_terminals[0].winner_request_id, 99,
+            "winner_request_id must be preserved through the walker",
+        );
+        assert_eq!(
+            chain.shared_load_terminals[0].canonical_id.as_ref(),
+            "/shared.ts",
+        );
+        assert_eq!(chain.root, None, "no derivation-graph root in this case");
+        assert!(chain.steps.is_empty(), "no derivation hops to walk");
+
+        let text = render_chain_text(&chain);
+        assert!(
+            text.contains("unaudited"),
+            "render_chain_text must emit the `unaudited` fallback wording from plan §2.7: {text}",
+        );
+        assert!(
+            text.contains("/shared.ts"),
+            "render_chain_text must mention the canonical id: {text}",
+        );
+        assert!(
+            text.contains("99"),
+            "render_chain_text must carry the winner_request_id into the output: {text}",
+        );
+    }
+
+    #[test]
     fn why_instantiated_returns_chain_rooted_at_matching_instantiation() {
         use crate::component_meta_audit::InstantiationRecord;
         let nodes = vec![primitive_node("decl"), primitive_node("inst_result")];
