@@ -83,7 +83,15 @@ fn audit_modules_compile_without_missing_docs_warnings() {
 }
 
 #[test]
-fn audit_doctests_pass() {
+fn audit_doc_snippet_names_resolve_to_exported_symbols() {
+    // (Previously named `audit_doctests_pass` — renamed in review
+    // F12 because the body does NAME RESOLUTION against the audit
+    // source, not `cargo test --doc` execution. The rustdoc
+    // `#![deny(missing_docs)]` attribute already guarantees every
+    // public item carries documentation; actual doctest execution
+    // is handled by `cargo test --doc` when the user explicitly
+    // runs it.)
+    //
     // Parse each `docs/audit-footprint/*.md`. For every fenced Rust
     // code block that is not `ignore` / `no_run`, verify that every
     // type name referenced in the block corresponds to a string
@@ -142,11 +150,27 @@ fn audit_doctests_pass() {
 fn skill_references_audit_api_names_exactly_as_exported() {
     let root = workspace_root();
     let skill_path = root.join(".claude/skills/component-meta/SKILL.md");
+    // Plan §3 Commit 11 explicitly modifies
+    // `.claude/skills/component-meta/SKILL.md` and the file is
+    // tracked in this repo. Silent-skip on missing file would hide
+    // a `git rm` mistake on a future branch; an explicit env-var
+    // escape hatch keeps the path open for downstream consumers
+    // who vendor this test without the skill file.
     if !skill_path.exists() {
-        // Skills directory is gitignored in some checkouts (user
-        // private configs). Skip silently in that case.
-        eprintln!("skipping — {} not present", skill_path.display());
-        return;
+        if std::env::var("VERTER_SKIP_SKILL_MD_CHECKS").is_ok() {
+            eprintln!(
+                "skipping — {} not present and VERTER_SKIP_SKILL_MD_CHECKS is set",
+                skill_path.display(),
+            );
+            return;
+        }
+        panic!(
+            "`.claude/skills/component-meta/SKILL.md` is missing at `{}`. Plan §3 Commit 11 \
+             adds this file and it must remain tracked. If you are intentionally testing a \
+             vendored checkout without the skill file, set \
+             `VERTER_SKIP_SKILL_MD_CHECKS=1`; otherwise, restore the file. (Review F10.)",
+            skill_path.display(),
+        );
     }
     let skill = fs::read_to_string(&skill_path).expect("read SKILL.md");
     // Audit-surface API names enumerated in the plan. If you add a

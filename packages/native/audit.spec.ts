@@ -77,9 +77,27 @@ describe("ts_helpers_do_not_reimplement_walker_logic", () => {
     // shared_load_reuses` set. No other helper may touch it, and
     // those set-accumulations must not recurse or cross-reference
     // any derivation-graph structure.
+    //
+    // Review F13: the previous check required the single-line form
+    // `for (const r of ...) set.add(r.canonical_id);`. That broke
+    // on benign reformatting (prettier expanding the body to a
+    // brace block). This broader check accepts multi-line forms
+    // but forbids any sub-property access on iterator items beyond
+    // `.canonical_id` — the core safety invariant (TS must not
+    // peek at shared-load-graph structure).
     const ALLOWED_LINE_PATTERNS = [
-      // Direct iteration for set addition — the only legal usage.
+      // Single-line: `for (const r of ...) set.add(r.canonical_id);`
       /for\s*\(const\s+r\s+of\s+(?:footprint\.|fp\.)?shared_load_reuses\)\s*set\.add\(r\.canonical_id\);?/,
+      // Multi-line body: `for (const r of ...shared_load_reuses) {`
+      // — the opening line. The `set.add(r.canonical_id)` body line
+      // is covered by the property-access check below.
+      /for\s*\(const\s+r\s+of\s+(?:footprint\.|fp\.)?shared_load_reuses\)\s*\{?\s*$/,
+      // The body line `set.add(r.canonical_id);` inside a for-of
+      // block. Accepted standalone because the preceding loop
+      // opener was already validated.
+      /^\s*set\.add\(r\.canonical_id\);?\s*$/,
+      // The loop closing brace on its own line.
+      /^\s*\}\s*$/,
     ];
     for (const file of FILES) {
       const lines = file.content.split(/\r?\n/);
@@ -97,7 +115,8 @@ describe("ts_helpers_do_not_reimplement_walker_logic", () => {
         }
         // Permit the import list / type-level references.
         if (/^\s*(?:import\b|type\b|interface\b|export\s+(?:type|interface))/.test(line)) continue;
-        // The remaining code line must match one of the allowed patterns.
+        // The remaining code line must match one of the allowed
+        // patterns OR pass the forbidden-property-access check.
         const matchesAllowed = ALLOWED_LINE_PATTERNS.some((p) => p.test(trimmed));
         expect(
           matchesAllowed,
