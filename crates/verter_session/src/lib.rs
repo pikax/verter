@@ -309,6 +309,15 @@ impl std::fmt::Debug for VerterHost {
 }
 
 impl VerterHost {
+    /// Read-only access to the host's configuration. Consumers (LSP
+    /// hover provenance, MCP diagnostics, etc.) use this to check
+    /// flags like `audit_enabled` or `footprint_capture` without
+    /// threading them at construction time.
+    #[must_use]
+    pub fn config(&self) -> &HostConfig {
+        &self.config
+    }
+
     /// Create a new host backed by the given workspace.
     ///
     /// The workspace provides file reads, import resolution, and edge recording

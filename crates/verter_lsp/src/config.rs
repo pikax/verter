@@ -58,6 +58,28 @@ pub fn parse_experimental_init_options(
     }
 }
 
+/// Hover-related init options. Plan §3 Commit 9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HoverOptions {
+    /// When `true`, hover responses are enriched with a provenance
+    /// markdown section showing files loaded and derivation chain.
+    /// Default `false` — opt-in.
+    pub provenance: bool,
+}
+
+/// Parse `HoverOptions` from `initializationOptions.hover.*` (or
+/// equivalent). Robust against missing keys and unexpected types —
+/// returns defaults for any unrecognized shape.
+pub fn parse_hover_init_options(init_options: &serde_json::Value) -> HoverOptions {
+    let hover = init_options.get("hover");
+    HoverOptions {
+        provenance: hover
+            .and_then(|v| v.get("provenance"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
 #[cfg(test)]
 mod config_migration_tests {
     use super::*;
@@ -124,6 +146,35 @@ mod config_migration_tests {
         assert_eq!(
             resolved.config.preset,
             verter_diagnostics::LintPreset::Strict
+        );
+    }
+
+    #[test]
+    fn parse_hover_init_options_defaults_to_provenance_false() {
+        // Plan §3 Commit 9 — default is opt-in false.
+        let opts = serde_json::json!({});
+        assert_eq!(
+            parse_hover_init_options(&opts),
+            HoverOptions { provenance: false }
+        );
+    }
+
+    #[test]
+    fn parse_hover_init_options_reads_provenance_flag() {
+        let opts = serde_json::json!({ "hover": { "provenance": true } });
+        assert_eq!(
+            parse_hover_init_options(&opts),
+            HoverOptions { provenance: true }
+        );
+    }
+
+    #[test]
+    fn parse_hover_init_options_ignores_wrong_type() {
+        let opts = serde_json::json!({ "hover": { "provenance": "yes" } });
+        assert_eq!(
+            parse_hover_init_options(&opts),
+            HoverOptions { provenance: false },
+            "non-bool provenance value should fall back to default"
         );
     }
 

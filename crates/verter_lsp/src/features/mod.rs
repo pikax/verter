@@ -20,6 +20,7 @@ pub mod extract_component;
 pub mod folding_range;
 pub mod formatting;
 pub mod hover;
+pub mod hover_provenance;
 pub mod inlay_hints;
 pub mod linked_editing;
 pub mod macro_actions;

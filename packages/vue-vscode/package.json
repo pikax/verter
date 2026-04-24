@@ -294,6 +294,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "**Experimental**: Enforce strict type checking for slot children. When a component defines typed slots via `defineSlots()`, only matching children types are accepted. See [RFC #733](https://github.com/vuejs/rfcs/discussions/733)."
+        },
+        "verter.hover.provenance": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "**Experimental**: Append a **Provenance** markdown section to hover responses, listing files loaded during the hover's component-meta resolution and key derivation counters. The first hover returns the legacy payload; subsequent hovers at the same position include the cached enriched section. Cache is LRU-bounded to 100 entries and invalidates on `didChange` for the hovered file (transitive dependency changes do NOT invalidate — codified limitation). Requires the LSP host to have `audit_enabled` + `footprint_capture` enabled for the enrichment to populate."
         }
       }
     },

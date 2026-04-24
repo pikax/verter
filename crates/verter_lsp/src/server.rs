@@ -153,6 +153,65 @@ struct ResolvedComponentDocument {
 /// Wraps `verter_session` for SFC analysis and optionally a `TypeProvider`
 /// (e.g., TSGO) for richer type information.
 ///
+/// Append a markdown suffix to a hover body. Plan §3 Commit 9 —
+/// used by the hover provenance enrichment to tack on the
+/// "Provenance" section below the legacy hover content. Returns a
+/// constructed hover even if the input was `None` (the enrichment
+/// alone counts as useful output).
+fn append_markdown(hover: Option<Hover>, suffix: &str) -> Hover {
+    match hover {
+        Some(mut h) => {
+            let combined = match h.contents {
+                HoverContents::Markup(existing) => {
+                    let mut value = existing.value;
+                    value.push_str(suffix);
+                    HoverContents::Markup(MarkupContent {
+                        kind: existing.kind,
+                        value,
+                    })
+                }
+                HoverContents::Scalar(marked) => {
+                    let value = match marked {
+                        MarkedString::String(s) => s,
+                        MarkedString::LanguageString(ls) => ls.value,
+                    };
+                    HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("{value}{suffix}"),
+                    })
+                }
+                HoverContents::Array(items) => {
+                    let mut combined = String::new();
+                    for item in items {
+                        let part = match item {
+                            MarkedString::String(s) => s,
+                            MarkedString::LanguageString(ls) => ls.value,
+                        };
+                        if !combined.is_empty() {
+                            combined.push_str("\n\n");
+                        }
+                        combined.push_str(&part);
+                    }
+                    combined.push_str(suffix);
+                    HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: combined,
+                    })
+                }
+            };
+            h.contents = combined;
+            h
+        }
+        None => Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: suffix.to_string(),
+            }),
+            range: None,
+        },
+    }
+}
+
 pub struct VerterLanguageServer {
     client: Client,
     documents: Arc<DocumentRegistry>,
@@ -243,6 +302,15 @@ pub struct VerterLanguageServer {
     /// completes. Provides disk-backed file reads, project ownership, and import
     /// resolution through the [`WorkspaceAccess`] trait.
     vfs_workspace: Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
+    /// Opt-in flag for the plan §3 Commit 9 provenance-enriched
+    /// hover. Default `false`. Read-only after `initialize()` sets
+    /// it from `initializationOptions.hover.provenance`.
+    hover_provenance_enabled: std::sync::atomic::AtomicBool,
+    /// LRU-100 cache of provenance-enriched hover payloads. Entries
+    /// are invalidated on `textDocument/didChange` for the matching
+    /// canonical (transitive deps NOT invalidated — codified
+    /// limitation). Plan §3 Commit 9.
+    hover_provenance_cache: Arc<crate::features::hover_provenance::HoverProvenanceCache>,
 }
 
 impl VerterLanguageServer {
@@ -313,6 +381,10 @@ impl VerterLanguageServer {
             type_provider_none_reason: config.type_provider_none_reason,
             mru_canonical_ids: parking_lot::Mutex::new(Vec::new()),
             vfs_workspace,
+            hover_provenance_enabled: std::sync::atomic::AtomicBool::new(false),
+            hover_provenance_cache: Arc::new(
+                crate::features::hover_provenance::HoverProvenanceCache::new(),
+            ),
         }
     }
 
@@ -3935,6 +4007,19 @@ impl LanguageServer for VerterLanguageServer {
                     if enabled { "enabled" } else { "disabled" }
                 );
             }
+            // Plan §3 Commit 9 — hover.provenance opt-in.
+            let hover_opts = crate::config::parse_hover_init_options(opts);
+            self.hover_provenance_enabled
+                .store(hover_opts.provenance, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                "hover provenance: {}",
+                if hover_opts.provenance {
+                    "enabled"
+                } else {
+                    "disabled (default)"
+                }
+            );
+
             let experimental = crate::config::parse_experimental_init_options(opts);
             self.documents
                 .tsx_profile
@@ -4351,6 +4436,13 @@ impl LanguageServer for VerterLanguageServer {
         // after 300ms of silence. No concurrent spawned tasks.
         if !style_only {
             if let Some(canonical_id) = self.documents.get_canonical_id(&uri) {
+                // Plan §3 Commit 9 — invalidate the hover provenance
+                // cache for this file. Transitive deps are NOT
+                // invalidated (codified limitation; see
+                // `hover_provenance_cache_does_NOT_invalidate_on_transitive_dependency_change`).
+                self.hover_provenance_cache
+                    .invalidate_canonical(&canonical_id);
+
                 if canonical_id.ends_with(".vue") {
                     self.refresh_vue_dependency_tracking(&canonical_id);
                 }
@@ -4901,7 +4993,12 @@ impl LanguageServer for VerterLanguageServer {
             tracing::info!("hover: no type_provider");
         }
 
-        Ok(verter_result)
+        // Plan §3 Commit 9 — provenance enrichment on the primary
+        // verter-only return path. Early returns (virtual file,
+        // child-hover, type-provider merge) intentionally skip
+        // enrichment for now; the opt-in feature targets the
+        // common "verter-only hover on a Vue binding" case.
+        Ok(self.enrich_hover_with_provenance(uri, position, verter_result))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -6798,6 +6895,76 @@ impl LanguageServer for VerterLanguageServer {
             Some(v) if !v.is_empty() => Ok(Some(v)),
             _ => Ok(None),
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Hover provenance enrichment — inherent methods (plan §3 Commit 9).
+// Kept outside `impl LanguageServer` so the trait dispatcher sees only
+// LSP-protocol methods.
+// ──────────────────────────────────────────────────────────────────────
+
+impl VerterLanguageServer {
+    /// Post-process a hover response with provenance enrichment
+    /// (plan §3 Commit 9):
+    /// - If `hover.provenance` is disabled → return hover unchanged.
+    /// - If the enrichment cache has a payload for `(canonical_id,
+    ///   position)` → append it to the hover body.
+    /// - On cache miss → spawn a background blocking task to compute
+    ///   the payload via `VerterHost::get_component_meta_with_resolution`
+    ///   and insert it into the cache. The current hover call returns
+    ///   the legacy payload immediately.
+    ///
+    /// The host must have `audit_enabled + footprint_capture` set for
+    /// the background task to produce a useful payload; otherwise the
+    /// task returns without populating the cache (graceful degradation).
+    fn enrich_hover_with_provenance(
+        &self,
+        uri: &Uri,
+        position: &Position,
+        hover: Option<Hover>,
+    ) -> Option<Hover> {
+        use std::sync::atomic::Ordering;
+        if !self.hover_provenance_enabled.load(Ordering::Relaxed) {
+            return hover;
+        }
+        let Some(canonical_id) = self.documents.get_canonical_id(uri) else {
+            return hover;
+        };
+        let key = crate::features::hover_provenance::HoverProvenanceKey::new(
+            canonical_id.clone(),
+            *position,
+        );
+
+        if let Some(payload) = self.hover_provenance_cache.get(&key) {
+            return Some(append_markdown(hover, &payload.markdown));
+        }
+
+        // Cache miss — spawn a background task. Plan §3 Commit 9
+        // "legacy payload immediately; background AuditedRequest".
+        let host = self.documents.host_arc();
+        let cache = Arc::clone(&self.hover_provenance_cache);
+        let canonical_for_task = canonical_id;
+        tokio::task::spawn_blocking(move || {
+            if !host.config().audit_enabled || !host.config().footprint_capture {
+                return;
+            }
+            let Some((_analysis, resolution)) =
+                host.get_component_meta_with_resolution(&canonical_for_task)
+            else {
+                return;
+            };
+            let Some(record) = host.take_audit_record(resolution.request_id) else {
+                return;
+            };
+            let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
+            cache.insert(
+                key,
+                crate::features::hover_provenance::HoverProvenancePayload { markdown },
+            );
+        });
+
+        hover
     }
 }
 
