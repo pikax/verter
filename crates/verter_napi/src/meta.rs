@@ -482,4 +482,67 @@ mod tests {
         };
         assert!(err.to_string().contains("MetaProject.openSession"));
     }
+
+    #[test]
+    fn audit_bundle_for_walker_tolerates_full_bundle_with_analysis_and_resolution() {
+        // Review F14: pin the serde "tolerate unknown fields" posture
+        // for `AuditBundleForWalker`. The walker bindings
+        // (`whyLoadedFromAuditJson`, `whyInstantiatedFromAuditJson`)
+        // receive a full `AuditBundle` JSON — `{ analysis, resolution,
+        // record }` — but only need `record`. If a future refactor
+        // accidentally adds `#[serde(deny_unknown_fields)]` to
+        // `AuditBundleForWalker` (or to `RustAuditRecord`), the walker
+        // bindings silently regress: consumers who stringify their
+        // full bundle would start hitting "unknown field `analysis`"
+        // deserialization errors that only surface at runtime.
+        //
+        // Discriminating: flip to `deny_unknown_fields` on
+        // `AuditBundleForWalker` and this test's `.expect("deserialize")`
+        // fails with a clear serde message naming the extra field.
+        let full_bundle = serde_json::json!({
+            "analysis": { "component": "Widget", "props": [] },
+            "resolution": { "canonicalId": "/Widget.vue", "kind": "some-kind" },
+            "record": {
+                "request_id": "42",
+                "canonical_id": "/Widget.vue",
+                "timings": {
+                    "total_ms": 0.0,
+                    "capture_inputs_ms": 0.0,
+                    "store_read_ms": 0.0,
+                    "store_merge_ms": 0.0,
+                    "direct_import_proof_ms": 0.0,
+                    "imported_root_proof_ms": 0.0,
+                    "solver_ms": 0.0,
+                    "materialize_ms": 0.0,
+                    "serialize_ms": 0.0
+                },
+                "solver": { "total_resolve_steps": "0", "solve_count": 0 },
+                "store": {
+                    "store_view_hits": 0,
+                    "store_view_misses": 0,
+                    "structural_merges": 0,
+                    "imported_dependency_entries": 0,
+                    "imported_dependency_bytes": "0",
+                    "prepared_type_decls": 0,
+                    "prepared_value_decls": 0
+                },
+                "memory": {
+                    "process_rss_before_bytes": "0",
+                    "process_rss_after_bytes": "0",
+                    "process_rss_delta_bytes": "0",
+                    "host_cache_before_bytes": "0",
+                    "host_cache_after_bytes": "0",
+                    "workspace_before_bytes": "0",
+                    "workspace_after_bytes": "0"
+                },
+                "footprint": null
+            }
+        });
+        let bundle_json = serde_json::to_string(&full_bundle).expect("encode");
+        let walker_bundle: AuditBundleForWalker =
+            serde_json::from_str(&bundle_json).expect("deserialize full bundle as walker-only");
+        assert_eq!(walker_bundle.record.request_id, 42);
+        assert_eq!(walker_bundle.record.canonical_id, "/Widget.vue");
+        assert!(walker_bundle.record.footprint.is_none());
+    }
 }

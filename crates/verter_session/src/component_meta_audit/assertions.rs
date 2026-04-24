@@ -281,10 +281,11 @@ fn walk_back(footprint: &super::RustSemanticFootprintAudit, root: NodeId) -> Pro
 
     let mut steps: Vec<ProvenanceStep> = Vec::new();
     let mut visited: FxHashSet<EdgeId> = FxHashSet::default();
-    // BFS work queue — push children, pop from front so the chain is
-    // shallow-first. Implemented as `Vec<(NodeId, u16)>` with `remove(0)`;
-    // edge counts are bounded by `max_derivation_edges` (default 10_000)
-    // so the linear pop cost is acceptable for the audit walker.
+    // BFS work queue — push children, consume front-to-back via an
+    // `idx` cursor into the `Vec` so traversal is shallow-first
+    // without O(n) pop-front shifts. Edge counts are bounded by
+    // `max_derivation_edges` (default 10_000), keeping the vector
+    // modest even on worst-case walks.
     let mut work: Vec<(NodeId, u16)> = vec![(root, 0)];
     let mut termination = ChainTermination::Complete;
     let mut idx = 0usize;

@@ -7,15 +7,27 @@
 //! the exact shape the WASM boundary produces, one layer down from
 //! the `JsValue` conversion.
 //!
-//! These tests complement the TS-side contract tests in
-//! `packages/wasm/src/audit.spec.ts` and the real-FFI tests in
-//! `packages/native/index.spec.ts` (which drive the native NAPI
-//! binary end-to-end). The WASM binary itself is built with
-//! `--target web` and cannot currently be initialized inside Node.js
-//! for a vitest-backed integration test — `std::time::Instant::now()`
-//! panics on wasm32-unknown-unknown — so the real-WASM integration
-//! lives in the browser (playground) and is outside the `cargo test
-//! --workspace --tests` gate.
+//! These tests form the Rust half of a layered coverage story:
+//!
+//! - **This file** — pins the `serde::Serialize`/`Deserialize` impls
+//!   on `RustAuditRecord` against `serde_json`. Catches regressions
+//!   in the serde annotation surface (missing `#[serde(with =
+//!   "u64_as_decimal_string")]`, accidental `#[serde(skip)]`,
+//!   enum-tagging drift) without requiring a live WASM runtime.
+//! - [`packages/wasm/src/audit.spec.ts`](../../../packages/wasm/src/audit.spec.ts)
+//!   — drives the REAL `verter_wasm_bg.wasm` binary inside Node.js
+//!   via `initSync` with disk bytes. The time primitives that used
+//!   to panic on wasm32-unknown-unknown now route through
+//!   `verter_session::time` → `web_time`, so the Node.js-based
+//!   integration test initializes cleanly.
+//! - [`packages/native/index.spec.ts`](../../../packages/native/index.spec.ts)
+//!   — drives the native NAPI binary end-to-end.
+//!
+//! Keeping this Rust-side test distinct from the live-WASM TS test
+//! is intentional: this file catches serde-level regressions even
+//! when the WASM binary is not yet built (common during
+//! mid-refactor), and it runs inside the `cargo test --workspace
+//! --tests` gate without a WASM toolchain.
 
 use std::sync::Arc;
 

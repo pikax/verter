@@ -286,17 +286,47 @@ impl RustSemanticFootprintAudit {
 
     /// Produce a new footprint with "incidental" events stripped — the
     /// Commit 6 assertion harness uses this to turn flaky snapshots into
-    /// stable ones. Today the function clones a subset that excludes
-    /// VFS reads (purely incidental — cache warmth doesn't change the
-    /// semantic footprint). Future work may expand the mask list; the
-    /// assertion tests pin the current set.
+    /// stable ones. The fields that get cleared are enumerated in
+    /// [`INCIDENTAL_FIELD_NAMES`]; [`commit_7_snapshots_stable_against_current_incidental_event_names_list`](
+    /// ../../../tests/corpus_generator_parity.rs) pins the current set
+    /// so a silent expansion surfaces as a named failure.
+    ///
+    /// Plan §3 Commit 13 references `INCIDENTAL_EVENT_NAMES` as the
+    /// driver for this mask. The set starts with `vfs_reads` (purely
+    /// incidental — cache warmth doesn't change the semantic
+    /// footprint); future additions should append to
+    /// [`INCIDENTAL_FIELD_NAMES`] and extend the `match` below in
+    /// lock-step.
     #[must_use]
     pub fn mask_incidental_spans(&self) -> RustSemanticFootprintAudit {
         let mut out = self.clone();
-        out.vfs_reads.clear();
+        for field in INCIDENTAL_FIELD_NAMES {
+            match *field {
+                "vfs_reads" => out.vfs_reads.clear(),
+                // Every entry in `INCIDENTAL_FIELD_NAMES` must have
+                // a corresponding arm here — the test pinning the
+                // constant will catch any missing wiring.
+                unknown => panic!(
+                    "mask_incidental_spans: INCIDENTAL_FIELD_NAMES entry `{unknown}` has no match arm — \
+                     extend the match statement in lock-step with the constant",
+                ),
+            }
+        }
         out
     }
 }
+
+/// Names of `RustSemanticFootprintAudit` fields that
+/// [`RustSemanticFootprintAudit::mask_incidental_spans`] clears when
+/// producing a snapshot-stable footprint. The set is load-bearing
+/// for Commit 7 fixture snapshots: a new entry implies pinned
+/// snapshots need regeneration.
+///
+/// The `commit_7_snapshots_stable_against_current_incidental_event_names_list`
+/// test (in `crates/verter_session/tests/corpus_generator_parity.rs`)
+/// pins this constant so a silent expansion surfaces as a named
+/// failure rather than flapping snapshots.
+pub const INCIDENTAL_FIELD_NAMES: &[&str] = &["vfs_reads"];
 
 /// Fresh `IndexedReady` build observed during the request. Emitted
 /// by the `IndexedReadyBuilt` structured event and surfaced by the

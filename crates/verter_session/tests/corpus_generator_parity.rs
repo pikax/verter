@@ -333,32 +333,33 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
     }
 }
 
-/// Plan §3 Commit 13 (F10 squash) test list entry — the structured
-/// events surface was enumerated at Commit 5 landing. This test
-/// pins the current set so an unintentional rename (e.g. a new
-/// "incidental event" that drifts the masking helper) surfaces as a
-/// discriminating failure rather than silently breaking downstream
-/// snapshot stability.
+/// Plan §3 Commit 13 (F10 squash) test list entry — pins the
+/// current incidental-field set so snapshot stability is not
+/// quietly broken. Review fix F6 promoted the previously-hardcoded
+/// masker body to a module-level `INCIDENTAL_FIELD_NAMES` constant;
+/// this test now consumes the constant directly AND verifies every
+/// listed field is actually cleared on the masked output.
 ///
-/// Discriminating: delete or rename an entry in
-/// `INCIDENTAL_EVENT_NAMES` in the Rust source without updating this
-/// test's expected list, and the test fails with a clear diff.
+/// Discriminating along three axes:
+///
+/// 1. Rename/delete `mask_incidental_spans` → the `contains` check
+///    on the helper name fails.
+/// 2. Add a field to `INCIDENTAL_FIELD_NAMES` without extending the
+///    match arm → the helper panics at runtime on any footprint
+///    with that field populated, surfacing immediately.
+/// 3. Change the masker so a listed field is NOT cleared → the
+///    behaviour loop at the bottom of this test fails naming the
+///    specific field.
 #[test]
 fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
+    use std::sync::Arc;
+    use verter_session::component_meta_audit::{
+        RustSemanticFootprintAudit, VfsLayer, VfsReadRecord, INCIDENTAL_FIELD_NAMES,
+    };
+
     let root = workspace_root();
     let audit_mod_path = root.join("crates/verter_session/src/component_meta_audit/mod.rs");
 
-    // Plan §3 Commit 13 (F10 squash) test list entry. Commit 7 pins
-    // authored-fixture snapshots by running them through the
-    // `mask_incidental_spans()` helper so that non-discriminating
-    // VFS-read detail doesn't flap across runs (cache-warmth noise).
-    // If the masking helper is renamed, deleted, or moved without
-    // updating this test, the stability story for F6 fixtures is
-    // broken and pinned snapshots may start flapping silently.
-    //
-    // Discriminating: remove `mask_incidental_spans` from the audit
-    // mod, or rename it to something else, and this test fails with
-    // a clear message pointing at plan §3 Commit 13.
     let audit_src =
         fs::read_to_string(&audit_mod_path).unwrap_or_else(|e| panic!("read audit mod: {e}"));
 
@@ -370,49 +371,45 @@ fn commit_7_snapshots_stable_against_current_incidental_event_names_list() {
          masking affordance to survive (or the test to be updated in lock-step).",
     );
 
-    // The helper must actually mutate something — currently by
-    // clearing `vfs_reads`. A regression where the body becomes a
-    // no-op (returns the footprint unchanged) is invisible from a
-    // "function exists" grep but visible from the body's mutation
-    // call. We bound the window tightly (just the impl body, not
-    // the wider module) so a dead reference in a nearby docblock
-    // can't satisfy the check.
-    let impl_start = audit_src
-        .find("pub fn mask_incidental_spans")
-        .expect("pub fn mask_incidental_spans location");
-    let body_rel_start = audit_src[impl_start..]
-        .find('{')
-        .expect("function body open-brace");
-    let body_start = impl_start + body_rel_start + 1;
-    let mut depth: i32 = 1;
-    let mut body_end = body_start;
-    for (i, ch) in audit_src[body_start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    body_end = body_start + i;
-                    break;
-                }
-            }
-            _ => {}
+    // Pin the current constant set. Adding a new field to the mask
+    // requires updating BOTH this expected list AND the match
+    // statement in `mask_incidental_spans` — plan §3 Commit 13.
+    let expected_incidental: &[&str] = &["vfs_reads"];
+    assert_eq!(
+        INCIDENTAL_FIELD_NAMES, expected_incidental,
+        "INCIDENTAL_FIELD_NAMES drifted — if this was intentional, update the expected list \
+         here AND regenerate Commit 7 pinned snapshots. Plan §3 Commit 13.",
+    );
+
+    // Behaviour check: for every field in INCIDENTAL_FIELD_NAMES,
+    // populate it on a fresh footprint and confirm the masked
+    // output clears it. This discriminates against a stealth
+    // regression where the match arm returns unchanged.
+    for &field in INCIDENTAL_FIELD_NAMES {
+        let mut fp = RustSemanticFootprintAudit::default();
+        match field {
+            "vfs_reads" => fp.vfs_reads.push(VfsReadRecord {
+                canonical_id: Arc::from("/x.ts"),
+                layer: VfsLayer::Disk,
+                cache_hit: false,
+                bytes_read: 1,
+                request_id: 1,
+            }),
+            unknown => panic!(
+                "commit_7_snapshots_stable: INCIDENTAL_FIELD_NAMES contains `{unknown}` but \
+                 this test has no population branch for it — extend the match arm in lock-step",
+            ),
+        }
+        let masked = fp.mask_incidental_spans();
+        match field {
+            "vfs_reads" => assert!(
+                masked.vfs_reads.is_empty(),
+                "mask_incidental_spans failed to clear `vfs_reads` — field is listed in \
+                 INCIDENTAL_FIELD_NAMES but survived the mask",
+            ),
+            _ => unreachable!(),
         }
     }
-    let body = &audit_src[body_start..body_end];
-    assert!(
-        body.contains("vfs_reads"),
-        "`mask_incidental_spans` body no longer references `vfs_reads` — the masker has been \
-         gutted. Pinned Commit 7 snapshots will flap on cache-warmth noise. Plan §3 Commit 13.",
-    );
-    // The body must also perform a mutation — `.clear()`,
-    // `Vec::new()`, or `vec![]` — not merely mention `vfs_reads`
-    // in a comment. This catches the "gutted-but-documented" case.
-    assert!(
-        body.contains(".clear()") || body.contains("Vec::new()") || body.contains("vec![]"),
-        "`mask_incidental_spans` body no longer mutates any field (no `.clear()`, \
-         `Vec::new()`, or `vec![]`) — the masker is a no-op. Plan §3 Commit 13.",
-    );
 
     // Additionally pin that the F6 authored fixtures are still
     // committed — they're the load-bearing snapshots the
