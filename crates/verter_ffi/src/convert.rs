@@ -901,6 +901,15 @@ fn resolved_component_meta_to_ffi(
     }
 }
 
+/// Public wrapper exposing the resolved-state → FFI projection. Used
+/// by the NAPI/WASM audit bindings (plan §3 Commit 8) to package the
+/// resolution alongside the audit record as JSON.
+pub fn component_meta_resolution_to_ffi(
+    state: &host::meta_resolve::ResolvedComponentMetaState,
+) -> FfiComponentMetaResolution {
+    resolved_component_meta_to_ffi(state)
+}
+
 fn resolved_macro_to_ffi(resolved: &host::meta_resolve::ResolvedMacroMeta) -> FfiResolvedMacroMeta {
     FfiResolvedMacroMeta {
         macro_index: resolved.macro_index as u32,
@@ -1285,6 +1294,9 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
     }
     if let Some(audit) = input.audit_enabled {
         out.audit_enabled = audit;
+    }
+    if let Some(footprint) = input.footprint_capture {
+        out.footprint_capture = footprint;
     }
     Ok(out)
 }
@@ -2405,6 +2417,7 @@ mod tests {
             resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
             analysis_level: Some("essential".to_string()),
             audit_enabled: None,
+            footprint_capture: None,
         };
         let result = ffi_config_to_host(config).unwrap();
         assert!(!result.dev_mode);

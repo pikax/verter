@@ -193,6 +193,10 @@ pub struct NapiHostConfig {
     /// Enable Rust-first native audit for component-meta requests.
     /// When true, timing/memory/store data is captured per request.
     pub auditEnabled: Option<bool>,
+    /// Enable per-request semantic footprint capture. Requires
+    /// `auditEnabled = true`. Plan §3 Commit 8 — necessary for
+    /// `getComponentMetaWithAudit` to return a populated bundle.
+    pub footprintCapture: Option<bool>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -205,6 +209,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             resolve_extensions: n.resolveExtensions,
             analysis_level: n.analysisLevel,
             audit_enabled: n.auditEnabled,
+            footprint_capture: n.footprintCapture,
         }
     }
 }

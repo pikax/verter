@@ -1,3 +1,8 @@
+// Re-export audit helpers so `@verter/wasm` consumers can import
+// `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
+// directly from the package root. Plan §3 Commit 8.
+export * from "./audit";
+
 export interface CodegenOptions {
   /** The filename for source map generation */
   filename?: string;

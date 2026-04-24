@@ -55,6 +55,21 @@ pub enum ComponentMetaHostError {
     Shutdown,
     #[error("host error: {0}")]
     Host(String),
+    /// Audit bundle requested but the host config does not enable
+    /// `audit_enabled` + `footprint_capture`. Plan §3 Commit 8.
+    #[error(
+        "audit is not enabled on this host — set HostConfig::audit_enabled and \
+         HostConfig::footprint_capture before calling get_component_meta_with_audit"
+    )]
+    AuditNotEnabled,
+    /// The resolution returned a request_id, but no audit record was
+    /// available at retrieval time. This can happen when the audit
+    /// record was displaced from the bounded store by subsequent
+    /// requests (store holds up to
+    /// [`crate::component_meta_audit::AUDIT_RECORDS_STORE_CAPACITY`]
+    /// entries). Plan §3 Commit 8.
+    #[error("audit record for request_id={request_id} missing — store may have evicted it")]
+    AuditRecordMissing { request_id: u64 },
 }
 impl From<crate::meta::MetaError> for ComponentMetaHostError {
     fn from(value: crate::meta::MetaError) -> Self {
@@ -314,6 +329,52 @@ impl ComponentMetaSession {
         ComponentMetaHostError,
     > {
         self.get_component_meta_with_fallthrough(canonical_or_alias, true)
+    }
+
+    /// Get component metadata plus the resolved-state sidecar AND the
+    /// per-request audit record produced by the same resolution.
+    /// Synchronous — the audit record is retrievable immediately
+    /// after `get_component_meta_with_resolution` returns. Plan §3
+    /// Commit 8.
+    ///
+    /// Requires `HostConfig::audit_enabled` + `HostConfig::footprint_capture`
+    /// to be true on the underlying host; otherwise returns
+    /// [`ComponentMetaHostError::AuditNotEnabled`].
+    pub fn get_component_meta_with_audit(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<
+        Option<(
+            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            crate::meta_resolve::ResolvedComponentMetaState,
+            crate::component_meta_audit::RustAuditRecord,
+        )>,
+        ComponentMetaHostError,
+    > {
+        let host = self.inner.host();
+        if !host.config.audit_enabled || !host.config.footprint_capture {
+            return Err(ComponentMetaHostError::AuditNotEnabled);
+        }
+        // Audit capture is instrumented on the host-level path — it
+        // installs the `RequestContext` TLS, stamps the resolution's
+        // `request_id`, and publishes the record into the bounded
+        // store. The session-runtime path (used by `get_component_meta`
+        // etc.) skips that setup because it resolves through an
+        // overlay-aware runtime that does not thread audit state.
+        // `ComponentMetaSession::get_component_meta_with_audit` is
+        // therefore equivalent to the base-project audit query — the
+        // same answer the `AuditedRequest` harness returns when given
+        // the same host.
+        let Some((analysis, resolution)) =
+            host.get_component_meta_with_resolution(canonical_or_alias)
+        else {
+            return Ok(None);
+        };
+        let request_id = resolution.request_id;
+        let record = host
+            .take_audit_record(request_id)
+            .ok_or(ComponentMetaHostError::AuditRecordMissing { request_id })?;
+        Ok(Some((analysis, resolution, record)))
     }
 
     /// Get component metadata plus the resolved-state sidecar in this session's

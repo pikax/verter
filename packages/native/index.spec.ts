@@ -273,6 +273,86 @@ describe("component-meta native aliases", () => {
     expect(methods).not.toContain("getComponentMetaProtobufBenchmark");
     expect(methods).not.toContain("getComponentMetaJsonBenchmark");
   });
+
+  it("exposes synchronous audit binding methods on ComponentMetaSession", () => {
+    // Plan §3 Commit 8 — the three audit bindings must all be
+    // synchronous (no async fn, no Promise-returning NAPI surface).
+    const native = require("./index.js");
+    const methods = Object.getOwnPropertyNames(native.ComponentMetaSession.prototype).sort();
+
+    expect(methods).toContain("getComponentMetaWithAudit");
+    expect(methods).toContain("whyLoadedFromAuditJson");
+    expect(methods).toContain("whyInstantiatedFromAuditJson");
+  });
+
+  it("getComponentMetaWithAudit throws when the host does not enable audit", () => {
+    // Default HostConfig has audit_enabled = false. Calling the audit
+    // binding must surface a clear error rather than returning an
+    // empty-footprint bundle. Plan §3 Commit 8.
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost();
+    const session = host.openSession();
+    expect(() => session.getComponentMetaWithAudit("/Missing.vue")).toThrow(
+      /audit is not enabled/i,
+    );
+    session.close();
+    host.shutdown();
+  });
+
+  it("getComponentMetaWithAudit returns a JSON Buffer when audit is enabled", () => {
+    // With audit_enabled + footprint_capture on, the binding returns
+    // a Buffer containing `{ analysis, resolution, record }` JSON.
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost({
+      auditEnabled: true,
+      footprintCapture: true,
+    });
+    host.upsertBase(
+      "/Widget.vue",
+      '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
+    );
+    const session = host.openSession();
+    const buffer = session.getComponentMetaWithAudit("/Widget.vue");
+    expect(buffer).toBeTruthy();
+    const bundle = JSON.parse((buffer as Buffer).toString("utf-8"));
+    expect(bundle).toHaveProperty("analysis");
+    expect(bundle).toHaveProperty("resolution");
+    expect(bundle).toHaveProperty("record");
+    expect(bundle.record).toHaveProperty("request_id");
+    // u64 fields must be decimal strings per plan §1.4 / §3.B.
+    expect(typeof bundle.record.request_id).toBe("string");
+    expect(bundle.record.request_id).toMatch(/^[0-9]+$/);
+    // i64 fields likewise after §3.B Commit 7.A.
+    expect(typeof bundle.record.memory.process_rss_delta_bytes).toBe("string");
+    session.close();
+    host.shutdown();
+  });
+
+  it("whyLoadedFromAuditJson round-trips a provenance chain via the Rust walker", () => {
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost({
+      auditEnabled: true,
+      footprintCapture: true,
+    });
+    host.upsertBase(
+      "/Widget.vue",
+      '<script setup lang="ts">\nconst n: number = 1\n</script>\n<template><div>{{ n }}</div></template>',
+    );
+    const session = host.openSession();
+    const buffer = session.getComponentMetaWithAudit("/Widget.vue");
+    const auditJson = (buffer as Buffer).toString("utf-8");
+    const chainJson = session.whyLoadedFromAuditJson(auditJson, "/Widget.vue");
+    const chain = JSON.parse(chainJson);
+    // Either a complete walk or NotFound — both are valid shapes; the
+    // test asserts the walker binding produces a parseable
+    // ProvenanceChain JSON regardless of fixture-specific structure.
+    expect(chain).toHaveProperty("steps");
+    expect(chain).toHaveProperty("terminated");
+    expect(chain).toHaveProperty("shared_load_terminals");
+    expect(Array.isArray(chain.steps)).toBe(true);
+    session.close();
+    host.shutdown();
+  });
 });
 
 describe("VerterHost type declarations in sync with native binary", () => {

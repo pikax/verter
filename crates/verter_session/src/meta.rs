@@ -473,6 +473,13 @@ impl MetaSession {
         self.id
     }
 
+    /// Access the project-level host. Needed by the audit-bundle path
+    /// (plan §3 Commit 8) to call `take_audit_record` after a
+    /// resolution completes.
+    pub fn host(&self) -> &VerterHost {
+        self.project.host()
+    }
+
     /// Path C C12 — this session's execution mode.
     #[allow(dead_code)]
     pub fn execution_mode(&self) -> ExecutionMode {

@@ -19,11 +19,73 @@
 
 use std::panic::AssertUnwindSafe;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
+use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
 use verter_session as host;
+use verter_session::component_meta_audit::RustAuditRecord;
 use wasm_bindgen::prelude::*;
+
+/// WASM audit bundle — mirror of the NAPI binding's bundle shape.
+/// Plan §3 Commit 8.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmAuditBundle {
+    analysis: FfiComponentMeta,
+    resolution: FfiComponentMetaResolution,
+    record: RustAuditRecord,
+}
+
+/// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
+/// — only `record` round-trips through the walker path.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct WasmAuditBundleForWalker {
+    #[serde(default)]
+    #[serde(skip)]
+    analysis: (),
+    #[serde(default)]
+    #[serde(skip)]
+    resolution: (),
+    record: RustAuditRecord,
+}
+
+/// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
+/// variant of the NAPI helper with the same name.
+fn parse_hash16_hex_wasm(hex: &str) -> Result<host::Hash16, JsValue> {
+    if hex.len() != 32 {
+        return Err(JsValue::from_str(&format!(
+            "args_fingerprint_hex must be 32 hex chars (16 bytes), got {} chars",
+            hex.len()
+        )));
+    }
+    let mut out = [0u8; 16];
+    for (i, byte_out) in out.iter_mut().enumerate() {
+        let hi = hex
+            .as_bytes()
+            .get(i * 2)
+            .and_then(|c| (*c as char).to_digit(16))
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "args_fingerprint_hex[{idx}] not a hex digit",
+                    idx = i * 2
+                ))
+            })?;
+        let lo = hex
+            .as_bytes()
+            .get(i * 2 + 1)
+            .and_then(|c| (*c as char).to_digit(16))
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "args_fingerprint_hex[{idx}] not a hex digit",
+                    idx = i * 2 + 1
+                ))
+            })?;
+        *byte_out = ((hi << 4) | lo) as u8;
+    }
+    Ok(out)
+}
 
 // Re-imports for code actions and diagnostics
 use verter_actions::{ActionContext, ActionEngine};
@@ -1078,6 +1140,91 @@ impl WasmMetaSession {
                 Some(snapshot) => to_wasm_value(&snapshot),
                 None => Ok(JsValue::NULL),
             }
+        }))?
+    }
+
+    /// Synchronous audit bundle — returns
+    /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
+    ///   record: RustAuditRecord } | null` as a JS object. Plan §3
+    /// Commit 8. Host must have `audit_enabled` + `footprint_capture`
+    /// set; otherwise throws.
+    ///
+    /// NOT a Promise. Consumer-side Promise ergonomics (if desired)
+    /// live in `packages/wasm/audit.ts`.
+    #[wasm_bindgen(js_name = "getComponentMetaWithAudit")]
+    pub fn get_component_meta_with_audit(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Result<JsValue, JsValue> {
+        let session = self.session()?;
+        catch_panic(AssertUnwindSafe(|| {
+            let Some((analysis, resolution, record)) = session
+                .get_component_meta_with_audit(canonical_or_alias)
+                .map_err(ffi_err)?
+            else {
+                return Ok(JsValue::NULL);
+            };
+            let ffi = verter_ffi::convert::component_meta_analysis_to_ffi_with_resolution(
+                analysis,
+                Some(&resolution),
+            );
+            let ffi_resolution = verter_ffi::convert::component_meta_resolution_to_ffi(&resolution);
+            let bundle = WasmAuditBundle {
+                analysis: ffi,
+                resolution: ffi_resolution,
+                record,
+            };
+            to_wasm_value(&bundle)
+        }))?
+    }
+
+    /// Run the Rust walker against a committed audit record (JSON
+    /// string from a prior `getComponentMetaWithAudit` round-trip
+    /// through `JSON.stringify`) rooted at `canonical_id`. Returns
+    /// the `ProvenanceChain` encoded as JSON string. Plan §2.8 —
+    /// single walker implementation; TS helpers format the JSON via
+    /// pure rendering.
+    #[wasm_bindgen(js_name = "whyLoadedFromAuditJson")]
+    pub fn why_loaded_from_audit_json(
+        &self,
+        audit_json: &str,
+        canonical_id: &str,
+    ) -> Result<String, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let bundle: WasmAuditBundleForWalker =
+                serde_json::from_str(audit_json).map_err(|e| {
+                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                })?;
+            let chain = bundle.record.why_loaded(canonical_id);
+            serde_json::to_string(&chain)
+                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
+        }))?
+    }
+
+    /// Run the Rust walker rooted at the instantiation keyed by
+    /// `(decl_canonical_id, decl_symbol_name, args_fingerprint_hex)`.
+    /// `args_fingerprint_hex` is the 32-char lowercase hex rendering
+    /// of the 16-byte `Hash16`.
+    #[wasm_bindgen(js_name = "whyInstantiatedFromAuditJson")]
+    pub fn why_instantiated_from_audit_json(
+        &self,
+        audit_json: &str,
+        decl_canonical_id: &str,
+        decl_symbol_name: &str,
+        args_fingerprint_hex: &str,
+    ) -> Result<String, JsValue> {
+        catch_panic(AssertUnwindSafe(|| {
+            let bundle: WasmAuditBundleForWalker =
+                serde_json::from_str(audit_json).map_err(|e| {
+                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                })?;
+            let fingerprint = parse_hash16_hex_wasm(args_fingerprint_hex)?;
+            let chain =
+                bundle
+                    .record
+                    .why_instantiated(decl_canonical_id, decl_symbol_name, fingerprint);
+            serde_json::to_string(&chain)
+                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
         }))?
     }
 

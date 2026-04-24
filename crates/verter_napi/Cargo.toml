@@ -29,6 +29,7 @@ verter_span = { path = "../verter_span" }
 verter_scheduler = { path = "../verter_scheduler" }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "async"] }
 napi-derive = "2"
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rayon = "1.8"
 oxc_allocator = { workspace = true }

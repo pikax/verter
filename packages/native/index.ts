@@ -1,5 +1,10 @@
 /// <reference types="node" />
 
+// Re-export audit helpers so `@verter/native` consumers can import
+// `whyLoaded`, `whyInstantiated`, `assertLoadedFilesExactly`, etc.
+// directly from the package root. Plan §3 Commit 8.
+export * from "./audit";
+
 // =============================================================================
 // Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
 // =============================================================================
@@ -484,6 +489,38 @@ export declare class ComponentMetaSession {
 
   /** Declared-surface native component-meta query. Returns a protobuf payload or null. */
   getDeclaredComponentMeta(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Synchronous audit bundle — returns JSON bytes of
+   * `{ analysis, resolution, record }` or `null` if the canonical does
+   * not resolve. Plan §3 Commit 8.
+   *
+   * The host must have `audit_enabled` + `footprint_capture` set on
+   * construction; otherwise this throws. Promise ergonomics (if
+   * desired) live in `packages/native/audit.ts` — the Rust binding
+   * itself is synchronous.
+   */
+  getComponentMetaWithAudit(canonicalOrAlias: string): Buffer | null;
+
+  /**
+   * Run the Rust provenance walker against a committed audit bundle
+   * JSON string, rooted at `canonicalId`. Returns a
+   * `ProvenanceChain` JSON string. Plan §2.8.
+   */
+  whyLoadedFromAuditJson(auditJson: string, canonicalId: string): string;
+
+  /**
+   * Run the Rust provenance walker rooted at the instantiation keyed
+   * by `(declCanonicalId, declSymbolName, argsFingerprintHex)`.
+   * `argsFingerprintHex` is the 32-character lowercase hex rendering
+   * of the 16-byte `Hash16`.
+   */
+  whyInstantiatedFromAuditJson(
+    auditJson: string,
+    declCanonicalId: string,
+    declSymbolName: string,
+    argsFingerprintHex: string,
+  ): string;
 
   /**
    * Get effective source for a file (overlay → base).

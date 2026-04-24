@@ -19,6 +19,7 @@
   "files": [
     "index.js",
     "host-types.ts",
+    "audit.ts",
     "dist"
   ],
   "main": "index.js",
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
     "@types/node": "^25.4.0",
+    "@verter/types": "workspace:^",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   },

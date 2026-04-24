@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "@verter/native": "workspace:^",
+    "@verter/types": "workspace:^",
     "tsdown": "^0.21.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
