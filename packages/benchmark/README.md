@@ -145,14 +145,23 @@ Supported flags:
 
 The generated JSON artifacts land under `packages/benchmark/benchmark-results/meta-ui/` by default, while reusable expected artifacts default to `packages/benchmark/benchmark-results/meta-ui/.expected-vue-component-meta/`. CI builds the expected artifact set once, uploads it, and reuses it across the backend/scenario matrix in the `/meta-benchmark` workflow.
 
-The component-meta trace workflow can now validate correctness against those same pinned artifacts. Fresh trace runs emit normalized result artifacts under `<trace-dir>/results/`, and the checker can fail a batch if performance improved but the returned metadata changed:
+Correctness validation is now driven by the audit record emitted from
+the Rust-side `RustAuditRecord` (plan §3 Commit 8 / F8 cutover).
+Specifications live under `packages/benchmark/audit-specs/component-meta/`
+and are consumed by `packages/benchmark/src/audit-validator.ts`. The
+legacy regex-validator CLI (`trace-check.ts`) and its
+`trace-specs/component-meta/*.json` pinned files have been retired —
+the audit record is the sole authority.
 
-```bash
-npx tsx packages/benchmark/src/trace-check.ts \
-  tmp/batch1-trace-002 \
-  --batch "Accordion,Alert,App" \
-  --strict \
-  --check-expected
+```ts
+// packages/benchmark/src/audit-validator.ts
+import { validateAuditBundle } from "./audit-validator.js";
+
+const result = validateAuditBundle(bundle, spec);
+if (!result.passed) {
+  console.error(result.violations.join("\n"));
+  process.exit(1);
+}
 ```
 
 ## CI Integration
