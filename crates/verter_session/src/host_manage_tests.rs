@@ -285,91 +285,11 @@ fn clear_cached_parse(host: &VerterHost) {
     entry.cached_parse = None;
 }
 
-#[test]
-fn component_meta_trace_line_formats_start_event() {
-    let line = format_component_meta_trace_line(
-        ComponentMetaTraceEvent::Start,
-        ComponentMetaTraceLine {
-            trace_id: 11,
-            span_id: 11,
-            parent_span_id: None,
-            depth: 0,
-            name: "resolve_component_meta",
-            detail: r#"owner=/src/App.vue mode=Expanded"#,
-        },
-        None,
-    );
-
-    assert!(
-        line.contains("[verter-meta-trace]"),
-        "trace lines should use the dedicated prefix, got: {line}"
-    );
-    assert!(
-        line.contains("event=start"),
-        "start trace lines should identify the event kind, got: {line}"
-    );
-    assert!(
-        line.contains("trace=11") && line.contains("span=11"),
-        "start trace lines should carry trace/span ids, got: {line}"
-    );
-    assert!(
-        line.contains("parent=-"),
-        "root trace lines should use a sentinel parent, got: {line}"
-    );
-    assert!(
-        line.contains("depth=0"),
-        "root trace lines should report depth zero, got: {line}"
-    );
-    assert!(
-        line.contains(r#"name="resolve_component_meta""#),
-        "trace lines should quote the scope name, got: {line}"
-    );
-    assert!(
-        line.contains(r#"detail="owner=/src/App.vue mode=Expanded""#),
-        "trace lines should quote the detail payload, got: {line}"
-    );
-    assert!(
-        !line.contains("dur_ms="),
-        "start trace lines should not include a duration before the scope ends, got: {line}"
-    );
-}
-
-#[test]
-fn component_meta_trace_line_formats_end_event_with_duration() {
-    let line = format_component_meta_trace_line(
-        ComponentMetaTraceEvent::End,
-        ComponentMetaTraceLine {
-            trace_id: 11,
-            span_id: 12,
-            parent_span_id: Some(11),
-            depth: 1,
-            name: "resolve_external_type",
-            detail: r#"owner=/src/App.vue import=vue type=Ref"#,
-        },
-        Some(std::time::Duration::from_micros(123_456)),
-    );
-
-    assert!(
-        line.contains("event=end"),
-        "end trace lines should identify the event kind, got: {line}"
-    );
-    assert!(
-        line.contains("parent=11"),
-        "nested trace lines should keep the parent span id, got: {line}"
-    );
-    assert!(
-        line.contains("depth=1"),
-        "nested trace lines should report the nesting depth, got: {line}"
-    );
-    assert!(
-        line.contains(r#"name="resolve_external_type""#),
-        "end trace lines should quote the scope name, got: {line}"
-    );
-    assert!(
-        line.contains("dur_ms=123.456"),
-        "end trace lines should include millisecond precision, got: {line}"
-    );
-}
+// Legacy trace-line formatting tests deleted in Commit 5 (plan §0.1
+// clean-cut rule). `format_component_meta_trace_line`,
+// `ComponentMetaTraceEvent`, and `ComponentMetaTraceLine` no longer
+// exist; their replacement is `StructuredComponentMetaEvent` tested
+// in `component_meta_audit/structured_event.rs`.
 
 #[test]
 fn build_eval_script_source_without_cached_parse_still_extracts_script_blocks() {

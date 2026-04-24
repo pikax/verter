@@ -5,10 +5,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
@@ -262,41 +260,21 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ComponentMetaTraceEvent {
-    Start,
-    End,
-    Point,
-}
-
-impl ComponentMetaTraceEvent {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::End => "end",
-            Self::Point => "point",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ComponentMetaTraceContext {
-    trace_id: u64,
-    span_id: u64,
-}
-
-pub(crate) struct ComponentMetaTraceLine<'a> {
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &'a str,
-    detail: &'a str,
-}
-
-thread_local! {
-    static COMPONENT_META_TRACE_STACK: RefCell<Vec<ComponentMetaTraceContext>> = const { RefCell::new(Vec::new()) };
-}
+// Plan §3 Commit 5: the legacy file/stderr trace is deleted. The
+// remaining infrastructure below is the thin shim that keeps
+// component_meta_trace_scope! / component_meta_trace_event! macro
+// call sites compiling — each now pushes `StructuredComponentMetaEvent::Custom`
+// into the active request's accumulator via
+// `component_meta_trace_structured!`. When no accumulator is
+// installed, the push is a no-op.
+//
+// The former `ComponentMetaTraceEvent` / `ComponentMetaTraceContext` /
+// `ComponentMetaTraceLine` types, the `COMPONENT_META_TRACE_STACK`
+// TLS, and the `format_component_meta_trace_line` /
+// `component_meta_trace_write_line` / `component_meta_trace_output_lock` /
+// `component_meta_trace_output_path` / `component_meta_trace_next_span_id` /
+// `component_meta_trace_enabled` helpers have all been removed
+// (plan §0.1 clean-cut rule).
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ParsedEvalProgramCacheKey {
@@ -505,121 +483,28 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
     }
 }
 
-fn component_meta_trace_output_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+/// Zero-sized RAII guard returned by `component_meta_trace_scope!`.
+/// Call sites use the scope form to time or bound a region; the guard
+/// previously wrote an `end` event to stderr on drop. Post-Commit 5
+/// it is a no-op marker: the corresponding event has already been
+/// pushed into the accumulator at the scope's start via
+/// `component_meta_trace_structured!`.
+pub(crate) struct ComponentMetaTraceGuard;
 
-fn component_meta_trace_next_span_id() -> u64 {
-    static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(crate) fn component_meta_trace_enabled() -> bool {
-    std::env::var_os("VERTER_COMPONENT_META_TRACE").is_some()
-        || std::env::var_os("VERTER_META_TRACE").is_some()
-}
-
-fn component_meta_trace_output_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("VERTER_COMPONENT_META_TRACE_PATH")
-        .or_else(|| std::env::var_os("VERTER_META_TRACE_PATH"))
-        .map(std::path::PathBuf::from)
-}
-
-pub(crate) fn format_component_meta_trace_line(
-    event: ComponentMetaTraceEvent,
-    line: ComponentMetaTraceLine<'_>,
-    duration: Option<Duration>,
-) -> String {
-    let parent = line
-        .parent_span_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let mut line = format!(
-        "[verter-meta-trace] event={} trace={} span={} parent={} request={} subrequest={} caller={} depth={} thread={:?} name={:?} detail={:?}",
-        event.as_str(),
-        line.trace_id,
-        line.span_id,
-        parent,
-        line.trace_id,
-        line.span_id,
-        parent,
-        line.depth,
-        std::thread::current().id(),
-        line.name,
-        line.detail,
-    );
-    if let Some(duration) = duration {
-        line.push_str(&format!(" dur_ms={:.3}", duration.as_secs_f64() * 1000.0));
-    }
-    line
-}
-
-fn component_meta_trace_write_line(line: &str) {
-    use std::io::Write;
-
-    let _lock = component_meta_trace_output_lock().lock();
-    if let Some(path) = component_meta_trace_output_path() {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-            return;
-        }
-    }
-
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{line}");
-    let _ = stderr.flush();
-}
-
-struct ComponentMetaTraceGuardState {
-    trace_id: u64,
-    span_id: u64,
-    parent_span_id: Option<u64>,
-    depth: usize,
-    name: &'static str,
-    detail: String,
-    started: Instant,
-}
-
-pub(crate) struct ComponentMetaTraceGuard {
-    state: Option<ComponentMetaTraceGuardState>,
-}
-
+#[allow(dead_code)]
 impl ComponentMetaTraceGuard {
     pub(crate) fn noop() -> Self {
-        Self { state: None }
+        Self
     }
 }
 
-impl Drop for ComponentMetaTraceGuard {
-    fn drop(&mut self) {
-        let Some(state) = self.state.take() else {
-            return;
-        };
-
-        COMPONENT_META_TRACE_STACK.with(|stack| {
-            let mut stack = stack.borrow_mut();
-            let popped = stack.pop();
-            debug_assert_eq!(popped.map(|ctx| ctx.span_id), Some(state.span_id));
-        });
-
-        component_meta_trace_write_line(&format_component_meta_trace_line(
-            ComponentMetaTraceEvent::End,
-            ComponentMetaTraceLine {
-                trace_id: state.trace_id,
-                span_id: state.span_id,
-                parent_span_id: state.parent_span_id,
-                depth: state.depth,
-                name: state.name,
-                detail: &state.detail,
-            },
-            Some(state.started.elapsed()),
-        ));
+/// Push a structured event into the active request's accumulator.
+/// No-op when no request context is installed.
+pub(crate) fn push_structured_event(
+    event: crate::component_meta_audit::StructuredComponentMetaEvent,
+) {
+    if let Some(acc) = crate::request_context::current_accumulator() {
+        acc.push_structured_event(event);
     }
 }
 
@@ -627,82 +512,31 @@ pub(crate) fn component_meta_trace_scope_impl(
     name: &'static str,
     detail: impl Into<String>,
 ) -> ComponentMetaTraceGuard {
-    if !component_meta_trace_enabled() {
-        return ComponentMetaTraceGuard { state: None };
-    }
-
-    let detail = detail.into();
-    let span_id = component_meta_trace_next_span_id();
-    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        let parent = stack.last().copied();
-        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
-        let depth = stack.len();
-        stack.push(ComponentMetaTraceContext { trace_id, span_id });
-        (trace_id, parent.map(|ctx| ctx.span_id), depth)
-    });
-
-    component_meta_trace_write_line(&format_component_meta_trace_line(
-        ComponentMetaTraceEvent::Start,
-        ComponentMetaTraceLine {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail: &detail,
-        },
-        None,
-    ));
-
-    ComponentMetaTraceGuard {
-        state: Some(ComponentMetaTraceGuardState {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail,
-            started: Instant::now(),
-        }),
-    }
+    // Custom justified: migrated from legacy component_meta_trace_scope!
+    // — Commit 5 preserves caller ergonomics while redirecting emission
+    // from stderr to the accumulator. Future commits may lift specific
+    // sites to named variants.
+    let name = std::sync::Arc::<str>::from(name);
+    let detail = std::sync::Arc::<str>::from(detail.into());
+    push_structured_event(
+        crate::component_meta_audit::StructuredComponentMetaEvent::Custom { name, detail },
+    );
+    ComponentMetaTraceGuard
 }
 
 pub(crate) fn component_meta_trace_event_impl(name: &'static str, detail: impl Into<String>) {
-    if !component_meta_trace_enabled() {
-        return;
-    }
-
-    let detail = detail.into();
-    let span_id = component_meta_trace_next_span_id();
-    let (trace_id, parent_span_id, depth) = COMPONENT_META_TRACE_STACK.with(|stack| {
-        let stack = stack.borrow();
-        let parent = stack.last().copied();
-        let trace_id = parent.map(|ctx| ctx.trace_id).unwrap_or(span_id);
-        (trace_id, parent.map(|ctx| ctx.span_id), stack.len())
-    });
-
-    component_meta_trace_write_line(&format_component_meta_trace_line(
-        ComponentMetaTraceEvent::Point,
-        ComponentMetaTraceLine {
-            trace_id,
-            span_id,
-            parent_span_id,
-            depth,
-            name,
-            detail: &detail,
-        },
-        None,
-    ));
+    // Custom justified: migrated from legacy component_meta_trace_event!
+    // macro form. See `component_meta_trace_scope_impl` comment.
+    let name = std::sync::Arc::<str>::from(name);
+    let detail = std::sync::Arc::<str>::from(detail.into());
+    push_structured_event(
+        crate::component_meta_audit::StructuredComponentMetaEvent::Custom { name, detail },
+    );
 }
 
 macro_rules! component_meta_trace_scope {
     ($name:expr, $detail:expr $(,)?) => {{
-        if $crate::host_manage::component_meta_trace_enabled() {
-            $crate::host_manage::component_meta_trace_scope_impl($name, $detail)
-        } else {
-            $crate::host_manage::ComponentMetaTraceGuard::noop()
-        }
+        $crate::host_manage::component_meta_trace_scope_impl($name, $detail)
     }};
 }
 
@@ -710,13 +544,21 @@ pub(crate) use component_meta_trace_scope;
 
 macro_rules! component_meta_trace_event {
     ($name:expr, $detail:expr $(,)?) => {{
-        if $crate::host_manage::component_meta_trace_enabled() {
-            $crate::host_manage::component_meta_trace_event_impl($name, $detail);
-        }
+        $crate::host_manage::component_meta_trace_event_impl($name, $detail);
     }};
 }
 
 pub(crate) use component_meta_trace_event;
+
+/// Push a typed `StructuredComponentMetaEvent` variant into the
+/// current accumulator. Preferred over `component_meta_trace_scope!`
+/// / `component_meta_trace_event!` for new call-sites (plan §2.3).
+#[macro_export]
+macro_rules! component_meta_trace_structured {
+    ($event:expr $(,)?) => {{
+        $crate::host_manage::push_structured_event($event);
+    }};
+}
 
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;

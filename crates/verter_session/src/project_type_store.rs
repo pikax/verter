@@ -239,11 +239,25 @@ impl IndexedReadyDb {
     /// increments the stale-sweep counter so downstream telemetry can see
     /// how often stale entries are superseded.
     pub fn insert(&self, canonical_id: Arc<str>, indexed: Arc<IndexedReady>) {
+        let whole_hash = indexed.whole_hash;
+        let canonical_for_event = Arc::clone(&canonical_id);
         let prev = self.entries.insert(canonical_id, indexed);
         if prev.is_some() {
             self.stale_sweeps.fetch_add(1, Ordering::Relaxed);
         } else {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
+            // Plan §3 Commit 5: push an `IndexedReadyBuilt` structured
+            // event into the active request's accumulator so the
+            // footprint records every fresh canonical lowered under
+            // the request. No-op when no context is installed.
+            if let Some(acc) = crate::request_context::current_accumulator() {
+                acc.push_structured_event(
+                    crate::component_meta_audit::StructuredComponentMetaEvent::IndexedReadyBuilt {
+                        canonical_id: canonical_for_event,
+                        whole_hash,
+                    },
+                );
+            }
         }
     }
 

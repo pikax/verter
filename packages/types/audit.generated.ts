@@ -130,6 +130,26 @@ export type SemanticNodeKind = "DeclAnchor" | "Instantiated" | "Alias" | "Condit
 
 export type SharedLoadReuseRecord = { canonical_id: string, winner_request_id: bigint, winner_audited: boolean, };
 
+/**
+ * Typed structured event emitted by the component-meta call chain.
+ *
+ * All variants are `Serialize + Deserialize` so they can be written
+ * to the TLS accumulator's event log and, later, to the footprint
+ * miner's output without a trip through a format string.
+ */
+export type StructuredComponentMetaEvent = { "RequestStart": { canonical_id: string, request_id: bigint, } } | { "RequestEnd": { request_id: bigint, success: boolean, } } | { "IndexedReadyBuilt": { canonical_id: string, whole_hash: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number], } } | { "VfsRead": { canonical_id: string, layer: VfsLayer, cache_hit: boolean, bytes_read: bigint, } } | { "SharedLoadReuse": { canonical_id: string, winner_request_id: bigint, winner_audited: boolean, } } | { "DispatchEnter": { key_kind: DispatchKeyKind, depth: number, } } | { "DispatchExit": { key_kind: DispatchKeyKind, outcome: CacheOutcomeKind, duration_ns: bigint, } } | { "MaterializeMemberRouteStart": { subject: MaterializationSubject, } } | { "MaterializeMemberRouteEnd": { subject: MaterializationSubject, duration_ns: bigint, } } | { "RematerializePublicPropTypeStart": { subject: MaterializationSubject, } } | { "RematerializePublicPropTypeEnd": { subject: MaterializationSubject, duration_ns: bigint, } } | { "MaterializeDefinePropsMember": { subject: MaterializationSubject, } } | { "FallthroughInheritanceComputed": { subject: MaterializationSubject, } } | { "ResolveImportedTypeRoot": { canonical_id: string, symbol_name: string, } } | { "CurrentEvalState": { canonical_id: string, duration_ns: bigint, } } | { "Custom": { 
+/**
+ * Short identifier for the event kind.
+ */
+name: string, 
+/**
+ * Free-form detail payload — kept `Arc<str>` rather than a
+ * typed struct because `Custom` exists precisely for the
+ * ad-hoc cases that have not yet been lifted into a named
+ * variant.
+ */
+detail: string, } };
+
 export type SubstitutionRecord = { result: NodeId, param_name: string, substituted_with: NodeId, };
 
 export type VfsLayer = "Overlay" | "Snapshot" | "Disk";
