@@ -1643,6 +1643,27 @@ fn merged_resolved_macro_input(
     merged
 }
 
+/// Resolve the prop's `TypeExpr` per the plan §3 Step 6.3 D15
+/// priority chain:
+///
+/// 1. Evaluated `TypeExpr` post-`raise_and_reduce` (when present).
+///    Phase 3 §4.1's graphNode-leak elimination guarantees no
+///    operator-leaf residue at this layer; the evaluated type IS the
+///    authoritative resolved shape.
+/// 2. Raw annotation (when no evaluated entry exists for this field).
+///    Parsed from the source annotation as the symbolic fallback.
+/// 3. `Unknown { raw: "unknown" }` (when neither is present).
+///
+/// `prefer_symbolic_prop_type_expr` enforces the priority on the
+/// evaluated path; the residual "fall back to raw when evaluated is
+/// incomplete-placeholder" branch in
+/// [`should_prefer_symbolic_prop_type_expr`] is defense-in-depth that
+/// fires only when expansion stops mid-shape (incomplete + budget-
+/// exceeded). When dispatch's `raise_and_reduce` substitution parity
+/// closes the substitution gap documented in
+/// `materialize_component_meta_type_expr_until_stable_full`, the
+/// incomplete-placeholder fallback becomes structurally unreachable
+/// and can be removed.
 fn resolve_prop_type(
     field: &AnalyzedPropField,
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
