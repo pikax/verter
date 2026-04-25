@@ -44,7 +44,17 @@ interface MetaUiBenchArgs {
   scenarios: MetaUiScenario[];
   repeats: number;
   warmupPasses: number;
+  /// Plan §3 Step 10: kill threshold for runaway requests. Aliased
+  /// from the legacy `--query-timeout-ms` flag. Replaces the
+  /// pre-Step-10 single 250 ms hard timeout.
   queryTimeoutMs: number;
+  /// Plan §3 Step 10: SLA threshold (metric only). Components that
+  /// resolve above `slaMs` but below `queryTimeoutMs` are tallied as
+  /// `slaCount.exceededSla` but allowed to complete; under or equal
+  /// counts as `slaCount.withinSla`. CI compares
+  /// `slaCount.withinSla` regression against the committed baseline
+  /// in packages/benchmark/baselines/.
+  slaMs: number;
   jsAudit: boolean;
   components: string[];
   limit: number | null;
@@ -130,7 +140,21 @@ type WorkerMessage =
   | WorkerErrorMessage
   | WorkerFatalMessage;
 
-const DEFAULT_QUERY_TIMEOUT_MS = 250;
+// Step 10 / F9 SLA-vs-hard-timeout split (plan §3 Step 10):
+//   - DEFAULT_SLA_MS measures responsiveness (within-SLA / exceeded-SLA
+//     buckets). Components above this threshold are reported but not
+//     killed; the within-SLA count drives the CI regression gate.
+//   - DEFAULT_HARD_TIMEOUT_MS is the actual kill threshold. The
+//     pre-Step-10 single 250 ms threshold conflated metric and kill;
+//     splitting them lets us tighten the SLA without prematurely
+//     terminating slow but still-finishing requests.
+const DEFAULT_SLA_MS = 250;
+const DEFAULT_HARD_TIMEOUT_MS = 5_000;
+/// Backwards-compatible alias retained so existing JSON consumers and
+/// older invocations passing --query-timeout-ms continue to work
+/// (the legacy flag aliases --hard-timeout-ms with a stderr deprecation
+/// warning emitted by `parseMetaUiBenchArgs`).
+const DEFAULT_QUERY_TIMEOUT_MS = DEFAULT_HARD_TIMEOUT_MS;
 const DEFAULT_SETUP_TIMEOUT_MS = 30_000;
 
 type GlobalWithOptionalGc = typeof globalThis & {
@@ -183,7 +207,8 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
     scenarios: [...SUPPORTED_SCENARIOS],
     repeats: 1,
     warmupPasses: 1,
-    queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS,
+    queryTimeoutMs: DEFAULT_HARD_TIMEOUT_MS,
+    slaMs: DEFAULT_SLA_MS,
     jsAudit: false,
     components: [],
     limit: null,
@@ -221,10 +246,28 @@ export function parseMetaUiBenchArgs(argv: string[]): MetaUiBenchArgs {
       );
       continue;
     }
-    if (arg.startsWith("--query-timeout-ms=")) {
+    if (arg.startsWith("--hard-timeout-ms=")) {
       args.queryTimeoutMs = parseNonNegativeInt(
+        arg.slice("--hard-timeout-ms=".length),
+        "hard-timeout-ms",
+      );
+      continue;
+    }
+    if (arg.startsWith("--sla-ms=")) {
+      args.slaMs = parseNonNegativeInt(arg.slice("--sla-ms=".length), "sla-ms");
+      continue;
+    }
+    if (arg.startsWith("--query-timeout-ms=")) {
+      // Plan §3 Step 10: --query-timeout-ms is deprecated. Aliases
+      // --hard-timeout-ms with a stderr deprecation warning. Removed
+      // one release after this lands per repo deprecation convention.
+      const value = parseNonNegativeInt(
         arg.slice("--query-timeout-ms=".length),
         "query-timeout-ms",
+      );
+      args.queryTimeoutMs = value;
+      process.stderr.write(
+        "warning: --query-timeout-ms is deprecated; use --hard-timeout-ms instead\n",
       );
       continue;
     }
