@@ -913,38 +913,6 @@ fn enrich_missing_slot_bindings(
     }
 }
 
-fn materialize_component_meta_type_expr_until_stable_in_scope(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let mut current = expr.clone();
-    for _ in 0..4 {
-        let materialized = materialize_component_meta_member_surface_expr(
-            &current,
-            scope_canonical_id,
-            query_engine,
-            true,
-        );
-        let next = query_engine
-            .solve_expr_type_expr(scope_canonical_id, &materialized)
-            .map(|solved| {
-                materialize_component_meta_member_surface_expr(
-                    &solved,
-                    scope_canonical_id,
-                    query_engine,
-                    true,
-                )
-            })
-            .unwrap_or(materialized);
-        if next == current {
-            return next;
-        }
-        current = next;
-    }
-    current
-}
-
 fn imported_component_meta_materialization_scope(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     owner_canonical: &str,
@@ -1318,87 +1286,20 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
 /// remains for callers that need only the `TypeExpr` shell — it
 /// delegates here and discards `node_id` / `dep_signature`.
 ///
-/// **Body (Step 6.3):** legacy owner-vs-imported scope reconciliation
-/// drives the user-visible `type_expr`; a dispatch round-trip
-/// (`shallow_lower_type_expr` → `raise_and_reduce`) runs alongside on
-/// the SAME expr to supply the `node_id` for sidecar capture and the
-/// `dep_signature` for fence merge — no public API duplication. The
-/// dispatch result's `type_expr` is informational only at this
-/// landing; the legacy path stays primary because it captures the
-/// generic-substitution machinery in `materialize_in_scope`'s
-/// fixed-point descent + `solve_expr_type_expr` that the dispatch
-/// `Instantiate` substitution does not yet replicate for every
-/// fixture (notably `defineProps<Props<T>>()` over a script-setup
-/// generic with constrained body parameters).
+/// **Body (Step 1.5 final cutover):** the legacy owner-vs-imported
+/// scope reconciliation has been removed. Materialization now flows
+/// entirely through dispatch:
+/// `shallow_lower_type_expr` → `raise_and_reduce(mode)`. Step 1.5
+/// closed the three substitution-parity gaps that previously required
+/// the legacy walker fallback (Pick<X,K>['member'] indexed access,
+/// mapped+conditional `infer P` per-key reduction, and method
+/// signatures used as `IndexedAccess` bases).
 ///
-/// **CLAUDE.md violation acknowledged.** Build Philosophy rule 7 forbids
-/// dual-path transitions: the final implementation lands as one clean
-/// cutover. This body runs both Stage 1 (legacy) and Stage 2 (dispatch)
-/// on every call; Plan §3 STOP CONDITION #4 trips. The deferral is
-/// documented here rather than silently kept; the Step 6.6 verification
-/// gate's umbrella test
-/// [`crates/verter_session/tests/resolved_no_residual_operator_leaves.rs`]
-/// covers the fixtures that DO close (Avatar, Pick<HelperProps, …>) and
-/// passes today, demonstrating that the dispatch path is correct for
-/// concrete operators. The script-setup-generic fixture
-/// [`evaluate_types_preserve_script_setup_generic_metadata_in_define_props`]
-/// in `meta_tests.rs:2283` is the diagnostic minimum reproducer for the
-/// remaining gap.
-///
-/// **TODO(dispatch-substitution-parity):** the precise upstream change
-/// to collapse this to a thin wrapper:
-///
-/// 1. **Symptom.** Calling `dispatch.shallow_lower_type_expr(expr=Props<T>, scope_payload)`
-///    where `T` is a script-setup generic produces an `Instantiate` node
-///    whose argument is a `TypeParameter` for `T` — but dispatch's
-///    `build_instantiate` does NOT carry forward `T`'s constraint /
-///    default metadata into the substituted body. The body's reference
-///    to `U` (the parameter being substituted) becomes
-///    `Opaque(SemanticMiss)` instead of resolving to `T`'s body.
-///
-/// 2. **Root cause.** Two interacting deficiencies in the dispatch
-///    substitution:
-///    - (a) `shallow_lower_type_expr` at
-///      [`crates/verter_session/src/project_semantic_dispatch/lower.rs`]
-///      does not consume the prepared script-setup TypeParameter
-///      decl when lowering a bare `TypeExpr::Ref { name: "T", … }`; it
-///      treats `T` as a free name and produces a synthetic
-///      `TypeParameter` node lacking the `decl` identity that
-///      `Instantiate` needs to bind the substitution.
-///    - (b) `Instantiate`'s body-substitution walker does not
-///      re-attach the substituting argument's `TypeParameter` metadata
-///      (constraint / default) to the substituted positions in the
-///      body; it forwards the substituted node verbatim, losing the
-///      context that the legacy `solve_expr_type_expr`'s
-///      `prepared_type_param_substitutions` helper preserves.
-///
-/// 3. **Fix.** Either:
-///    - (A) Thread the `DeclarationScopePayload`'s script-setup
-///      generics into `shallow_lower_type_expr`'s name-resolution table
-///      so bare `T` lowers to a `TypeParameter { decl, constraint, default }`
-///      with the same identity the legacy path uses; AND
-///    - (B) Update dispatch's `Instantiate` builder
-///      ([`crates/verter_session/src/project_semantic_dispatch/build.rs`]
-///      `build_instantiate`) to call the same
-///      `prepared_type_param_substitutions` helper currently used by
-///      `expand_local_generic_ref_expr` at
-///      [`component_meta_query_engine.rs:3672`].
-///
-/// 4. **Sizing.** Estimated 200-400 LOC across `lower.rs` + `build.rs` + a sibling test file. Cross-cuts every dispatch call site that today bypasses script-setup generic context. Outside the audit-pass scope; needs its own plan with corresponding regression tests in `crates/verter_session/tests/dispatch_script_setup_generic.rs` or equivalent.
-///
-/// 5. **Removal trigger.** When Stage 2 (dispatch) returns the same
-///    `type_expr` as Stage 1 (legacy) for the
-///    `evaluate_types_preserve_script_setup_generic_metadata_in_define_props`
-///    fixture under both `Expanded` and `Navigate` modes, this body
-///    collapses to:
-///    ```text
-///    let lowered = dispatch.shallow_lower_type_expr(...);
-///    dispatch.raise_and_reduce(lowered, mode)
-///    ```
-///    AND the engine-local `materialize_memo` field, the
-///    `materialize_*_in_scope` family, and Step 6.4's
-///    `projected_member_surface_keys` walker can ALL be deleted in the
-///    same commit.
+/// Per-request memoisation is preserved so repeat queries of the same
+/// `(scope, expr, mode)` triple within one component-meta request
+/// reuse the prior result instead of re-running the dispatch
+/// reduction. Dispatch's own family memo handles cross-request
+/// deduplication.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -1431,94 +1332,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         return cached.clone();
     }
 
-    // Step 6.3 body (plan §3 Step 6.3): two-stage materialization.
-    //
-    // TODO(dispatch-substitution-parity): collapse this body to the
-    // thin dispatch wrapper described by Step 1 sub-task 1.2 once the
-    // dispatch path's substitution parity covers the engine-internal
-    // callers of `materialize_component_meta_type_expr_until_stable_full`
-    // (called from non-closure paths inside meta_resolve.rs's helper
-    // routines). Step 1's closure rewire
-    // (`compute_evaluated_types_from_owner_context` /
-    // `compute_evaluated_types_from_owner_context`) ALREADY routes
-    // macro shells through dispatch — that path no longer reaches the
-    // legacy walker. The remaining dual path here serves only the
-    // engine-internal callers, which the plan's Removal trigger gates
-    // on parity coverage of three fixtures:
-    //   - `imported_mapped_slots_reach_resolved_evaluated_types`
-    //   - `imported_mapped_slots_reach_final_component_meta`
-    //   - `get_component_meta_materializes_imported_pick_indexed_access_props`
-    // These three exercise mapped-type-over-imported, conditional-infer,
-    // and `Pick<X, K>['member']` indexed-access projection where the
-    // dispatch path currently returns the whole parent object instead
-    // of the indexed member. Closing them needs follow-up work in
-    // `project_semantic_dispatch::lower::TypeExpr::IndexedAccess` /
-    // `build_project_path` for the indexed Pick result, and in
-    // mapped-type expansion for the conditional-infer slot signature.
-    // Once parity lands, this body collapses to the dispatch-only
-    // wrapper and the `materialize_*_in_scope` family + projection
-    // rescue helpers below are deleted in the same commit.
-    //
-    // Stage 1: legacy `materialize_in_scope` runs. Its
-    // `materialize_component_meta_member_surface_expr` walker carries
-    // the broader generic-substitution context the dispatch path's
-    // per-call lower invocation cannot reconstruct from the field-level
-    // `expr` alone — the substitution mapping lives in the calling
-    // generic's prepared decl, not in the field-type expression. This
-    // stage produces `chosen_type_expr` (the user-visible result for
-    // Expanded mode).
-    //
-    // Stage 2: dispatch round-trip on the SAME expr supplies
-    // `node_id` (Step 9 sidecar capture) and `dep_signature` (Step
-    // 6.6.A fence merge). For Navigate mode the dispatch type_expr IS
-    // the user-visible answer (lazy `DeclRef` / `InstantiationRef`
-    // carriers are the entire point of Navigate, and the legacy path
-    // doesn't preserve them).
-    let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
-        expr,
-        scope_canonical_id,
-        query_engine,
-    );
-    let mut chosen_type_expr = if !type_expr_needs_projection_rescue(
-        query_engine,
-        scope_canonical_id,
-        &owner_materialized,
-    ) {
-        owner_materialized.clone()
-    } else if let Some(imported_scope_canonical_id) =
-        imported_component_meta_materialization_scope(expr, scope_canonical_id, query_engine)
-    {
-        if owner_materialized != *expr
-            && expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
-        {
-            owner_materialized.clone()
-        } else {
-            let imported_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
-                expr,
-                imported_scope_canonical_id.as_str(),
-                query_engine,
-            );
-            if imported_materialized != owner_materialized
-                && component_meta_type_expr_improves(&imported_materialized, &owner_materialized)
-                && (!type_expr_needs_projection_rescue(
-                    query_engine,
-                    imported_scope_canonical_id.as_str(),
-                    &imported_materialized,
-                ) || type_expr_needs_projection_rescue(
-                    query_engine,
-                    scope_canonical_id,
-                    &owner_materialized,
-                ))
-            {
-                imported_materialized
-            } else {
-                owner_materialized.clone()
-            }
-        }
-    } else {
-        owner_materialized.clone()
-    };
-
+    // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
+    // scope, then lower → raise_and_reduce in the caller's mode.
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
     let host = query_engine.host();
     let dispatch = ProjectSemanticDispatch::new(host);
@@ -1545,10 +1360,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     );
     let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
 
-    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
-        chosen_type_expr = dispatch_materialized.type_expr.clone();
-    }
-
     // Step 6.6.A: accumulate dispatch's dep_signature into the
     // per-request thread-local so compute_component_meta_state_inner
     // can merge the facts into ResolvedComponentMetaState.fact_versions
@@ -1558,7 +1369,7 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 
     let materialized = MaterializedTypeExpr {
         node_id: dispatch_materialized.node_id,
-        type_expr: chosen_type_expr,
+        type_expr: dispatch_materialized.type_expr,
         dep_signature: dispatch_materialized.dep_signature,
     };
 

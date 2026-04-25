@@ -808,8 +808,107 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence)
             }
 
+            // ---- Object-filter utilities ----
+            // `Pick<X, K>` produces an Object surface containing the
+            // subset of `X`'s members whose names appear in `K`'s
+            // enumerable key space. `Omit<X, K>` is the inverse —
+            // members of `X` whose names are NOT in `K`. Both
+            // implementations preserve the source's per-member
+            // optional / readonly / is_method flags so downstream
+            // path-walking lands on the same value SemanticNodeIds
+            // a userland-equivalent definition would emit.
+            //
+            // When `K` cannot be enumerated (e.g. still a TypeParam
+            // or deferred shell) OR `X` does not resolve to an
+            // Object surface, the utility falls through to the
+            // deferred shell so callers re-dispatch once the inputs
+            // become enumerable.
+            "Pick" if args.len() == 2 => {
+                let source = args[0];
+                let keys_arg = args[1];
+                let pick_names = match self.key_names_from_keyspace_node(keys_arg) {
+                    Some(names) => names,
+                    None => {
+                        let result = self.opaque(QueryError::Miss);
+                        record_utility_edges(result);
+                        return (QueryResult::Value(result), fence);
+                    }
+                };
+                let source_resolved = self.evaluate_deferred_semantic_node(source);
+                let surface = match graph.node_data(source_resolved).as_deref() {
+                    Some(SemanticNodeData::Object(view)) => view.clone(),
+                    _ => {
+                        let result = self.opaque(QueryError::Miss);
+                        record_utility_edges(result);
+                        return (QueryResult::Value(result), fence);
+                    }
+                };
+                let pick_set: FxHashSet<&str> = pick_names.iter().map(|s| s.as_ref()).collect();
+                let picked: Vec<SurfaceMember> = surface
+                    .members
+                    .iter()
+                    .filter(|m| pick_set.contains(m.name.as_ref()))
+                    .cloned()
+                    .collect();
+                let result_surface = SurfaceView {
+                    members: Arc::from(picked.into_boxed_slice()),
+                    call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    construct_signatures: Arc::from(
+                        Vec::<SemanticNodeId>::new().into_boxed_slice(),
+                    ),
+                    index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                };
+                let result = graph.intern_node(SemanticNodeData::Object(result_surface));
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence)
+            }
+            "Omit" if args.len() == 2 => {
+                let source = args[0];
+                let keys_arg = args[1];
+                let omit_names = match self.key_names_from_keyspace_node(keys_arg) {
+                    Some(names) => names,
+                    None => {
+                        let result = self.opaque(QueryError::Miss);
+                        record_utility_edges(result);
+                        return (QueryResult::Value(result), fence);
+                    }
+                };
+                let source_resolved = self.evaluate_deferred_semantic_node(source);
+                let surface = match graph.node_data(source_resolved).as_deref() {
+                    Some(SemanticNodeData::Object(view)) => view.clone(),
+                    _ => {
+                        let result = self.opaque(QueryError::Miss);
+                        record_utility_edges(result);
+                        return (QueryResult::Value(result), fence);
+                    }
+                };
+                let omit_set: FxHashSet<&str> = omit_names.iter().map(|s| s.as_ref()).collect();
+                let kept: Vec<SurfaceMember> = surface
+                    .members
+                    .iter()
+                    .filter(|m| !omit_set.contains(m.name.as_ref()))
+                    .cloned()
+                    .collect();
+                let result_surface = SurfaceView {
+                    members: Arc::from(kept.into_boxed_slice()),
+                    // Omit preserves source signatures (TS semantics):
+                    // `Omit<T, K>` only filters property names, leaving
+                    // call/construct/index signatures intact.
+                    call_signatures: Arc::clone(&surface.call_signatures),
+                    construct_signatures: Arc::clone(&surface.construct_signatures),
+                    index_signatures: Arc::clone(&surface.index_signatures),
+                    keyspace: surface.keyspace,
+                    has_index_signature: surface.has_index_signature,
+                };
+                let result = graph.intern_node(SemanticNodeData::Object(result_surface));
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence)
+            }
+
             // ---- Deferred utilities ----
-            // Pick/Omit/Extract/Exclude/NonNullable require union-filter
+            // Extract/Exclude/NonNullable require union-filter
             // semantics; Awaited requires recursive promise unwrapping.
             // Each emits an `Opaque(Miss)` shell anchored to the
             // instantiate identity so the origin walk remains coherent;

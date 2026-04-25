@@ -9490,3 +9490,586 @@ defineProps<Wrapper<Inner>>()
         other => panic!("Navigate body_mode must raise back to a Ref carrier; got {other:?}"),
     }
 }
+
+// ===========================================================================
+// Step 1.5 FAIL-FIRST tests — dispatch-only parity for the three fixtures
+// the merged dual-path covers via the legacy walker fallback.
+//
+// These tests bypass `materialize_component_meta_type_expr_until_stable_full`
+// (which currently runs both the legacy walker and dispatch and falls back
+// to the legacy result for the three fixtures below). Each test calls
+// dispatch's `lower_type_expr_in_scope_with_mode` + `raise_and_reduce` (or
+// `execute(ProjectPath)` + `raise_node_to_type_expr`) directly so the
+// failure isolates the dispatch substitution gap.
+//
+// Pre-Step-1.5: each of these three tests fails — dispatch's reduction
+// surface returns `IndexedAccess { object: Opaque(Miss), … }` for Pick
+// and a deferred `SemanticNodeData::Mapped` shell for the mapped slot
+// fixtures, both of which raise back to `TypeExpr::Unknown` /
+// `TypeExpr::IndexedAccess` shells.
+//
+// Post-Step-1.5: each test asserts the concrete reduced shape — Pick
+// reduces to a member union, mapped slots reduce to an Object surface
+// whose `badge` value is a Function with the substituted infer-bound
+// parameter type.
+// ===========================================================================
+
+/// Step 1.5 FAIL-FIRST sub-task 1.5.0/1: `Pick<X, K>['member']` dispatch
+/// reduction. Mirrors `meta_tests::get_component_meta_materializes_imported_pick_indexed_access_props`'s
+/// fixture but exercises dispatch directly, NOT through the materialize
+/// wrapper that today falls back to the legacy walker.
+///
+/// Pre-Step-1.5 failure: `build_builtin_utility`'s `Pick` arm falls
+/// through to `Opaque(Miss)`, so the IndexedAccess walker over the
+/// utility result misses immediately.
+///
+/// Post-Step-1.5: `Pick<X, K>` reduces to an Object surface containing
+/// the K-named members of X; the IndexedAccess hop projects to the
+/// terminal member's value (the `'button' | 'submit' | 'reset'` union).
+#[test]
+fn dispatch_only_pick_indexed_access_reduces_to_member_union() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::{empty_type_args, LiteralValue, TypeExpr};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/vue-dom.ts",
+            r#"
+export interface VueButtonHTMLAttributes {
+  type?: 'button' | 'submit' | 'reset'
+  disabled?: boolean
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/html.ts",
+            r#"
+import type { VueButtonHTMLAttributes } from './vue-dom'
+
+export type ButtonHTMLAttributes = Pick<VueButtonHTMLAttributes, 'type' | 'disabled'>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { ButtonHTMLAttributes } from './html'
+defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/src/App.vue").unwrap().unwrap();
+
+    let host = project.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro field type the legacy materialize walker has been
+    // covering: `ButtonHTMLAttributes['type']`.
+    let expr = TypeExpr::IndexedAccess {
+        object: StdArc::new(TypeExpr::Ref {
+            name: StdArc::from("ButtonHTMLAttributes"),
+            type_arguments: empty_type_args(),
+        }),
+        index: StdArc::new(TypeExpr::Literal(LiteralValue::String("type".to_string()))),
+    };
+
+    let lowered = dispatch
+        .lower_type_expr_in_scope_with_mode("/src/App.vue", &expr, ProjectionMode::Expanded)
+        .expect("dispatch must lower IndexedAccess<ButtonHTMLAttributes, 'type'> at /src/App.vue");
+
+    let materialized = dispatch.raise_and_reduce(lowered, ProjectionMode::Expanded);
+
+    let raised = &materialized.type_expr;
+
+    // Negative assertions: dispatch must NOT leave the IndexedAccess shell
+    // unresolved or erase to Unknown — those are the pre-Step-1.5 dispatch
+    // signatures the legacy walker covers via the fallback.
+    assert!(
+        !matches!(
+            raised,
+            TypeExpr::IndexedAccess { .. } | TypeExpr::Unknown { .. }
+        ),
+        "dispatch-only must reduce Pick<X, K>['member'] to a concrete \
+         surface; got {raised:?}"
+    );
+
+    // Positive assertion: the result is a union of the three string
+    // literals from VueButtonHTMLAttributes.type.
+    let literals: std::collections::BTreeSet<String> = match raised {
+        TypeExpr::Union(arms) => arms
+            .iter()
+            .filter_map(|arm| match arm {
+                TypeExpr::Literal(LiteralValue::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        TypeExpr::Literal(LiteralValue::String(s)) => std::collections::BTreeSet::from([s.clone()]),
+        other => panic!("expected Union of string literals; got {other:?}"),
+    };
+    assert_eq!(
+        literals,
+        std::collections::BTreeSet::from([
+            "button".to_string(),
+            "submit".to_string(),
+            "reset".to_string(),
+        ]),
+        "dispatch-only Pick['member'] reduction must yield the picked \
+         member's literal union; got {literals:?}"
+    );
+}
+
+/// Step 1.5 FAIL-FIRST sub-task 1.5.0/2: mapped type with conditional
+/// `infer P` per-key reduction reaches resolved evaluated_types shape.
+/// Mirrors `imported_mapped_slots_reach_resolved_evaluated_types` but
+/// exercises dispatch directly.
+///
+/// Pre-Step-1.5 failure: dispatch's `build_mapped_type` substitutes
+/// the per-key literal into the mapper value, but the substituted
+/// conditional with `infer P` extends a Function whose `check` is
+/// `PricingPlanSlots[K]` — that IndexedAccess never resolves through
+/// the substituted mapper context, so `build_conditional`'s C11a Function-
+/// extends arm sees check_resolved as the unsubstituted shell and skips
+/// the per-position infer binding.
+///
+/// Post-Step-1.5: `build_mapped_type`'s substitute-and-evaluate path
+/// resolves the inner `IndexedAccess` BEFORE the conditional materialises,
+/// so the C11a binding extracts `P → { planId: string }` and the
+/// substituted true_branch surfaces as
+/// `(props: { planId: string; plan: TPlan }) => any`.
+#[test]
+fn dispatch_only_imported_mapped_slots_resolved_shape_via_dispatch_only() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::{empty_type_args, TypeExpr};
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { PricingPlansSlots } from './slots'
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    let host = project.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
+    let plan_arg = TypeExpr::Object(StdArc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: "id".to_string(),
+                        ty: TypeExpr::Primitive(
+                            verter_semantic::analysis::type_expr::PrimitiveName::String,
+                        ),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: "tier".to_string(),
+                        ty: TypeExpr::string_literal("pro"),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+            ],
+        },
+    ));
+
+    let macro_shell = TypeExpr::Ref {
+        name: StdArc::from("PricingPlansSlots"),
+        type_arguments: StdArc::from(vec![plan_arg]),
+    };
+
+    let lowered = dispatch
+        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
+
+    // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
+    // can navigate the Mapped+Conditional pair to extract the badge slot.
+    let badge_path: StdArc<[PathSegment]> =
+        StdArc::from(vec![PathSegment::Member(StdArc::from("badge"))]);
+    let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: lowered,
+        path: badge_path,
+        mode: ProjectionMode::Expanded,
+    });
+
+    let badge_node = match projected {
+        QueryResult::Value(id) => id,
+        other => panic!(
+            "dispatch-only ProjectPath(['badge']) on PricingPlansSlots<…> \
+             must return Value(id); got {other:?}\n\
+             this isolates the dispatch substitution gap that the \
+             materialize wrapper currently masks via the legacy walker."
+        ),
+    };
+
+    let raised = dispatch
+        .raise_node_to_type_expr(badge_node)
+        .expect("raise_node_to_type_expr must succeed on the badge projection");
+
+    // Resolve any leading Parenthesized/Alias-style wrappers.
+    let raised_inner = match &raised {
+        TypeExpr::Parenthesized(inner) => inner.as_ref().clone(),
+        other => other.clone(),
+    };
+
+    // Negative assertion: the badge slot result must NOT be an Unknown
+    // shell or a deferred IndexedAccess/Conditional (the pre-Step-1.5
+    // dispatch signatures).
+    assert!(
+        !matches!(
+            raised_inner,
+            TypeExpr::Unknown { .. }
+                | TypeExpr::IndexedAccess { .. }
+                | TypeExpr::Conditional { .. }
+        ),
+        "dispatch-only mapped+infer projection must reduce; got {raised_inner:?}"
+    );
+
+    // Positive assertion: the badge slot is a Function whose first
+    // parameter is an Intersection of `{ planId }` (from infer P) and
+    // `{ plan: TPlan-substituted }`. We assert it carries BOTH the
+    // inferred and TPlan-substituted contributions.
+    fn function_param_type(expr: &TypeExpr) -> Option<&TypeExpr> {
+        match expr {
+            TypeExpr::Function(f) => f.parameters.first().map(|p| &p.ty),
+            _ => None,
+        }
+    }
+
+    fn collect_member_names(expr: &TypeExpr, names: &mut std::collections::BTreeSet<String>) {
+        match expr {
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    match member {
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                            names.insert(p.name.clone());
+                        }
+                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                            names.insert(m.name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeExpr::Intersection(arms) => {
+                for arm in arms.iter() {
+                    collect_member_names(arm, names);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_member_names(inner, names),
+            _ => {}
+        }
+    }
+
+    let param_ty = function_param_type(&raised_inner).unwrap_or_else(|| {
+        panic!(
+            "dispatch-only badge slot must be a Function — got {raised_inner:?}.\n\
+             pre-Step-1.5 the conditional + infer reduction yields a deferred \
+             shell because mapper substitution does not flow through the \
+             IndexedAccess check."
+        )
+    });
+
+    let mut names = std::collections::BTreeSet::new();
+    collect_member_names(param_ty, &mut names);
+
+    assert!(
+        names.contains("planId") && names.contains("plan"),
+        "dispatch-only badge param type must include both `planId` (from \
+         infer P) and `plan` (from `& {{ plan: TPlan }}`) — got names={:?}, \
+         param={param_ty:?}\n\
+         missing `planId` means infer-binding never flowed through; missing \
+         `plan` means the intersection arm was lost.",
+        names,
+    );
+
+    // Use the materialized handle to also assert dispatch returned a
+    // non-empty dep_signature for the path projection (validates the
+    // Step-6.6.A fence wiring is not regressed by the parity fix).
+    let _ = empty_type_args();
+}
+
+/// Step 1.5 FAIL-FIRST sub-task 1.5.0/3: mapped+infer reduction reaches
+/// a final-meta-shaped Object with all three slot names enumerated.
+/// Mirrors `imported_mapped_slots_reach_final_component_meta` but at the
+/// dispatch boundary.
+///
+/// Pre-Step-1.5 failure: in addition to the conditional+infer per-key
+/// gap (covered by the previous test), the Mapped's Intersection arm
+/// (`& { default?(props?: {}): any }`) doesn't compose into a single
+/// Object the consumer can iterate — dispatch leaves a deferred Mapped
+/// shell that raises back as `TypeExpr::Mapped`.
+///
+/// Post-Step-1.5: dispatch reduces the mapped Intersection to a single
+/// Object surface enumerating `badge`, `title`, `default` so consumers
+/// can iterate the slot names without re-walking source IR.
+#[test]
+fn dispatch_only_imported_mapped_slots_final_shape_via_dispatch_only() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/slots.ts",
+            r#"
+export interface PricingPlan {
+  id: string
+}
+
+export interface PricingPlanSlots {
+  badge(props: { planId: string }): any
+  title(props: { planId: string }): any
+}
+
+export type ExtendSlotWithPlan<TPlan, TKey extends keyof PricingPlanSlots> =
+  PricingPlanSlots[TKey] extends (props: infer P) => any
+    ? (props: P & { plan: TPlan }) => any
+    : PricingPlanSlots[TKey]
+
+export type PricingPlansSlots<TPlan extends PricingPlan = PricingPlan> = {
+  [K in keyof PricingPlanSlots]?: ExtendSlotWithPlan<TPlan, K>
+} & {
+  default?(props?: {}): any
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { PricingPlansSlots } from './slots'
+defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/App.vue").unwrap().unwrap();
+
+    let host = project.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    let plan_arg = TypeExpr::Object(StdArc::new(
+        verter_semantic::analysis::type_expr::ObjectExpr {
+            properties: vec![
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: "id".to_string(),
+                        ty: TypeExpr::Primitive(
+                            verter_semantic::analysis::type_expr::PrimitiveName::String,
+                        ),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+                verter_semantic::analysis::type_expr::ObjectMember::Property(
+                    verter_semantic::analysis::type_expr::ObjectProperty {
+                        name: "tier".to_string(),
+                        ty: TypeExpr::string_literal("pro"),
+                        optional: false,
+                        readonly: false,
+                    },
+                ),
+            ],
+        },
+    ));
+    let macro_shell = TypeExpr::Ref {
+        name: StdArc::from("PricingPlansSlots"),
+        type_arguments: StdArc::from(vec![plan_arg]),
+    };
+
+    let lowered = dispatch
+        .lower_type_expr_in_scope_with_mode("/App.vue", &macro_shell, ProjectionMode::Expanded)
+        .expect("dispatch must lower PricingPlansSlots<{...}> at /App.vue");
+
+    let materialized = dispatch.raise_and_reduce(lowered, ProjectionMode::Expanded);
+    let raised = &materialized.type_expr;
+
+    // Negative assertion: the dispatch must NOT leave a deferred Mapped
+    // shell at the top level — that's the pre-Step-1.5 signature.
+    assert!(
+        !matches!(raised, TypeExpr::Mapped { .. } | TypeExpr::Unknown { .. }),
+        "dispatch-only must reduce mapped+intersection to a concrete \
+         Object/Intersection surface; got {raised:?}"
+    );
+
+    // Collect slot names from the reduced surface (handles either a
+    // single Object or an Intersection of Objects).
+    fn collect_slot_names(expr: &TypeExpr, out: &mut std::collections::BTreeSet<String>) {
+        match expr {
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    match member {
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                            out.insert(p.name.clone());
+                        }
+                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                            out.insert(m.name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeExpr::Intersection(arms) => {
+                for arm in arms.iter() {
+                    collect_slot_names(arm, out);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_slot_names(inner, out),
+            _ => {}
+        }
+    }
+
+    let mut names = std::collections::BTreeSet::new();
+    collect_slot_names(raised, &mut names);
+
+    assert!(
+        names.contains("badge") && names.contains("title") && names.contains("default"),
+        "dispatch-only mapped+intersection projection must enumerate \
+         badge/title/default — got {names:?}, surface={raised:?}\n\
+         missing keys mean the mapper's per-key substitution never \
+         materialised the literal-substituted body, OR the trailing \
+         intersection arm was dropped."
+    );
+
+    // Strong assertion mirroring `imported_mapped_slots_reach_final_component_meta`'s
+    // bindings check: each slot's value (e.g. badge) must NOT be a
+    // deferred Conditional shell — it must reduce to a Function whose
+    // first parameter type carries both `planId` (from infer P) and
+    // `plan` (from the intersection with `{ plan: TPlan }`).
+    fn find_member_value<'a>(expr: &'a TypeExpr, name: &str) -> Option<&'a TypeExpr> {
+        match expr {
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    if let verter_semantic::analysis::type_expr::ObjectMember::Property(p) = member
+                    {
+                        if p.name == name {
+                            return Some(&p.ty);
+                        }
+                    }
+                }
+                None
+            }
+            TypeExpr::Intersection(arms) => {
+                arms.iter().find_map(|arm| find_member_value(arm, name))
+            }
+            TypeExpr::Parenthesized(inner) => find_member_value(inner, name),
+            _ => None,
+        }
+    }
+
+    let badge_value = find_member_value(raised, "badge").unwrap_or_else(|| {
+        panic!("dispatch-only mapped surface must expose `badge` Property member; got {raised:?}")
+    });
+
+    assert!(
+        !matches!(
+            badge_value,
+            TypeExpr::Conditional { .. }
+                | TypeExpr::Unknown { .. }
+                | TypeExpr::IndexedAccess { .. }
+        ),
+        "dispatch-only badge slot value must reduce to a concrete Function — \
+         got {badge_value:?}\n\
+         a Conditional or Unknown here means the mapper's \
+         substitute-and-evaluate did not materialise the conditional+infer \
+         body for the per-key literal substitution."
+    );
+
+    // Walk into the Function's first parameter type and assert names.
+    fn collect_param_member_names(expr: &TypeExpr, names: &mut std::collections::BTreeSet<String>) {
+        match expr {
+            TypeExpr::Object(obj) => {
+                for member in &obj.properties {
+                    match member {
+                        verter_semantic::analysis::type_expr::ObjectMember::Property(p) => {
+                            names.insert(p.name.clone());
+                        }
+                        verter_semantic::analysis::type_expr::ObjectMember::Method(m) => {
+                            names.insert(m.name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TypeExpr::Intersection(arms) => {
+                for arm in arms.iter() {
+                    collect_param_member_names(arm, names);
+                }
+            }
+            TypeExpr::Parenthesized(inner) => collect_param_member_names(inner, names),
+            _ => {}
+        }
+    }
+    let TypeExpr::Function(func) = badge_value else {
+        panic!("dispatch-only badge slot must be a Function; got {badge_value:?}");
+    };
+    let first_param_ty = func
+        .parameters
+        .first()
+        .map(|p| &p.ty)
+        .unwrap_or_else(|| panic!("badge function must have a first parameter"));
+    let mut binding_names = std::collections::BTreeSet::new();
+    collect_param_member_names(first_param_ty, &mut binding_names);
+    assert!(
+        binding_names.contains("planId") && binding_names.contains("plan"),
+        "dispatch-only final-shape badge bindings must include planId and \
+         plan — got {binding_names:?}; param={first_param_ty:?}"
+    );
+}

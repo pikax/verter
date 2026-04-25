@@ -539,12 +539,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             });
                         }
                         ObjectMember::Method(method) => {
-                            // Methods are not fully lowered at shell
-                            // level; record the member slot with an
-                            // opaque value. Real function-signature
-                            // lowering lands when the function-semantic
-                            // variant is added post-C1.
-                            let value = self.opaque(QueryError::Miss);
+                            // Step 1.5 mapped+conditional infer closure:
+                            // lower methods to canonical Function nodes
+                            // (matching CallSignature handling below) so
+                            // `PricingPlanSlots[K]` IndexedAccess can
+                            // resolve to a real Function for C11a's
+                            // Function-extends infer-binding arm. The
+                            // pre-Step-1.5 `Opaque(Miss)` placeholder
+                            // broke `IndexedAccess<I, "method-name">`
+                            // projection: the path walker finds the
+                            // member but its value is opaque, so
+                            // downstream C11a's `let Some(Function...) =
+                            // graph.node_data(check_resolved)` match
+                            // fails and the conditional drops to a
+                            // deferred shell.
+                            let function_expr =
+                                TypeExpr::Function(Arc::new(method.function.clone()));
+                            let value = self.shallow_lower_type_expr(
+                                &function_expr,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                substitutions,
+                                mode,
+                            );
                             members.push(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value,
@@ -1029,25 +1048,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     substitutions,
                     mode,
                 );
-                // Plan §3 Cluster A: when `extends` lowers to a bare
-                // `SemanticNodeData::Infer { name }`, bind the infer
-                // name in the true-branch lowering env so
-                // `TypeExpr::Ref { name }` references in the true
-                // branch resolve back to the same Infer node id. Without
-                // this binding, the Ref would route through ResolveDecl
-                // and lower to `Opaque(Miss)` — at which point the name
-                // is lost and `build_conditional`'s Infer arm cannot
-                // substitute check into the true branch.
+                // Plan §3 Cluster A + Step 1.5 mapped+conditional infer
+                // closure: collect EVERY `SemanticNodeData::Infer { name }`
+                // reachable from `extends` (bare position OR nested inside
+                // Function / Tuple / Array / Union / Intersection / Object
+                // shapes) and bind each name in the true-branch env so
+                // `TypeExpr::Ref { name }` references in the true branch
+                // resolve back to the same Infer node id. Without this
+                // binding, the Ref routes through `ResolveDecl` and lowers
+                // to `Opaque(Miss)`, at which point the name is lost and
+                // `build_conditional`'s C11a Function-extends arm cannot
+                // substitute the bound type into the true branch — leaving
+                // a deferred shell with `Unknown { raw: "semanticMiss" }`
+                // sitting in the position the user wrote `infer P`.
+                //
+                // The pre-Step-1.5 single-bare-Infer arm at
+                // `extends` lowered as `SemanticNodeData::Infer { name }`
+                // covered `T extends infer P ? P : T` only.
+                // `T extends (props: infer P) => any ? P : T` and the
+                // many compound-extends shapes need the recursive walk.
                 let true_env_owned;
-                let true_env = if let Some(SemanticNodeData::Infer { name }) =
-                    graph.node_data(extends_id).as_deref()
-                {
+                let true_env = {
                     let mut extended = env.clone();
-                    extended.insert(name.as_ref().to_string(), extends_id);
-                    true_env_owned = extended;
-                    &true_env_owned
-                } else {
-                    env
+                    let mut visited = rustc_hash::FxHashSet::default();
+                    self.collect_infer_bindings_into_env(extends_id, &mut extended, &mut visited);
+                    if extended.len() != env.len() {
+                        true_env_owned = extended;
+                        &true_env_owned
+                    } else {
+                        env
+                    }
                 };
                 let true_id = self.shallow_lower_type_expr(
                     true_type,
@@ -1220,6 +1250,107 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // through their own dispatch builders (C2/C7/...) or stay
             // solver-scratch-only per plan §7.14 / §7.18.
             _ => self.opaque(QueryError::Miss),
+        }
+    }
+
+    /// Walk `extends_id`'s graph subtree collecting every reachable
+    /// `SemanticNodeData::Infer { name }` and binding `name → infer_node`
+    /// in `env`. Used by the Conditional lowering arm to extend the
+    /// true-branch lowering env so nested `infer P` positions
+    /// (e.g. `T extends (props: infer P) => any` or
+    /// `T extends [infer A, infer B]`) bind correctly. Cycles are guarded
+    /// via `visited`.
+    ///
+    /// Walks Function / Tuple / Array / Union / Intersection / Object
+    /// shapes — every composite a Conditional's `extends` clause may
+    /// hold an `infer` position inside. Skips terminals and lazy
+    /// carriers (DeclRef / InstantiationRef) because TypeScript only
+    /// allows `infer` syntactically inside conditional `extends`
+    /// positions, and the syntactic positions correspond to the
+    /// composite shapes walked here.
+    pub(super) fn collect_infer_bindings_into_env(
+        &self,
+        node: SemanticNodeId,
+        env: &mut FxHashMap<String, SemanticNodeId>,
+        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+    ) {
+        if !visited.insert(node) {
+            return;
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Infer { name } => {
+                env.insert(name.as_ref().to_string(), node);
+            }
+            SemanticNodeData::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                let params = params.clone();
+                let return_type = *return_type;
+                drop(data);
+                for param in params.iter() {
+                    self.collect_infer_bindings_into_env(param.ty, env, visited);
+                }
+                self.collect_infer_bindings_into_env(return_type, env, visited);
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                let elements = elements.clone();
+                drop(data);
+                for elem in elements.iter() {
+                    self.collect_infer_bindings_into_env(elem.value, env, visited);
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                let element = *element;
+                drop(data);
+                self.collect_infer_bindings_into_env(element, env, visited);
+            }
+            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                let members = members.clone();
+                drop(data);
+                for member in members.iter() {
+                    self.collect_infer_bindings_into_env(*member, env, visited);
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                let surface = surface.clone();
+                drop(data);
+                for member in surface.members.iter() {
+                    self.collect_infer_bindings_into_env(member.value, env, visited);
+                }
+                for sig in surface.call_signatures.iter() {
+                    self.collect_infer_bindings_into_env(*sig, env, visited);
+                }
+                for sig in surface.construct_signatures.iter() {
+                    self.collect_infer_bindings_into_env(*sig, env, visited);
+                }
+                for sig in surface.index_signatures.iter() {
+                    self.collect_infer_bindings_into_env(sig.key_type, env, visited);
+                    self.collect_infer_bindings_into_env(sig.value_type, env, visited);
+                }
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let object = *object;
+                let index = index.clone();
+                drop(data);
+                self.collect_infer_bindings_into_env(object, env, visited);
+                if let crate::semantic_query::IndexKey::TypeNode(idx_node) = index {
+                    self.collect_infer_bindings_into_env(idx_node, env, visited);
+                }
+            }
+            SemanticNodeData::KeyOf { base } => {
+                let base = *base;
+                drop(data);
+                self.collect_infer_bindings_into_env(base, env, visited);
+            }
+            // Terminals and lazy carriers — no nested infer positions
+            // syntactically reachable. (TS rejects `infer` outside
+            // conditional `extends`.)
+            _ => {}
         }
     }
 }

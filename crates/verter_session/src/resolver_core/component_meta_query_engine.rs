@@ -3134,32 +3134,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// **TODO(dispatch-substitution-parity):** Plan §3 Step 6.4 requires
-    /// deletion of this walker — the architectural target is `PathWalker`
+    /// **Step 2 deletion target.** Plan §3 Step 6.4 requires deletion
+    /// of this walker — the architectural target is `PathWalker`
     /// (in `project_semantic_dispatch/walk.rs`) as the only path-precise
     /// walker. The Step 11 tombstone command
     /// `! grep -rn "projected_member_surface_keys" crates/ packages/ scripts/`
     /// must return 0 hits.
     ///
-    /// **Blocker.** Removal is gated on the same dispatch-substitution
-    /// gap documented on
-    /// `materialize_component_meta_type_expr_until_stable_full` in
-    /// `meta_resolve.rs`. The legacy walker has access to
-    /// `prepared_type_param_substitutions` via `expand_local_generic_ref_expr`;
-    /// dispatch's `PathWalker` does not yet thread script-setup generic
-    /// substitutions through `Instantiate`. See `meta_resolve.rs` doc-
-    /// comment §"TODO(dispatch-substitution-parity)" for the precise
-    /// upstream change required.
-    ///
-    /// **Diagnostic minimum reproducer.** The fixture
-    /// `evaluate_types_preserve_script_setup_generic_metadata_in_define_props`
-    /// at `meta_tests.rs:2283` exercises the gap.
-    ///
-    /// **Removal trigger.** When `dispatch.execute(SemanticQueryKey::ProjectPath)`
-    /// returns the same `Vec<String>` member-key set as this walker for
-    /// the symbolic-intersection corpus fixtures, this function and its
-    /// 13 internal call sites can ALL be deleted in the same commit
-    /// (per CLAUDE.md "Legacy Code Deletion" — no shims).
+    /// **Status (post Step 1.5).** The Step 1.5 dispatch-substitution
+    /// parity work (Pick<X, K>['member'], mapped+conditional infer P,
+    /// Method-as-Function lowering) closed the substitution-parity gap
+    /// that previously blocked this walker's deletion. The walker
+    /// remains in service of legacy member-route resolution and
+    /// projection-rescue helpers (`type_expr_needs_projection_rescue`,
+    /// `component_meta_type_expr_improves`,
+    /// `imported_component_meta_materialization_scope`,
+    /// `expr_has_transitively_recursive_generic_root`) that Step 2's
+    /// caller-class parity matrix is responsible for migrating. Once
+    /// those callers retire, this walker and its 13 internal call sites
+    /// can ALL be deleted in the same commit (per CLAUDE.md
+    /// "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn projected_member_surface_keys(
         &mut self,
