@@ -3112,6 +3112,32 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    /// **TODO(dispatch-substitution-parity):** Plan §3 Step 6.4 requires
+    /// deletion of this walker — the architectural target is `PathWalker`
+    /// (in `project_semantic_dispatch/walk.rs`) as the only path-precise
+    /// walker. The Step 11 tombstone command
+    /// `! grep -rn "projected_member_surface_keys" crates/ packages/ scripts/`
+    /// must return 0 hits.
+    ///
+    /// **Blocker.** Removal is gated on the same dispatch-substitution
+    /// gap documented on
+    /// `materialize_component_meta_type_expr_until_stable_full` in
+    /// `meta_resolve.rs`. The legacy walker has access to
+    /// `prepared_type_param_substitutions` via `expand_local_generic_ref_expr`;
+    /// dispatch's `PathWalker` does not yet thread script-setup generic
+    /// substitutions through `Instantiate`. See `meta_resolve.rs` doc-
+    /// comment §"TODO(dispatch-substitution-parity)" for the precise
+    /// upstream change required.
+    ///
+    /// **Diagnostic minimum reproducer.** The fixture
+    /// `evaluate_types_preserve_script_setup_generic_metadata_in_define_props`
+    /// at `meta_tests.rs:2283` exercises the gap.
+    ///
+    /// **Removal trigger.** When `dispatch.execute(SemanticQueryKey::ProjectPath)`
+    /// returns the same `Vec<String>` member-key set as this walker for
+    /// the symbolic-intersection corpus fixtures, this function and its
+    /// 13 internal call sites can ALL be deleted in the same commit
+    /// (per CLAUDE.md "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn projected_member_surface_keys(
         &mut self,
@@ -10309,6 +10335,106 @@ defineProps<SourceProps>()
             "Step 8: route_hash field must be populated on IndexedReady when \
              shallow_state.has_resolvable_surface() is true. Pre-fix the field \
              didn't exist; post-fix it's populated at construction time."
+        );
+    }
+
+    /// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_invalidated_on_content_change):
+    /// when a tracked dep's source changes, the `IndexedReady` for that
+    /// canonical rebuilds and `route_hash` changes too. Pre-fix any
+    /// caching that is NOT keyed by content-hash would return the same
+    /// hash across mutations. Post-fix the field is rebuilt with the
+    /// new ShallowFileState whose whole_hash differs.
+    #[test]
+    fn step8_route_hash_invalidated_on_content_change() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Source.ts".to_string(),
+            Arc::from(
+                r#"
+export interface SourceProps {
+  size?: 'sm' | 'md' | 'lg'
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Card.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { SourceProps } from './Source'
+defineProps<SourceProps>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Card.vue"));
+        host.set_import_dependencies(
+            "/src/Card.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./Source".to_string(),
+                resolved_canonical_id: Some("/src/Source.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        // Trigger component-meta resolution which loads Source.ts as
+        // a dependency.
+        let _ = host.get_component_meta("/src/Card.vue");
+
+        let initial_hash = host
+            .project_type_store()
+            .indexed()
+            .get_any("/src/Source.ts")
+            .expect("Source.ts must be indexed after dependency-walk")
+            .route_hash
+            .expect("Source.ts has resolvable surface — route_hash must be Some");
+
+        // Mutate the dep's source so the shallow surface changes. The
+        // new content (different prop name + extra prop) MUST produce a
+        // different route_hash since the resolvable surface differs.
+        // upsert with the new content forces re-indexing through the
+        // host's parsing path (matches LSP didChange flow).
+        let _ = host.upsert(crate::UpsertRequest {
+            canonical_id: Some("/src/Source.ts".into()),
+            input_id: "/src/Source.ts".into(),
+            source: Arc::from(
+                r#"
+export interface SourceProps {
+  variant?: 'primary' | 'secondary' | 'tertiary'
+  loading?: boolean
+}
+"#,
+            ),
+            file_kind: crate::FileKind::NonSfc,
+            aliases: vec![],
+        });
+
+        // Re-trigger meta to re-walk dependencies after the upsert.
+        let _ = host.get_component_meta("/src/Card.vue");
+
+        let after_hash = host
+            .project_type_store()
+            .indexed()
+            .get_any("/src/Source.ts")
+            .expect("Source.ts must be re-indexed after upsert")
+            .route_hash
+            .expect("post-mutation Source.ts has resolvable surface — route_hash must be Some");
+
+        assert_ne!(
+            initial_hash, after_hash,
+            "Step 8: route_hash MUST change when the resolvable surface changes. \
+             Pre-mutation hash and post-mutation hash matched, which means the \
+             cache lifecycle is not keyed by content. Initial: {initial_hash:?} After: {after_hash:?}",
         );
     }
 

@@ -67,18 +67,22 @@ fn path_to_host_id(path: &Path) -> String {
 /// Resolve a target spec (env-var or default-list entry) to an absolute
 /// canonical id. Accepts:
 ///   * a bare component name → `src/runtime/components/<name>.vue`
-///   * a relative path under the components dir → e.g. `prose/PCallout.vue`
-///   * a path relative to the project root → used as-is (must end in `.vue`)
+///   * a relative path under the components dir → e.g. `prose/PCallout`
+///     becomes `src/runtime/components/prose/PCallout.vue`
+///   * a path that already begins with `src/` or `runtime/` → used as
+///     project-root-relative (so `src/runtime/vue/components/Icon.vue`
+///     stays put)
 fn target_id_for_name(project_root: &Path, spec: &str) -> String {
     let with_ext = if spec.ends_with(".vue") {
         spec.to_string()
     } else {
         format!("{spec}.vue")
     };
-    let path = if with_ext.starts_with("src/") || with_ext.contains('/') {
-        // Relative to project root if it has any path separator.
+    let path = if with_ext.starts_with("src/") || with_ext.starts_with("runtime/") {
         project_root.join(&with_ext)
     } else {
+        // Bare name OR slug like `prose/PCallout` — both resolve under
+        // the canonical components dir.
         project_root
             .join("src")
             .join("runtime")

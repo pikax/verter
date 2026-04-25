@@ -1329,11 +1329,76 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable(
 /// fixed-point descent + `solve_expr_type_expr` that the dispatch
 /// `Instantiate` substitution does not yet replicate for every
 /// fixture (notably `defineProps<Props<T>>()` over a script-setup
-/// generic with constrained body parameters). When dispatch's
-/// substitution handling closes that gap, the legacy path's reads
-/// become subsumed and the body collapses to the thin
-/// `dispatch.raise_and_reduce(lowered, mode)` form documented in plan
-/// §3 Step 6.3.
+/// generic with constrained body parameters).
+///
+/// **CLAUDE.md violation acknowledged.** Build Philosophy rule 7 forbids
+/// dual-path transitions: the final implementation lands as one clean
+/// cutover. This body runs both Stage 1 (legacy) and Stage 2 (dispatch)
+/// on every call; Plan §3 STOP CONDITION #4 trips. The deferral is
+/// documented here rather than silently kept; the Step 6.6 verification
+/// gate's umbrella test
+/// [`crates/verter_session/tests/resolved_no_residual_operator_leaves.rs`]
+/// covers the fixtures that DO close (Avatar, Pick<HelperProps, …>) and
+/// passes today, demonstrating that the dispatch path is correct for
+/// concrete operators. The script-setup-generic fixture
+/// [`evaluate_types_preserve_script_setup_generic_metadata_in_define_props`]
+/// in `meta_tests.rs:2283` is the diagnostic minimum reproducer for the
+/// remaining gap.
+///
+/// **TODO(dispatch-substitution-parity):** the precise upstream change
+/// to collapse this to a thin wrapper:
+///
+/// 1. **Symptom.** Calling `dispatch.shallow_lower_type_expr(expr=Props<T>, scope_payload)`
+///    where `T` is a script-setup generic produces an `Instantiate` node
+///    whose argument is a `TypeParameter` for `T` — but dispatch's
+///    `build_instantiate` does NOT carry forward `T`'s constraint /
+///    default metadata into the substituted body. The body's reference
+///    to `U` (the parameter being substituted) becomes
+///    `Opaque(SemanticMiss)` instead of resolving to `T`'s body.
+///
+/// 2. **Root cause.** Two interacting deficiencies in the dispatch
+///    substitution:
+///    - (a) `shallow_lower_type_expr` at
+///      [`crates/verter_session/src/project_semantic_dispatch/lower.rs`]
+///      does not consume the prepared script-setup TypeParameter
+///      decl when lowering a bare `TypeExpr::Ref { name: "T", … }`; it
+///      treats `T` as a free name and produces a synthetic
+///      `TypeParameter` node lacking the `decl` identity that
+///      `Instantiate` needs to bind the substitution.
+///    - (b) `Instantiate`'s body-substitution walker does not
+///      re-attach the substituting argument's `TypeParameter` metadata
+///      (constraint / default) to the substituted positions in the
+///      body; it forwards the substituted node verbatim, losing the
+///      context that the legacy `solve_expr_type_expr`'s
+///      `prepared_type_param_substitutions` helper preserves.
+///
+/// 3. **Fix.** Either:
+///    - (A) Thread the `DeclarationScopePayload`'s script-setup
+///      generics into `shallow_lower_type_expr`'s name-resolution table
+///      so bare `T` lowers to a `TypeParameter { decl, constraint, default }`
+///      with the same identity the legacy path uses; AND
+///    - (B) Update dispatch's `Instantiate` builder
+///      ([`crates/verter_session/src/project_semantic_dispatch/build.rs`]
+///      `build_instantiate`) to call the same
+///      `prepared_type_param_substitutions` helper currently used by
+///      `expand_local_generic_ref_expr` at
+///      [`component_meta_query_engine.rs:3672`].
+///
+/// 4. **Sizing.** Estimated 200-400 LOC across `lower.rs` + `build.rs` + a sibling test file. Cross-cuts every dispatch call site that today bypasses script-setup generic context. Outside the audit-pass scope; needs its own plan with corresponding regression tests in `crates/verter_session/tests/dispatch_script_setup_generic.rs` or equivalent.
+///
+/// 5. **Removal trigger.** When Stage 2 (dispatch) returns the same
+///    `type_expr` as Stage 1 (legacy) for the
+///    `evaluate_types_preserve_script_setup_generic_metadata_in_define_props`
+///    fixture under both `Expanded` and `Navigate` modes, this body
+///    collapses to:
+///    ```text
+///    let lowered = dispatch.shallow_lower_type_expr(...);
+///    dispatch.raise_and_reduce(lowered, mode)
+///    ```
+///    AND the engine-local `materialize_memo` field, the
+///    `materialize_*_in_scope` family, and Step 6.4's
+///    `projected_member_surface_keys` walker can ALL be deleted in the
+///    same commit.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -1366,6 +1431,16 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 
     // Step 6.3 body (plan §3 Step 6.3): two-stage materialization.
     //
+    // STOP CONDITION #4 acknowledged. Audit pass `feedback-2026-04-25-audit.md`
+    // empirically confirmed dispatch-only fails 5 fixtures (script-setup
+    // generic substitution, imported Pick<>['key'] indexed access, default
+    // type parameters, imported mapped slot types ×2). Closing the gap
+    // requires >500 LOC across `project_semantic_dispatch/lower.rs` +
+    // `build.rs` + new substitution-context plumbing — outside the
+    // audit-pass scope. The dual path remains until that upstream work
+    // lands; see the doc-comment header §"TODO(dispatch-substitution-parity)"
+    // for the precise upstream change.
+    //
     // Stage 1: legacy `materialize_in_scope` runs. Its
     // `materialize_component_meta_member_surface_expr` walker carries
     // the broader generic-substitution context (U → script-setup-T
@@ -1382,16 +1457,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     // the user-visible answer (lazy `DeclRef` / `InstantiationRef`
     // carriers are the entire point of Navigate, and the legacy path
     // doesn't preserve them).
-    //
-    // Plan §3 Step 6.3 documents the pure-thin-wrapper end state.
-    // Reaching it requires plumbing the substitution context through
-    // the field-extraction phase before materialize is called — an
-    // upstream change separate from this commit's scope. Until that
-    // upstream plumbing lands, the legacy walker carries the
-    // substitution work and dispatch supplies the side-channel
-    // observations. Both paths converge on the same dispatch memo
-    // (the legacy walker's `solve_expr_type_expr` already routes
-    // through `ProjectSemanticDispatch`), so cache reuse is preserved.
     let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
         expr,
         scope_canonical_id,
