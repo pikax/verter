@@ -17,6 +17,7 @@ import {
 } from "./meta-ui-core.js";
 import {
   aggregateRunFromRepeats,
+  buildSlaCount,
   type ComponentResultRow,
   type MetaUiBenchmarkRun,
 } from "./meta-ui-report.js";
@@ -985,6 +986,7 @@ async function runSingleScenarioRepeat(
     endToEndMs: setupMs + warmupMs + steadyStateMs,
     componentResults,
     outcomeCounts,
+    slaCount: buildSlaCount(componentResults, args.slaMs),
     deviationTotals,
     stats: summarizeLatencySeries(latencies.length > 0 ? latencies : [steadyStateMs]),
   };
@@ -1163,6 +1165,7 @@ async function runRepoScenarioRepeat(
       endToEndMs: setupMs + warmupMs + steadyStateMs,
       componentResults,
       outcomeCounts,
+      slaCount: buildSlaCount(componentResults, args.slaMs),
       deviationTotals,
       stats: summarizeLatencySeries(
         (() => {

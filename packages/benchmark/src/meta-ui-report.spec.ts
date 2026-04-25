@@ -61,6 +61,7 @@ function makeRun(overrides: Partial<MetaUiBenchmarkRun>): MetaUiBenchmarkRun {
           },
         ],
         outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+        slaCount: { withinSla: 2, exceededSla: 0 },
         deviationTotals: {
           exactMatches: 2,
           totalMissing: 0,
@@ -76,6 +77,7 @@ function makeRun(overrides: Partial<MetaUiBenchmarkRun>): MetaUiBenchmarkRun {
       steadyStateMs: { min: 20, max: 20, p50: 20, p95: 20, p99: 20, mean: 20, stddev: 0 },
       endToEndMs: { min: 30, max: 30, p50: 30, p95: 30, p99: 30, mean: 30, stddev: 0 },
       outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+      slaCount: { withinSla: 2, exceededSla: 0 },
       deviationTotals: { exactMatches: 2, totalMissing: 0, totalExtra: 0, totalFieldMismatches: 0 },
     },
     ...overrides,
@@ -108,6 +110,7 @@ describe("buildMetaUiAggregateReport", () => {
           steadyStateMs: { min: 40, max: 40, p50: 40, p95: 40, p99: 40, mean: 40, stddev: 0 },
           endToEndMs: { min: 48, max: 48, p50: 48, p95: 48, p99: 48, mean: 48, stddev: 0 },
           outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+          slaCount: { withinSla: 2, exceededSla: 0 },
           deviationTotals: {
             exactMatches: 2,
             totalMissing: 0,
@@ -152,6 +155,7 @@ describe("componentResults in repeat", () => {
             },
           ],
           outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+          slaCount: { withinSla: 2, exceededSla: 0 },
           deviationTotals: {
             exactMatches: 2,
             totalMissing: 0,
@@ -189,6 +193,7 @@ describe("componentResults in repeat", () => {
             },
           ],
           outcomeCounts: { success: 0, degraded: 0, query_error: 0, crash: 1 },
+          slaCount: { withinSla: 0, exceededSla: 0 },
           deviationTotals: {
             exactMatches: 0,
             totalMissing: 0,
@@ -241,6 +246,7 @@ describe("buildMetaUiMarkdownReport top outliers", () => {
               },
             ],
             outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+            slaCount: { withinSla: 2, exceededSla: 0 },
             deviationTotals: {
               exactMatches: 2,
               totalMissing: 0,
@@ -284,6 +290,7 @@ describe("buildMetaUiMarkdownReport top outliers", () => {
             endToEndMs: 30,
             componentResults: [],
             outcomeCounts: { success: 0, degraded: 0, query_error: 0, crash: 0 },
+            slaCount: { withinSla: 0, exceededSla: 0 },
             deviationTotals: {
               exactMatches: 0,
               totalMissing: 0,
@@ -327,6 +334,7 @@ describe("buildMetaUiMarkdownReport", () => {
           steadyStateMs: { min: 40, max: 40, p50: 40, p95: 40, p99: 40, mean: 40, stddev: 0 },
           endToEndMs: { min: 48, max: 48, p50: 48, p95: 48, p99: 48, mean: 48, stddev: 0 },
           outcomeCounts: { success: 2, degraded: 0, query_error: 0, crash: 0 },
+          slaCount: { withinSla: 2, exceededSla: 0 },
           deviationTotals: {
             exactMatches: 2,
             totalMissing: 0,
@@ -364,6 +372,7 @@ describe("buildMetaUiMarkdownReport", () => {
           steadyStateMs: { min: 20, max: 20, p50: 20, p95: 20, p99: 20, mean: 20, stddev: 0 },
           endToEndMs: { min: 30, max: 30, p50: 30, p95: 30, p99: 30, mean: 30, stddev: 0 },
           outcomeCounts: { success: 1, degraded: 1, query_error: 0, crash: 0 },
+          slaCount: { withinSla: 2, exceededSla: 0 },
           deviationTotals: {
             exactMatches: 1,
             totalMissing: 0,

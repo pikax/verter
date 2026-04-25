@@ -26,6 +26,21 @@ export interface ComponentResultRow {
   error: string | null;
 }
 
+/**
+ * Plan §3 Step 10 / F9 — SLA bucket counts.
+ *
+ * Splits the metric (SLA threshold = `slaMs`) from the kill threshold
+ * (hard timeout = `queryTimeoutMs`). Components whose `latencyMs <=
+ * slaMs` count as `withinSla`; components above `slaMs` but below
+ * `queryTimeoutMs` count as `exceededSla` (still completed). The CI
+ * regression gate compares `withinSla` against the committed baseline
+ * — a regression of >=5 components on `single_cold` fails the PR.
+ */
+export interface MetaUiSlaCount {
+  withinSla: number;
+  exceededSla: number;
+}
+
 export interface MetaUiBenchmarkRunRepeat {
   index: number;
   orderStart: number;
@@ -35,6 +50,8 @@ export interface MetaUiBenchmarkRunRepeat {
   endToEndMs: number;
   componentResults: ComponentResultRow[];
   outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
+  /// Plan §3 Step 10 / F9: SLA bucket counts for the regression gate.
+  slaCount: MetaUiSlaCount;
   deviationTotals: {
     exactMatches: number;
     totalMissing: number;
@@ -70,6 +87,8 @@ export interface MetaUiBenchmarkRun {
     steadyStateMs: NumericSummary;
     endToEndMs: NumericSummary;
     outcomeCounts: Record<"success" | "degraded" | "query_error" | "crash", number>;
+    /// Plan §3 Step 10 / F9: aggregated SLA counts across all repeats.
+    slaCount: MetaUiSlaCount;
     deviationTotals: {
       exactMatches: number;
       totalMissing: number;
@@ -266,6 +285,7 @@ export function aggregateRunFromRepeats(
       steadyStateMs: summarizeLatencySeries(steadySeries),
       endToEndMs: summarizeLatencySeries(endToEndSeries),
       outcomeCounts: sumOutcomeCounts(run.repeats),
+      slaCount: sumSlaCounts(run.repeats),
       deviationTotals: sumDeviationTotals(run.repeats),
     },
   };
@@ -281,6 +301,41 @@ function sumOutcomeCounts(repeats: MetaUiBenchmarkRunRepeat[]) {
     }),
     { success: 0, degraded: 0, query_error: 0, crash: 0 },
   );
+}
+
+function sumSlaCounts(repeats: MetaUiBenchmarkRunRepeat[]): MetaUiSlaCount {
+  return repeats.reduce<MetaUiSlaCount>(
+    (totals, repeat) => ({
+      withinSla: totals.withinSla + (repeat.slaCount?.withinSla ?? 0),
+      exceededSla: totals.exceededSla + (repeat.slaCount?.exceededSla ?? 0),
+    }),
+    { withinSla: 0, exceededSla: 0 },
+  );
+}
+
+/**
+ * Build per-repeat SLA bucket counts from the repeat's component
+ * results. `slaMs` is the metric threshold (configured via
+ * `--sla-ms`); components with `latencyMs <= slaMs` go to
+ * `withinSla`, all others (including hard-timeout failures) go to
+ * `exceededSla`. Helper exposed for the bench-runner so it computes
+ * the buckets at the same point it tallies `outcomeCounts`.
+ */
+export function buildSlaCount(
+  componentResults: ComponentResultRow[],
+  slaMs: number,
+): MetaUiSlaCount {
+  let withinSla = 0;
+  let exceededSla = 0;
+  for (const result of componentResults) {
+    const latency = result.latencyMs ?? Number.POSITIVE_INFINITY;
+    if (latency <= slaMs) {
+      withinSla += 1;
+    } else {
+      exceededSla += 1;
+    }
+  }
+  return { withinSla, exceededSla };
 }
 
 function sumDeviationTotals(repeats: MetaUiBenchmarkRunRepeat[]) {
