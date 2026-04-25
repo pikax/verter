@@ -179,6 +179,10 @@ These operate on native metadata results. They do not reintroduce JS parsing or 
 
 `@verter/component-meta/browser` is the browser-safe entrypoint for shared types and Type IR helpers. It does not expose the Node.js project/session API.
 
+## Audit-Only Fields
+
+`meta.origin` (the origin/derivation graph) is populated only when the host is constructed with both `audit_enabled: true` and `footprint_capture: true`. With the default configuration this field is `undefined`. The contract matches the LSP hover-provenance gate: provenance data is captured only when the audit infrastructure is enabled.
+
 ## Removed Public Surfaces
 
 These legacy public APIs are not supported:
