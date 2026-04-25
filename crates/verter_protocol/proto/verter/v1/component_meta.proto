@@ -7,6 +7,9 @@ message ComponentMetaPayload {
   TypeGraph type_graph = 2;
   repeated TypeRegistryEntry type_registry = 3;
   ComponentMetaBody body = 4;
+  // Audit-only. Populated only when host audit_enabled=true AND
+  // footprint_capture=true (matches LSP hover-provenance gate at
+  // server.rs:6918-6953). Default-mode consumers see this field absent.
   OriginGraph origin_graph = 5;
 }
 

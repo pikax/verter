@@ -5618,7 +5618,14 @@ impl VerterHost {
                 timings: audit_timings,
                 solver: solver_audit,
             }),
-            origin_graph: if mode == ProjectionMode::Expanded {
+            // F1 (D3, D34): origin_graph is audit-only by contract.
+            // Gates on `audit_enabled && footprint_capture` to match LSP's
+            // hover-provenance gate at server.rs:6918-6953. Default-mode
+            // consumers (audit_enabled = false) see the field absent.
+            origin_graph: if mode == ProjectionMode::Expanded
+                && audit_enabled
+                && self.config.footprint_capture
+            {
                 let graph = self.project_type_store.semantic_graph();
                 let dto = build_origin_graph(graph);
                 if dto.edges.is_empty() {
