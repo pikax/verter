@@ -67,13 +67,19 @@ fn record_baseline_allocation_count_for_audit_off_get_component_meta() {
         aliases: vec![],
     });
 
-    // Warm path discovery (load + parse).
-    let _ = host.get_component_meta_with_resolution("/Small.vue");
+    // First call: warm bootstrap (parsing, indexing, initial resolution).
+    // Allocations during this phase are not what F4 targets.
+    let primed = host.get_component_meta_with_resolution("/Small.vue");
+    assert!(
+        primed.is_some(),
+        "F8 baseline precondition: host must resolve `/Small.vue` before measurement",
+    );
 
-    // Reset and measure a cold-cache resolution. Since audit is off,
-    // there should be no `RequestFootprintAccumulator` installed in
-    // TLS during this call, so post-Step-2 the trace macros' detail
-    // expressions skip evaluation entirely.
+    // Reset, then measure a second resolution. Audit is off → no
+    // `RequestFootprintAccumulator` is installed in TLS for either call,
+    // so post-Step-2 the trace macros short-circuit before evaluating
+    // their detail expressions; pre-Step-2 every trace site
+    // unconditionally ran `format!(...)`.
     COUNTER.store(0, Ordering::Relaxed);
     let _ = host.get_component_meta_with_resolution("/Small.vue");
     let allocations = COUNTER.load(Ordering::Relaxed);

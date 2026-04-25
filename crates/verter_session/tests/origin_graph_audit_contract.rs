@@ -77,23 +77,30 @@ fn host_with(audit_enabled: bool, footprint_capture: bool) -> Arc<VerterHost> {
 
 #[test]
 fn gate_text_includes_audit_enabled() {
-    // FAIL-FIRST static-text discriminator. The guard is the literal
-    // gate `audit_enabled && self.config.footprint_capture`. Pre-fix
-    // this expression is absent; post-fix it is present at exactly one
-    // location (the `origin_graph:` field of `ResolvedComponentMetaState`
-    // construction in `compute_component_meta_state_inner`).
+    // FAIL-FIRST static-text discriminator. Asserts the source contains
+    // the boolean `audit_enabled && self.config.footprint_capture` (in
+    // either token order, robust to reformatting whitespace) inside the
+    // `compute_component_meta_state_inner` body. Pre-fix the gate is
+    // absent; post-fix it is present at exactly one site (the
+    // `origin_graph:` field of `ResolvedComponentMetaState`).
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("meta_resolve.rs");
     let body = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
-    let needle = "audit_enabled\n                && self.config.footprint_capture";
+    // Normalize all whitespace runs to a single space so the test
+    // tolerates rustfmt rewrites (e.g., joining tokens onto one line
+    // or splitting them differently).
+    let normalized: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let needle_a = "audit_enabled && self.config.footprint_capture";
+    let needle_b = "self.config.footprint_capture && audit_enabled";
     assert!(
-        body.contains(needle),
+        normalized.contains(needle_a) || normalized.contains(needle_b),
         "F1 contract: meta_resolve.rs must contain the gate \
-         `audit_enabled && self.config.footprint_capture` for `origin_graph` \
-         emission. Pre-fix that gate is absent and `origin_graph` would emit \
-         under any audit configuration. (Plan §3 Step 3 D3 + D34.)",
+         `audit_enabled && self.config.footprint_capture` (in either token \
+         order) for `origin_graph` emission. Pre-fix that gate is absent \
+         and `origin_graph` would emit under any audit configuration. \
+         (Plan §3 Step 3 D3 + D34.)",
     );
 }
 

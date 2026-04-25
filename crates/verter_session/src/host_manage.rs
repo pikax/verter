@@ -542,9 +542,9 @@ macro_rules! component_meta_trace_structured {
 /// into [`push_structured_custom`]. Plan §3.A Commit 6.E.
 macro_rules! component_meta_trace_custom {
     ($name:expr, $detail:expr $(,)?) => {{
-        // F4: only evaluate $detail when an accumulator is installed.
-        // Without this gate, format!() / to_string() arguments allocate
-        // on every call regardless of whether the trace will be recorded.
+        // The accumulator check gates the $detail expression so its
+        // allocations (typically a format!) are skipped when no audit
+        // run is in flight. Hot-path call sites depend on this.
         if $crate::request_context::current_accumulator().is_some() {
             $crate::host_manage::push_structured_custom($name, $detail);
         }
@@ -3900,12 +3900,9 @@ impl VerterHost {
                 imported_name,
                 &live_view,
                 || {
-                    // F7 (Plan §3 Step 4): trace emission moved BELOW the
-                    // ImportedRootDb cache check. Pre-fix the event fired on
-                    // every call regardless of cache state; same (canonical,
-                    // imported_name) repeated 5x produced 5 trace events
-                    // even though only the first did real work. Post-fix
-                    // the event fires once per cache MISS.
+                    // Trace inside the closure: the closure runs only on
+                    // cache miss, so the trace event records actual
+                    // resolution work — not redundant lookups.
                     component_meta_trace_custom!(
                         "resolve_imported_type_root",
                         format!("canonical={} imported={}", dep_canonical, imported_name),

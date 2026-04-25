@@ -181,7 +181,7 @@ fn print_profile(
     eprintln!("  fact versions:        {}", resolved.fact_versions.len());
 }
 
-fn profile_one(project_root: &PathBuf, token: &str, repeats: usize) -> io::Result<()> {
+fn profile_one(project_root: &Path, token: &str, repeats: usize) -> io::Result<()> {
     let target_file = resolve_target_file(project_root, token)?;
     let target_id = path_to_host_id(&target_file)?;
 

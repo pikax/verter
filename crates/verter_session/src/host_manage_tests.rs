@@ -10017,38 +10017,41 @@ mod trace_laziness_tests {
     use super::*;
     use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use crate::request_context::{RequestContext, RequestContextGuard};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
-    static SIDE_EFFECT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    fn side_effecting_detail() -> String {
-        SIDE_EFFECT_COUNTER.fetch_add(1, Ordering::SeqCst);
-        "detail".to_string()
-    }
+    // Counter is per-test (declared inside the test function), not
+    // module-static — cargo runs sibling tests in parallel and any
+    // shared mutable state would race. `Cell<u32>` is single-threaded
+    // and lives entirely on the test's stack, so the macro's
+    // captured-by-reference closure is safe without locking.
 
     #[test]
     fn macro_detail_not_evaluated_when_no_accumulator_installed() {
-        // Setup: ensure no accumulator is installed (a sibling test
-        // could leave one behind via a leaked guard, so explicitly
-        // confirm we're starting clean).
-        assert!(
-            crate::request_context::current_accumulator().is_none(),
-            "test precondition: no accumulator installed at entry",
-        );
-        SIDE_EFFECT_COUNTER.store(0, Ordering::SeqCst);
-        component_meta_trace_custom!("test_event", side_effecting_detail());
-        component_meta_trace_custom!("test_event", side_effecting_detail());
-        component_meta_trace_custom!("test_event", side_effecting_detail());
+        let counter: Cell<u32> = Cell::new(0);
+        // The macro's $detail expression evaluates only when the if-guard
+        // takes the branch. Inline a block that ticks the counter so we
+        // observe whether the macro evaluated detail at all.
+        let tick = || {
+            counter.set(counter.get() + 1);
+            String::from("detail")
+        };
+        component_meta_trace_custom!("test_event", tick());
+        component_meta_trace_custom!("test_event", tick());
+        component_meta_trace_custom!("test_event", tick());
         assert_eq!(
-            SIDE_EFFECT_COUNTER.load(Ordering::SeqCst),
+            counter.get(),
             0,
-            "F4: macro $detail expression must not run when no accumulator is installed",
+            "F4: macro $detail must not run when no accumulator is installed",
         );
     }
 
     #[test]
     fn macro_detail_evaluated_when_accumulator_installed() {
-        SIDE_EFFECT_COUNTER.store(0, Ordering::SeqCst);
+        let counter: Cell<u32> = Cell::new(0);
+        let tick = || {
+            counter.set(counter.get() + 1);
+            String::from("detail")
+        };
         let acc = Arc::new(RequestFootprintAccumulator::new());
         let ctx = RequestContext::new(
             42,
@@ -10056,14 +10059,13 @@ mod trace_laziness_tests {
             true,
             Some(Arc::clone(&acc)),
         );
-        // RequestContext::new already returns Arc<Self>.
         let _guard = RequestContextGuard::install(ctx);
-        component_meta_trace_custom!("test_event", side_effecting_detail());
-        component_meta_trace_custom!("test_event", side_effecting_detail());
+        component_meta_trace_custom!("test_event", tick());
+        component_meta_trace_custom!("test_event", tick());
         assert_eq!(
-            SIDE_EFFECT_COUNTER.load(Ordering::SeqCst),
+            counter.get(),
             2,
-            "F4 regression invariant: macro must still fire when accumulator is installed",
+            "F4 regression invariant: macro must fire $detail when accumulator is installed",
         );
     }
 }
