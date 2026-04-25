@@ -9897,6 +9897,109 @@ export type Props = { render: typeof Button }
 }
 
 // ----------------------------------------------------------------
+// F7 (Plan §3 Step 4) — `resolve_imported_type_root` trace dedup.
+// Discriminator: same (canonical, imported_name) queried N times in
+// a single request emits the `resolve_imported_type_root` Custom
+// event exactly ONCE (the cache miss). Pre-fix the event fired on
+// every call regardless of cache state.
+//
+// Test must live here (not under `tests/`) because
+// `resolve_imported_type_root` is `pub(crate)` and integration
+// tests cannot reach it (D36 placement rule).
+// ----------------------------------------------------------------
+
+#[cfg(test)]
+mod imported_root_trace_dedup_tests {
+    use super::*;
+    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
+    use crate::component_meta_audit::structured_event::StructuredComponentMetaEvent;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    fn host_with_props_ts() -> Arc<VerterHost> {
+        let workspace: Arc<dyn WorkspaceAccess> =
+            Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                audit_enabled: true,
+                footprint_capture: true,
+                ..HostConfig::default()
+            },
+            workspace,
+        ));
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/props.ts".into()),
+            input_id: "/props.ts".into(),
+            source: Arc::from("export interface Props { label: string; }\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: vec![],
+        });
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/Component.vue".into()),
+            input_id: "/Component.vue".into(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\n\
+                 import type { Props } from './props';\n\
+                 defineProps<Props>();\n\
+                 </script>\n\
+                 <template><div /></template>\n",
+            ),
+            file_kind: FileKind::VueSfc,
+            aliases: vec![],
+        });
+        host
+    }
+
+    #[test]
+    fn resolve_imported_type_root_traces_once_per_cache_miss_not_per_call() {
+        let host = host_with_props_ts();
+        let acc = Arc::new(RequestFootprintAccumulator::new());
+        let ctx = RequestContext::new(
+            7777,
+            Arc::from("/Component.vue"),
+            true,
+            Some(Arc::clone(&acc)),
+        );
+        let _guard = RequestContextGuard::install(ctx);
+
+        // Five repeated calls with identical inputs. The
+        // ImportedRootDb (host.resolver.runtime.imported_roots) caches
+        // the result on the first call; subsequent calls are cache
+        // hits.
+        for _ in 0..5 {
+            let _ = host.resolve_imported_type_root("/Component.vue", "Props");
+        }
+
+        let state = acc.drain();
+        let resolve_events: Vec<&StructuredComponentMetaEvent> = state
+            .structured_events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StructuredComponentMetaEvent::Custom { name, .. }
+                        if name.as_ref() == "resolve_imported_type_root"
+                )
+            })
+            .collect();
+
+        // Pre-fix expected count = 5 (the trace fired before the
+        // cache check, so every call emitted). Post-fix expected
+        // count = 1 (the trace moved inside the closure, runs only
+        // on cache miss; first call misses, subsequent four hit).
+        assert_eq!(
+            resolve_events.len(),
+            1,
+            "F7 contract: `resolve_imported_type_root` must trace once per \
+             cache MISS, not once per call. Got {} events for 5 identical \
+             calls. Pre-fix the trace was emitted before the ImportedRootDb \
+             cache check.",
+            resolve_events.len(),
+        );
+    }
+}
+
+// ----------------------------------------------------------------
 // F4 — `component_meta_trace_custom!` laziness discriminators.
 // Plan §3 Step 2 (D5): a side-effecting AtomicUsize counter proves
 // that the macro's `$detail` expression is NOT evaluated when no

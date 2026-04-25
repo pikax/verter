@@ -3885,10 +3885,6 @@ impl VerterHost {
         imported_name: &str,
     ) -> (String, String) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
-        component_meta_trace_custom!(
-            "resolve_imported_type_root",
-            format!("canonical={} imported={}", dep_canonical, imported_name),
-        );
 
         let normalized_canonical = self
             .resolve_eval_dependency_canonical(dep_canonical)
@@ -3904,6 +3900,17 @@ impl VerterHost {
                 imported_name,
                 &live_view,
                 || {
+                    // F7 (Plan §3 Step 4): trace emission moved BELOW the
+                    // ImportedRootDb cache check. Pre-fix the event fired on
+                    // every call regardless of cache state; same (canonical,
+                    // imported_name) repeated 5x produced 5 trace events
+                    // even though only the first did real work. Post-fix
+                    // the event fires once per cache MISS.
+                    component_meta_trace_custom!(
+                        "resolve_imported_type_root",
+                        format!("canonical={} imported={}", dep_canonical, imported_name),
+                    );
+
                     if let Some((resolved, facts)) = self
                         .resolve_direct_imported_type_root_fast_path(
                             normalized_canonical.as_str(),
