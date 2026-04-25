@@ -1180,6 +1180,7 @@ fn named_decl_body_reaches_cycle(
     false
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -1757,6 +1758,7 @@ fn define_props_member_can_stay_symbolic_without_rescue(
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn materialize_component_meta_field_types(
     scope_canonical_id: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -2898,6 +2900,7 @@ fn produce_macro_object_shapes(
     );
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn produce_macro_object_shapes_for_purpose(
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -5333,6 +5336,7 @@ impl VerterHost {
         )
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn compute_component_meta_state_inner(
         &self,
         canonical: &str,
@@ -7896,6 +7900,7 @@ fn materialize_component_meta_macro_shape_member_types(
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn materialize_component_meta_macro_shape_member_type_expr(
     lowered: &verter_semantic::analysis::type_expr::TypeExpr,
     member_name: &str,
@@ -9588,6 +9593,7 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
     })?
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn materialize_component_meta_member_surface_expr_with_active_stack(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -10247,6 +10253,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
     result
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn build_origin_graph(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
 ) -> verter_protocol::types::OriginGraphDto {

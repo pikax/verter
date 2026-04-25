@@ -1470,6 +1470,7 @@ impl SemanticGraphStore {
         self.derivation.lock().edge_count()
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
         self.derivation.lock().all_edges()
     }

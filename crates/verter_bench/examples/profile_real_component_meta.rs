@@ -181,19 +181,11 @@ fn print_profile(
     eprintln!("  fact versions:        {}", resolved.fact_versions.len());
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 120))]
-fn main() -> io::Result<()> {
-    let project_root = std::env::var("VERTER_PROFILE_PROJECT_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| default_project_root());
-    let token = std::env::args().nth(1).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing component token/path")
-    })?;
-    let target_file = resolve_target_file(&project_root, &token)?;
+fn profile_one(project_root: &PathBuf, token: &str, repeats: usize) -> io::Result<()> {
+    let target_file = resolve_target_file(project_root, token)?;
     let target_id = path_to_host_id(&target_file)?;
-    let repeats = parse_repeats();
 
-    let host = make_host(&project_root)?;
+    let host = make_host(project_root)?;
     let bootstrap_started = Instant::now();
     let _ = host.ensure_loaded(&target_id);
     eprintln!("Real component-meta profiler");
@@ -219,5 +211,22 @@ fn main() -> io::Result<()> {
         eprintln!();
     }
 
+    Ok(())
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::main(limit = 120))]
+fn main() -> io::Result<()> {
+    let project_root = std::env::var("VERTER_PROFILE_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_project_root());
+    let targets: Vec<String> = std::env::args().skip(1).collect();
+    if targets.is_empty() {
+        eprintln!("usage: profile_real_component_meta <component> [<component> ...]");
+        std::process::exit(1);
+    }
+    let repeats = parse_repeats();
+    for target in &targets {
+        profile_one(&project_root, target, repeats)?;
+    }
     Ok(())
 }

@@ -7708,6 +7708,7 @@ fn extract_component_meta_from_inputs(
     meta
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn choose_less_symbolic_component_meta_type_expr(
     current: &verter_semantic::analysis::type_expr::TypeExpr,
     raw_type: Option<&str>,
@@ -8435,6 +8436,7 @@ fn choose_less_symbolic_component_meta_type_expr(
     best
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn rematerialize_public_component_meta_types(
     host: &VerterHost,
     owner_canonical: &str,

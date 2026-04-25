@@ -3064,6 +3064,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn projected_member_surface_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
