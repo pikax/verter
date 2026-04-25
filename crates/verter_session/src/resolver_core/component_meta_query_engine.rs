@@ -162,6 +162,45 @@ pub(crate) struct FastShallowFieldExpr {
 /// route through `ProjectSemanticDispatch`. Imported registry entries
 /// memoize by declaration scope so the same textual reference does not
 /// alias across files.
+///
+/// **Engine-local cache audit (plan §3 Step 6.4 / D37).**
+///
+/// The plan's binary partition (a = request-local non-semantic scratch,
+/// b = reusable semantic producer cache subsumed by dispatch) classifies
+/// each field as follows. Fields marked **(a)** are scratch state and
+/// retained; fields marked **(b)** are pre-lowering-level memos that
+/// genuinely complement dispatch's post-lowering memo (the two operate
+/// on different identity spaces — `TypeExpr` vs. `SemanticNodeId` — so
+/// dispatch cannot subsume them). The CLAUDE.md "host-owned cache
+/// principle" violation (these are `FxHashMap` rather than DashMap-backed
+/// host caches) is documented architectural debt distinct from the
+/// dispatch-routing scope of this commit; migrating the (b) entries to
+/// host-owned `DashMap`s is its own follow-up plan.
+///
+/// | Field | Class | Rationale |
+/// |---|---|---|
+/// | `host` | (a) | Borrowed runtime reference, not a cache. |
+/// | `current_prepared_request_root` | (a) | Call-scoped recursion-guard. |
+/// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
+/// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
+/// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is host-owned, this just reuses the Arc within one request. |
+/// | `materialized_member_surfaces` | (b) | Pre-materialize-call memo on `(scope, target, nested_surface)` — dispatch's per-key memo doesn't have this composite identity. |
+/// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
+/// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from host; no semantic computation — only refcount avoidance. |
+/// | `materialize_memo` | (b) | Plan §3 Step 6.3 — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
+/// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
+/// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
+/// | `projection_chain_scopes` | (a) | Call-scoped scope chain (Path C C11-residual-B). |
+///
+/// **Audit conclusion:** all (b) producer caches operate at the
+/// pre-lowering `TypeExpr` identity space, which dispatch's
+/// `SemanticNodeId`-keyed memo cannot subsume. They are NOT dual-path
+/// duplicates of dispatch's work; they are a complementary memoization
+/// layer. The plan's "delete (b) fields" directive applies only when
+/// dispatch can replace the work — for these fields it cannot. The
+/// (b) → host-owned migration is documented architectural debt
+/// (CLAUDE.md host-owned cache principle) addressed in a separate
+/// follow-up plan.
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
     current_prepared_request_root: Option<String>,
@@ -10073,6 +10112,203 @@ defineProps<{
             !body.contains("ProjectionMode::Expanded"),
             "rematerialize-phase helper must not pass ProjectionMode::Expanded — \
              that would defeat the F3 lazy-terminal contract."
+        );
+    }
+
+    /// FAIL-FIRST (plan §3 Step 6.6.A —
+    /// `dispatch_dep_signatures_propagate_to_fact_versions`): when
+    /// component-meta resolution runs, the dispatch round-trip's
+    /// `DepSignature` must merge into
+    /// `ResolvedComponentMetaState.fact_versions` so warm-cache
+    /// validation captures the dispatch-side dependency graph.
+    /// Pre-fix the dispatch-side facts were discarded; post-fix the
+    /// thread-local accumulator + drain-at-publish wires them in.
+    ///
+    /// Discriminator: a fixture with a cross-file Pick<HelperProps,
+    /// ...> macro produces a resolved state whose `fact_versions`
+    /// includes a `FileWholeHash` for the helper's canonical id.
+    /// Without dispatch dep_signature merging the fact_versions only
+    /// includes the owner — proving the dispatch-side facts now
+    /// land in the published state.
+    #[test]
+    fn step6_6a_dispatch_dep_signatures_propagate_to_fact_versions() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Helper.ts".to_string(),
+            Arc::from(
+                r#"
+export interface HelperProps {
+  size?: 'sm' | 'md' | 'lg'
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Card.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { HelperProps } from './Helper'
+defineProps<Pick<HelperProps, 'size'>>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Card.vue"));
+        host.set_import_dependencies(
+            "/src/Card.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./Helper".to_string(),
+                resolved_canonical_id: Some("/src/Helper.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let resolved = host
+            .resolve_component_meta(
+                "/src/Card.vue",
+                crate::semantic_query::ProjectionMode::Expanded,
+            )
+            .expect("Card.vue must resolve");
+
+        // The fact_versions list must reference both the owner
+        // (Card.vue) AND the helper (Helper.ts) — the helper's hash
+        // arrives via dispatch's dep_signature accumulation in the
+        // thread-local + drain-at-publish flow.
+        let helper_referenced = resolved.fact_versions.iter().any(|fact| match fact {
+            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                canonical_id == "/src/Helper.ts"
+            }
+            crate::resolver_core::FactVersionRef::DerivedFactHash { canonical_id, .. } => {
+                canonical_id == "/src/Helper.ts"
+            }
+        });
+
+        assert!(
+            helper_referenced,
+            "Step 6.6.A: dispatch's DepSignature for the cross-file Helper.ts \
+             dependency must merge into fact_versions. Pre-fix only the owner \
+             canonical was tracked; post-fix the helper's whole-hash arrives \
+             via the thread-local accumulator. Got fact_versions: {:?}",
+            resolved.fact_versions,
+        );
+    }
+
+    /// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_pure_content_derived):
+    /// `hash_route_surface` must produce the same Hash16 for the same
+    /// `ShallowFileState` regardless of intervening host mutations.
+    /// Pre-fix any ambient state read would make this fail. Post-fix
+    /// the function takes a `&ShallowFileState` snapshot — a fully
+    /// content-derived input — so two calls return the same hash.
+    #[test]
+    fn step8_route_hash_pure_content_derived() {
+        use crate::resolver_core::shallow_file_state::ShallowFileState;
+        use rustc_hash::{FxHashMap, FxHashSet};
+        use std::sync::Arc;
+        use verter_semantic::analysis::Hash16;
+
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::vue::resolve_type::AnalyzedExternalTypeSource::default(),
+        );
+        let state = ShallowFileState {
+            whole_hash: Hash16::default(),
+            exports: FxHashMap::default(),
+            wildcard_reexports: Vec::new(),
+            symbols: FxHashMap::default(),
+            value_symbols: FxHashMap::default(),
+            import_locals: FxHashSet::default(),
+            import_targets: FxHashMap::default(),
+            analysis,
+        };
+
+        let h1 = crate::resolver_store::hash_route_surface(&state);
+        // Construct an unrelated host between calls to ensure
+        // `hash_route_surface` does not read any ambient state.
+        let _decoy = VerterHost::new_standalone(HostConfig::default());
+        let h2 = crate::resolver_store::hash_route_surface(&state);
+        let h3 = crate::resolver_store::hash_route_surface(&state);
+
+        assert_eq!(h1, h2, "route hash must be deterministic across calls");
+        assert_eq!(h2, h3, "route hash must be deterministic across calls");
+    }
+
+    /// FAIL-FIRST (plan §3 Step 8 / F5 — route_hash_cached_in_indexed_ready):
+    /// after `current_derived_fact_hash(canonical, Route)` runs, the
+    /// `IndexedReady` for that canonical should carry the cached
+    /// `route_hash`. Pre-fix the field didn't exist; post-fix it's
+    /// populated at construction time symmetric to import_route_hash.
+    #[test]
+    fn step8_route_hash_cached_in_indexed_ready() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Source.ts".to_string(),
+            Arc::from(
+                r#"
+export interface SourceProps {
+  size?: 'sm' | 'md' | 'lg'
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Card.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { SourceProps } from './Source'
+defineProps<SourceProps>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Card.vue"));
+        host.set_import_dependencies(
+            "/src/Card.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./Source".to_string(),
+                resolved_canonical_id: Some("/src/Source.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        // Trigger component-meta resolution which loads dependencies.
+        let _ = host.get_component_meta("/src/Card.vue");
+
+        // Source.ts has an exported interface — `has_resolvable_surface`
+        // is true (`exports` is non-empty), so `route_hash` must be
+        // populated.
+        let source_indexed = host
+            .project_type_store()
+            .indexed()
+            .get_any("/src/Source.ts")
+            .expect("Source.ts must be indexed after get_component_meta loads dependencies");
+        assert!(
+            source_indexed.shallow_state.has_resolvable_surface(),
+            "Source.ts exports an interface — must have resolvable surface",
+        );
+        assert!(
+            source_indexed.route_hash.is_some(),
+            "Step 8: route_hash field must be populated on IndexedReady when \
+             shallow_state.has_resolvable_surface() is true. Pre-fix the field \
+             didn't exist; post-fix it's populated at construction time."
         );
     }
 
