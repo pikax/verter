@@ -542,7 +542,12 @@ macro_rules! component_meta_trace_structured {
 /// into [`push_structured_custom`]. Plan §3.A Commit 6.E.
 macro_rules! component_meta_trace_custom {
     ($name:expr, $detail:expr $(,)?) => {{
-        $crate::host_manage::push_structured_custom($name, $detail);
+        // F4: only evaluate $detail when an accumulator is installed.
+        // Without this gate, format!() / to_string() arguments allocate
+        // on every call regardless of whether the trace will be recorded.
+        if $crate::request_context::current_accumulator().is_some() {
+            $crate::host_manage::push_structured_custom($name, $detail);
+        }
     }};
 }
 

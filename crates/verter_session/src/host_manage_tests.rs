@@ -9895,3 +9895,72 @@ export type Props = { render: typeof Button }
         hd.source_type,
     );
 }
+
+// ----------------------------------------------------------------
+// F4 — `component_meta_trace_custom!` laziness discriminators.
+// Plan §3 Step 2 (D5): a side-effecting AtomicUsize counter proves
+// that the macro's `$detail` expression is NOT evaluated when no
+// audit accumulator is installed. Pre-fix: counter increments on
+// every call. Post-fix: counter increments only when accumulator
+// is installed.
+//
+// Tests live here (not under `tests/`) because the macro is
+// `pub(crate) use component_meta_trace_custom;` and integration
+// tests cannot import a `pub(crate)` macro (D36).
+// ----------------------------------------------------------------
+
+#[cfg(test)]
+mod trace_laziness_tests {
+    use super::*;
+    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SIDE_EFFECT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn side_effecting_detail() -> String {
+        SIDE_EFFECT_COUNTER.fetch_add(1, Ordering::SeqCst);
+        "detail".to_string()
+    }
+
+    #[test]
+    fn macro_detail_not_evaluated_when_no_accumulator_installed() {
+        // Setup: ensure no accumulator is installed (a sibling test
+        // could leave one behind via a leaked guard, so explicitly
+        // confirm we're starting clean).
+        assert!(
+            crate::request_context::current_accumulator().is_none(),
+            "test precondition: no accumulator installed at entry",
+        );
+        SIDE_EFFECT_COUNTER.store(0, Ordering::SeqCst);
+        component_meta_trace_custom!("test_event", side_effecting_detail());
+        component_meta_trace_custom!("test_event", side_effecting_detail());
+        component_meta_trace_custom!("test_event", side_effecting_detail());
+        assert_eq!(
+            SIDE_EFFECT_COUNTER.load(Ordering::SeqCst),
+            0,
+            "F4: macro $detail expression must not run when no accumulator is installed",
+        );
+    }
+
+    #[test]
+    fn macro_detail_evaluated_when_accumulator_installed() {
+        SIDE_EFFECT_COUNTER.store(0, Ordering::SeqCst);
+        let acc = Arc::new(RequestFootprintAccumulator::new());
+        let ctx = RequestContext::new(
+            42,
+            Arc::from("/test_lazy_macro.vue"),
+            true,
+            Some(Arc::clone(&acc)),
+        );
+        // RequestContext::new already returns Arc<Self>.
+        let _guard = RequestContextGuard::install(ctx);
+        component_meta_trace_custom!("test_event", side_effecting_detail());
+        component_meta_trace_custom!("test_event", side_effecting_detail());
+        assert_eq!(
+            SIDE_EFFECT_COUNTER.load(Ordering::SeqCst),
+            2,
+            "F4 regression invariant: macro must still fire when accumulator is installed",
+        );
+    }
+}
