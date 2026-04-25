@@ -1,0 +1,1348 @@
+{
+  "kind": "meta-ui-benchmark-run",
+  "generatedAt": "2026-04-24T23:17:23.826Z",
+  "version": {
+    "benchmarkPackageVersion": "0.0.1",
+    "verterCommitSha": "4b146ff4b45fc278f891da388f7a2347c1b30a73",
+    "resolvedTargetSha": "4b146ff4b45fc278f891da388f7a2347c1b30a73",
+    "vueComponentMetaVersion": "3.2.6",
+    "nodeVersion": "v22.20.0"
+  },
+  "target": {
+    "project": "nuxt-ui",
+    "repo": "nuxt/ui",
+    "branch": "v4",
+    "root": "D:/dev/personal/verter/.integration-tests/repos/nuxt-ui",
+    "componentsDir": "D:/dev/personal/verter/.integration-tests/repos/nuxt-ui/src/runtime/components",
+    "componentCount": 177
+  },
+  "config": {
+    "backend": "verter",
+    "scenario": "single_cold",
+    "repeats": 1,
+    "warmupPasses": 1,
+    "runtimeMode": "dedicated"
+  },
+  "repeats": [
+    {
+      "index": 1,
+      "orderStart": 0,
+      "setupMs": 96059.95449999976,
+      "warmupMs": 0,
+      "steadyStateMs": 289838.5910000001,
+      "endToEndMs": 385898.54549999983,
+      "componentResults": [
+        {
+          "relativePath": "src/runtime/components/Accordion.vue",
+          "componentName": "Accordion",
+          "latencyMs": 1298.7968,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Alert.vue",
+          "componentName": "Alert",
+          "latencyMs": 2051.9685,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/App.vue",
+          "componentName": "App",
+          "latencyMs": 603.3124,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/AuthForm.vue",
+          "componentName": "AuthForm",
+          "latencyMs": 4359.9111,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Avatar.vue",
+          "componentName": "Avatar",
+          "latencyMs": 275.42820000000006,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/AvatarGroup.vue",
+          "componentName": "AvatarGroup",
+          "latencyMs": 565.8641,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Badge.vue",
+          "componentName": "Badge",
+          "latencyMs": 354.1107,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Banner.vue",
+          "componentName": "Banner",
+          "latencyMs": 1725.0164,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/BlogPost.vue",
+          "componentName": "BlogPost",
+          "latencyMs": 1167.5359999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/BlogPosts.vue",
+          "componentName": "BlogPosts",
+          "latencyMs": 269.3449,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Breadcrumb.vue",
+          "componentName": "Breadcrumb",
+          "latencyMs": 555.6760999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Button.vue",
+          "componentName": "Button",
+          "latencyMs": 835.9581,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Calendar.vue",
+          "componentName": "Calendar",
+          "latencyMs": 1859.4504000000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Card.vue",
+          "componentName": "Card",
+          "latencyMs": 541.0671,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Carousel.vue",
+          "componentName": "Carousel",
+          "latencyMs": 875.7751,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChangelogVersion.vue",
+          "componentName": "ChangelogVersion",
+          "latencyMs": 1141.5444,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChangelogVersions.vue",
+          "componentName": "ChangelogVersions",
+          "latencyMs": 481.1986,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatMessage.vue",
+          "componentName": "ChatMessage",
+          "latencyMs": 5119.476,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatMessages.vue",
+          "componentName": "ChatMessages",
+          "latencyMs": 2893.4965,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatPalette.vue",
+          "componentName": "ChatPalette",
+          "latencyMs": 501.0183,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatPrompt.vue",
+          "componentName": "ChatPrompt",
+          "latencyMs": 4139.6239000000005,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatPromptSubmit.vue",
+          "componentName": "ChatPromptSubmit",
+          "latencyMs": 5074.0017,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatReasoning.vue",
+          "componentName": "ChatReasoning",
+          "latencyMs": 357.572,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatShimmer.vue",
+          "componentName": "ChatShimmer",
+          "latencyMs": 212.07670000000007,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ChatTool.vue",
+          "componentName": "ChatTool",
+          "latencyMs": 341.93260000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Checkbox.vue",
+          "componentName": "Checkbox",
+          "latencyMs": 1144.7518,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/CheckboxGroup.vue",
+          "componentName": "CheckboxGroup",
+          "latencyMs": 1503.6477,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Chip.vue",
+          "componentName": "Chip",
+          "latencyMs": 581.2720999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Collapsible.vue",
+          "componentName": "Collapsible",
+          "latencyMs": 704.6002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/color-mode/ColorModeAvatar.vue",
+          "componentName": "ColorModeAvatar",
+          "latencyMs": 200.38819999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/color-mode/ColorModeButton.vue",
+          "componentName": "ColorModeButton",
+          "latencyMs": 4251.2839,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/color-mode/ColorModeImage.vue",
+          "componentName": "ColorModeImage",
+          "latencyMs": 30.797500000000014,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/color-mode/ColorModeSelect.vue",
+          "componentName": "ColorModeSelect",
+          "latencyMs": 616.3444,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/color-mode/ColorModeSwitch.vue",
+          "componentName": "ColorModeSwitch",
+          "latencyMs": 214.7527,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ColorPicker.vue",
+          "componentName": "ColorPicker",
+          "latencyMs": 273.7244,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/CommandPalette.vue",
+          "componentName": "CommandPalette",
+          "latencyMs": 2202.9682,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Container.vue",
+          "componentName": "Container",
+          "latencyMs": 381.4334999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/content/ContentNavigation.vue",
+          "componentName": "ContentNavigation",
+          "latencyMs": 2044.8526,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/content/ContentSearch.vue",
+          "componentName": "ContentSearch",
+          "latencyMs": 4234.792600000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/content/ContentSearchButton.vue",
+          "componentName": "ContentSearchButton",
+          "latencyMs": 4824.9934,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/content/ContentSurround.vue",
+          "componentName": "ContentSurround",
+          "latencyMs": 364.85780000000005,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/content/ContentToc.vue",
+          "componentName": "ContentToc",
+          "latencyMs": 1694.641,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ContextMenu.vue",
+          "componentName": "ContextMenu",
+          "latencyMs": 5879.0113,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ContextMenuContent.vue",
+          "componentName": "ContextMenuContent",
+          "latencyMs": 1905.8701,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardGroup.vue",
+          "componentName": "DashboardGroup",
+          "latencyMs": 253.53839999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardNavbar.vue",
+          "componentName": "DashboardNavbar",
+          "latencyMs": 807.9448,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardPanel.vue",
+          "componentName": "DashboardPanel",
+          "latencyMs": 306.48550000000006,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardResizeHandle.vue",
+          "componentName": "DashboardResizeHandle",
+          "latencyMs": 367.9285,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardSearch.vue",
+          "componentName": "DashboardSearch",
+          "latencyMs": 1012.5832,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardSearchButton.vue",
+          "componentName": "DashboardSearchButton",
+          "latencyMs": 5782.557,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardSidebar.vue",
+          "componentName": "DashboardSidebar",
+          "latencyMs": 2616.3234,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardSidebarCollapse.vue",
+          "componentName": "DashboardSidebarCollapse",
+          "latencyMs": 4372.8414,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardSidebarToggle.vue",
+          "componentName": "DashboardSidebarToggle",
+          "latencyMs": 4364.2328,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DashboardToolbar.vue",
+          "componentName": "DashboardToolbar",
+          "latencyMs": 558.567,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Drawer.vue",
+          "componentName": "Drawer",
+          "latencyMs": 731.895,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DropdownMenu.vue",
+          "componentName": "DropdownMenu",
+          "latencyMs": 7321.319,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/DropdownMenuContent.vue",
+          "componentName": "DropdownMenuContent",
+          "latencyMs": 1079.4791,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Editor.vue",
+          "componentName": "Editor",
+          "latencyMs": 5573.391500000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/EditorDragHandle.vue",
+          "componentName": "EditorDragHandle",
+          "latencyMs": 5590.0656,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/EditorEmojiMenu.vue",
+          "componentName": "EditorEmojiMenu",
+          "latencyMs": 508.9314,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/EditorMentionMenu.vue",
+          "componentName": "EditorMentionMenu",
+          "latencyMs": 488.4184,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/EditorSuggestionMenu.vue",
+          "componentName": "EditorSuggestionMenu",
+          "latencyMs": 576.3046999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/EditorToolbar.vue",
+          "componentName": "EditorToolbar",
+          "latencyMs": 12806.9252,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Empty.vue",
+          "componentName": "Empty",
+          "latencyMs": 1944.0139000000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Error.vue",
+          "componentName": "Error",
+          "latencyMs": 647.1161999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/FieldGroup.vue",
+          "componentName": "FieldGroup",
+          "latencyMs": 532.9946,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/FileUpload.vue",
+          "componentName": "FileUpload",
+          "latencyMs": 1068.1108,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Footer.vue",
+          "componentName": "Footer",
+          "latencyMs": 525.4105999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/FooterColumns.vue",
+          "componentName": "FooterColumns",
+          "latencyMs": 622.6505,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Form.vue",
+          "componentName": "Form",
+          "latencyMs": 986.7237,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/FormField.vue",
+          "componentName": "FormField",
+          "latencyMs": 280.8067,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Header.vue",
+          "componentName": "Header",
+          "latencyMs": 6542.9382000000005,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Icon.vue",
+          "componentName": "Icon",
+          "latencyMs": 54.885500000000036,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Input.vue",
+          "componentName": "Input",
+          "latencyMs": 3560.6167,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/InputDate.vue",
+          "componentName": "InputDate",
+          "latencyMs": 2352.8603000000003,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/InputMenu.vue",
+          "componentName": "InputMenu",
+          "latencyMs": 12454.095299999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/InputNumber.vue",
+          "componentName": "InputNumber",
+          "latencyMs": 8773.4133,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/InputTags.vue",
+          "componentName": "InputTags",
+          "latencyMs": 10283.664999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/InputTime.vue",
+          "componentName": "InputTime",
+          "latencyMs": 2202.5522,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Kbd.vue",
+          "componentName": "Kbd",
+          "latencyMs": 732.7290999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Link.vue",
+          "componentName": "Link",
+          "latencyMs": 283.907,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/LinkBase.vue",
+          "componentName": "LinkBase",
+          "latencyMs": 168.86150000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/locale/LocaleSelect.vue",
+          "componentName": "LocaleSelect",
+          "latencyMs": 17896.692600000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Main.vue",
+          "componentName": "Main",
+          "latencyMs": 399.4793000000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Marquee.vue",
+          "componentName": "Marquee",
+          "latencyMs": 584.3692999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Modal.vue",
+          "componentName": "Modal",
+          "latencyMs": 844.0264999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/NavigationMenu.vue",
+          "componentName": "NavigationMenu",
+          "latencyMs": 2376.6071,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/OverlayProvider.vue",
+          "componentName": "OverlayProvider",
+          "latencyMs": 8.343399999999974,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Page.vue",
+          "componentName": "Page",
+          "latencyMs": 564.7705,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageAnchors.vue",
+          "componentName": "PageAnchors",
+          "latencyMs": 266.88480000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageAside.vue",
+          "componentName": "PageAside",
+          "latencyMs": 528.7353,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageBody.vue",
+          "componentName": "PageBody",
+          "latencyMs": 383.49010000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageCard.vue",
+          "componentName": "PageCard",
+          "latencyMs": 1235.3935999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageColumns.vue",
+          "componentName": "PageColumns",
+          "latencyMs": 401.35389999999995,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageCTA.vue",
+          "componentName": "PageCTA",
+          "latencyMs": 1797.8135000000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageFeature.vue",
+          "componentName": "PageFeature",
+          "latencyMs": 1656.4715,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageGrid.vue",
+          "componentName": "PageGrid",
+          "latencyMs": 762.8727999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageHeader.vue",
+          "componentName": "PageHeader",
+          "latencyMs": 2586.6775,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageHero.vue",
+          "componentName": "PageHero",
+          "latencyMs": 2746.2349000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageLinks.vue",
+          "componentName": "PageLinks",
+          "latencyMs": 528.3704,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageList.vue",
+          "componentName": "PageList",
+          "latencyMs": 640.8336,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageLogos.vue",
+          "componentName": "PageLogos",
+          "latencyMs": 963.7696,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PageSection.vue",
+          "componentName": "PageSection",
+          "latencyMs": 1876.7813,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Pagination.vue",
+          "componentName": "Pagination",
+          "latencyMs": 1128.7909,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PinInput.vue",
+          "componentName": "PinInput",
+          "latencyMs": 1164.7653,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Popover.vue",
+          "componentName": "Popover",
+          "latencyMs": 542.0104,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PricingPlan.vue",
+          "componentName": "PricingPlan",
+          "latencyMs": 1822.09,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PricingPlans.vue",
+          "componentName": "PricingPlans",
+          "latencyMs": 385.41790000000003,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/PricingTable.vue",
+          "componentName": "PricingTable",
+          "latencyMs": 618.7717,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Progress.vue",
+          "componentName": "Progress",
+          "latencyMs": 1077.6385,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/A.vue",
+          "componentName": "A",
+          "latencyMs": 200.04109999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Accordion.vue",
+          "componentName": "Accordion",
+          "latencyMs": 615.7321999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/AccordionItem.vue",
+          "componentName": "AccordionItem",
+          "latencyMs": 200.21090000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Badge.vue",
+          "componentName": "Badge",
+          "latencyMs": 191.82420000000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Blockquote.vue",
+          "componentName": "Blockquote",
+          "latencyMs": 184.77839999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Callout.vue",
+          "componentName": "Callout",
+          "latencyMs": 613.5681999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/callout/Caution.vue",
+          "componentName": "Caution",
+          "latencyMs": 8.963200000000029,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/callout/Note.vue",
+          "componentName": "Note",
+          "latencyMs": 9.475799999999992,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/callout/Tip.vue",
+          "componentName": "Tip",
+          "latencyMs": 16.520399999999995,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/callout/Warning.vue",
+          "componentName": "Warning",
+          "latencyMs": 12.881599999999935,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Card.vue",
+          "componentName": "Card",
+          "latencyMs": 862.3419000000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CardGroup.vue",
+          "componentName": "CardGroup",
+          "latencyMs": 201.40420000000006,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Code.vue",
+          "componentName": "Code",
+          "latencyMs": 395.3203,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CodeCollapse.vue",
+          "componentName": "CodeCollapse",
+          "latencyMs": 387.31190000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CodeGroup.vue",
+          "componentName": "CodeGroup",
+          "latencyMs": 582.3598999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CodeIcon.vue",
+          "componentName": "CodeIcon",
+          "latencyMs": 72.17859999999996,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CodePreview.vue",
+          "componentName": "CodePreview",
+          "latencyMs": 312.88409999999993,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/CodeTree.vue",
+          "componentName": "CodeTree",
+          "latencyMs": 660.9331999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Collapsible.vue",
+          "componentName": "Collapsible",
+          "latencyMs": 458.46740000000005,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Em.vue",
+          "componentName": "Em",
+          "latencyMs": 201.6639,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Field.vue",
+          "componentName": "Field",
+          "latencyMs": 535.7884999999999,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/FieldGroup.vue",
+          "componentName": "FieldGroup",
+          "latencyMs": 362.64730000000003,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/H1.vue",
+          "componentName": "H1",
+          "latencyMs": 315.6885,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/H2.vue",
+          "componentName": "H2",
+          "latencyMs": 323.8834,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/H3.vue",
+          "componentName": "H3",
+          "latencyMs": 307.86050000000006,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/H4.vue",
+          "componentName": "H4",
+          "latencyMs": 340.8169,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Hr.vue",
+          "componentName": "Hr",
+          "latencyMs": 39.88869999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Icon.vue",
+          "componentName": "Icon",
+          "latencyMs": 43.44760000000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Img.vue",
+          "componentName": "Img",
+          "latencyMs": 317.4087,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Kbd.vue",
+          "componentName": "Kbd",
+          "latencyMs": 41.0847,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Li.vue",
+          "componentName": "Li",
+          "latencyMs": 189.24440000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Ol.vue",
+          "componentName": "Ol",
+          "latencyMs": 186.85979999999995,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/P.vue",
+          "componentName": "P",
+          "latencyMs": 228.37149999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Pre.vue",
+          "componentName": "Pre",
+          "latencyMs": 411.80569999999994,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Script.vue",
+          "componentName": "Script",
+          "latencyMs": 5.47339999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Steps.vue",
+          "componentName": "Steps",
+          "latencyMs": 337.6332,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Strong.vue",
+          "componentName": "Strong",
+          "latencyMs": 198.94550000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Table.vue",
+          "componentName": "Table",
+          "latencyMs": 333.44890000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Tabs.vue",
+          "componentName": "Tabs",
+          "latencyMs": 609.1394,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/TabsItem.vue",
+          "componentName": "TabsItem",
+          "latencyMs": 186.9753,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Tbody.vue",
+          "componentName": "Tbody",
+          "latencyMs": 196.84149999999994,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Td.vue",
+          "componentName": "Td",
+          "latencyMs": 193.25279999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Th.vue",
+          "componentName": "Th",
+          "latencyMs": 200.0174,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Thead.vue",
+          "componentName": "Thead",
+          "latencyMs": 190.70570000000004,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Tr.vue",
+          "componentName": "Tr",
+          "latencyMs": 197.32619999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/prose/Ul.vue",
+          "componentName": "Ul",
+          "latencyMs": 194.62810000000002,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/RadioGroup.vue",
+          "componentName": "RadioGroup",
+          "latencyMs": 1361.8189,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/ScrollArea.vue",
+          "componentName": "ScrollArea",
+          "latencyMs": 270.917,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Select.vue",
+          "componentName": "Select",
+          "latencyMs": 6167.840200000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/SelectMenu.vue",
+          "componentName": "SelectMenu",
+          "latencyMs": 4345.1457,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Separator.vue",
+          "componentName": "Separator",
+          "latencyMs": 1571.6497,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Sidebar.vue",
+          "componentName": "Sidebar",
+          "latencyMs": 6269.742200000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Skeleton.vue",
+          "componentName": "Skeleton",
+          "latencyMs": 82.68559999999997,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Slideover.vue",
+          "componentName": "Slideover",
+          "latencyMs": 892.7853,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Slider.vue",
+          "componentName": "Slider",
+          "latencyMs": 911.8438,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Stepper.vue",
+          "componentName": "Stepper",
+          "latencyMs": 1335.4228,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Switch.vue",
+          "componentName": "Switch",
+          "latencyMs": 1054.2631000000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Table.vue",
+          "componentName": "Table",
+          "latencyMs": 12928.8244,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Tabs.vue",
+          "componentName": "Tabs",
+          "latencyMs": 1441.7903000000001,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Textarea.vue",
+          "componentName": "Textarea",
+          "latencyMs": 3336.6645,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Theme.vue",
+          "componentName": "Theme",
+          "latencyMs": 3430.1887,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Timeline.vue",
+          "componentName": "Timeline",
+          "latencyMs": 502.138,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Toast.vue",
+          "componentName": "Toast",
+          "latencyMs": 2434.9184999999998,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Toaster.vue",
+          "componentName": "Toaster",
+          "latencyMs": 740.0171,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Tooltip.vue",
+          "componentName": "Tooltip",
+          "latencyMs": 352.5133,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/Tree.vue",
+          "componentName": "Tree",
+          "latencyMs": 1162.4466,
+          "outcome": "success",
+          "error": null
+        },
+        {
+          "relativePath": "src/runtime/components/User.vue",
+          "componentName": "User",
+          "latencyMs": 983.2511000000001,
+          "outcome": "success",
+          "error": null
+        }
+      ],
+      "outcomeCounts": {
+        "success": 177,
+        "degraded": 0,
+        "query_error": 0,
+        "crash": 0
+      },
+      "deviationTotals": {
+        "exactMatches": 3,
+        "totalMissing": 60,
+        "totalExtra": 34,
+        "totalFieldMismatches": 3013
+      },
+      "stats": {
+        "min": 5.47339999999997,
+        "max": 17896.692600000002,
+        "p50": 609.1394,
+        "p95": 6269.742200000001,
+        "p99": 12928.8244,
+        "mean": 1637.506163841808,
+        "stddev": 2609.642193074692
+      }
+    }
+  ],
+  "summary": {
+    "setupMs": {
+      "min": 96059.95449999976,
+      "max": 96059.95449999976,
+      "p50": 96059.95449999976,
+      "p95": 96059.95449999976,
+      "p99": 96059.95449999976,
+      "mean": 96059.95449999976,
+      "stddev": 0
+    },
+    "warmupMs": {
+      "min": 0,
+      "max": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "mean": 0,
+      "stddev": 0
+    },
+    "steadyStateMs": {
+      "min": 289838.5910000001,
+      "max": 289838.5910000001,
+      "p50": 289838.5910000001,
+      "p95": 289838.5910000001,
+      "p99": 289838.5910000001,
+      "mean": 289838.5910000001,
+      "stddev": 0
+    },
+    "endToEndMs": {
+      "min": 385898.54549999983,
+      "max": 385898.54549999983,
+      "p50": 385898.54549999983,
+      "p95": 385898.54549999983,
+      "p99": 385898.54549999983,
+      "mean": 385898.54549999983,
+      "stddev": 0
+    },
+    "outcomeCounts": {
+      "success": 177,
+      "degraded": 0,
+      "query_error": 0,
+      "crash": 0
+    },
+    "deviationTotals": {
+      "exactMatches": 3,
+      "totalMissing": 60,
+      "totalExtra": 34,
+      "totalFieldMismatches": 3013
+    }
+  }
+}
