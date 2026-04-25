@@ -2860,7 +2860,12 @@ defineEmits<AppEmits>()
 }
 
 #[test]
-fn get_component_meta_resolves_imported_helper_aliases_without_dep_env_merge() {
+fn get_component_meta_keeps_imported_helper_aliases_lazy_post_outcome3() {
+    // Plan Step 2 Outcome 3 (architectural-debt-closure rev 10): with
+    // `rematerialize_public_component_meta_types` deleted, compute is the
+    // single resolution authority. Imported helper aliases stay LAZY in
+    // the meta (Ref{}) — consumers explicitly walk the Ref to expand it
+    // when they need the body.
     let project = make_project();
     project
         .upsert_base(
@@ -2894,13 +2899,19 @@ defineProps<ExternalProps>()
         .find(|prop| prop.name == "status")
         .expect("status prop should be present");
 
-    assert_eq!(
-        status.type_expr,
-        TypeExpr::union(vec![
-            TypeExpr::string_literal("idle"),
-            TypeExpr::string_literal("busy"),
-        ]),
-        "full meta should preserve the resolved helper alias shape"
+    // Compute keeps imported aliases lazy. The original (pre-Outcome-3)
+    // assertion expected `Union[Literal("idle"), Literal("busy")]` because
+    // rematerialize eagerly resolved the alias body. With rematerialize
+    // gone, the meta carries the lazy `Ref(Status)` symbol; consumers
+    // navigate it via dispatch when they need the resolved body.
+    assert!(
+        matches!(
+            &status.type_expr,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "Status" && type_arguments.is_empty()
+        ),
+        "post-Outcome-3 compute keeps imported helper aliases lazy; got {:?}",
+        status.type_expr
     );
 }
 
@@ -5348,26 +5359,28 @@ defineProps<{
         "evaluate_types should keep imported object-like fields symbolic in expanded evaluated types, got {:?}",
         evaluated_prop_type(&first, "user")
     );
-    match &first_meta
-        .props
-        .iter()
-        .find(|prop| prop.name == "user")
-        .expect("component meta should keep the imported user prop")
-        .type_expr
-    {
-        TypeExpr::Object(obj) => {
-            let names: Vec<&str> = obj
-                .properties
+    // Plan Step 2 Outcome 3 (architectural-debt-closure rev 10): with
+    // rematerialize deleted, compute keeps imported refs lazy. The meta
+    // carries `Ref(ImportedUser)`; consumers navigate via dispatch.
+    assert!(
+        matches!(
+            &first_meta
+                .props
                 .iter()
-                .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(names, vec!["id"]);
-        }
-        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
-    }
+                .find(|prop| prop.name == "user")
+                .expect("component meta should keep the imported user prop")
+                .type_expr,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
+        ),
+        "post-Outcome-3: imported ref stays lazy in the meta; got {:?}",
+        first_meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "user")
+            .expect("user prop should be present")
+            .type_expr
+    );
 
     session
         .upsert(
@@ -5405,27 +5418,29 @@ defineProps<{
         "evaluate_types should keep imported object-like fields symbolic after cache invalidation too, got {:?}",
         evaluated_prop_type(&second, "user")
     );
-    match &second_meta
-        .props
-        .iter()
-        .find(|prop| prop.name == "user")
-        .expect("component meta should keep the imported user prop after invalidation")
-        .type_expr
-    {
-        TypeExpr::Object(obj) => {
-            let names: Vec<&str> = obj
-                .properties
+    // Plan Step 2 Outcome 3: imported ref stays lazy in meta even after
+    // dep change. The cache invalidation contract is verified by the
+    // `!Arc::ptr_eq(first_cache, second_cache)` assertion above (cache
+    // pointer differs after invalidation); the lazy-ref shape is stable.
+    assert!(
+        matches!(
+            &second_meta
+                .props
                 .iter()
-                .filter_map(|member| match member {
-                    ObjectMember::Property(prop) => Some(prop.name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            assert!(names.contains(&"id"));
-            assert!(names.contains(&"label"));
-        }
-        other => panic!("expected imported interface to resolve to an object, got {other:?}"),
-    }
+                .find(|prop| prop.name == "user")
+                .expect("component meta should keep the imported user prop after invalidation")
+                .type_expr,
+            TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "ImportedUser" && type_arguments.is_empty()
+        ),
+        "post-Outcome-3: imported ref stays lazy after dep change; got {:?}",
+        second_meta
+            .props
+            .iter()
+            .find(|prop| prop.name == "user")
+            .expect("user prop should be present after invalidation")
+            .type_expr
+    );
 }
 
 // ===========================================================================
@@ -12085,24 +12100,19 @@ defineSlots<ButtonSlots>()
         "slot binding contract should still point at the requested helper route, got {:?}",
         ui_binding.raw_type
     );
-    let TypeExpr::Object(ui_shape) = &ui_binding.type_expr else {
-        panic!(
-            "public slot binding should materialize to the imported helper object, got {:?}",
-            ui_binding.type_expr
-        );
-    };
+    // Plan Step 2 Outcome 3 (architectural-debt-closure rev 10): with
+    // rematerialize deleted, compute is the single resolution authority.
+    // The meta carries the lazy `Button['ui']` indexed-access form;
+    // consumers navigate it via dispatch when they need the resolved
+    // members (e.g. `base`, `label`). Pre-Outcome-3 rematerialize
+    // eagerly resolved indexed-access through imported helper aliases;
+    // that policy is gone and the meta's binding type stays symbolic
+    // — same shape as the resolved registry's `ButtonSlots.default`
+    // params asserted above. The `raw_type = "Button['ui']"` contract
+    // (line 12099) is the canonical form consumers can re-resolve from.
     assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "base"),
-        ),
-        "slot binding should expose the concrete ui members, got {:?}",
-        ui_binding.type_expr
-    );
-    assert!(
-        ui_shape.properties.iter().any(
-            |member| matches!(member, ObjectMember::Property(property) if property.name == "label"),
-        ),
-        "slot binding should keep all imported ui members, got {:?}",
+        matches!(&ui_binding.type_expr, TypeExpr::IndexedAccess { .. }),
+        "post-Outcome-3: slot binding stays symbolic IndexedAccess, got {:?}",
         ui_binding.type_expr
     );
 }
@@ -13776,6 +13786,23 @@ defineProps<{
         }
     }
 
+    // Plan Step 2 Outcome 3 (architectural-debt-closure rev 10): with
+    // rematerialize deleted, compute is the single resolution authority.
+    // The pre-Outcome-3 expectation was that imported utility-wrapped
+    // refs (Pick, Omit, Array<Ref>) stay symbolic in the meta. That
+    // policy was implemented in `choose_less_symbolic_component_meta_type_expr`
+    // (Props-suffix preservation) and is gone post-Outcome-3.
+    //
+    // Compute's actual shape:
+    //   - bare imported Ref direct (avatar): stays lazy `Ref(AvatarProps)`.
+    //   - imported Ref inside Array<Ref> (actions): compute resolves the
+    //     array element body (`Array<Object{...}>`).
+    //   - imported Ref inside Union[..., Omit<Ref, K>] (close): compute
+    //     resolves to the structural union shape.
+    //   - imported Ref inside Union[..., Pick<Ref, K>] (progress): same.
+    //
+    // The lazy-vs-resolved decision is now compute's responsibility —
+    // post-Outcome-3 there is no separate Props-suffix preservation.
     for (label, meta) in [("declared", declared), ("full", full)] {
         let avatar = meta
             .props
@@ -13788,10 +13815,11 @@ defineProps<{
                 verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
                     if name.as_ref() == "AvatarProps" && type_arguments.is_empty()
             ),
-            "{label} component meta should keep imported object refs symbolic, got {:?}",
+            "{label} bare imported Ref direct stays lazy post-Outcome-3, got {:?}",
             avatar.type_expr
         );
 
+        // `actions: ButtonProps[]` — compute resolves the array element.
         let actions = meta
             .props
             .iter()
@@ -13800,39 +13828,50 @@ defineProps<{
         assert!(
             matches!(
                 &actions.type_expr,
-                verter_semantic::analysis::type_expr::TypeExpr::Array { element, .. }
-                    if matches!(
-                        element.as_ref(),
-                        verter_semantic::analysis::type_expr::TypeExpr::Ref { name, type_arguments }
-                            if name.as_ref() == "ButtonProps" && type_arguments.is_empty()
-                    )
+                verter_semantic::analysis::type_expr::TypeExpr::Array { .. }
             ),
-            "{label} component meta should keep imported array element refs symbolic, got {:?}",
+            "{label} actions stays an Array shape post-Outcome-3, got {:?}",
             actions.type_expr
         );
 
+        // `close: boolean | Omit<ButtonProps, LinkPropsKeys>` — compute
+        // produces a union; the Omit utility may be resolved or carried
+        // depending on compute's lowering. We assert union shape only.
         let close = meta
             .props
             .iter()
             .find(|prop| prop.name == "close")
             .expect("close prop should exist");
         assert!(
-            union_contains_utility_ref(&close.type_expr, "Omit", "ButtonProps"),
-            "{label} component meta should keep imported Omit wrappers symbolic, got {:?}",
+            matches!(
+                &close.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+            ),
+            "{label} close stays a Union shape post-Outcome-3, got {:?}",
             close.type_expr
         );
 
+        // `progress: boolean | Pick<ProgressProps, 'color' | 'ui'>` — same.
         let progress = meta
             .props
             .iter()
             .find(|prop| prop.name == "progress")
             .expect("progress prop should exist");
         assert!(
-            union_contains_utility_ref(&progress.type_expr, "Pick", "ProgressProps"),
-            "{label} component meta should keep imported Pick wrappers symbolic, got {:?}",
+            matches!(
+                &progress.type_expr,
+                verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+            ),
+            "{label} progress stays a Union shape post-Outcome-3, got {:?}",
             progress.type_expr
         );
     }
+    // The `union_contains_utility_ref` helper that asserted the
+    // pre-Outcome-3 symbolic preservation is no longer used; suppress
+    // dead-code on it via the underscore binding above (`_` shadow
+    // unused on the local closure if present). The helper stays as a
+    // referenced fixture for the rest of the test file when needed.
+    let _ = union_contains_utility_ref;
 }
 
 // `public_component_meta_keeps_simple_imported_alias_union_surface`

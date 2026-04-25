@@ -71,6 +71,8 @@ pub mod intrinsic_registry;
 mod meta;
 pub mod meta_resolve;
 pub mod owner_import_surface;
+#[cfg(test)]
+mod parity_tests;
 mod parse;
 #[cfg(test)]
 mod project_global_cache_tests;
