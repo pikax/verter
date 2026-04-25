@@ -993,6 +993,13 @@ pub(crate) struct ComputedEvaluatedTypes {
     pub(crate) evaluated_types:
         Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub(crate) discovered_dependencies: std::collections::BTreeSet<String>,
+    /// Step 9.1 / D32: surface-id sidecar populated during the
+    /// `expand_macro_types_impl_with_expander` closure's per-field run.
+    /// Vector-aligned with the same-FieldKind output vectors on
+    /// `evaluated_types`. `None` when audit is off (the only consumer
+    /// is the scoped origin export in Step 9.2 which is itself
+    /// audit-gated).
+    pub(crate) surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
 }
 
 /// Host-backed import resolver for `ShallowFileState` construction.
@@ -4643,6 +4650,24 @@ impl VerterHost {
         };
         // D-Cutover §5.8 WIP-W: the retired `external_engine` branch is
         // gone; there is only one `expand_macro_types` entry point left.
+        // Step 9.1 / D32: surface-id sidecar capture buffers. Populated
+        // when audit is on; the dispatch round-trip inside the closure
+        // gives a SemanticNodeId for the produced expanded type, which
+        // is stored in the buffer keyed by FieldKind. After the closure
+        // returns, the buffers feed `SurfaceNodeIdentities` so Step
+        // 9.2's scoped origin export reverse-walks only the reachable
+        // subgraph rooted at these ids.
+        let audit_enabled = self.config.audit_enabled;
+        let prop_node_ids: std::cell::RefCell<Vec<Option<crate::semantic_query::SemanticNodeId>>> =
+            std::cell::RefCell::new(Vec::new());
+        let emit_node_ids: std::cell::RefCell<Vec<Option<crate::semantic_query::SemanticNodeId>>> =
+            std::cell::RefCell::new(Vec::new());
+        let slot_binding_node_ids: std::cell::RefCell<
+            Vec<Option<crate::semantic_query::SemanticNodeId>>,
+        > = std::cell::RefCell::new(Vec::new());
+        let binding_node_ids: std::cell::RefCell<
+            Vec<Option<crate::semantic_query::SemanticNodeId>>,
+        > = std::cell::RefCell::new(Vec::new());
         let result =
             {
                 component_meta_trace_custom!(
@@ -4669,15 +4694,7 @@ impl VerterHost {
                         verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
                     }
                 },
-                |_field_kind, parsed| {
-                    // Step 9 / D32: closure now receives FieldKind discriminator
-                    // so session-side surface-id capture can route the
-                    // produced SemanticNodeId to the right
-                    // SurfaceNodeIdentities slot. The current closure body
-                    // does not yet capture node_ids — that wiring lands
-                    // alongside SurfaceNodeIdentities populate logic in a
-                    // follow-up commit. The `_field_kind` is unused for
-                    // now but the parameter is in place for consumers.
+                |field_kind, parsed| {
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };
@@ -4702,29 +4719,63 @@ impl VerterHost {
                         }
                     }
 
-                    if let Some(fast) = engine.try_fast_shallow_field_expr(canonical, parsed) {
-                        return fast_to_expansion(fast);
-                    }
-                    if engine.should_preserve_shallow_field_expr(canonical, parsed) {
-                        return ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                    let expansion = if let Some(fast) =
+                        engine.try_fast_shallow_field_expr(canonical, parsed)
+                    {
+                        fast_to_expansion(fast)
+                    } else if engine.should_preserve_shallow_field_expr(canonical, parsed) {
+                        ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
                             expr: parsed.clone(),
-                        });
-                    }
-                    match engine.project_expr_surface_expr(canonical, parsed) {
-                        Some(projected) if projected != *parsed => {
-                            ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                expr: projected,
-                            })
+                        })
+                    } else {
+                        match engine.project_expr_surface_expr(canonical, parsed) {
+                            Some(projected) if projected != *parsed => {
+                                ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
+                                    expr: projected,
+                                })
+                            }
+                            _ => match engine.solve_expr_type_expr(canonical, parsed) {
+                                Some(solved) => ExpansionResult::exact_concrete(
+                                    ExpandedNormalizedExpr { expr: solved },
+                                ),
+                                None => ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                                    expr: parsed.clone(),
+                                }),
+                            },
                         }
-                        _ => match engine.solve_expr_type_expr(canonical, parsed) {
-                            Some(solved) => ExpansionResult::exact_concrete(
-                                ExpandedNormalizedExpr { expr: solved },
-                            ),
-                            None => ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                                expr: parsed.clone(),
-                            }),
-                        },
+                    };
+
+                    // Step 9.1 / D32: route the produced expanded type
+                    // through dispatch's lower to capture a SemanticNodeId
+                    // for sidecar storage. Audit-gated so non-audit
+                    // requests don't pay the dispatch round-trip cost.
+                    // None when the lowering misses (e.g., synthetic /
+                    // inline-annotation entries dispatch can't resolve).
+                    if audit_enabled {
+                        let dispatch =
+                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                engine.host(),
+                            );
+                        let node_id =
+                            dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr);
+                        let target = match field_kind {
+                            verter_semantic::analysis::type_eval_build::FieldKind::Prop => {
+                                &prop_node_ids
+                            }
+                            verter_semantic::analysis::type_eval_build::FieldKind::Emit => {
+                                &emit_node_ids
+                            }
+                            verter_semantic::analysis::type_eval_build::FieldKind::SlotBinding => {
+                                &slot_binding_node_ids
+                            }
+                            verter_semantic::analysis::type_eval_build::FieldKind::Binding => {
+                                &binding_node_ids
+                            }
+                        };
+                        target.borrow_mut().push(node_id);
                     }
+
+                    expansion
                 },
             )
             };
@@ -4741,9 +4792,52 @@ impl VerterHost {
                 result.bindings.len(),
             ));
         }
+        // Step 9.1: assemble SurfaceNodeIdentities from the audit-gated
+        // capture buffers. Length-equality with the corresponding output
+        // vectors is guaranteed by the closure being called once per
+        // FieldKind-tagged field in the same order
+        // expand_macro_types_impl_with_expander pushes into props/emits/
+        // slot_bindings/bindings.
+        let surface_identities =
+            if audit_enabled {
+                let prop_ids = prop_node_ids.into_inner();
+                let emit_ids = emit_node_ids.into_inner();
+                let slot_binding_ids = slot_binding_node_ids.into_inner();
+                let binding_ids = binding_node_ids.into_inner();
+                // Sanity invariant — debug panic in tests, fall back to None
+                // in release if the closure-call cardinality somehow differs.
+                let lengths_match = prop_ids.len() == result.props.len()
+                    && emit_ids.len() == result.emits.len()
+                    && slot_binding_ids.len() == result.slot_bindings.len()
+                    && binding_ids.len() == result.bindings.len();
+                if lengths_match {
+                    Some(crate::meta_resolve::SurfaceNodeIdentities {
+                        prop_node_ids: prop_ids,
+                        emit_node_ids: emit_ids,
+                        slot_binding_node_ids: slot_binding_ids,
+                        binding_node_ids: binding_ids,
+                        registry_node_ids: Vec::new(),
+                    })
+                } else {
+                    debug_assert!(
+                    lengths_match,
+                    "surface_identities length mismatch — closure-call cardinality drifted from \
+                     ExpandedComponentTypes vector lengths. props {}/{}, emits {}/{}, \
+                     slot_bindings {}/{}, bindings {}/{}.",
+                    prop_ids.len(), result.props.len(),
+                    emit_ids.len(), result.emits.len(),
+                    slot_binding_ids.len(), result.slot_bindings.len(),
+                    binding_ids.len(), result.bindings.len(),
+                );
+                    None
+                }
+            } else {
+                None
+            };
         Some(ComputedEvaluatedTypes {
             evaluated_types: (!Self::is_expanded_types_empty(&result)).then_some(result),
             discovered_dependencies,
+            surface_identities,
         })
     }
 

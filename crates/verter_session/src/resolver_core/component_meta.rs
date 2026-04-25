@@ -34,6 +34,13 @@ pub fn collect_requested_binding_names(macros: &[AnalyzedMacro]) -> FxHashSet<St
 pub struct ComponentMetaEvalOutputs {
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
+    /// Step 9.1 / D32: surface-id sidecar captured during the
+    /// `expand_macro_types_impl_with_expander` closure run. None when
+    /// audit is off; populated in lock-step with `evaluated_types`'s
+    /// per-FieldKind output vectors when audit is on. Consumed by
+    /// `compute_component_meta_state_inner` and stored on
+    /// `ResolvedComponentMetaState.surface_identities`.
+    pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +93,14 @@ pub struct ResolvedComponentMetaParts {
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
     pub fact_versions: Vec<FactVersionRef>,
+    /// Step 9.1 / D32: surface-id sidecar. Populated when audit is on
+    /// (vector-aligned with `evaluated_types`'s per-FieldKind output
+    /// vectors); `None` when audit is off. Threaded down from
+    /// `ComponentMetaEvalOutputs.surface_identities` so
+    /// `compute_component_meta_state_inner` can store it on
+    /// `ResolvedComponentMetaState.surface_identities` (Step 9.2's
+    /// scoped origin export consumer).
+    pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -964,6 +979,7 @@ where
         evaluated_types: eval_outputs.evaluated_types,
         tracked_dependencies: tracked_deps,
         fact_versions,
+        surface_identities: eval_outputs.surface_identities,
     }
 }
 
@@ -1510,6 +1526,7 @@ mod tests {
                     },
                 ),
                 tracked_dependencies: BTreeSet::new(),
+                surface_identities: None,
             },
         };
         let snapshot = TestSnapshot {
@@ -2023,6 +2040,7 @@ type Props = Pick<ImportedBase, 'href'>
                     ..Default::default()
                 }),
                 tracked_dependencies: BTreeSet::new(),
+                surface_identities: None,
             },
             projectable_owner_local_roots: BTreeSet::new(),
         };

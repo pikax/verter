@@ -10076,6 +10076,135 @@ defineProps<{
         );
     }
 
+    /// FAIL-FIRST (plan §3 Step 9.1 / D32 / D24 — `surface_node_ids_partition`):
+    /// when audit is on, `ResolvedComponentMetaState.surface_identities`
+    /// is populated with vector-aligned `Option<SemanticNodeId>` per
+    /// output entry in `evaluated_types`. Pre-Step-9.1 the field was
+    /// always `None`. Post-fix the FieldKind closure routes the
+    /// dispatch lower's SemanticNodeId per FieldKind into per-kind
+    /// buffers; the assembled sidecar lengths match the corresponding
+    /// `ExpandedComponentTypes` vectors.
+    ///
+    /// Discriminator: assert
+    /// `surface_identities.is_some()` AND
+    /// `surface_identities.prop_node_ids.len() == evaluated_types.props.len()`
+    /// for an audit-enabled host on a fixture with a single defineProps
+    /// field. This catches drift where the closure stops being called
+    /// in lock-step with the output vector.
+    #[test]
+    fn step9_1_surface_identities_populated_for_audit_enabled_host() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Avatar.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+defineProps<{
+  size?: 'sm' | 'md' | 'lg'
+  label?: string
+}>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                audit_enabled: true,
+                footprint_capture: true,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Avatar.vue"));
+
+        let resolved = host
+            .resolve_component_meta(
+                "/src/Avatar.vue",
+                crate::semantic_query::ProjectionMode::Expanded,
+            )
+            .expect("Avatar.vue must resolve under audit-enabled config");
+
+        let evaluated = resolved
+            .evaluated_types
+            .as_ref()
+            .expect("audit-enabled Expanded resolution should have evaluated_types");
+        let surface_ids = resolved
+            .surface_identities
+            .as_ref()
+            .expect("Step 9.1: surface_identities MUST be Some when audit is on");
+
+        assert_eq!(
+            surface_ids.prop_node_ids.len(),
+            evaluated.props.len(),
+            "Step 9.1: prop_node_ids length must match evaluated_types.props length \
+             (vector-aligned sidecar invariant from §1.7)",
+        );
+        assert_eq!(
+            surface_ids.emit_node_ids.len(),
+            evaluated.emits.len(),
+            "Step 9.1: emit_node_ids length must match evaluated_types.emits length",
+        );
+        assert_eq!(
+            surface_ids.slot_binding_node_ids.len(),
+            evaluated.slot_bindings.len(),
+            "Step 9.1: slot_binding_node_ids length must match evaluated_types.slot_bindings length",
+        );
+        assert_eq!(
+            surface_ids.binding_node_ids.len(),
+            evaluated.bindings.len(),
+            "Step 9.1: binding_node_ids length must match evaluated_types.bindings length",
+        );
+    }
+
+    /// REGRESSION INVARIANT (plan §3 Step 9.1): when audit is OFF,
+    /// `surface_identities` stays `None` so the dispatch round-trip
+    /// for capture is skipped (perf cost gate). The Step 9.2 scoped
+    /// origin export is itself audit-gated, so the partition is
+    /// audit-on=Some / audit-off=None — there is no third state.
+    #[test]
+    fn step9_1_surface_identities_none_when_audit_off() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Avatar.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+defineProps<{ size?: 'sm' | 'md' | 'lg' }>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                audit_enabled: false,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Avatar.vue"));
+
+        let resolved = host
+            .resolve_component_meta(
+                "/src/Avatar.vue",
+                crate::semantic_query::ProjectionMode::Expanded,
+            )
+            .expect("Avatar.vue must resolve under audit-off config");
+
+        assert!(
+            resolved.surface_identities.is_none(),
+            "Step 9.1: surface_identities MUST be None when audit is off — the dispatch \
+             round-trip for node_id capture is audit-gated to avoid the round-trip cost \
+             on the hot non-audit path. Got {:?}.",
+            resolved.surface_identities,
+        );
+    }
+
     /// REGRESSION INVARIANT (plan §3 Step 6.2): an indexed-access
     /// fixture that previously round-tripped to concrete literal
     /// unions still does so post-reorder. The reorder must not change

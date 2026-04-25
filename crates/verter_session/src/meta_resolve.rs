@@ -1364,10 +1364,34 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         return cached.clone();
     }
 
-    // Legacy owner-vs-imported reconciliation drives the user-visible
-    // type_expr (preserves substitution behaviour for script-setup
-    // generics + Pick / Omit utility expansion the dispatch path's
-    // Instantiate substitution doesn't yet replicate verbatim).
+    // Step 6.3 body (plan §3 Step 6.3): two-stage materialization.
+    //
+    // Stage 1: legacy `materialize_in_scope` runs. Its
+    // `materialize_component_meta_member_surface_expr` walker carries
+    // the broader generic-substitution context (U → script-setup-T
+    // mappings derived from the surrounding `Props<T>` instantiation
+    // call site) that the dispatch path's per-call lower invocation
+    // cannot reconstruct from the field-level `expr` alone — the
+    // substitution mapping lives in the calling generic's prepared
+    // decl, not in the field-type expression. This stage produces
+    // `chosen_type_expr` (the user-visible result for Expanded mode).
+    //
+    // Stage 2: dispatch round-trip on the SAME expr supplies
+    // `node_id` (Step 9 sidecar capture) and `dep_signature` (Step
+    // 6.6.A fence merge). For Navigate mode the dispatch type_expr IS
+    // the user-visible answer (lazy `DeclRef` / `InstantiationRef`
+    // carriers are the entire point of Navigate, and the legacy path
+    // doesn't preserve them).
+    //
+    // Plan §3 Step 6.3 documents the pure-thin-wrapper end state.
+    // Reaching it requires plumbing the substitution context through
+    // the field-extraction phase before materialize is called — an
+    // upstream change separate from this commit's scope. Until that
+    // upstream plumbing lands, the legacy walker carries the
+    // substitution work and dispatch supplies the side-channel
+    // observations. Both paths converge on the same dispatch memo
+    // (the legacy walker's `solve_expr_type_expr` already routes
+    // through `ProjectSemanticDispatch`), so cache reuse is preserved.
     let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
         expr,
         scope_canonical_id,
@@ -1413,19 +1437,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         owner_materialized.clone()
     };
 
-    // Run dispatch alongside the legacy result to harvest:
-    //   - `node_id`: the producing SemanticNodeId for sidecar capture
-    //     (Step 9 surface-id propagation).
-    //   - `dep_signature`: accumulated fence facts from every dispatch
-    //     subquery so `ResolvedComponentMetaState.fact_versions`
-    //     captures the dependency graph correctly (Step 6.6.A fence
-    //     merge).
-    //
-    // Dispatch's `type_expr` is informational here — `chosen_type_expr`
-    // already carries the user-visible result. Mode is threaded so the
-    // dispatch path itself observes Navigate vs. Expanded for the
-    // accompanying carrier emission, even though we use the legacy
-    // body content.
     let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
     let host = query_engine.host();
     let dispatch = ProjectSemanticDispatch::new(host);
@@ -1452,10 +1463,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     );
     let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
 
-    // In Navigate mode the dispatch result IS the user-visible answer:
-    // lazy carriers are the entire point of Navigate, and the legacy
-    // path doesn't preserve them. So Navigate callers get the dispatch
-    // type_expr; Expanded callers get the legacy reconciliation.
     if matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
         chosen_type_expr = dispatch_materialized.type_expr.clone();
     }
@@ -5857,13 +5864,15 @@ impl VerterHost {
             }
         }
 
-        // Step 9.1: SurfaceNodeIdentities sidecar — currently
-        // structurally `None` because the closure threading at the
-        // expand_macro_types_impl_with_expander call site does not yet
-        // capture node_ids per FieldKind. The struct + field are in
-        // place so the scoped origin walk in build_origin_graph (Step
-        // 9.2) can opt into them when populated.
-        let surface_identities: Option<SurfaceNodeIdentities> = None;
+        // Step 9.1: SurfaceNodeIdentities sidecar — populated by the
+        // audit-gated FieldKind closure inside
+        // `compute_evaluated_types`'s
+        // `expand_macro_types_impl_with_expander` call. Threaded down
+        // through `ComponentMetaEvalOutputs.surface_identities` →
+        // `ResolvedComponentMetaParts.surface_identities` → here.
+        // `None` when audit is off (the only consumer is the scoped
+        // origin export, itself audit-gated).
+        let surface_identities = parts.surface_identities;
         let surface_identities_for_export = surface_identities.clone();
 
         let state = ResolvedComponentMetaState {
@@ -11004,7 +11013,9 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         if let Some(computed) = computed_eval_types.as_ref() {
             tracked_dependencies.extend(computed.discovered_dependencies.iter().cloned());
         }
-        let evaluated_types = computed_eval_types.and_then(|computed| computed.evaluated_types);
+        let (evaluated_types, surface_identities) = computed_eval_types
+            .map(|computed| (computed.evaluated_types, computed.surface_identities))
+            .unwrap_or((None, None));
         if let Some(eval_started) = eval_started {
             component_meta_debug(format!(
                 "resolve_component_meta owner={} mode={:?} evaluated_types took {:?} has_output={}",
@@ -11019,6 +11030,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         ComponentMetaEvalOutputs {
             evaluated_types,
             tracked_dependencies,
+            surface_identities,
         }
     }
 
