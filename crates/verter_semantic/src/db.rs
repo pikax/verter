@@ -685,6 +685,7 @@ mod tests {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(0, 50),
         }];
 
@@ -744,6 +745,7 @@ mod tests {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(0, 50),
         }];
         let child_surface = extract_component_surface(&child_snap);
@@ -1088,6 +1090,7 @@ mod tests {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(0, 50),
         }];
 

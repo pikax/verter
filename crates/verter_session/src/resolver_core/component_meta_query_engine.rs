@@ -2032,6 +2032,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         match dispatch.execute(SemanticQueryKey::Instantiate {
             base: identity,
             args: empty_semantic_args(),
+            // `dispatch_root_instantiated` feeds
+            // `projected_surface_from_semantic_node` which reads the
+            // root's surface members, call/construct lists, etc. Expanded
+            // is required so the surface is interpretable; Navigate
+            // would yield the lazy shell with no readable view.
+            body_mode: crate::semantic_query::ProjectionMode::Expanded,
         }) {
             QueryResult::Value(id) => Some(id),
             _ => Some(anchor),

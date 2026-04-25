@@ -37,6 +37,7 @@ fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         default_values: Vec::new(),
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
         span: verter_span::Span::default(),
     }
 }

@@ -124,6 +124,7 @@ mod tests {
             expose_fields: vec![],
             default_values: vec![],
             resolved_local_types: vec![],
+            parsed_type_argument: None,
             span,
         }
     }

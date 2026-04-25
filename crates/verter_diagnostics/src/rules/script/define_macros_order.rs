@@ -94,6 +94,7 @@ mod tests {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(start, end),
         }
     }

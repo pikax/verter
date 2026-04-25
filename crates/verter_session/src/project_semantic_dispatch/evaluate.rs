@@ -140,6 +140,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        // Typeof unwraps a deferred declaration body so
+                        // the fix-point loop can keep walking into it
+                        // (mapper applications, conditionals, object
+                        // surfaces). Expanded is required: with Navigate,
+                        // the next iteration would observe the lazy Ref
+                        // shell and stop short of the value's real type.
+                        body_mode: crate::semantic_query::ProjectionMode::Expanded,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => return self.opaque(QueryError::Miss),

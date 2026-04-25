@@ -198,10 +198,12 @@ fn instantiate_dedups_by_args() {
     let k_number = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args_number.clone(),
+        body_mode: ProjectionMode::Expanded,
     };
     let k_string = SemanticQueryKey::Instantiate {
         base,
         args: args_string.clone(),
+        body_mode: ProjectionMode::Expanded,
     };
 
     let n1 = dispatch.execute(k_number.clone());
@@ -1123,6 +1125,7 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     };
     let _ = dispatch.execute(key.clone());
 
@@ -1180,6 +1183,7 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base,
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -1251,7 +1255,11 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
-    let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+    let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base,
+        args,
+        body_mode: ProjectionMode::Expanded,
+    }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -1314,6 +1322,7 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let first = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -1321,6 +1330,7 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let second = match dispatch.execute(SemanticQueryKey::Instantiate {
         base,
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -1360,7 +1370,11 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let base = decl_identity("/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
-    let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+    let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base,
+        args,
+        body_mode: ProjectionMode::Expanded,
+    }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -1418,11 +1432,16 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let inst_s = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: args_s,
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
-    let inst_n = match dispatch.execute(SemanticQueryKey::Instantiate { base, args: args_n }) {
+    let inst_n = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base,
+        args: args_n,
+        body_mode: ProjectionMode::Expanded,
+    }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -2787,6 +2806,7 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: foo,
         args: Arc::clone(&args),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2904,6 +2924,7 @@ fn partial_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial,
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2942,6 +2963,7 @@ fn required_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: required,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -2974,6 +2996,7 @@ fn readonly_routes_through_mapped_type_dispatch() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: ro,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3006,6 +3029,7 @@ fn no_infer_returns_arg_with_alias_resolve_edge() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: no_infer,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3041,6 +3065,7 @@ fn utility_dispatch_emits_instantiate_edge() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3076,6 +3101,7 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3102,6 +3128,7 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: record,
         args: Arc::from(vec![k, v].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3127,6 +3154,7 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: pick,
         args: Arc::from(vec![source, k].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3157,6 +3185,7 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let first = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial.clone(),
         args: args.clone(),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3164,6 +3193,7 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let second = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial,
         args,
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3188,6 +3218,7 @@ fn string_intrinsics_return_string_primitive() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: upper,
         args: Arc::from(vec![s].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3286,6 +3317,7 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let utility_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: partial,
         args: Arc::from(vec![source].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected utility Value, got {other:?}"),
@@ -3339,6 +3371,7 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
         let result = match dispatch.execute(SemanticQueryKey::Instantiate {
             base: anchor,
             args: Arc::from(vec![source].into_boxed_slice()),
+            body_mode: ProjectionMode::Expanded,
         }) {
             QueryResult::Value(id) => id,
             other => panic!("expected Value for {name}, got {other:?}"),
@@ -3423,6 +3456,7 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: return_type_anchor,
         args: Arc::from(vec![typeof_id].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value for ReturnType<typeof>, got {other:?}"),
@@ -3482,6 +3516,7 @@ fn return_type_of_plain_object_stays_opaque() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: anchor,
         args: Arc::from(vec![plain_object].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3529,6 +3564,7 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let mut_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: mut_base,
         args: Arc::clone(&args),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value for Mut<string>, got {other:?}"),
@@ -3562,6 +3598,7 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value for Ro<string>, got {other:?}"),
@@ -3599,6 +3636,7 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base,
         args: Arc::clone(&args),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3646,6 +3684,7 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let ro_result = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: ro_base,
         args,
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -3679,7 +3718,11 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tl.ts", "Greet"); // ensure indexed
     let base = decl_identity("/w/tl.ts", "Greet");
-    let result = match dispatch.execute(SemanticQueryKey::Instantiate { base, args }) {
+    let result = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base,
+        args,
+        body_mode: ProjectionMode::Expanded,
+    }) {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -3936,10 +3979,12 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     let _ = dispatch.execute(SemanticQueryKey::Instantiate {
         base: decl_identity("/w/two_mapped.ts", "A"),
         args: Arc::from(vec![num].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     });
     let _ = dispatch.execute(SemanticQueryKey::Instantiate {
         base: decl_identity("/w/two_mapped.ts", "B"),
         args: Arc::from(vec![str_].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     });
 
     // Walk every interned node id in the arena and collect the
@@ -4005,6 +4050,7 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
     let instantiated = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: decl_identity("/w/scope_pres.ts", "Wrap"),
         args: Arc::from(vec![num].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("expected instantiated, got {other:?}"),
@@ -4056,6 +4102,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     let inst = match dispatch.execute(SemanticQueryKey::Instantiate {
         base: decl_identity("/w/unresolved.ts", "Has"),
         args: Arc::from(vec![num].into_boxed_slice()),
+        body_mode: ProjectionMode::Expanded,
     }) {
         QueryResult::Value(id) => id,
         other => panic!("inst: {other:?}"),

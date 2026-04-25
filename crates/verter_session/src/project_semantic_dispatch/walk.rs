@@ -464,6 +464,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        body_mode: self.mode,
                     }) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -532,6 +533,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let resolved = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                         base: identity,
                         args: args_clone,
+                        body_mode: self.mode,
                     }) {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(id) => {
@@ -733,6 +735,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 let expanded = match self.dispatch.execute(SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    body_mode: self.mode,
                 }) {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => {

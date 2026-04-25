@@ -507,6 +507,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 30),
             })
             .collect::<Vec<_>>()
@@ -802,6 +803,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),
@@ -872,6 +874,7 @@ fn macro_fallback_with_defaults_pattern() {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
@@ -909,6 +912,7 @@ fn macro_fallback_with_defaults_pattern() {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(10, 40),
             },
         ]
@@ -1017,6 +1021,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 30),
         }]
         .into(),

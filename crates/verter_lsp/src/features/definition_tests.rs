@@ -338,6 +338,7 @@ fn test_go_to_macro_binding_from_template() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(macro_start, macro_end),
         }],
     );
@@ -2089,6 +2090,7 @@ fn test_go_to_definition_dollar_props() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 30) as u32),
         }])
         .into(),
@@ -2153,6 +2155,7 @@ fn test_go_to_definition_dollar_emit() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(define_offset as u32, (define_offset + 22) as u32),
         }])
         .into(),
@@ -2274,6 +2277,7 @@ fn definition_prop_field_type_based() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 45) as u32,
@@ -2355,6 +2359,7 @@ fn definition_prop_field_runtime() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(
                 define_props_offset as u32,
                 (define_props_offset + 28) as u32,
@@ -2442,6 +2447,7 @@ fn definition_binding_takes_precedence_over_prop_field() {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(90, 140),
         }],
     );

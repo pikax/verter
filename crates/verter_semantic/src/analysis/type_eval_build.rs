@@ -1328,7 +1328,7 @@ pub enum MacroExpansionScope {
 /// slot. Threading the discriminator at the closure-call boundary
 /// keeps the verter_semantic API scope-aware without exposing
 /// session-layer types upstream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldKind {
     /// `defineProps<T>()` field — populates `ExpandedComponentTypes.props`.
     Prop,
@@ -1342,6 +1342,49 @@ pub enum FieldKind {
     Binding,
 }
 
+/// Path segment for [`FieldExpansionContext::output_path`] — a path from
+/// the parent macro shell (e.g. `Props<T>`) to the specific field the
+/// closure is being invoked for. The session-side closure converts this
+/// into a `verter_session::semantic_query::PathSegment` slice when
+/// constructing the dispatch projection query (plan Step 1 / D1.1).
+///
+/// `Member` is the only variant required for Step 1 — `defineProps`,
+/// `defineEmits`, and `defineSlots` all expose fields at named members
+/// of the macro's parent type. Future variants (`Index`, `KeyOf`) are
+/// deferred until a consumer needs them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum PathSegment {
+    /// Named-member hop, e.g. `[Member("items")]` for the `items` prop
+    /// field of `defineProps<Props>()`.
+    Member(std::sync::Arc<str>),
+}
+
+/// Closure invocation context for
+/// [`expand_macro_types_impl_with_expander`]'s `expand_field_expr`
+/// callback (plan Step 1 / D1.1).
+///
+/// Replaces the previous bare `FieldKind` parameter so the closure has
+/// enough context to drive a dispatch-mediated projection of the
+/// macro's parent shell rather than re-resolving the field-level
+/// `TypeExpr` in isolation:
+///
+/// - `kind` — destination output vector (Prop / Emit / SlotBinding / Binding).
+/// - `macro_index` — index into the surrounding `AnalyzedFileSnapshot::macros`
+///   slice. The closure consumes `macro.parsed_type_argument` (cached
+///   shallow analysis output, plan D1.2) at this index to obtain the
+///   parent shell as a [`TypeExpr`] without re-parsing.
+/// - `output_path` — path from the parent shell to the field's value.
+///   For props/emits this is `[Member(field_name)]`; for slot bindings
+///   it is `[Member(slot_name), Member(binding_name)]`. The closure
+///   passes the path through dispatch's `ProjectPath` query after
+///   lowering the parent shell.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FieldExpansionContext {
+    pub kind: FieldKind,
+    pub macro_index: usize,
+    pub output_path: std::sync::Arc<[PathSegment]>,
+}
+
 pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
@@ -1352,7 +1395,7 @@ pub fn expand_macro_types_impl_with_expander<F>(
 ) -> crate::analysis::type_expand::ExpandedComponentTypes
 where
     F: FnMut(
-        FieldKind,
+        FieldExpansionContext,
         &TypeExpr,
     ) -> crate::analysis::type_expand::ExpansionResult<
         crate::analysis::type_expand::ExpandedNormalizedExpr,
@@ -1391,7 +1434,14 @@ where
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(FieldKind::Prop, &parsed);
+                    let ctx = FieldExpansionContext {
+                        kind: FieldKind::Prop,
+                        macro_index,
+                        output_path: std::sync::Arc::from(vec![PathSegment::Member(
+                            std::sync::Arc::from(field.name.as_str()),
+                        )]),
+                    };
+                    let expanded = expand_field_expr(ctx, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1431,7 +1481,14 @@ where
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(FieldKind::Emit, &parsed);
+                    let ctx = FieldExpansionContext {
+                        kind: FieldKind::Emit,
+                        macro_index,
+                        output_path: std::sync::Arc::from(vec![PathSegment::Member(
+                            std::sync::Arc::from(field.name.as_str()),
+                        )]),
+                    };
+                    let expanded = expand_field_expr(ctx, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1470,7 +1527,17 @@ where
                                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                             };
                             log_expand_stage_start(&stage_log);
-                            let expanded = expand_field_expr(FieldKind::SlotBinding, &parsed);
+                            let ctx = FieldExpansionContext {
+                                kind: FieldKind::SlotBinding,
+                                macro_index,
+                                output_path: std::sync::Arc::from(vec![
+                                    PathSegment::Member(std::sync::Arc::from(slot.name.as_str())),
+                                    PathSegment::Member(std::sync::Arc::from(
+                                        binding.name.as_str(),
+                                    )),
+                                ]),
+                            };
+                            let expanded = expand_field_expr(ctx, &parsed);
                             log_expand_stage(
                                 stage_log,
                                 expanded.exactness,
@@ -1507,7 +1574,20 @@ where
                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
             };
             log_expand_stage_start(&stage_log);
-            let expanded = expand_field_expr(FieldKind::Binding, type_ann);
+            // `defineExpose` binding entries are top-level value
+            // bindings in the script-setup scope — there is no parent
+            // macro shell. The closure recognises an empty
+            // `output_path` as "no projection rewrite available; treat
+            // `parsed` as the resolution target" and falls back to
+            // legacy field-level resolution. `macro_index` carries the
+            // sentinel `usize::MAX` used elsewhere for non-macro-anchored
+            // expose entries (see binding stage label below).
+            let ctx = FieldExpansionContext {
+                kind: FieldKind::Binding,
+                macro_index: usize::MAX,
+                output_path: std::sync::Arc::from(Vec::<PathSegment>::new()),
+            };
+            let expanded = expand_field_expr(ctx, type_ann);
             log_expand_stage(
                 stage_log,
                 expanded.exactness,

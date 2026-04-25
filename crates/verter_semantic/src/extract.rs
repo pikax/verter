@@ -482,6 +482,7 @@ mod tests {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(0, 50),
         }
     }
@@ -705,6 +706,7 @@ mod tests {
             }],
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(30, 60),
         };
 

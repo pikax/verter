@@ -1001,6 +1001,7 @@ fn make_macro(
         default_values: Vec::new(),
         expose_fields: vec![],
         resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
         span,
     }
 }

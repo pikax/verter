@@ -897,12 +897,16 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         SemanticQueryKey::ResolveDecl(decl) => {
             (FamilyKey::ResolveDecl(decl.clone()), ModeSlot::Single)
         }
-        SemanticQueryKey::Instantiate { base, args } => (
+        SemanticQueryKey::Instantiate {
+            base,
+            args,
+            body_mode,
+        } => (
             FamilyKey::Instantiate {
                 base: base.clone(),
                 args: Arc::clone(args),
             },
-            ModeSlot::Single,
+            mode_to_slot(*body_mode),
         ),
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
@@ -2411,6 +2415,11 @@ mod tests {
     /// canonical (via the dep-sig) is evicted by the sweep. Regardless of
     /// the family-key shape — `Instantiate` carries semantic-node ids, not
     /// canonicals — the dep-sig walk is the single invalidation authority.
+    ///
+    /// Post-D1.4: `Instantiate` is mode-slot aware (`body_mode`). A write
+    /// at `Expanded` backfills `Shallow` / `Navigate` / `Identity` per
+    /// §7.11; all four slots carry the same dep-sig and the sweep evicts
+    /// every one that references the touched canonical.
     #[test]
     fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body() {
         let store = SemanticGraphStore::new();
@@ -2419,6 +2428,7 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![arg].into_boxed_slice()),
+            body_mode: crate::semantic_query::ProjectionMode::Expanded,
         };
 
         // Dep-sig references /w/body.ts — the declaration file the
@@ -2433,9 +2443,17 @@ mod tests {
             store.get(&key).is_some(),
             "entry must be warm pre-invalidation"
         );
+        assert_eq!(
+            store.memo_entry_count(),
+            4,
+            "Expanded write backfills Shallow + Navigate + Identity (§7.11)",
+        );
 
         let removed = store.invalidate_canonical("/w/body.ts");
-        assert_eq!(removed, 1, "one Instantiate slot evicted");
+        assert_eq!(
+            removed, 4,
+            "Expanded plus its three backfilled narrower slots all reference /w/body.ts",
+        );
         assert!(
             store.get(&key).is_none(),
             "Instantiate entry whose dep-sig references /w/body.ts must be evicted",
@@ -2453,6 +2471,7 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![arg].into_boxed_slice()),
+            body_mode: crate::semantic_query::ProjectionMode::Expanded,
         };
 
         let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));

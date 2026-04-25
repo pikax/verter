@@ -744,9 +744,17 @@ pub enum QueryResult<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticQueryKey {
     ResolveDecl(ResolveDeclKey),
+    /// Generic instantiation of `base` with the supplied `args`.
+    ///
+    /// `body_mode` controls how the decl body is lowered after substitution
+    /// (Navigate keeps shells lazy, Expanded fully reduces). The memo splits
+    /// per body_mode (see [`SemanticQueryKey`] family-slot mapping in
+    /// [`semantic_query_memo`](crate::semantic_query_memo)) so a Navigate
+    /// caller and an Expanded caller never collide on a single shared entry.
     Instantiate {
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
+        body_mode: ProjectionMode,
     },
     ProjectMember {
         base: SemanticNodeId,
@@ -1481,8 +1489,13 @@ pub trait SemanticQueryApi {
         &self,
         base: DeclIdentity,
         args: Arc<[SemanticNodeId]>,
+        body_mode: ProjectionMode,
     ) -> QueryResult<SemanticNodeId> {
-        self.execute(SemanticQueryKey::Instantiate { base, args })
+        self.execute(SemanticQueryKey::Instantiate {
+            base,
+            args,
+            body_mode,
+        })
     }
     fn project_member(
         &self,
@@ -1565,10 +1578,12 @@ mod tests {
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
+            body_mode: ProjectionMode::Expanded,
         };
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
+            body_mode: ProjectionMode::Expanded,
         };
         assert_ne!(a, b);
     }
@@ -1705,29 +1720,35 @@ mod tests {
     /// distinct `Instantiate` calls that visit the same path.
     #[test]
     fn navigation_once_invariant_contract() {
-        // Structural: `SemanticQueryKey::Instantiate { base, args }` is
-        // mode-free per §7.14, so two distinct projections into the
-        // same declaration body share family memo entries for every
-        // structurally-equal path segment.
+        // Structural: `SemanticQueryKey::Instantiate { base, args, body_mode }`
+        // splits the family memo per `body_mode`, so two distinct
+        // projections under the SAME body_mode into the same declaration
+        // body share family memo entries for every structurally-equal
+        // path segment.
         //
         // When the F2 counter `decl_subexpression_lowering_count` lands
         // as a post-track refinement, this test's strict assertion
-        // becomes: after N `Instantiate(Foo, [V_i])` + matching
-        // `ProjectPath(result, [p], Identity)`, the counter equals the
-        // size of the visited path intersection, not N × body_size.
+        // becomes: after N `Instantiate(Foo, [V_i], body_mode)` +
+        // matching `ProjectPath(result, [p], Identity)`, the counter
+        // equals the size of the visited path intersection, not
+        // N × body_size — within one body_mode slot.
         //
-        // The current assertion is the structural invariant: the key
-        // shape admits this form (base + args, no mode field).
+        // The current assertion is the structural invariant: same
+        // `(base, args, body_mode)` triple constructs an equal key.
         let base = DeclIdentity::synthetic("Foo");
         let args = Arc::from(vec![SemanticNodeId(2)].into_boxed_slice());
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
+            body_mode: ProjectionMode::Expanded,
         };
-        // Verify the key can be constructed and hashed (mode-free).
         let mut map = std::collections::HashMap::new();
         map.insert(key.clone(), 1);
-        let key2 = SemanticQueryKey::Instantiate { base, args };
+        let key2 = SemanticQueryKey::Instantiate {
+            base,
+            args,
+            body_mode: ProjectionMode::Expanded,
+        };
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
     }
 }

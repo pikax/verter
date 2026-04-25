@@ -4668,20 +4668,19 @@ impl VerterHost {
         let binding_node_ids: std::cell::RefCell<
             Vec<Option<crate::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
-        let result =
-            {
-                component_meta_trace_custom!(
-                    "compute_evaluated_types_expand_macros",
-                    format!(
-                        "owner={} macros={} bindings={} store_view={}",
-                        canonical,
-                        snapshot.macros.len(),
-                        binding_entries.len(),
-                        false,
-                    ),
-                );
-                let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
-                verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
+        let result = {
+            component_meta_trace_custom!(
+                "compute_evaluated_types_expand_macros",
+                format!(
+                    "owner={} macros={} bindings={} store_view={}",
+                    canonical,
+                    snapshot.macros.len(),
+                    binding_entries.len(),
+                    false,
+                ),
+            );
+            let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
+            verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
                 snapshot.macros.as_ref(),
                 Some(eval_source),
                 binding_entries.as_slice(),
@@ -4694,7 +4693,7 @@ impl VerterHost {
                         verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
                     }
                 },
-                |field_kind, parsed| {
+                |ctx, parsed| {
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };
@@ -4728,20 +4727,118 @@ impl VerterHost {
                             expr: parsed.clone(),
                         })
                     } else {
-                        match engine.project_expr_surface_expr(canonical, parsed) {
-                            Some(projected) if projected != *parsed => {
-                                ExpansionResult::exact_concrete(ExpandedNormalizedExpr {
-                                    expr: projected,
-                                })
+                        // Plan Step 1 / D1.7: dispatch-projection branch.
+                        // Lower the macro's parent shell once via dispatch
+                        // (using the cache-owned parsed_type_argument), then
+                        // project the closure's output_path off the lowered
+                        // base. On any failure (no parsed_type_argument,
+                        // empty output_path, lowering miss, projection
+                        // unknown, raise failed) emit a structured trace
+                        // event and fall back to symbolic preservation —
+                        // legacy walkers (project_expr_surface_expr /
+                        // solve_expr_type_expr) are no longer invoked from
+                        // this closure (their other callers retire in Step 2).
+                        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+                        use crate::semantic_query::{
+                            PathSegment as SemanticPathSegment, ProjectionMode, QueryResult,
+                            SemanticQueryApi, SemanticQueryKey,
+                        };
+                        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+
+                        let symbolic_fallback = || {
+                            ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
+                                expr: parsed.clone(),
+                            })
+                        };
+
+                        let macro_type_arg = snapshot
+                            .macros
+                            .get(ctx.macro_index)
+                            .and_then(|m| m.parsed_type_argument.clone());
+
+                        match (ctx.output_path.is_empty(), macro_type_arg) {
+                            (true, _) | (_, None) => {
+                                component_meta_trace_custom!(
+                                    "macro_projection_failover",
+                                    format!(
+                                        "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
+                                        ctx.macro_index, ctx.kind,
+                                    ),
+                                );
+                                symbolic_fallback()
                             }
-                            _ => match engine.solve_expr_type_expr(canonical, parsed) {
-                                Some(solved) => ExpansionResult::exact_concrete(
-                                    ExpandedNormalizedExpr { expr: solved },
-                                ),
-                                None => ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
-                                    expr: parsed.clone(),
-                                }),
-                            },
+                            (false, Some(macro_type_arg)) => {
+                                let dispatch = ProjectSemanticDispatch::new(engine.host());
+                                let lowered = dispatch.lower_type_expr_in_scope_with_mode(
+                                    canonical,
+                                    macro_type_arg.as_ref(),
+                                    ProjectionMode::Expanded,
+                                );
+                                match lowered {
+                                    None => {
+                                        component_meta_trace_custom!(
+                                        "macro_projection_failover",
+                                        format!(
+                                            "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
+                                            ctx.macro_index, ctx.kind,
+                                        ),
+                                    );
+                                        symbolic_fallback()
+                                    }
+                                    Some(base_id) => {
+                                        let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
+                                            std::sync::Arc::from(
+                                                ctx.output_path
+                                                    .iter()
+                                                    .map(|seg| match seg {
+                                                        MacroPathSegment::Member(name) => {
+                                                            SemanticPathSegment::Member(
+                                                                std::sync::Arc::clone(name),
+                                                            )
+                                                        }
+                                                    })
+                                                    .collect::<Vec<_>>(),
+                                            );
+                                        let projected =
+                                            dispatch.execute(SemanticQueryKey::ProjectPath {
+                                                base: base_id,
+                                                path: dispatch_path,
+                                                mode: ProjectionMode::Expanded,
+                                            });
+                                        match projected {
+                                            QueryResult::Value(node_id) => {
+                                                match dispatch.raise_node_to_type_expr(node_id) {
+                                                    Some(raised) => {
+                                                        ExpansionResult::exact_concrete(
+                                                            ExpandedNormalizedExpr { expr: raised },
+                                                        )
+                                                    }
+                                                    None => {
+                                                        component_meta_trace_custom!(
+                                                        "macro_projection_failover",
+                                                        format!(
+                                                            "macro_index={} field_kind={:?} reason=raise_failed",
+                                                            ctx.macro_index, ctx.kind,
+                                                        ),
+                                                    );
+                                                        symbolic_fallback()
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                component_meta_trace_custom!(
+                                                "macro_projection_failover",
+                                                format!(
+                                                    "macro_index={} field_kind={:?} reason=projection_unknown",
+                                                    ctx.macro_index, ctx.kind,
+                                                ),
+                                            );
+                                                symbolic_fallback()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     };
 
@@ -4758,7 +4855,7 @@ impl VerterHost {
                             );
                         let node_id =
                             dispatch.lower_type_expr_in_scope(canonical, &expansion.value.expr);
-                        let target = match field_kind {
+                        let target = match ctx.kind {
                             verter_semantic::analysis::type_eval_build::FieldKind::Prop => {
                                 &prop_node_ids
                             }
@@ -4778,7 +4875,7 @@ impl VerterHost {
                     expansion
                 },
             )
-            };
+        };
         // Dependency tracking comes from the frontier/shallow-file-state path.
         let discovered_dependencies = std::collections::BTreeSet::<String>::new();
         if component_meta_debug_enabled() {

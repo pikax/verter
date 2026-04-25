@@ -246,12 +246,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `SessionSolverHost` is constructed on this path (plan §5.7
     /// step 3).
     ///
+    /// Lowers under [`ProjectionMode::Expanded`]. Callers that need
+    /// mode-aware lowering should use
+    /// [`Self::lower_type_expr_in_scope_with_mode`] (plan Step 1 / D1.6).
+    ///
     /// Returns `None` when the scope's file is not known to the host or
     /// the expression lowers to an opaque miss.
     pub fn lower_type_expr_in_scope(
         &self,
         scope_canonical_id: &str,
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> Option<SemanticNodeId> {
+        self.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            crate::semantic_query::ProjectionMode::Expanded,
+        )
+    }
+
+    /// Mode-aware variant of [`Self::lower_type_expr_in_scope`].
+    ///
+    /// Threads `mode` into the underlying
+    /// [`Self::shallow_lower_type_expr`] call so callers can request a
+    /// `Navigate` lowering (lazy-terminal: keep `Ref`-shells lazy
+    /// instead of triggering wholesale body expansion at the lowering
+    /// site) or an `Expanded` lowering (the legacy default of the
+    /// non-mode-aware sibling).
+    ///
+    /// Used by Step 1's host-side closure (`compute_evaluated_types_*`)
+    /// to thread the macro shell through dispatch with the consumer's
+    /// chosen mode (currently `Expanded` — the consumer wants reduced
+    /// output for component-meta projection).
+    pub fn lower_type_expr_in_scope_with_mode(
+        &self,
+        scope_canonical_id: &str,
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        mode: crate::semantic_query::ProjectionMode,
     ) -> Option<SemanticNodeId> {
         let shallow = self.host.shallow_file_state(scope_canonical_id)?;
         let scope = NodeScopeId::File {
@@ -277,7 +307,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &name_resolution,
             scope_payload.as_ref(),
             &mut substitutions,
-            crate::semantic_query::ProjectionMode::Expanded,
+            mode,
         );
         Some(id)
     }
@@ -435,7 +465,11 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         let build = move || match &key_for_build {
             SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
             SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
-            SemanticQueryKey::Instantiate { base, args } => self.build_instantiate(base, args),
+            SemanticQueryKey::Instantiate {
+                base,
+                args,
+                body_mode,
+            } => self.build_instantiate(base, args, *body_mode),
             // Plan §3 C4: `ProjectMember` / `IndexedAccess` are API sugar
             // that admission-time canonicalisation rewrites to
             // `ProjectPath` above. The build closure never observes

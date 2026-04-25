@@ -1433,25 +1433,40 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
 
     // Step 6.3 body (plan §3 Step 6.3): two-stage materialization.
     //
-    // STOP CONDITION #4 acknowledged. Audit pass `feedback-2026-04-25-audit.md`
-    // empirically confirmed dispatch-only fails 5 fixtures (script-setup
-    // generic substitution, imported Pick<>['key'] indexed access, default
-    // type parameters, imported mapped slot types ×2). Closing the gap
-    // requires >500 LOC across `project_semantic_dispatch/lower.rs` +
-    // `build.rs` + new substitution-context plumbing — outside the
-    // audit-pass scope. The dual path remains until that upstream work
-    // lands; see the doc-comment header §"TODO(dispatch-substitution-parity)"
-    // for the precise upstream change.
+    // TODO(dispatch-substitution-parity): collapse this body to the
+    // thin dispatch wrapper described by Step 1 sub-task 1.2 once the
+    // dispatch path's substitution parity covers the engine-internal
+    // callers of `materialize_component_meta_type_expr_until_stable_full`
+    // (called from non-closure paths inside meta_resolve.rs's helper
+    // routines). Step 1's closure rewire
+    // (`compute_evaluated_types_from_owner_context` /
+    // `compute_evaluated_types_from_owner_context`) ALREADY routes
+    // macro shells through dispatch — that path no longer reaches the
+    // legacy walker. The remaining dual path here serves only the
+    // engine-internal callers, which the plan's Removal trigger gates
+    // on parity coverage of three fixtures:
+    //   - `imported_mapped_slots_reach_resolved_evaluated_types`
+    //   - `imported_mapped_slots_reach_final_component_meta`
+    //   - `get_component_meta_materializes_imported_pick_indexed_access_props`
+    // These three exercise mapped-type-over-imported, conditional-infer,
+    // and `Pick<X, K>['member']` indexed-access projection where the
+    // dispatch path currently returns the whole parent object instead
+    // of the indexed member. Closing them needs follow-up work in
+    // `project_semantic_dispatch::lower::TypeExpr::IndexedAccess` /
+    // `build_project_path` for the indexed Pick result, and in
+    // mapped-type expansion for the conditional-infer slot signature.
+    // Once parity lands, this body collapses to the dispatch-only
+    // wrapper and the `materialize_*_in_scope` family + projection
+    // rescue helpers below are deleted in the same commit.
     //
     // Stage 1: legacy `materialize_in_scope` runs. Its
     // `materialize_component_meta_member_surface_expr` walker carries
-    // the broader generic-substitution context (U → script-setup-T
-    // mappings derived from the surrounding `Props<T>` instantiation
-    // call site) that the dispatch path's per-call lower invocation
-    // cannot reconstruct from the field-level `expr` alone — the
-    // substitution mapping lives in the calling generic's prepared
-    // decl, not in the field-type expression. This stage produces
-    // `chosen_type_expr` (the user-visible result for Expanded mode).
+    // the broader generic-substitution context the dispatch path's
+    // per-call lower invocation cannot reconstruct from the field-level
+    // `expr` alone — the substitution mapping lives in the calling
+    // generic's prepared decl, not in the field-type expression. This
+    // stage produces `chosen_type_expr` (the user-visible result for
+    // Expanded mode).
     //
     // Stage 2: dispatch round-trip on the SAME expr supplies
     // `node_id` (Step 9 sidecar capture) and `dep_signature` (Step

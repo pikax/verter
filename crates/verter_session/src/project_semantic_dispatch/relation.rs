@@ -192,6 +192,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
             base: identity,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            // Identity-carrier unwrap feeds `evaluate_deferred_semantic_node`
+            // which walks through the body's structural layers (object
+            // surfaces, conditionals, mapper applications). Expanded is
+            // required: with Navigate the unwrap stops at the lazy shell
+            // and the subsequent walk has nothing to inspect.
+            body_mode: crate::semantic_query::ProjectionMode::Expanded,
         }) {
             QueryResult::Value(unwrapped) => self.evaluate_deferred_semantic_node(unwrapped),
             _ => return IdentityCarrierUnwrap::Unresolvable,
@@ -270,6 +276,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
             base: identity,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            // Object-vs-Record relation reads `view.members`, index
+            // signatures, and call/construct lists off the unwrapped
+            // body. Expanded is required: Navigate would leave the body
+            // as a lazy Ref shell with no inspectable surface view.
+            body_mode: crate::semantic_query::ProjectionMode::Expanded,
         }) {
             QueryResult::Value(id) => self.evaluate_deferred_semantic_node(id),
             _ => return Some(RelationResult::Unknown),

@@ -3593,6 +3593,7 @@ const count = ref(0)
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 100),
             }],
             bindings: vec![],

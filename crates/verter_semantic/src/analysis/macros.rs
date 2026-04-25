@@ -1389,16 +1389,43 @@ fn try_extract_macro(
             let kind = classify_macro(callee_name)?;
 
             // In OXC 0.112, type parameters on call expressions are `.type_arguments`
-            let (is_type_based, type_references) = if let Some(ref type_args) = call.type_arguments
-            {
-                if let Some(first) = type_args.params.first() {
-                    (true, collect_type_references(first))
+            let (is_type_based, type_references, parsed_type_argument) =
+                if let Some(ref type_args) = call.type_arguments {
+                    if let Some(first) = type_args.params.first() {
+                        // D1.2: capture the parent shell as a TypeExpr
+                        // once during shallow analysis. The host-side
+                        // closure consumes this field to drive a
+                        // dispatch projection of the macro's fields
+                        // without re-parsing.
+                        let raw_span = first.span();
+                        let start = raw_span.start as usize;
+                        let end = raw_span.end as usize;
+                        let parsed = if start <= end && end <= source.len() {
+                            let text = source[start..end].trim();
+                            if text.is_empty() {
+                                None
+                            } else {
+                                let lowered =
+                                    crate::analysis::type_expr_lower::parse_type_annotation(text);
+                                if matches!(
+                                    lowered,
+                                    crate::analysis::type_expr::TypeExpr::Unknown { .. }
+                                ) {
+                                    None
+                                } else {
+                                    Some(std::sync::Arc::new(lowered))
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        (true, collect_type_references(first), parsed)
+                    } else {
+                        (true, Vec::new(), None)
+                    }
                 } else {
-                    (true, Vec::new())
-                }
-            } else {
-                (false, Vec::new())
-            };
+                    (false, Vec::new(), None)
+                };
 
             // Extract model name from defineModel('name') first string argument
             let model_name = if kind == AnalyzedMacroKind::DefineModel {
@@ -1483,6 +1510,7 @@ fn try_extract_macro(
                 expose_fields,
                 default_values,
                 resolved_local_types: Vec::new(),
+                parsed_type_argument,
                 span: call.span.into(),
             })
         }

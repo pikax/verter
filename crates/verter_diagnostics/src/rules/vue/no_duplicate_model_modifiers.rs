@@ -114,6 +114,7 @@ mod tests {
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: Span::new(span_start, span_end),
         }
     }
@@ -236,6 +237,7 @@ mod tests {
                 expose_fields: vec![],
                 default_values: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(10, 30),
             }],
             ..Default::default()

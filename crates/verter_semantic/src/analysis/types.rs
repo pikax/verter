@@ -1259,6 +1259,22 @@ pub struct AnalyzedMacro {
     pub expose_fields: Vec<AnalyzedExposeField>,
     /// Locally resolved type expansions referenced by macro type parameters.
     pub resolved_local_types: Vec<ResolvedLocalType>,
+    /// First type argument of the macro call (the parent shell), parsed
+    /// once during shallow analysis (plan Step 1 / D1.2). For
+    /// `defineProps<Props<T>>()` this is `Props<T>`. For
+    /// `defineEmits<Emits>()` this is `Emits`. `None` when the macro
+    /// has no type arguments or when parsing the source slice fails.
+    ///
+    /// Cache-owned per the Shallow File Processing Core Invariant
+    /// (rule 1: capture once during single read/parse, never re-parse
+    /// per call). Used by the host-side closure
+    /// (`compute_evaluated_types_from_owner_context`) to drive
+    /// dispatch-mediated projection of macro fields.
+    ///
+    /// `Arc<TypeExpr>` rather than `Box<TypeExpr>` so the closure +
+    /// dispatch lower call clone a single refcount instead of deep-copying
+    /// the full expression tree (R6).
+    pub parsed_type_argument: Option<std::sync::Arc<crate::analysis::type_expr::TypeExpr>>,
     /// SFC-absolute byte span of the macro call.
     pub span: Span,
 }
@@ -1274,7 +1290,8 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(!self.default_keys.is_empty())
             + usize::from(!self.default_values.is_empty())
             + usize::from(!self.expose_fields.is_empty())
-            + usize::from(!self.resolved_local_types.is_empty());
+            + usize::from(!self.resolved_local_types.is_empty())
+            + usize::from(self.parsed_type_argument.is_some());
         let mut s = serializer.serialize_struct("AnalyzedMacro", count)?;
         s.serialize_field("kind", &self.kind)?;
         s.serialize_field("isTypeBased", &self.is_type_based)?;
@@ -1304,6 +1321,15 @@ impl serde::Serialize for AnalyzedMacro {
         }
         if !self.resolved_local_types.is_empty() {
             s.serialize_field("resolvedLocalTypes", &self.resolved_local_types)?;
+        }
+        // D1.2: opt-in field — only serialised when populated (mirrors
+        // the convention used for prop_fields / emit_fields above and
+        // keeps wire payloads compact when the macro has no type
+        // argument). Field name is camelCase to match the Wire struct's
+        // `#[serde(rename_all = "camelCase")]` deserialization.
+        if let Some(arg) = self.parsed_type_argument.as_ref() {
+            let inner: &crate::analysis::type_expr::TypeExpr = arg.as_ref();
+            s.serialize_field("parsedTypeArgument", inner)?;
         }
         s.serialize_field("spanStart", &self.span.start)?;
         s.serialize_field("spanEnd", &self.span.end)?;
@@ -1338,6 +1364,12 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             expose_fields: Vec<AnalyzedExposeField>,
             #[serde(default)]
             resolved_local_types: Vec<ResolvedLocalType>,
+            // D1.2 back-compat: old payloads (no parsedTypeArgument
+            // key) deserialize with `None`; manual-serde edits don't
+            // pick up `#[serde(default)]` on the outer struct so the
+            // attribute lives on the Wire deserialization helper.
+            #[serde(default)]
+            parsed_type_argument: Option<crate::analysis::type_expr::TypeExpr>,
             #[serde(default)]
             span_start: u32,
             #[serde(default)]
@@ -1358,6 +1390,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             default_values: w.default_values,
             expose_fields: w.expose_fields,
             resolved_local_types: w.resolved_local_types,
+            parsed_type_argument: w.parsed_type_argument.map(std::sync::Arc::new),
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -1777,5 +1810,123 @@ impl CssVarManipulationKind {
             Self::GetPropertyValue => "getPropertyValue",
             Self::RemoveProperty => "removeProperty",
         }
+    }
+}
+
+#[cfg(test)]
+mod analyzed_macro_serde_tests {
+    //! Plan Step 1 / D1.2 + sub-task 1.4 — serialization integrity for
+    //! `AnalyzedMacro::parsed_type_argument`. The struct uses manual
+    //! `Serialize` / `Deserialize` impls (types.rs:1276 / 1322), so a
+    //! string-typo in the camelCase field name would silently drop the
+    //! field on the wire. These tests catch that.
+    //!
+    //! FAIL-FIRST contract: writing the field literal `parsedTypeArgument`
+    //! into the manual serializer is required for `serializes_field_name_exactly`
+    //! to pass. The back-compat test verifies old-shape payloads (no
+    //! `parsedTypeArgument` key) deserialize with `parsed_type_argument: None`
+    //! — discriminating because if the deserializer's `Wire` struct were
+    //! to drop `#[serde(default)]` on the field, the test would fail with
+    //! "missing field" error.
+    use super::{AnalyzedMacro, AnalyzedMacroKind};
+    use crate::analysis::type_expr::TypeExpr;
+    use std::sync::Arc;
+    use verter_span::Span;
+
+    fn empty_macro() -> AnalyzedMacro {
+        AnalyzedMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            is_type_based: true,
+            type_references: Vec::new(),
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            span: Span::new(0, 0),
+        }
+    }
+
+    #[test]
+    fn serializes_parsed_type_argument_field_name_exactly() {
+        let mut m = empty_macro();
+        m.parsed_type_argument = Some(Arc::new(TypeExpr::Ref {
+            name: Arc::from("Sentinel"),
+            type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+        }));
+        let json = serde_json::to_string(&m).unwrap();
+        // Field name appears EXACTLY (catches typo in manual serialize_field).
+        assert!(
+            json.contains("\"parsedTypeArgument\":"),
+            "manual Serialize did not emit the parsedTypeArgument field; \
+             check serialize_field call in AnalyzedMacro::serialize. JSON: {json}"
+        );
+        // Sentinel value also appears (catches the value being silently dropped).
+        assert!(
+            json.contains("\"Sentinel\""),
+            "parsed_type_argument value not in serialized output; JSON: {json}"
+        );
+
+        // Round-trip integrity.
+        let roundtripped: AnalyzedMacro = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.parsed_type_argument, roundtripped.parsed_type_argument);
+    }
+
+    #[test]
+    fn serializes_none_omits_field() {
+        let m = empty_macro();
+        assert!(m.parsed_type_argument.is_none());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("parsedTypeArgument"),
+            "None values should be omitted from output; JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn deserializes_old_payload_without_parsed_type_argument_field() {
+        // Construct an old-shape payload (no parsedTypeArgument key).
+        // Mirrors what existing serialized AnalyzedMacro JSON on disk
+        // would have looked like before D1.2 added the field.
+        let old_json = r#"{
+            "kind": "DefineProps",
+            "isTypeBased": true,
+            "typeReferences": [],
+            "bindingName": null,
+            "hasInheritAttrsFalse": false,
+            "spanStart": 0,
+            "spanEnd": 0
+        }"#;
+        let parsed: AnalyzedMacro = serde_json::from_str(old_json).unwrap();
+        assert_eq!(
+            parsed.parsed_type_argument, None,
+            "old-shape payload (no parsedTypeArgument key) must \
+             deserialize with parsed_type_argument: None"
+        );
+    }
+
+    #[test]
+    fn roundtrip_preserves_arc_typeexpr_payload_structure() {
+        let mut m = empty_macro();
+        // Construct a non-trivial TypeExpr (Ref with nested args) so the
+        // round-trip test exercises the non-empty serialization path.
+        m.parsed_type_argument = Some(Arc::new(TypeExpr::Ref {
+            name: Arc::from("Props"),
+            type_arguments: Arc::from(vec![TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            }]),
+        }));
+        let json = serde_json::to_string(&m).unwrap();
+        let back: AnalyzedMacro = serde_json::from_str(&json).unwrap();
+        // Arc identity isn't preserved across deserialization (fresh
+        // allocation), but the structural equality is.
+        assert_eq!(m.parsed_type_argument, back.parsed_type_argument);
     }
 }

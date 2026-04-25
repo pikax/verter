@@ -249,10 +249,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// produces **one shell level** of the declaration's structural shape
     /// with `args` bound to the decl's type parameters.
     ///
-    /// The result is mode-free: the caller issues a follow-up
-    /// [`SemanticQueryKey::ProjectPath`] if a specific mode / depth is
-    /// needed (§7.14). Member bodies are not recursively lowered —
-    /// nested references emit `Opaque(Miss)` placeholders per the
+    /// `body_mode` controls how the decl body and its argument
+    /// expressions are lowered after substitution. Memo entries split
+    /// per body_mode (see `family_and_slot` in
+    /// [`semantic_query_memo`](crate::semantic_query_memo)) so a Navigate
+    /// caller and an Expanded caller never collide on the same shell
+    /// result. Member bodies are not recursively lowered — nested
+    /// references emit `Opaque(Miss)` placeholders per the
     /// lazy-materialisation rule; deeper lowering is driven by
     /// `ProjectPath` sub-queries through the family memo.
     ///
@@ -265,6 +268,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &DeclIdentity,
         args: &Arc<[SemanticNodeId]>,
+        body_mode: crate::semantic_query::ProjectionMode,
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let decl_canonical = &identity.canonical_id;
         let decl_name = &identity.decl_name;
@@ -337,7 +341,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &prepared.name_resolution,
                     scope_payload.as_ref(),
                     &mut substitutions,
-                    crate::semantic_query::ProjectionMode::Expanded,
+                    body_mode,
                 )
             } else {
                 continue;
@@ -380,7 +384,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &prepared.name_resolution,
             scope_payload.as_ref(),
             &mut substitutions,
-            crate::semantic_query::ProjectionMode::Expanded,
+            body_mode,
         );
         result = self.backfill_member_index_surface(
             result,

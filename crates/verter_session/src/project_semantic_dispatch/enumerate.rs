@@ -182,6 +182,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match self.execute(crate::semantic_query::SemanticQueryKey::Instantiate {
                     base: identity,
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    // Key-name enumeration consumes the body's structural
+                    // shape (Object members, Union arms, etc.) — Expanded
+                    // is required so the next Expand frame can read keys
+                    // off the unwrapped surface, not a lazy Ref shell.
+                    body_mode: crate::semantic_query::ProjectionMode::Expanded,
                 }) {
                     crate::semantic_query::QueryResult::Value(instantiated)
                         if instantiated != resolved =>

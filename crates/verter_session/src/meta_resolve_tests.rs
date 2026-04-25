@@ -4701,6 +4701,7 @@ fn define_props_macro_shape_reuses_expanded_fields_directly() {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -4818,6 +4819,7 @@ fn define_props_macro_shape_prefers_resolved_macro_when_expanded_fields_are_inco
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -4941,6 +4943,7 @@ fn define_props_fields_fast_path_allows_direct_object_literals() {
         default_values: Vec::new(),
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
         span: verter_span::Span::new(0, 0),
     };
     let lowered =
@@ -4978,6 +4981,7 @@ fn define_props_fields_fast_path_rejects_complex_heritage_refs() {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -5049,6 +5053,7 @@ fn define_props_fields_fast_path_rejects_multi_surface_macro_candidates() {
         default_values: Vec::new(),
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
+        parsed_type_argument: None,
         span: verter_span::Span::new(0, 0),
     };
     let resolved_macros = vec![
@@ -5315,6 +5320,7 @@ defineProps<Props>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -5465,6 +5471,7 @@ defineModel<boolean>('open')
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 0),
             },
             verter_semantic::analysis::AnalyzedMacro {
@@ -5481,6 +5488,7 @@ defineModel<boolean>('open')
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 0),
             },
         ]
@@ -6269,6 +6277,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6384,6 +6393,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6488,6 +6498,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6588,6 +6599,7 @@ defineModel<string>('searchTerm')
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 0),
             },
             verter_semantic::analysis::AnalyzedMacro {
@@ -6604,6 +6616,7 @@ defineModel<string>('searchTerm')
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: verter_span::Span::new(0, 0),
             },
         ]
@@ -6711,6 +6724,7 @@ defineEmits<Emits>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -6874,6 +6888,7 @@ defineSlots<Slots>()
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -7029,6 +7044,7 @@ withDefaults(defineProps<Props>(), {
             default_values: Vec::new(),
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
             span: verter_span::Span::new(0, 0),
         }]
         .into(),
@@ -9366,4 +9382,111 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let _ = query_engine
         .project_route_surface_expr("/src/base.ts", "Props", &route)
         .expect("prepared pick route should project");
+}
+
+// ===========================================================================
+// Step 1 FAIL-FIRST #5 — `Instantiate` memo splits per body_mode.
+//
+// Validates D1.4: extending `SemanticQueryKey::Instantiate` with `body_mode`
+// (and projecting the family-slot mapping through `mode_to_slot(body_mode)`)
+// produces structurally distinct memo entries for the same `(base, args)`
+// pair under different body_modes. Pre-Step-1 the key was mode-free
+// (`Single` slot); post-Step-1 the same `(base, args)` triggers two
+// distinct lowerings depending on the caller's body_mode.
+// ===========================================================================
+
+/// Constructs a fixture where `Wrapper<Inner>` is an alias to its `T`
+/// argument (`type Wrapper<T> = T`) — the simplest shape that exercises
+/// body_mode discrimination: under Expanded the body fully reduces to
+/// the substituted `Inner`, under Navigate the lowering keeps the
+/// `Wrapper` Ref shell as a lazy carrier.
+#[test]
+fn instantiate_memo_splits_per_body_mode() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Owner.vue",
+            r#"<script lang="ts">
+export interface Inner { tag: 'inner'; payload: string }
+export type Wrapper<T> = T
+</script>
+<script setup lang="ts">
+defineProps<Wrapper<Inner>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/Owner.vue").unwrap().unwrap();
+    let host = project.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    let wrapper_inner = TypeExpr::Ref {
+        name: StdArc::from("Wrapper"),
+        type_arguments: StdArc::from(vec![TypeExpr::Ref {
+            name: StdArc::from("Inner"),
+            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+        }]),
+    };
+
+    let lowered_expanded = dispatch
+        .lower_type_expr_in_scope_with_mode("/Owner.vue", &wrapper_inner, ProjectionMode::Expanded)
+        .expect("lower under Expanded must succeed");
+    let lowered_navigate = dispatch
+        .lower_type_expr_in_scope_with_mode("/Owner.vue", &wrapper_inner, ProjectionMode::Navigate)
+        .expect("lower under Navigate must succeed");
+
+    // Assertion 1: distinct SemanticNodeIds. Pre-Step-1 the family
+    // memo collapsed both modes onto one entry; post-Step-1 the
+    // `mode_to_slot(body_mode)` projection in
+    // `semantic_query_memo::family_and_slot` splits the slot, so the
+    // two lowerings produce structurally distinct nodes.
+    assert_ne!(
+        lowered_expanded, lowered_navigate,
+        "Instantiate memo must split per body_mode; same node id across \
+         body_modes means the key change at semantic_query.rs:747 is \
+         not flowing through to the family-slot projection"
+    );
+
+    // Assertion 2: Expanded fully reduces to the body's substituted
+    // shape. `type Wrapper<T> = T` with T=Inner reduces to Inner — the
+    // raised TypeExpr should NOT be a Ref to "Wrapper".
+    let expanded_raised = dispatch
+        .raise_node_to_type_expr(lowered_expanded)
+        .expect("raise expanded");
+    if let TypeExpr::Ref { ref name, .. } = expanded_raised {
+        assert_ne!(
+            name.as_ref(),
+            "Wrapper",
+            "Expanded body_mode must not preserve the Wrapper Ref shell — \
+             body lowering is supposed to substitute T and reduce. \
+             Got: {expanded_raised:?}"
+        );
+    }
+
+    // Assertion 3: Navigate keeps the Wrapper InstantiationRef shell
+    // (D26 lazy carrier semantics: `InstantiationRef` is TERMINAL under
+    // Navigate). Raising back to TypeExpr should preserve the Wrapper
+    // Ref so downstream callers can decide whether to project further.
+    let navigate_raised = dispatch
+        .raise_node_to_type_expr(lowered_navigate)
+        .expect("raise navigate");
+    match &navigate_raised {
+        TypeExpr::Ref { name, .. } => {
+            assert_eq!(
+                name.as_ref(),
+                "Wrapper",
+                "Navigate body_mode must preserve the Wrapper Ref shell as \
+                 a lazy carrier. Got name={:?}, full TypeExpr: {navigate_raised:?}",
+                name.as_ref(),
+            );
+        }
+        other => panic!("Navigate body_mode must raise back to a Ref carrier; got {other:?}"),
+    }
 }

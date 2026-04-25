@@ -1374,6 +1374,7 @@ mod tests {
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, 20),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1443,6 +1444,7 @@ mod tests {
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, 20),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1558,6 +1560,7 @@ mod tests {
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, 20),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1650,6 +1653,7 @@ defineEmits<Emits>()
                     type_expr: None,
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -1717,6 +1721,7 @@ defineEmits<Emits>()
                     type_expr: None,
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: Vec::new(),
@@ -1778,6 +1783,7 @@ defineEmits<Emits>()
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: Vec::new(),
@@ -1839,6 +1845,7 @@ defineSlots<CalendarSlots>()
                     type_expr: None,
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: Vec::new(),
@@ -1949,6 +1956,7 @@ type LocalItem = {
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![
@@ -2072,6 +2080,7 @@ type Props = Pick<ImportedBase, 'href'>
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2172,6 +2181,7 @@ type Props = Pick<ImportedBase, 'href'>
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2271,6 +2281,7 @@ type Props = {
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2367,6 +2378,7 @@ type Props = {
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2455,6 +2467,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                     ),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2541,6 +2554,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                     }))),
                     span: Span::new(0, source.len() as u32),
                 }],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2616,6 +2630,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, 1),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2703,6 +2718,7 @@ type Props = Omit<ImportedBase, 'hidden'>
                 default_values: Vec::new(),
                 expose_fields: Vec::new(),
                 resolved_local_types: Vec::new(),
+                parsed_type_argument: None,
                 span: Span::new(0, 1),
             }],
             macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
@@ -2782,6 +2798,7 @@ interface Helper {
                         span: Span::new(0, source.len() as u32),
                     },
                 ],
+                parsed_type_argument: None,
                 span: Span::new(0, source.len() as u32),
             }],
             macro_type_deps: Vec::new(),

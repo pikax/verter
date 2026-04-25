@@ -299,6 +299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return match self.execute(SemanticQueryKey::Instantiate {
                         base: builtin_identity,
                         args: Arc::from(arg_ids.into_boxed_slice()),
+                        body_mode: mode,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),
@@ -457,6 +458,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     match self.execute(SemanticQueryKey::Instantiate {
                         base: decl_identity,
                         args: Arc::from(arg_ids.into_boxed_slice()),
+                        body_mode: mode,
                     }) {
                         QueryResult::Value(id) => id,
                         _ => self.opaque(QueryError::Miss),

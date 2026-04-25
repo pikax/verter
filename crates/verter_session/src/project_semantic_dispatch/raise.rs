@@ -440,7 +440,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let build = move || match &key_for_build {
             SemanticQueryKey::ResolveDecl(decl_key) => self.build_resolve_decl(decl_key),
             SemanticQueryKey::TypeOf { value_root } => self.build_typeof(value_root),
-            SemanticQueryKey::Instantiate { base, args } => self.build_instantiate(base, args),
+            SemanticQueryKey::Instantiate {
+                base,
+                args,
+                body_mode,
+            } => self.build_instantiate(base, args, *body_mode),
             SemanticQueryKey::ProjectMember { base, member, mode } => {
                 let path: Arc<[PathSegment]> =
                     Arc::from(vec![PathSegment::Member(Arc::clone(member))].into_boxed_slice());
@@ -734,6 +738,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let key = SemanticQueryKey::Instantiate {
                     base: identity,
                     args,
+                    body_mode: mode,
                 };
                 self.dispatch_operator_with_recurse(node, key, mode, state)
             }
