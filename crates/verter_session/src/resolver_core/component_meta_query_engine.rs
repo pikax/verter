@@ -10000,6 +10000,82 @@ defineProps<{
         );
     }
 
+    /// FAIL-FIRST (plan §3 Step 7 / F3): rematerialize-phase callers
+    /// of `materialize_component_meta_type_expr_until_stable` must pass
+    /// `ProjectionMode::Navigate` so lazy `DeclRef` /
+    /// `InstantiationRef` carriers survive into the resolved payload
+    /// (D26 + D4 phase-by-construction). Compute-phase callers continue
+    /// to pass `Expanded`. Pre-fix every materialize call passed
+    /// Expanded; post-fix the rematerialize entry-point in
+    /// `host_manage::choose_less_symbolic_component_meta_type_expr`
+    /// passes Navigate.
+    ///
+    /// Static-text discriminator over `host_manage.rs` since runtime
+    /// instrumentation of "the inner call passed Navigate" requires
+    /// thread-locals that conflict with parallel test execution. The
+    /// structural invariant — Navigate threaded at the rematerialize
+    /// site — is observable directly.
+    #[test]
+    fn step7_rematerialize_uses_navigate_mode() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace parent")
+            .to_path_buf();
+        let host_manage_path = workspace_root
+            .join("crates")
+            .join("verter_session")
+            .join("src")
+            .join("host_manage.rs");
+        let raw_source = std::fs::read_to_string(&host_manage_path)
+            .unwrap_or_else(|e| panic!("read host_manage.rs: {e}"));
+        let source = raw_source.replace("\r\n", "\n");
+
+        let function_marker = "fn choose_less_symbolic_component_meta_type_expr(";
+        let function_start = source
+            .find(function_marker)
+            .expect("rematerialize-phase helper must be present");
+
+        let post_marker = function_start + function_marker.len();
+        let function_end = source[post_marker..]
+            .find("\n#[cfg_attr(feature = \"hotpath\", hotpath::measure)]\n")
+            .map(|offset| post_marker + offset)
+            .or_else(|| source[post_marker..].find("\nfn ").map(|o| post_marker + o))
+            .or_else(|| {
+                source[post_marker..]
+                    .find("\npub(crate) fn ")
+                    .map(|o| post_marker + o)
+            })
+            .unwrap_or(source.len());
+        let body = &source[function_start..function_end];
+
+        let materialize_marker = "materialize_component_meta_type_expr_until_stable(";
+        assert!(
+            body.contains(materialize_marker),
+            "rematerialize-phase helper must call materialize_component_meta_type_expr_until_stable"
+        );
+        // The Navigate mode argument must appear inside the call's
+        // argument list. Match the literal token to discriminate from
+        // Expanded — pre-fix this path passed Expanded.
+        let navigate_marker = "ProjectionMode::Navigate";
+        assert!(
+            body.contains(navigate_marker),
+            "rematerialize-phase helper must pass ProjectionMode::Navigate \
+             into materialize_component_meta_type_expr_until_stable. Pre-Step-6.4 \
+             this path passed Expanded; post-fix Navigate preserves lazy \
+             DeclRef / InstantiationRef carriers in the resolved payload."
+        );
+        // Ensure the Expanded literal does NOT appear in this same
+        // helper. (If both modes are passed in different inner calls,
+        // the assertion needs to be more precise; for now the
+        // rematerialize helper passes only Navigate.)
+        assert!(
+            !body.contains("ProjectionMode::Expanded"),
+            "rematerialize-phase helper must not pass ProjectionMode::Expanded — \
+             that would defeat the F3 lazy-terminal contract."
+        );
+    }
+
     /// REGRESSION INVARIANT (plan §3 Step 6.2): an indexed-access
     /// fixture that previously round-tripped to concrete literal
     /// unions still does so post-reorder. The reorder must not change
