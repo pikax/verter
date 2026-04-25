@@ -4669,7 +4669,15 @@ impl VerterHost {
                         verter_semantic::analysis::type_eval_build::MacroExpansionScope::Fallthrough
                     }
                 },
-                |parsed| {
+                |_field_kind, parsed| {
+                    // Step 9 / D32: closure now receives FieldKind discriminator
+                    // so session-side surface-id capture can route the
+                    // produced SemanticNodeId to the right
+                    // SurfaceNodeIdentities slot. The current closure body
+                    // does not yet capture node_ids — that wiring lands
+                    // alongside SurfaceNodeIdentities populate logic in a
+                    // follow-up commit. The `_field_kind` is unused for
+                    // now but the parameter is in place for consumers.
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };

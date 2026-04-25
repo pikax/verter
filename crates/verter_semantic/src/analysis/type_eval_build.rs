@@ -1318,6 +1318,30 @@ pub enum MacroExpansionScope {
     Fallthrough,
 }
 
+/// Field kind discriminator threaded into the closure passed to
+/// [`expand_macro_types_impl_with_expander`] (plan §3 Step 9.1 / D32).
+///
+/// The closure used to receive only the [`TypeExpr`]; session-side
+/// surface-id capture (Step 9 sidecar propagation) needs to know
+/// which output vector the result is destined for so the captured
+/// `SemanticNodeId` lands in the correct `SurfaceNodeIdentities`
+/// slot. Threading the discriminator at the closure-call boundary
+/// keeps the verter_semantic API scope-aware without exposing
+/// session-layer types upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    /// `defineProps<T>()` field — populates `ExpandedComponentTypes.props`.
+    Prop,
+    /// `defineEmits<T>()` field — populates `ExpandedComponentTypes.emits`.
+    Emit,
+    /// `defineSlots<T>()` slot binding — populates
+    /// `ExpandedComponentTypes.slot_bindings`.
+    SlotBinding,
+    /// `defineExpose<T>()` binding — populates
+    /// `ExpandedComponentTypes.bindings`.
+    Binding,
+}
+
 pub fn expand_macro_types_impl_with_expander<F>(
     macros: &[crate::analysis::types::AnalyzedMacro],
     source: Option<&str>,
@@ -1328,6 +1352,7 @@ pub fn expand_macro_types_impl_with_expander<F>(
 ) -> crate::analysis::type_expand::ExpandedComponentTypes
 where
     F: FnMut(
+        FieldKind,
         &TypeExpr,
     ) -> crate::analysis::type_expand::ExpansionResult<
         crate::analysis::type_expand::ExpandedNormalizedExpr,
@@ -1366,7 +1391,7 @@ where
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(&parsed);
+                    let expanded = expand_field_expr(FieldKind::Prop, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1406,7 +1431,7 @@ where
                         start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                     };
                     log_expand_stage_start(&stage_log);
-                    let expanded = expand_field_expr(&parsed);
+                    let expanded = expand_field_expr(FieldKind::Emit, &parsed);
                     log_expand_stage(
                         stage_log,
                         expanded.exactness,
@@ -1445,7 +1470,7 @@ where
                                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
                             };
                             log_expand_stage_start(&stage_log);
-                            let expanded = expand_field_expr(&parsed);
+                            let expanded = expand_field_expr(FieldKind::SlotBinding, &parsed);
                             log_expand_stage(
                                 stage_log,
                                 expanded.exactness,
@@ -1482,7 +1507,7 @@ where
                 start_steps: debug_env.as_deref().map(EvalEnv::steps).unwrap_or(0),
             };
             log_expand_stage_start(&stage_log);
-            let expanded = expand_field_expr(type_ann);
+            let expanded = expand_field_expr(FieldKind::Binding, type_ann);
             log_expand_stage(
                 stage_log,
                 expanded.exactness,

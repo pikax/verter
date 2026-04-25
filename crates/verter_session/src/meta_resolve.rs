@@ -374,6 +374,38 @@ pub struct ResolvedComponentMetaComputeAudit {
     pub solver: crate::component_meta_audit::RustSolverAudit,
 }
 
+/// Vector-aligned sidecar carrying the producing `SemanticNodeId`
+/// for each output entry in `ExpandedComponentTypes` /
+/// `ResolvedTypeRegistry` (plan §3 §1.7 + Step 9.1, D19).
+///
+/// Populated when audit is on so `build_origin_graph` can scope the
+/// reachable-subgraph walk to the actual surface nodes the request
+/// touched, rather than exporting every edge ever recorded by the
+/// shared graph store. `None` entries indicate synthetic /
+/// inline-annotation results that bypassed dispatch (no
+/// `SemanticNodeId` available).
+///
+/// Index alignment is invariant: `prop_node_ids[i]` corresponds to
+/// `evaluated_types.props[i]`, etc. Length-equality checked at
+/// construction time inside `compute_component_meta_state_inner`.
+///
+/// Stored on `ResolvedComponentMetaState.surface_identities` —
+/// session-layer only (per crate-layering §1.3 + D19, NOT pushed
+/// upstream into `verter_semantic` types).
+#[derive(Debug, Clone, Default)]
+pub struct SurfaceNodeIdentities {
+    /// Index-aligned with `ExpandedComponentTypes.props`.
+    pub prop_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    /// Index-aligned with `ExpandedComponentTypes.emits`.
+    pub emit_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    /// Index-aligned with `ExpandedComponentTypes.slot_bindings`.
+    pub slot_binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    /// Index-aligned with `ExpandedComponentTypes.bindings`.
+    pub binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    /// Index-aligned with `ResolvedComponentMetaState.resolved_type_registry`.
+    pub registry_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedComponentMetaState {
     /// The raw analysis snapshot (never mutated for enrichment).
@@ -395,6 +427,10 @@ pub struct ResolvedComponentMetaState {
     pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
+    /// Surface-id sidecar (plan §3 Step 9.1 / §1.7 / D19). Populated only
+    /// when audit is on; the scoped origin export reads `prop_node_ids`
+    /// etc. as starting points for the reachable-subgraph walk.
+    pub surface_identities: Option<SurfaceNodeIdentities>,
     /// Origin subgraph for semantic results. Populated in `Expanded` mode
     /// by walking the `SemanticGraphStore` after dispatch resolution.
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
@@ -5821,6 +5857,15 @@ impl VerterHost {
             }
         }
 
+        // Step 9.1: SurfaceNodeIdentities sidecar — currently
+        // structurally `None` because the closure threading at the
+        // expand_macro_types_impl_with_expander call site does not yet
+        // capture node_ids per FieldKind. The struct + field are in
+        // place so the scoped origin walk in build_origin_graph (Step
+        // 9.2) can opt into them when populated.
+        let surface_identities: Option<SurfaceNodeIdentities> = None;
+        let surface_identities_for_export = surface_identities.clone();
+
         let state = ResolvedComponentMetaState {
             snapshot,
             mode,
@@ -5830,6 +5875,7 @@ impl VerterHost {
             resolved_type_registry_meta: parts.resolved_type_registry_meta,
             evaluated_types: parts.evaluated_types,
             fact_versions: merged_fact_versions,
+            surface_identities,
             compute_audit: audit_enabled.then_some(ResolvedComponentMetaComputeAudit {
                 timings: audit_timings,
                 solver: solver_audit,
@@ -5837,10 +5883,19 @@ impl VerterHost {
             // F1 (D3, D34): origin_graph is audit-only. Gate matches LSP's
             // hover-provenance contract at server.rs:6918-6953 — both
             // audit_enabled and footprint_capture must be on.
+            // Step 9.2 / F6: surface_identities (when populated) scopes
+            // the export to the reachable subgraph rooted at the
+            // request's surface nodes; falls back to workspace-total
+            // export when None.
             origin_graph: (mode == ProjectionMode::Expanded
                 && audit_enabled
                 && self.config.footprint_capture)
-                .then(|| build_origin_graph(self.project_type_store.semantic_graph()))
+                .then(|| {
+                    build_origin_graph(
+                        self.project_type_store.semantic_graph(),
+                        surface_identities_for_export.as_ref(),
+                    )
+                })
                 .filter(|dto| !dto.edges.is_empty()),
             request_id: 0,
         };
@@ -10573,12 +10628,70 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn build_origin_graph(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    surface_identities: Option<&SurfaceNodeIdentities>,
 ) -> verter_protocol::types::OriginGraphDto {
     use crate::semantic_query::OriginEdgeKind;
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use std::collections::VecDeque;
     use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
 
-    let all_edges = graph.export_all_origin_edges();
+    // Step 9.2 / F6 scoped origin export: when surface_identities are
+    // populated, reverse-walk via walk_origin_chain starting from each
+    // surface node and collect only the reachable subgraph. Falls back
+    // to export_all_origin_edges when surface_identities is None
+    // (audit-off path or pre-populated state).
+    let all_edges = if let Some(ids) = surface_identities {
+        let mut roots: Vec<crate::semantic_query::SemanticNodeId> = Vec::new();
+        let push_some =
+            |roots: &mut Vec<_>, opt: &Option<crate::semantic_query::SemanticNodeId>| {
+                if let Some(id) = opt {
+                    roots.push(*id);
+                }
+            };
+        for id in &ids.prop_node_ids {
+            push_some(&mut roots, id);
+        }
+        for id in &ids.emit_node_ids {
+            push_some(&mut roots, id);
+        }
+        for id in &ids.slot_binding_node_ids {
+            push_some(&mut roots, id);
+        }
+        for id in &ids.binding_node_ids {
+            push_some(&mut roots, id);
+        }
+        for id in &ids.registry_node_ids {
+            push_some(&mut roots, id);
+        }
+        if roots.is_empty() {
+            return OriginGraphDto::default();
+        }
+        let mut reached: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
+        let mut worklist: VecDeque<crate::semantic_query::SemanticNodeId> =
+            roots.into_iter().collect();
+        let mut collected: Vec<(
+            crate::semantic_query::SemanticNodeId,
+            OriginEdgeKind,
+            crate::semantic_query::OriginEdge,
+        )> = Vec::new();
+        while let Some(node) = worklist.pop_front() {
+            if !reached.insert(node) {
+                continue;
+            }
+            graph.walk_origin_chain(node, |kind, edge| {
+                collected.push((node, kind, edge.clone()));
+                for source in edge.sources.iter() {
+                    if !reached.contains(source) {
+                        worklist.push_back(*source);
+                    }
+                }
+            });
+        }
+        collected
+    } else {
+        graph.export_all_origin_edges()
+    };
+
     if all_edges.is_empty() {
         return OriginGraphDto::default();
     }

@@ -2108,6 +2108,7 @@ mod tests {
             compute_audit: None,
             origin_graph: None,
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -2224,6 +2225,7 @@ mod tests {
             compute_audit: None,
             origin_graph: None,
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi = component_meta_analysis_to_ffi_with_resolution(analysis, Some(&resolved_state));
@@ -3567,6 +3569,7 @@ mod tests {
                 meta_strings: Vec::new(),
             }),
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi =
@@ -3593,6 +3596,7 @@ mod tests {
             compute_audit: None,
             origin_graph: None,
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi =
@@ -3647,6 +3651,7 @@ mod tests {
                 meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
             }),
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi =
@@ -3677,6 +3682,7 @@ mod tests {
             compute_audit: None,
             origin_graph: None,
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi = resolved_component_meta_to_ffi(&resolved_state);
@@ -3735,6 +3741,7 @@ mod tests {
                 meta_strings: vec!["SubstitutedParam(\"T\")".to_string()],
             }),
             request_id: 0,
+            surface_identities: None,
         };
 
         let ffi =
