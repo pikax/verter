@@ -622,7 +622,7 @@ pub enum QueryError {
     AliasCycle { chain: Arc<[Arc<str>]> },
     /// Recursive back-edge sentinel emitted when dispatch detects a
     /// declaration expanding into itself (e.g., `type TreeNode = {
-    /// children: TreeNode[] }`). `semantic_node_to_type_expr` converts
+    /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
     /// this to [`TypeExpr::RecursiveRef`] so the materialiser stops at
     /// the back-edge instead of recursing indefinitely. Plan §5.8 /
     /// plan §1.4 recursion handling.
@@ -1051,6 +1051,38 @@ pub enum SemanticNodeData {
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
     },
+    /// Lazy declaration-reference carrier (plan §3 Step 6.1.A, D26).
+    ///
+    /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
+    /// encounters a `TypeExpr::Ref { name, type_arguments: [] }`. Identity
+    /// is the [`DeclIdentity`] (`canonical_id + whole_hash + decl_name`)
+    /// — two equivalent navigate-mode references intern to the same node.
+    ///
+    /// The walker treats this variant as terminal in `Navigate` mode
+    /// ([`PathWalker`] does not dispatch `ResolveDecl`); in `Expanded` mode
+    /// the reducer ([`raise_and_reduce`]) issues a `ResolveDecl` dispatch
+    /// and substitutes the result.
+    ///
+    /// Raises to `TypeExpr::Ref { name: identity.decl_name, type_arguments: [] }`.
+    DeclRef {
+        identity: DeclIdentity,
+    },
+    /// Lazy generic-application carrier (plan §3 Step 6.1.A, D26).
+    ///
+    /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
+    /// encounters a `TypeExpr::Ref { name, type_arguments: [...non-empty] }`.
+    /// Identity is `(DeclIdentity, args)` — two structurally-equivalent
+    /// navigate-mode generic applications intern to the same node.
+    ///
+    /// Terminal in `Navigate` mode (no `Instantiate` dispatch); the
+    /// reducer issues `Instantiate` in `Expanded` mode and substitutes
+    /// the result.
+    ///
+    /// Raises to `TypeExpr::Ref { name: base.decl_name, type_arguments: [...raised args] }`.
+    InstantiationRef {
+        base: DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
+    },
 }
 
 impl SemanticNodeData {
@@ -1085,6 +1117,8 @@ impl SemanticNodeData {
             Self::Conditional { .. } => 17,
             Self::VueMacroElements(_) => 18,
             Self::Function { .. } => 19,
+            Self::DeclRef { .. } => 20,
+            Self::InstantiationRef { .. } => 21,
         }
     }
 }
@@ -1234,6 +1268,11 @@ impl PartialEq for SemanticNodeData {
                     type_parameters: btp,
                 },
             ) => ap == bp && ar == br && atp == btp,
+            (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
+            (
+                Self::InstantiationRef { base: ab, args: aa },
+                Self::InstantiationRef { base: bb, args: ba },
+            ) => ab == bb && aa == ba,
             _ => false,
         }
     }
@@ -1341,6 +1380,13 @@ impl std::hash::Hash for SemanticNodeData {
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
+            }
+            Self::DeclRef { identity } => {
+                identity.hash(state);
+            }
+            Self::InstantiationRef { base, args } => {
+                base.hash(state);
+                args.hash(state);
             }
         }
     }

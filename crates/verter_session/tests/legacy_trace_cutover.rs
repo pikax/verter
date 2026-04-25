@@ -199,11 +199,19 @@ fn every_custom_variant_construction_site_has_justification_comment() {
                 continue;
             }
 
-            // Exclude pattern-match forms:
+            // Exclude pattern-match forms. Constructions populate every
+            // field by name (no `..` rest pattern); destructuring uses
+            // bare names and may include `..`. The presence of `..`
+            // anywhere inside the `{ ... }` block — alone, after a
+            // field name, after multiple fields — is the discriminator.
+            //
             //   `Custom { .. }`              — rest pattern
+            //   `Custom { name, .. }`        — name + rest
+            //   `Custom { name, detail }`    — both fields, no rest
             //   `Custom { name, detail } =>` — destructuring match arm
             //   Any `=>` on the same line indicates a match arm.
-            if line.contains("Custom { .. }")
+            let is_destructuring_with_rest = line.contains("Custom { ") && line.contains("..");
+            if is_destructuring_with_rest
                 || line.contains("Custom { name, detail }")
                 || line.contains(" => ")
                 || line.trim_end().ends_with("=>")

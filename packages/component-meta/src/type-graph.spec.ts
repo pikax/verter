@@ -384,9 +384,14 @@ describe("decodeComponentMetaPayload", () => {
     const propType = native.props[0]!.type;
     const registry = new Map((native.typeRegistry ?? []).map((entry) => [entry.name, entry.type]));
 
+    // Plan §3 Step 6.5: graphTypeExprToString renders the indexed-access
+    // shape structurally (`Fields[label]`) instead of leaking the node
+    // discriminator (`graphNode(13)`). The unknown fallback still fires
+    // because no typeRegistry is supplied to resolve `Fields`, but the
+    // string form is now diagnostic-friendly.
     expect(typeExprToDescriptor(propType)).toEqual({
       kind: "unknown",
-      rawType: "graphNode(13)",
+      rawType: "Fields[label]",
     });
     expect(typeExprToDescriptor(propType, registry)).toEqual({ kind: "primitive", name: "string" });
   });

@@ -81,6 +81,7 @@ pub(crate) mod build;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod lower;
+pub(crate) mod raise;
 pub(crate) mod relation;
 pub(crate) mod substitute;
 pub(crate) mod walk;
@@ -276,6 +277,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &name_resolution,
             scope_payload.as_ref(),
             &mut substitutions,
+            crate::semantic_query::ProjectionMode::Expanded,
         );
         Some(id)
     }

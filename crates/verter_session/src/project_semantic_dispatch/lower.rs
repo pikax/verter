@@ -62,6 +62,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        mode: ProjectionMode,
     ) -> SemanticNodeId {
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
@@ -90,6 +91,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         )
                     });
                     let default = param.default.as_ref().map(|d| {
@@ -100,6 +102,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         )
                     });
                     let display_name: Arc<str> = Arc::from(param.name.as_str());
@@ -183,6 +186,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     )
                 });
                 let default = binding.default.as_ref().map(|d| {
@@ -193,6 +197,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     )
                 });
                 let display_name = Arc::clone(&binding.name);
@@ -281,6 +286,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             )
                         })
                         .collect();
@@ -352,6 +358,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 let resolved_canonical_clone = Arc::clone(&resolved_canonical);
                 let resolved_name_clone = Arc::clone(&resolved_name);
+
+                // D26+D27 lazy carriers: in `Navigate` mode, intern a
+                // `DeclRef` / `InstantiationRef` carrier rather than
+                // executing `ResolveDecl` / `Instantiate` eagerly. Cache
+                // identity is the `DeclIdentity` (canonical_id +
+                // whole_hash + decl_name) — same as the eager path
+                // would have produced internally, so the lazy form's
+                // hash collapses to the same memo entry. The walker
+                // (D28) treats `DeclRef` as transparent through alias
+                // chains and `InstantiationRef` as terminal.
+                let whole_hash = self
+                    .host
+                    .shallow_file_state(resolved_canonical_clone.as_ref())
+                    .map_or(HashValue::default(), |s| s.whole_hash);
+                let decl_identity = DeclIdentity {
+                    canonical_id: Arc::clone(&resolved_canonical_clone),
+                    whole_hash,
+                    decl_name: Arc::clone(&resolved_name_clone),
+                };
+                if matches!(mode, ProjectionMode::Navigate) {
+                    if type_arguments.is_empty() {
+                        return graph.intern_node_with_scope(
+                            SemanticNodeData::DeclRef {
+                                identity: decl_identity,
+                            },
+                            scope.clone(),
+                        );
+                    } else {
+                        let arg_ids: Vec<SemanticNodeId> = type_arguments
+                            .iter()
+                            .map(|arg| {
+                                self.shallow_lower_type_expr(
+                                    arg,
+                                    env,
+                                    scope,
+                                    name_resolution,
+                                    scope_payload,
+                                    substitutions,
+                                    mode,
+                                )
+                            })
+                            .collect();
+                        return graph.intern_node_with_scope(
+                            SemanticNodeData::InstantiationRef {
+                                base: decl_identity,
+                                args: Arc::from(arg_ids.into_boxed_slice()),
+                            },
+                            scope.clone(),
+                        );
+                    }
+                }
+
                 let anchor = match self.execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope: ScopeId {
                         canonical_id: resolved_canonical,
@@ -376,15 +434,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if type_arguments.is_empty() && !decl_routes_through_instantiate {
                     anchor
                 } else {
-                    let whole_hash = self
-                        .host
-                        .shallow_file_state(resolved_canonical_clone.as_ref())
-                        .map_or(HashValue::default(), |s| s.whole_hash);
-                    let decl_identity = DeclIdentity {
-                        canonical_id: resolved_canonical_clone,
-                        whole_hash,
-                        decl_name: resolved_name_clone,
-                    };
                     let arg_ids: Vec<SemanticNodeId> = type_arguments
                         .iter()
                         .map(|arg| {
@@ -395,6 +444,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             )
                         })
                         .collect();
@@ -417,6 +467,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     ));
                 }
                 if arm_ids.is_empty() {
@@ -440,6 +491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     ));
                 }
                 if arm_ids.is_empty() {
@@ -468,6 +520,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             members.push(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
@@ -500,7 +553,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // inspect parameter / return structure at the
                             // graph level instead of falling back to an
                             // opaque miss. The reverse mapping
-                            // `semantic_node_to_type_expr` reconstitutes
+                            // `raise_node_to_type_expr` reconstitutes
                             // `ObjectMember::CallSignature` entries from
                             // `SurfaceView.call_signatures` by matching
                             // `TypeExpr::Function(...)`.
@@ -512,6 +565,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             call_signatures.push(fn_id);
                         }
@@ -524,6 +578,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             construct_signatures.push(fn_id);
                         }
@@ -535,6 +590,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             let value_type = self.shallow_lower_type_expr(
                                 &sig.value_type,
@@ -543,6 +599,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             index_signatures.push(IndexSignature {
                                 key_type,
@@ -576,6 +633,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 graph.intern_node_with_scope(
                     SemanticNodeData::Array {
@@ -601,6 +659,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     );
                     lowered_elements.push(TupleElement {
                         label: element.label.as_deref().map(Arc::<str>::from),
@@ -639,6 +698,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         )
                     })
                     .collect();
@@ -660,6 +720,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 name_resolution,
                 scope_payload,
                 substitutions,
+                mode,
             ),
             // Mapped types (`{ [K in keyof T]: T[K] }` and friends)
             // route through `SemanticQueryKey::MappedType` so `build_mapped_type`
@@ -745,6 +806,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         );
                         let key_space =
                             match self.execute(SemanticQueryKey::KeyOf { base: inner_id }) {
@@ -762,6 +824,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         );
                         (lowered, lowered)
                     }
@@ -774,6 +837,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
 
                 let optionality = match optional {
@@ -795,6 +859,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     )
                 });
 
@@ -841,6 +906,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 match graph.node_data(base_id).as_deref() {
                     Some(SemanticNodeData::Object(_)) => {
@@ -868,6 +934,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 // Try to reduce literal-string / literal-number indices
                 // to a `PathSegment::Index` — fall back to TypeNode for
@@ -888,6 +955,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             );
                             IndexKey::TypeNode(idx_id)
                         }
@@ -900,6 +968,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         );
                         IndexKey::TypeNode(idx_id)
                     }
@@ -941,6 +1010,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 let extends_id = self.shallow_lower_type_expr(
                     extends,
@@ -949,6 +1019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 // Plan §3 Cluster A: when `extends` lowers to a bare
                 // `SemanticNodeData::Infer { name }`, bind the infer
@@ -977,6 +1048,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 let false_id = self.shallow_lower_type_expr(
                     false_type,
@@ -985,6 +1057,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     name_resolution,
                     scope_payload,
                     substitutions,
+                    mode,
                 );
                 match self.execute(SemanticQueryKey::Conditional {
                     check: check_id,
@@ -1065,6 +1138,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             name_resolution,
                             scope_payload,
                             substitutions,
+                            mode,
                         ),
                         optional: param.optional,
                         rest: param.rest,
@@ -1078,6 +1152,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         name_resolution,
                         scope_payload,
                         substitutions,
+                        mode,
                     ),
                     None => self.opaque(QueryError::Miss),
                 };
@@ -1094,6 +1169,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             )
                         }),
                         default: tp.default.as_deref().map(|d| {
@@ -1104,6 +1180,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 name_resolution,
                                 scope_payload,
                                 substitutions,
+                                mode,
                             )
                         }),
                     })

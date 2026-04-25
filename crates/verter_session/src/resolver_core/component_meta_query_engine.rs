@@ -28,8 +28,8 @@ use crate::project_semantic_dispatch::{node_data_for, resolve_decl_key, ProjectS
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::{
-    IndexKey, PathSegment, PrimitiveKind as SemanticPrimitiveKind, ProjectionMode, QueryError,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SurfaceView,
+    PathSegment, ProjectionMode, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SurfaceView,
 };
 use crate::VerterHost;
 
@@ -199,17 +199,19 @@ pub struct ComponentMetaQueryEngine<'a> {
     >,
     /// §4.5 item 3-4: per-request memo for
     /// `materialize_component_meta_type_expr_until_stable` keyed on
-    /// `(scope_canonical_id, candidate_expr)`. Purity audit (see
-    /// `.claude/feedback/feedback-2026-04-17-phase1cc.md`) confirmed the
-    /// materializer's output depends only on `(candidate, scope,
-    /// query_engine_state)` — no cross-candidate "best-so-far" baseline
-    /// leaks in, and the solver caches are monotonic-additive. `TypeExpr`
-    /// derives `PartialEq + Eq + Hash` so it serves as the identity
-    /// directly (no separate `TypeExprIdentity` construct needed).
+    /// `(scope_canonical_id, candidate_expr, navigate_mode_flag)`.
+    /// Step 6.3 added `mode` as a memo discriminator since
+    /// `Navigate` and `Expanded` produce structurally different
+    /// outputs (lazy carriers vs. eager resolution). Purity audit
+    /// confirmed the materializer's output depends only on
+    /// `(candidate, scope, mode, query_engine_state)`. The cached
+    /// value is `MaterializedTypeExpr` so callers that read
+    /// `node_id` / `dep_signature` (Step 9 sidecar capture +
+    /// Step 6.6.A fence merge) get them from the memo too.
     /// Cleared at end-of-request when the engine drops.
     pub(crate) materialize_memo: FxHashMap<
-        (String, verter_semantic::analysis::type_expr::TypeExpr),
-        verter_semantic::analysis::type_expr::TypeExpr,
+        (String, verter_semantic::analysis::type_expr::TypeExpr, bool),
+        crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
@@ -380,7 +382,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    fn scope_payload_for_scope(
+    /// Returns the cached [`DeclarationScopePayload`] for
+    /// `scope_canonical_id`, lazily loading the underlying
+    /// `prepared_decl_bundle` on first access (plan §3 Step 6.3 D35:
+    /// promoted to `pub(crate)` so the session-layer materialize wrapper
+    /// in `meta_resolve.rs` can reuse the cache without re-walking the
+    /// bundle).
+    pub(crate) fn scope_payload_for_scope(
         &mut self,
         scope_canonical_id: &str,
     ) -> Option<std::sync::Arc<DeclarationScopePayload>> {
@@ -2046,7 +2054,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     path: query_path,
                     mode: ProjectionMode::Expanded,
                 }) {
-                    QueryResult::Value(node) => semantic_node_to_type_expr(self.host, node)
+                    QueryResult::Value(node) => dispatch
+                        .raise_node_to_type_expr(node)
                         .filter(dispatch_route_expr_is_materialized),
                     _ => None,
                 }
@@ -3502,7 +3511,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }) else {
             return None;
         };
-        let projected = semantic_node_to_type_expr(self.host, node)?;
+        let projected = dispatch.raise_node_to_type_expr(node)?;
         (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
             .then_some(projected)
     }
@@ -3538,7 +3547,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }) else {
             return None;
         };
-        let projected = semantic_node_to_type_expr(self.host, node)?;
+        let projected = dispatch.raise_node_to_type_expr(node)?;
         type_expr_has_any_object_arm(&projected).then_some(projected)
     }
 
@@ -3574,7 +3583,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }) else {
             return None;
         };
-        let reduced = semantic_node_to_type_expr(self.host, node)?;
+        let reduced = dispatch.raise_node_to_type_expr(node)?;
         (!type_expr_contains_semantic_miss(&reduced)
             && type_expr_is_expanded_surface(&reduced)
             && reduced != *expr)
@@ -5329,15 +5338,21 @@ fn projected_surface_from_semantic_node_inner(
     }
 }
 
-fn surface_view_to_projected_surface(host: &VerterHost, surface: &SurfaceView) -> ProjectedSurface {
+pub(crate) fn surface_view_to_projected_surface(
+    host: &VerterHost,
+    surface: &SurfaceView,
+) -> ProjectedSurface {
+    let dispatch = ProjectSemanticDispatch::new(host);
     let members = surface
         .members
         .iter()
         .map(|member| ProjectedMember {
             name: member.name.as_ref().to_string(),
-            ty: semantic_node_to_type_expr(host, member.value).unwrap_or(TypeExpr::Unknown {
-                raw: SEMANTIC_SURFACE_MEMBER.to_string(),
-            }),
+            ty: dispatch
+                .raise_node_to_type_expr(member.value)
+                .unwrap_or(TypeExpr::Unknown {
+                    raw: SEMANTIC_SURFACE_MEMBER.to_string(),
+                }),
             optional: member.optional,
             readonly: member.readonly,
             is_method: member.is_method,
@@ -5346,12 +5361,12 @@ fn surface_view_to_projected_surface(host: &VerterHost, surface: &SurfaceView) -
     let call_signatures = surface
         .call_signatures
         .iter()
-        .filter_map(|signature| semantic_node_to_type_expr(host, *signature))
+        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
         .collect();
     let construct_signatures = surface
         .construct_signatures
         .iter()
-        .filter_map(|signature| semantic_node_to_type_expr(host, *signature))
+        .filter_map(|signature| dispatch.raise_node_to_type_expr(*signature))
         .collect();
     ProjectedSurface {
         members,
@@ -5369,342 +5384,10 @@ fn filtered_projected_surface(
     surface
 }
 
-fn semantic_node_to_type_expr(host: &VerterHost, node: SemanticNodeId) -> Option<TypeExpr> {
-    let mut active = FxHashSet::default();
-    semantic_node_to_type_expr_inner(host, node, &mut active)
-}
-
-fn semantic_node_to_type_expr_inner(
-    host: &VerterHost,
-    node: SemanticNodeId,
-    active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<TypeExpr> {
-    let data = node_data_for(host, node)?;
-    Some(match data.as_ref() {
-        SemanticNodeData::Primitive(kind) => semantic_primitive_to_type_expr(*kind),
-        SemanticNodeData::Literal(value) => TypeExpr::Literal(value.clone()),
-        SemanticNodeData::Alias(target) => {
-            if !active.insert(node) {
-                return Some(TypeExpr::Unknown {
-                    raw: "semanticAliasCycle".to_string(),
-                });
-            }
-            let result = semantic_node_to_type_expr_inner(host, *target, active);
-            active.remove(&node);
-            return result;
-        }
-        SemanticNodeData::Union(members) => TypeExpr::Union(std::sync::Arc::from(
-            members
-                .iter()
-                .filter_map(|member| semantic_node_to_type_expr_inner(host, *member, active))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        )),
-        SemanticNodeData::Intersection(members) => {
-            // Path C C11a — drop empty-object arms from the
-            // Intersection projection. `Id<T> = {} & { [P in keyof T]: T[P] }`
-            // and similar helper patterns lower to
-            // Intersection([empty_object, mapped_object]); the empty
-            // arm contributes nothing semantically (`{} & X ≡ X`) but
-            // leaks through as a `TypeExpr::Unknown { raw:
-            // SEMANTIC_OBJECT_SURFACE }` sentinel which breaks callers
-            // that expect a pure Object at the projection boundary.
-            // Dropping the semantically-vacuous arm here collapses
-            // `{} & X → X` so imported-helper ui bindings materialise
-            // cleanly instead of nested in Intersection([Unknown, Object]).
-            let mut arms: Vec<TypeExpr> = members
-                .iter()
-                .filter_map(|member| semantic_node_to_type_expr_inner(host, *member, active))
-                .filter(|arm| !matches!(arm, TypeExpr::Unknown { raw } if raw == SEMANTIC_OBJECT_SURFACE))
-                .collect();
-            if arms.len() == 1 {
-                arms.pop().unwrap()
-            } else {
-                TypeExpr::Intersection(std::sync::Arc::from(arms.into_boxed_slice()))
-            }
-        }
-        SemanticNodeData::Array { element, readonly } => TypeExpr::Array {
-            element: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *element, active)?),
-            readonly: *readonly,
-        },
-        SemanticNodeData::Tuple { elements, readonly } => {
-            use verter_semantic::analysis::type_expr::TupleElement;
-
-            TypeExpr::Tuple {
-                elements: std::sync::Arc::from(
-                    elements
-                        .iter()
-                        .filter_map(|element| {
-                            Some(TupleElement {
-                                label: element
-                                    .label
-                                    .as_ref()
-                                    .map(|label| label.as_ref().to_string()),
-                                ty: semantic_node_to_type_expr_inner(host, element.value, active)?,
-                                optional: element.optional,
-                                rest: element.rest,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-                readonly: *readonly,
-            }
-        }
-        SemanticNodeData::Object(surface) => {
-            projected_surface_to_type_expr(&surface_view_to_projected_surface(host, surface))
-                .unwrap_or(TypeExpr::Unknown {
-                    raw: SEMANTIC_OBJECT_SURFACE.to_string(),
-                })
-        }
-        // C16: DeclPlaceholder → TypeExpr::Ref (replaces DeclAnchor).
-        SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
-            name,
-            ..
-        }) => TypeExpr::Ref {
-            name: std::sync::Arc::clone(name),
-            type_arguments: verter_semantic::analysis::type_expr::empty_type_args(),
-        },
-        SemanticNodeData::Conditional {
-            check,
-            extends,
-            true_branch_ref,
-            false_branch_ref,
-            ..
-        } => TypeExpr::Conditional {
-            check: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *check, active)?),
-            extends: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *extends, active)?),
-            true_type: std::sync::Arc::new(semantic_node_to_type_expr_inner(
-                host,
-                *true_branch_ref,
-                active,
-            )?),
-            false_type: std::sync::Arc::new(semantic_node_to_type_expr_inner(
-                host,
-                *false_branch_ref,
-                active,
-            )?),
-        },
-        SemanticNodeData::TemplateLiteral {
-            quasis,
-            expressions,
-        } => TypeExpr::TemplateLiteral {
-            quasis: quasis
-                .iter()
-                .map(|quasi| quasi.as_ref().to_string())
-                .collect(),
-            expressions: std::sync::Arc::from(
-                expressions
-                    .iter()
-                    .filter_map(|expr| semantic_node_to_type_expr_inner(host, *expr, active))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-        },
-        SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-            semantic_node_to_type_expr_inner(host, *base, active)?,
-        )),
-        SemanticNodeData::IndexedAccess { object, index } => TypeExpr::IndexedAccess {
-            object: std::sync::Arc::new(semantic_node_to_type_expr_inner(host, *object, active)?),
-            index: std::sync::Arc::new(index_key_to_type_expr(host, index, active)?),
-        },
-        SemanticNodeData::Mapped { mapper, .. } => TypeExpr::Mapped {
-            // Path C C6a item 9c: presentational projection. Look
-            // up the binder node by `mapper.parameter_node` and
-            // read its `display_name` for the projected
-            // `TypeExpr::Mapped { parameter }` field. C7's interner
-            // dedups only structurally-identical binders, so the
-            // representative's display_name is well-defined.
-            parameter: match node_data_for(host, mapper.parameter_node).as_deref() {
-                Some(SemanticNodeData::TypeParam { display_name, .. }) => {
-                    display_name.as_ref().to_string()
-                }
-                _ => String::new(),
-            },
-            source: std::sync::Arc::new(match node_data_for(host, mapper.key_space)?.as_ref() {
-                SemanticNodeData::KeyOf { base } => TypeExpr::KeyOf(std::sync::Arc::new(
-                    semantic_node_to_type_expr_inner(host, *base, active)?,
-                )),
-                _ => semantic_node_to_type_expr_inner(host, mapper.key_space, active)?,
-            }),
-            value: std::sync::Arc::new(semantic_node_to_type_expr_inner(
-                host,
-                mapper.value_expr,
-                active,
-            )?),
-            optional: match mapper.optionality {
-                crate::semantic_query::OptionalityMod::Add => {
-                    verter_semantic::analysis::type_expr::MappedModifier::Add
-                }
-                crate::semantic_query::OptionalityMod::Remove => {
-                    verter_semantic::analysis::type_expr::MappedModifier::Remove
-                }
-                crate::semantic_query::OptionalityMod::Keep => {
-                    verter_semantic::analysis::type_expr::MappedModifier::None
-                }
-            },
-            readonly: match mapper.readonly {
-                crate::semantic_query::ReadonlyMod::Add => {
-                    verter_semantic::analysis::type_expr::MappedModifier::Add
-                }
-                crate::semantic_query::ReadonlyMod::Remove => {
-                    verter_semantic::analysis::type_expr::MappedModifier::Remove
-                }
-                crate::semantic_query::ReadonlyMod::Keep => {
-                    verter_semantic::analysis::type_expr::MappedModifier::None
-                }
-            },
-            name_type: match mapper.name_remap {
-                Some(node) => Some(std::sync::Arc::new(semantic_node_to_type_expr_inner(
-                    host, node, active,
-                )?)),
-                None => None,
-            },
-        },
-        SemanticNodeData::TypeOf { value_root, path } => {
-            let mut segments = value_root
-                .name
-                .split('.')
-                .map(|segment| segment.to_string())
-                .collect::<Vec<_>>();
-            segments.extend(path.iter().map(|segment| segment.as_ref().to_string()));
-            TypeExpr::TypeOf(verter_semantic::analysis::type_expr::ValueRef { path: segments })
-        }
-        SemanticNodeData::TypeParam {
-            display_name,
-            constraint,
-            default,
-            ..
-        } => {
-            // Plan §3 Cluster A: project `constraint` / `default` back
-            // to `TypeExpr` so the round-trip preserves the declaration
-            // shape. The `active` visited set guards against cyclic
-            // constraint graphs (plan F7): when a TypeParam's
-            // constraint or default transitively reaches this same
-            // node, return `None` from the recursion and drop the
-            // field rather than looping.
-            //
-            // Path C C6: the projected `TypeExpr::TypeParameter.name`
-            // uses `display_name` — the human-readable parameter
-            // name. `decl` / `param_index` are identity discriminators
-            // for structural interning and do not appear in the
-            // projected `TypeExpr` shape.
-            if !active.insert(node) {
-                return Some(TypeExpr::Unknown {
-                    raw: "semanticTypeParamCycle".to_string(),
-                });
-            }
-            let constraint_expr = constraint
-                .as_ref()
-                .and_then(|c| semantic_node_to_type_expr_inner(host, *c, active))
-                .map(std::sync::Arc::new);
-            let default_expr = default
-                .as_ref()
-                .and_then(|d| semantic_node_to_type_expr_inner(host, *d, active))
-                .map(std::sync::Arc::new);
-            active.remove(&node);
-            TypeExpr::TypeParameter(verter_semantic::analysis::type_expr::TypeParam {
-                name: display_name.as_ref().to_string(),
-                constraint: constraint_expr,
-                default: default_expr,
-            })
-        }
-        SemanticNodeData::Infer { name } => TypeExpr::Infer {
-            name: name.as_ref().to_string(),
-        },
-        SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { name } => TypeExpr::recursive_ref(name.as_ref(), Vec::new()),
-            _ => TypeExpr::Unknown {
-                raw: semantic_query_error_raw(err),
-            },
-        },
-        SemanticNodeData::VueMacroElements(_) => TypeExpr::Unknown {
-            raw: "VueMacroElements".to_string(),
-        },
-        // Phase D §5.6 WIP-L / §3 Change L — canonical Function shape
-        // converts back to `TypeExpr::Function`. Session 4 lowered
-        // `TypeExpr::Function` → `SemanticNodeData::Function`; this
-        // conversion completes the round-trip so alias bodies that
-        // include function types (`(() => T)` branches) survive
-        // dispatch-only projection without emitting `semanticFunction`
-        // sentinels.
-        SemanticNodeData::Function {
-            params,
-            return_type,
-            type_parameters,
-        } => {
-            use verter_semantic::analysis::type_expr::{FunctionExpr, FunctionParam, TypeParam};
-            let parameters: Vec<FunctionParam> = params
-                .iter()
-                .filter_map(|p| {
-                    Some(FunctionParam {
-                        name: p.name.as_ref().map(|n| n.as_ref().to_string()),
-                        ty: semantic_node_to_type_expr_inner(host, p.ty, active)?,
-                        optional: p.optional,
-                        rest: p.rest,
-                    })
-                })
-                .collect();
-            let return_ty = semantic_node_to_type_expr_inner(host, *return_type, active)
-                .map(std::sync::Arc::new);
-            let type_params: Vec<TypeParam> = type_parameters
-                .iter()
-                .map(|tp| TypeParam {
-                    name: tp.name.as_ref().to_string(),
-                    constraint: tp
-                        .constraint
-                        .and_then(|c| semantic_node_to_type_expr_inner(host, c, active))
-                        .map(std::sync::Arc::new),
-                    default: tp
-                        .default
-                        .and_then(|d| semantic_node_to_type_expr_inner(host, d, active))
-                        .map(std::sync::Arc::new),
-                })
-                .collect();
-            TypeExpr::Function(std::sync::Arc::new(FunctionExpr {
-                parameters,
-                return_type: return_ty,
-                type_parameters: type_params,
-            }))
-        }
-    })
-}
-
-fn index_key_to_type_expr(
-    host: &VerterHost,
-    index: &IndexKey,
-    active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<TypeExpr> {
-    Some(match index {
-        IndexKey::String(text) => TypeExpr::string_literal(text.as_ref()),
-        IndexKey::Number(number) => TypeExpr::number_literal(*number as f64),
-        IndexKey::TypeNode(node) => semantic_node_to_type_expr_inner(host, *node, active)?,
-    })
-}
-
-fn semantic_primitive_to_type_expr(kind: SemanticPrimitiveKind) -> TypeExpr {
-    use verter_semantic::analysis::type_expr::PrimitiveName;
-
-    TypeExpr::Primitive(match kind {
-        SemanticPrimitiveKind::String => PrimitiveName::String,
-        SemanticPrimitiveKind::Number => PrimitiveName::Number,
-        SemanticPrimitiveKind::Boolean => PrimitiveName::Boolean,
-        SemanticPrimitiveKind::Symbol => PrimitiveName::Symbol,
-        SemanticPrimitiveKind::BigInt => PrimitiveName::BigInt,
-        SemanticPrimitiveKind::Any => PrimitiveName::Any,
-        SemanticPrimitiveKind::Unknown => PrimitiveName::Unknown,
-        SemanticPrimitiveKind::Void => PrimitiveName::Void,
-        SemanticPrimitiveKind::Never => PrimitiveName::Never,
-        SemanticPrimitiveKind::Null => PrimitiveName::Null,
-        SemanticPrimitiveKind::Undefined => PrimitiveName::Undefined,
-        SemanticPrimitiveKind::Object => PrimitiveName::Object,
-    })
-}
-
 fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown { raw } => {
-            // Every sentinel emitted by `semantic_node_to_type_expr_inner`
+            // Every sentinel emitted by `raise_node_to_type_expr_inner`
             // (exact matches) or by `semantic_query_error_raw` (prefix
             // matches for parameterised errors) must round-trip to
             // "not materialised" so the dispatch-first path falls back
@@ -5816,7 +5499,7 @@ fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
     }
 }
 
-/// Detects sentinel tokens emitted by `semantic_node_to_type_expr_inner`
+/// Detects sentinel tokens emitted by `raise_node_to_type_expr_inner`
 /// when dispatch cannot materialise a node. Dispatch-first paths fall
 /// back to `owner_engine` when the sentinel is present — transitional
 /// until §5.8 retires the owner_engine bridge.
@@ -5857,7 +5540,7 @@ fn type_expr_has_any_object_arm(expr: &TypeExpr) -> bool {
     }
 }
 
-fn semantic_query_error_raw(err: &QueryError) -> String {
+pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
     match err {
         QueryError::Miss => SEMANTIC_MISS.to_string(),
         QueryError::Other(text) => text.as_ref().to_string(),
@@ -6496,7 +6179,7 @@ fn function_expr_references_substitutions(
         })
 }
 
-fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
+pub(crate) fn projected_surface_to_type_expr(surface: &ProjectedSurface) -> Option<TypeExpr> {
     use std::sync::Arc;
     use verter_semantic::analysis::type_expr::{
         FunctionExpr, IndexSignature, MethodSignature, ObjectExpr, ObjectMember, ObjectProperty,
@@ -10067,33 +9750,10 @@ type Button = ComponentConfig<typeof theme, AppConfig, 'button'>
         );
     }
 
-    #[test]
-    fn semantic_node_to_type_expr_preserves_number_index_key_values() {
-        use super::semantic_node_to_type_expr;
-        use crate::semantic_query::{
-            IndexKey, PrimitiveKind as SemanticPrimitiveKind, SemanticNodeData,
-        };
-
-        let host = VerterHost::new_standalone(Default::default());
-        let graph = Arc::clone(host.project_type_store().semantic_graph());
-        let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
-        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
-            object,
-            index: IndexKey::Number(7),
-        });
-
-        let expr = semantic_node_to_type_expr(&host, indexed)
-            .expect("indexed-access semantic node should serialize");
-
-        let TypeExpr::IndexedAccess { index, .. } = expr else {
-            panic!("expected IndexedAccess expr, got {expr:?}");
-        };
-        assert_eq!(
-            *index,
-            TypeExpr::number_literal(7.0),
-            "numeric index keys should serialize as number literals",
-        );
-    }
+    // `semantic_node_to_type_expr_preserves_number_index_key_values` moved to
+    // `crates/verter_session/src/project_semantic_dispatch/raise.rs` along
+    // with the `semantic_node_to_type_expr` function it covered (Step 6.1
+    // — function renamed to `ProjectSemanticDispatch::raise_node_to_type_expr`).
 
     #[test]
     fn get_component_meta_resolves_indexed_access_variant_props_and_imported_ref() {
@@ -10244,6 +9904,161 @@ defineProps<{
             ),
             "avatar prop should stay as symbolic Ref('AvatarProps'), got {:?}",
             avatar_prop.type_expr,
+        );
+    }
+
+    /// FAIL-FIRST (plan §3 Step 6.2): assert the structural ordering
+    /// invariant inside
+    /// `materialize_component_meta_macro_shape_member_type_expr`: the
+    /// route/project candidate loop must precede the eager
+    /// whole-expression `materialize_component_meta_type_expr_until_stable(current, …)`
+    /// call. Pre-fix the eager `materialize_component_meta_type_expr_until_stable`
+    /// call ran first and route candidates were consulted only as
+    /// fallbacks; post-fix the fast-path early-return short-circuits
+    /// the eager call when a project / solve candidate is structurally
+    /// sufficient.
+    ///
+    /// This is a static-text discriminator over the function source
+    /// because runtime instrumentation of "the eager call did NOT fire"
+    /// requires per-fixture tuning (counter increments for many other
+    /// reasons during a full `getComponentMeta` request); the structural
+    /// invariant is observable directly from the function body.
+    #[test]
+    fn step6_2_member_route_fast_path_runs_before_eager_materialize() {
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace parent")
+            .to_path_buf();
+        let meta_resolve_path = workspace_root
+            .join("crates")
+            .join("verter_session")
+            .join("src")
+            .join("meta_resolve.rs");
+        let raw_source = std::fs::read_to_string(&meta_resolve_path)
+            .unwrap_or_else(|e| panic!("read meta_resolve.rs: {e}"));
+        // Normalize CRLF to LF so the marker matches on both Windows
+        // (CRLF line endings) and Unix (LF). The static-text test
+        // discriminates structural ordering, not byte-exact line
+        // termination.
+        let source = raw_source.replace("\r\n", "\n");
+
+        let function_marker = "fn materialize_component_meta_macro_shape_member_type_expr(";
+        let function_start = source
+            .find(function_marker)
+            .expect("function declaration must be present");
+
+        // Find the *next* function declaration to bound the search slice.
+        let post_marker = function_start + function_marker.len();
+        let function_end = source[post_marker..]
+            .find("\n#[cfg_attr(feature = \"hotpath\", hotpath::measure)]\n")
+            .map(|offset| post_marker + offset)
+            .or_else(|| source[post_marker..].find("\nfn ").map(|o| post_marker + o))
+            .or_else(|| {
+                source[post_marker..]
+                    .find("\npub(crate) fn ")
+                    .map(|o| post_marker + o)
+            })
+            .unwrap_or(source.len());
+
+        let body = &source[function_start..function_end];
+
+        // The fast-path loop must precede the eager materialize call.
+        // Match the literal call shape that fires with `current` as the
+        // first argument — distinguishes it from candidate-side calls.
+        let fast_path_marker = "MEMBER_ROUTE_FAST_PATH_HITS.fetch_add";
+        let eager_call_marker =
+            "materialize_component_meta_type_expr_until_stable(\n            current,";
+
+        let fast_path_pos = body.find(fast_path_marker).unwrap_or_else(|| {
+            panic!(
+                "Step 6.2 reorder: the fast-path early-return marker \
+                 `{fast_path_marker}` must appear in the body of \
+                 `materialize_component_meta_macro_shape_member_type_expr`. \
+                 The fast-path runs route/project candidates before \
+                 falling through to the eager whole-expression \
+                 materialize call."
+            )
+        });
+        let eager_call_pos = body.find(eager_call_marker).unwrap_or_else(|| {
+            panic!(
+                "Step 6.2: the eager whole-expression materialize call \
+                 (`materialize_component_meta_type_expr_until_stable(current, …)`) \
+                 must remain in the body — it's the slow-path fallback \
+                 when no route candidate is structurally sufficient."
+            )
+        });
+
+        assert!(
+            fast_path_pos < eager_call_pos,
+            "Step 6.2 caller-ordering invariant: the fast-path early-return \
+             at byte {fast_path_pos} must precede the eager `materialize_\
+             component_meta_type_expr_until_stable(current, …)` call at \
+             byte {eager_call_pos}. Pre-fix this ordering was reversed; \
+             post-fix the route candidates short-circuit the eager call \
+             when structurally sufficient."
+        );
+    }
+
+    /// REGRESSION INVARIANT (plan §3 Step 6.2): an indexed-access
+    /// fixture that previously round-tripped to concrete literal
+    /// unions still does so post-reorder. The reorder must not change
+    /// the public contract for fixtures where the eager materialize
+    /// path was the correct answer.
+    #[test]
+    fn step6_2_reorder_preserves_indexed_access_resolution() {
+        let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        ws.inject_file(
+            "/src/Helper.ts".to_string(),
+            Arc::from(
+                r#"
+export interface HelperProps {
+  name?: string
+  description?: string
+}
+"#,
+            ),
+        );
+        ws.inject_file(
+            "/src/Card.vue".to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+import type { HelperProps } from './Helper'
+
+defineProps<Pick<HelperProps, 'name' | 'description'>>()
+</script>
+<template><div /></template>"#,
+            ),
+        );
+
+        let host = VerterHost::new(
+            HostConfig {
+                analysis_level: AnalysisLevel::Full,
+                ..HostConfig::default()
+            },
+            ws,
+        );
+        assert!(host.ensure_loaded("/src/Card.vue"));
+        host.set_import_dependencies(
+            "/src/Card.vue",
+            vec![crate::DependencyResolution {
+                specifier: "./Helper".to_string(),
+                resolved_canonical_id: Some("/src/Helper.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let meta = host
+            .get_component_meta("/src/Card.vue")
+            .expect("Card.vue should produce component meta");
+
+        let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            prop_names.contains(&"name") && prop_names.contains(&"description"),
+            "Pick<HelperProps, 'name' | 'description'> should yield both props, \
+             got {prop_names:?}",
         );
     }
 

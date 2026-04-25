@@ -481,6 +481,74 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = expanded;
                 }
+                // D26 lazy carriers (plan §3 Step 6.1.A + D41).
+                // DeclRef in any mode resolves through ResolveDecl
+                // ("aliases follow") — Navigate is lazy at the lowering
+                // site but transparent through alias chains during walk.
+                SemanticNodeData::DeclRef { identity } => {
+                    let scope = ScopeId {
+                        canonical_id: Arc::clone(&identity.canonical_id),
+                        local_scope: None,
+                    };
+                    let name = Arc::clone(&identity.decl_name);
+                    drop(data);
+                    let resolved =
+                        match self
+                            .dispatch
+                            .execute(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                                scope,
+                                name,
+                            })) {
+                            QueryResult::Value(id) => id,
+                            QueryResult::Recursive(id) => {
+                                results.push(id);
+                                return;
+                            }
+                            QueryResult::Error(_) => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                    if resolved == current {
+                        results.push(current);
+                        return;
+                    }
+                    current = resolved;
+                }
+                // InstantiationRef differs by mode (D41):
+                //   - Navigate: TERMINAL — generic application IS a
+                //     structural expansion. Preserve as-is so the
+                //     EditorToolbar `items: ArrayOrNested<EditorToolbarItem>`
+                //     case keeps the lazy `Ref` shape.
+                //   - Expanded: dispatch Instantiate, recurse on result.
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    if matches!(self.mode, ProjectionMode::Navigate) {
+                        results.push(current);
+                        return;
+                    }
+                    let identity = base.clone();
+                    let args_clone = Arc::clone(args);
+                    drop(data);
+                    let resolved = match self.dispatch.execute(SemanticQueryKey::Instantiate {
+                        base: identity,
+                        args: args_clone,
+                    }) {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(id) => {
+                            results.push(id);
+                            return;
+                        }
+                        QueryResult::Error(_) => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    };
+                    if resolved == current {
+                        results.push(current);
+                        return;
+                    }
+                    current = resolved;
+                }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)

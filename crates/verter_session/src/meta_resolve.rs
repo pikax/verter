@@ -1180,81 +1180,267 @@ fn named_decl_body_reaches_cycle(
     false
 }
 
+thread_local! {
+    /// Step 6.6.A dep-signature accumulator.
+    ///
+    /// `materialize_component_meta_type_expr_until_stable_full` populates
+    /// this thread-local with each dispatch round-trip's
+    /// `DepSignature`; `compute_component_meta_state_inner` reads + clears
+    /// it before publish and merges the accumulated facts into
+    /// `ResolvedComponentMetaState.fact_versions` (D31). The thread-local
+    /// is request-scoped — the compute entry point clears it; if any
+    /// recursive materialize call accumulates without a matching read,
+    /// the next request's compute clears it before populating fresh
+    /// facts.
+    ///
+    /// **Why thread-local, not host-owned cache:** the accumulator is
+    /// transient per-request channel state, not a reusable cache. It
+    /// crosses caller boundaries (deep materialize stacks), but the
+    /// completion-fence design already uses thread-locals for the same
+    /// reason. CLAUDE.md "host-owned cache principle" applies to
+    /// reusable semantic caches, not request-scoped instrumentation
+    /// accumulators.
+    static DISPATCH_DEP_SIGNATURE_ACCUMULATOR: std::cell::RefCell<
+        Vec<crate::resolver_core::FactVersionRef>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Reset the per-request dep-signature accumulator. Called at the
+/// entry of `compute_component_meta_state_inner` so each request
+/// starts with a clean slate.
+pub(crate) fn reset_dispatch_dep_signature_accumulator() {
+    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Drain the per-request dep-signature accumulator. Called at publish
+/// time in `compute_component_meta_state_inner` so accumulated facts
+/// merge into `ResolvedComponentMetaState.fact_versions` (Step 6.6.A).
+pub(crate) fn drain_dispatch_dep_signature_accumulator() -> Vec<crate::resolver_core::FactVersionRef>
+{
+    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Convert dispatch's `DepSignature` (canonical-id + DepVersion pairs)
+/// into session-layer `FactVersionRef` entries and merge them into the
+/// thread-local accumulator. Deduplicates against entries already in
+/// the accumulator on the way in (linear scan; the accumulator is
+/// short for a typical request).
+fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::DepSignature) {
+    use crate::resolver_core::FactVersionRef;
+    use crate::semantic_query::DepVersion;
+
+    DISPATCH_DEP_SIGNATURE_ACCUMULATOR.with(|cell| {
+        let mut accumulator = cell.borrow_mut();
+        for (canonical, version) in sig.iter() {
+            let canonical_id = canonical.as_ref().to_string();
+            let fact = match version {
+                DepVersion::WholeHash(hash) => FactVersionRef::FileWholeHash {
+                    canonical_id,
+                    hash: *hash,
+                },
+                DepVersion::RouteGeneration(_) | DepVersion::ProjectGeneration(_) => {
+                    // Route / project generation are coarse-grained
+                    // counters; they don't map to a content-hash and
+                    // would force the warm-cache validator to invalidate
+                    // on unrelated activity. Skip them at the merge
+                    // point — `HostFenceValidator`'s revalidation
+                    // covers the project-generation lifecycle directly.
+                    continue;
+                }
+            };
+            if !accumulator.iter().any(|existing| existing == &fact) {
+                accumulator.push(fact);
+            }
+        }
+    });
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
+    mode: crate::semantic_query::ProjectionMode,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
-    // §4.5 items 2-5: per-request memo keyed on `(scope, candidate)`.
-    // Purity audit passed — the materialization output depends only on
-    // `(expr, scope, query_engine_state)` and solver caches are additive
-    // within one request, so memoization is correct. Without the memo,
-    // `choose_less_symbolic_component_meta_type_expr` re-enters this
-    // function per `(expr × scope × candidate)` triple (~102 iterations
-    // for InputMenu's `as` prop, V1 in verification-2026-04-17.md).
-    let memo_key = (scope_canonical_id.to_string(), expr.clone());
+    materialize_component_meta_type_expr_until_stable_full(
+        expr,
+        scope_canonical_id,
+        mode,
+        query_engine,
+    )
+    .type_expr
+}
+
+/// Materialize a `TypeExpr` and return both the result and the
+/// producing `SemanticNodeId` + accumulated dep_signature
+/// ([`MaterializedTypeExpr`]; D31 / D32). Sidecar-capture call sites
+/// (Step 9 surface-id propagation) read `.node_id`; the session merges
+/// `.dep_signature` into `ResolvedComponentMetaState.fact_versions`
+/// before publish (Step 6.6.A).
+///
+/// The main entry [`materialize_component_meta_type_expr_until_stable`]
+/// remains for callers that need only the `TypeExpr` shell — it
+/// delegates here and discards `node_id` / `dep_signature`.
+///
+/// **Body (Step 6.3):** legacy owner-vs-imported scope reconciliation
+/// drives the user-visible `type_expr`; a dispatch round-trip
+/// (`shallow_lower_type_expr` → `raise_and_reduce`) runs alongside on
+/// the SAME expr to supply the `node_id` for sidecar capture and the
+/// `dep_signature` for fence merge — no public API duplication. The
+/// dispatch result's `type_expr` is informational only at this
+/// landing; the legacy path stays primary because it captures the
+/// generic-substitution machinery in `materialize_in_scope`'s
+/// fixed-point descent + `solve_expr_type_expr` that the dispatch
+/// `Instantiate` substitution does not yet replicate for every
+/// fixture (notably `defineProps<Props<T>>()` over a script-setup
+/// generic with constrained body parameters). When dispatch's
+/// substitution handling closes that gap, the legacy path's reads
+/// become subsumed and the body collapses to the thin
+/// `dispatch.raise_and_reduce(lowered, mode)` form documented in plan
+/// §3 Step 6.3.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    mode: crate::semantic_query::ProjectionMode,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> crate::project_semantic_dispatch::raise::MaterializedTypeExpr {
+    use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::NodeScopeId;
+    use rustc_hash::FxHashMap;
+    use std::sync::Arc;
+
+    // Step 6.2 / D22: count every entry into whole-expression
+    // materialization. Memo hits + cold builds both increment so the
+    // FAIL-FIRST test discriminates the call-ordering contract at the
+    // *entry* boundary, not the build closure.
+    #[cfg(test)]
+    MTL_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    // §4.5 items 2-5: per-request memo keyed on `(scope, candidate, mode)`.
+    let memo_key = (
+        scope_canonical_id.to_string(),
+        expr.clone(),
+        matches!(mode, crate::semantic_query::ProjectionMode::Navigate),
+    );
     if let Some(cached) = query_engine.materialize_memo.get(&memo_key) {
         return cached.clone();
     }
 
+    // Legacy owner-vs-imported reconciliation drives the user-visible
+    // type_expr (preserves substitution behaviour for script-setup
+    // generics + Pick / Omit utility expansion the dispatch path's
+    // Instantiate substitution doesn't yet replicate verbatim).
     let owner_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
         expr,
         scope_canonical_id,
         query_engine,
     );
-    if !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &owner_materialized) {
-        return owner_materialized;
-    }
-
-    let Some(imported_scope_canonical_id) =
+    let mut chosen_type_expr = if !type_expr_needs_projection_rescue(
+        query_engine,
+        scope_canonical_id,
+        &owner_materialized,
+    ) {
+        owner_materialized.clone()
+    } else if let Some(imported_scope_canonical_id) =
         imported_component_meta_materialization_scope(expr, scope_canonical_id, query_engine)
-    else {
-        query_engine
-            .materialize_memo
-            .insert(memo_key, owner_materialized.clone());
-        return owner_materialized;
+    {
+        if owner_materialized != *expr
+            && expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
+        {
+            owner_materialized.clone()
+        } else {
+            let imported_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
+                expr,
+                imported_scope_canonical_id.as_str(),
+                query_engine,
+            );
+            if imported_materialized != owner_materialized
+                && component_meta_type_expr_improves(&imported_materialized, &owner_materialized)
+                && (!type_expr_needs_projection_rescue(
+                    query_engine,
+                    imported_scope_canonical_id.as_str(),
+                    &imported_materialized,
+                ) || type_expr_needs_projection_rescue(
+                    query_engine,
+                    scope_canonical_id,
+                    &owner_materialized,
+                ))
+            {
+                imported_materialized
+            } else {
+                owner_materialized.clone()
+            }
+        }
+    } else {
+        owner_materialized.clone()
     };
 
-    // Skip the declaration-scope fallback for transitively-recursive helper
-    // generics (DotPathKeys → NestedItem → DotPathKeys etc.). Those restart
-    // the solver in a scope with full local visibility and can exhaust the
-    // structural budgets during a single projection call even after the owner
-    // scope already produced a good surface.
-    if owner_materialized != *expr
-        && expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
-    {
-        query_engine
-            .materialize_memo
-            .insert(memo_key, owner_materialized.clone());
-        return owner_materialized;
+    // Run dispatch alongside the legacy result to harvest:
+    //   - `node_id`: the producing SemanticNodeId for sidecar capture
+    //     (Step 9 surface-id propagation).
+    //   - `dep_signature`: accumulated fence facts from every dispatch
+    //     subquery so `ResolvedComponentMetaState.fact_versions`
+    //     captures the dependency graph correctly (Step 6.6.A fence
+    //     merge).
+    //
+    // Dispatch's `type_expr` is informational here — `chosen_type_expr`
+    // already carries the user-visible result. Mode is threaded so the
+    // dispatch path itself observes Navigate vs. Expanded for the
+    // accompanying carrier emission, even though we use the legacy
+    // body content.
+    let scope_payload = query_engine.scope_payload_for_scope(scope_canonical_id);
+    let host = query_engine.host();
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let env: FxHashMap<String, crate::semantic_query::SemanticNodeId> = FxHashMap::default();
+    let whole_hash = host
+        .shallow_file_state(scope_canonical_id)
+        .map(|state| state.whole_hash)
+        .unwrap_or_default();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(scope_canonical_id),
+        whole_hash,
+        local_scope: None,
+    };
+    let name_resolution = rustc_hash::FxHashMap::default();
+    let mut substitutions: Vec<(Arc<str>, crate::semantic_query::SemanticNodeId)> = Vec::new();
+    let lowered = dispatch.shallow_lower_type_expr(
+        expr,
+        &env,
+        &scope,
+        &name_resolution,
+        scope_payload.as_deref(),
+        &mut substitutions,
+        mode,
+    );
+    let dispatch_materialized = dispatch.raise_and_reduce(lowered, mode);
+
+    // In Navigate mode the dispatch result IS the user-visible answer:
+    // lazy carriers are the entire point of Navigate, and the legacy
+    // path doesn't preserve them. So Navigate callers get the dispatch
+    // type_expr; Expanded callers get the legacy reconciliation.
+    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
+        chosen_type_expr = dispatch_materialized.type_expr.clone();
     }
 
-    let imported_materialized = materialize_component_meta_type_expr_until_stable_in_scope(
-        expr,
-        imported_scope_canonical_id.as_str(),
-        query_engine,
-    );
-    let chosen = if imported_materialized != owner_materialized
-        && component_meta_type_expr_improves(&imported_materialized, &owner_materialized)
-        && (!type_expr_needs_projection_rescue(
-            query_engine,
-            imported_scope_canonical_id.as_str(),
-            &imported_materialized,
-        ) || type_expr_needs_projection_rescue(
-            query_engine,
-            scope_canonical_id,
-            &owner_materialized,
-        )) {
-        imported_materialized
-    } else {
-        owner_materialized
+    // Step 6.6.A: accumulate dispatch's dep_signature into the
+    // per-request thread-local so compute_component_meta_state_inner
+    // can merge the facts into ResolvedComponentMetaState.fact_versions
+    // before publish. Each materialize call contributes its own
+    // dispatch-side fact set; the accumulator deduplicates.
+    accumulate_dispatch_dep_signature(&dispatch_materialized.dep_signature);
+
+    let materialized = MaterializedTypeExpr {
+        node_id: dispatch_materialized.node_id,
+        type_expr: chosen_type_expr,
+        dep_signature: dispatch_materialized.dep_signature,
     };
 
     query_engine
         .materialize_memo
-        .insert(memo_key, chosen.clone());
-    chosen
+        .insert(memo_key, materialized.clone());
+    materialized
 }
 
 fn type_expr_has_package_backed_root(
@@ -1460,6 +1646,7 @@ pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
             let materialized = materialize_component_meta_type_expr_until_stable(
                 &body,
                 scope_canonical_id,
+                crate::semantic_query::ProjectionMode::Expanded,
                 engine,
             );
             (materialized != body).then_some(materialized)
@@ -1483,8 +1670,12 @@ pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
         }
     };
 
-    let materialized_leaf =
-        materialize_component_meta_type_expr_until_stable(&leaf, scope_canonical_id, engine);
+    let materialized_leaf = materialize_component_meta_type_expr_until_stable(
+        &leaf,
+        scope_canonical_id,
+        crate::semantic_query::ProjectionMode::Expanded,
+        engine,
+    );
     Some(if materialized_leaf != leaf {
         materialized_leaf
     } else {
@@ -1790,6 +1981,7 @@ fn materialize_component_meta_field_types(
         let rescued = materialize_component_meta_type_expr_until_stable(
             &field.r#type,
             materialize_scope_canonical_id.as_str(),
+            crate::semantic_query::ProjectionMode::Expanded,
             query_engine,
         );
         if rescued != field.r#type {
@@ -2649,6 +2841,7 @@ fn materialize_component_meta_field_types(
                         materialize_component_meta_type_expr_until_stable(
                             &field.r#type,
                             materialize_scope_canonical_id.as_str(),
+                            crate::semantic_query::ProjectionMode::Expanded,
                             query_engine,
                         )
                     });
@@ -2669,6 +2862,7 @@ fn materialize_component_meta_field_types(
             _ => materialize_component_meta_type_expr_until_stable(
                 &field.r#type,
                 materialize_scope_canonical_id.as_str(),
+                crate::semantic_query::ProjectionMode::Expanded,
                 query_engine,
             ),
         };
@@ -2846,6 +3040,7 @@ fn materialize_component_meta_field_types(
                 let rescued = materialize_component_meta_type_expr_until_stable(
                     &candidate,
                     scope_hint,
+                    crate::semantic_query::ProjectionMode::Expanded,
                     query_engine,
                 );
                 if component_meta_type_expr_improves(&rescued, &field.r#type) {
@@ -5346,6 +5541,12 @@ impl VerterHost {
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
     ) -> Option<ResolvedComponentMetaState> {
+        // Step 6.6.A: reset the per-request dep-signature accumulator
+        // so each compute call starts fresh. Inner materialize_until_stable
+        // calls accumulate dispatch-side facts; we drain + merge them
+        // into the published `fact_versions` below.
+        reset_dispatch_dep_signature_accumulator();
+
         let audit_enabled = self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured
@@ -5605,6 +5806,21 @@ impl VerterHost {
                 parts.fact_versions.len(),
             ),
         );
+        // Step 6.6.A: drain accumulated dispatch dep_signatures and
+        // merge into fact_versions before publish. Each
+        // materialize_until_stable_full call inside the compute body
+        // pushed the dispatch round-trip's DepSignature into the
+        // thread-local accumulator; here we read + merge so warm
+        // cache validation captures the dependency graph the
+        // dispatch path discovered.
+        let mut merged_fact_versions = parts.fact_versions;
+        let dispatch_facts = drain_dispatch_dep_signature_accumulator();
+        for fact in dispatch_facts {
+            if !merged_fact_versions.contains(&fact) {
+                merged_fact_versions.push(fact);
+            }
+        }
+
         let state = ResolvedComponentMetaState {
             snapshot,
             mode,
@@ -5613,7 +5829,7 @@ impl VerterHost {
             resolved_type_registry: parts.resolved_type_registry,
             resolved_type_registry_meta: parts.resolved_type_registry_meta,
             evaluated_types: parts.evaluated_types,
-            fact_versions: parts.fact_versions,
+            fact_versions: merged_fact_versions,
             compute_audit: audit_enabled.then_some(ResolvedComponentMetaComputeAudit {
                 timings: audit_timings,
                 solver: solver_audit,
@@ -5753,6 +5969,7 @@ impl VerterHost {
                                     materialize_component_meta_type_expr_until_stable(
                                         &materialized,
                                         scope_canonical_id,
+                                        crate::semantic_query::ProjectionMode::Expanded,
                                         query_engine,
                                     );
                                 // For generic Ref members (e.g. ComponentVariants<T>),
@@ -6032,6 +6249,7 @@ impl VerterHost {
                             &materialize_component_meta_type_expr_until_stable(
                                 &member_surface,
                                 scope_canonical_id,
+                                crate::semantic_query::ProjectionMode::Expanded,
                                 query_engine,
                             ),
                             scope_canonical_id,
@@ -7413,6 +7631,45 @@ thread_local! {
     static MATERIALIZE_DEPTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
 }
 
+/// Test-only call counter for `materialize_component_meta_type_expr_until_stable`
+/// (plan §3 Step 6.2 / D22). Incremented at function entry — memo hits and
+/// cold builds both count, since the counter discriminates the *entry*
+/// invariant: did the caller route through whole-expression materialization
+/// at all? The Step 6.2 FAIL-FIRST test asserts that route/project
+/// candidates evaluated by `materialize_component_meta_macro_shape_member_type_expr`
+/// satisfy the request without falling through to this entry, so the
+/// counter stays at 0 in the success case.
+#[cfg(test)]
+pub(crate) static MTL_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test accessor for [`MTL_CALL_COUNT`].
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn mtl_call_count_for_tests() -> usize {
+    MTL_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Test reset for [`MTL_CALL_COUNT`].
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn reset_mtl_call_count_for_tests() {
+    MTL_CALL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Step 6.2 fast-path counter — instrumented in
+/// `materialize_component_meta_macro_shape_member_type_expr` whenever a
+/// route / project candidate satisfies the request directly without
+/// falling through to the eager whole-expression materialize path.
+/// The static-text test
+/// `step6_2_member_route_fast_path_runs_before_eager_materialize`
+/// asserts the structural ordering invariant by reading the source
+/// file; the counter is kept available for future runtime probes.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) static MEMBER_ROUTE_FAST_PATH_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn materialize_component_meta_member_surface_expr(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -8067,6 +8324,87 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             ),
         );
     }
+
+    // Step 6.2 reorder (plan §3): try route/project candidates BEFORE
+    // the eager whole-expression `materialize_component_meta_type_expr_until_stable(current, …)`
+    // call. The pre-Step-6.2 ordering ran `current` materialization
+    // first and only consulted route candidates as fallbacks; this
+    // unconditionally invoked the heaviest path even for fixtures
+    // where a single project/solve hop satisfied the request. The
+    // FAIL-FIRST test `materialize_member_route_caller_ordering`
+    // exercises the symbolic-intersection case where a route
+    // candidate succeeds without falling through to the eager
+    // materialize — `MTL_CALL_COUNT` stays at 0 post-fix.
+    //
+    // Returns Some(early-good-enough-candidate) when a route /
+    // project candidate is concrete enough to satisfy the public
+    // contract directly; None means we must fall through to the
+    // eager materialization path.
+    let route_scope_candidates: Vec<String> = if current_is_route_expr {
+        Vec::new()
+    } else if materialize_scope_canonical_id == scope_canonical_id {
+        vec![scope_canonical_id.to_string()]
+    } else {
+        vec![
+            scope_canonical_id.to_string(),
+            materialize_scope_canonical_id.clone(),
+        ]
+    };
+
+    let route_candidates: Vec<verter_semantic::analysis::type_expr::TypeExpr> = {
+        let mut acc = Vec::new();
+        for candidate_scope in &route_scope_candidates {
+            let projected = {
+                component_meta_trace_custom!(
+                    "materialize_member_route_projected_candidate",
+                    format!(
+                        "owner={} member={} candidate_scope={} route={:?}",
+                        scope_canonical_id, member_name, candidate_scope, route_expr,
+                    ),
+                );
+                query_engine.project_expr_surface_expr(candidate_scope.as_str(), &route_expr)
+            };
+            let solved = {
+                component_meta_trace_custom!(
+                    "materialize_member_route_solved_candidate",
+                    format!(
+                        "owner={} member={} candidate_scope={} route={:?}",
+                        scope_canonical_id, member_name, candidate_scope, route_expr,
+                    ),
+                );
+                query_engine.solve_expr_type_expr(candidate_scope.as_str(), &route_expr)
+            };
+            for candidate in [projected, solved].into_iter().flatten() {
+                acc.push(candidate);
+            }
+        }
+        acc
+    };
+
+    let candidate_is_good_enough = |candidate: &verter_semantic::analysis::type_expr::TypeExpr| {
+        !matches!(
+            candidate,
+            verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. }
+        ) && !type_expr_contains_public_member_route(candidate)
+            && !top_level_needs_owner_route_fallback(candidate)
+    };
+
+    // Fast-path: any route candidate that is already structurally
+    // sufficient short-circuits the eager materialize. This is the
+    // observable contract the FAIL-FIRST test asserts — when a route
+    // candidate succeeds, MTL_CALL_COUNT stays at 0.
+    for candidate in &route_candidates {
+        if expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, candidate)
+        {
+            continue;
+        }
+        if candidate_is_good_enough(candidate) {
+            #[cfg(test)]
+            MEMBER_ROUTE_FAST_PATH_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return candidate.clone();
+        }
+    }
+
     let current_materialized = if inline_route_candidate.is_some() {
         inline_route_candidate.clone().unwrap()
     } else {
@@ -8080,6 +8418,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         materialize_component_meta_type_expr_until_stable(
             current,
             materialize_scope_canonical_id.as_str(),
+            crate::semantic_query::ProjectionMode::Expanded,
             query_engine,
         )
     };
@@ -8100,12 +8439,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             best = candidate;
         }
     }
-    if !matches!(
-        best,
-        verter_semantic::analysis::type_expr::TypeExpr::Unknown { .. }
-    ) && !type_expr_contains_public_member_route(&best)
-        && !top_level_needs_owner_route_fallback(&best)
-    {
+    if candidate_is_good_enough(&best) {
         return best;
     }
     if current_is_route_expr {
@@ -8129,68 +8463,39 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             }
         }
     }
-    let route_scope_candidates: Vec<String> = if current_is_route_expr {
-        Vec::new()
-    } else if materialize_scope_canonical_id == scope_canonical_id {
-        vec![scope_canonical_id.to_string()]
-    } else {
-        vec![
-            scope_canonical_id.to_string(),
-            materialize_scope_canonical_id.clone(),
-        ]
-    };
 
-    for candidate_scope in route_scope_candidates {
-        let projected_candidate = {
-            component_meta_trace_custom!(
-                "materialize_member_route_projected_candidate",
-                format!(
-                    "owner={} member={} candidate_scope={} route={:?}",
-                    scope_canonical_id, member_name, candidate_scope, route_expr,
-                ),
-            );
-            query_engine.project_expr_surface_expr(candidate_scope.as_str(), &route_expr)
-        };
-        let solved_candidate = {
-            component_meta_trace_custom!(
-                "materialize_member_route_solved_candidate",
-                format!(
-                    "owner={} member={} candidate_scope={} route={:?}",
-                    scope_canonical_id, member_name, candidate_scope, route_expr,
-                ),
-            );
-            query_engine.solve_expr_type_expr(candidate_scope.as_str(), &route_expr)
-        };
-
-        for candidate in [projected_candidate, solved_candidate]
-            .into_iter()
-            .flatten()
+    // Slow path: previously-cached project/solve candidates that
+    // weren't structurally sufficient now feed into the
+    // materialize-and-improve loop, same as before. This preserves
+    // behavioral coverage for fixtures that need the heavier
+    // `materialize_component_meta_type_expr_until_stable(&candidate, …)`
+    // recursion.
+    for candidate in route_candidates {
+        if expr_has_transitively_recursive_generic_root(
+            query_engine,
+            scope_canonical_id,
+            &candidate,
+        ) && !component_meta_type_expr_improves(&candidate, &best)
         {
-            if expr_has_transitively_recursive_generic_root(
-                query_engine,
-                scope_canonical_id,
+            continue;
+        }
+        let candidate_materialized = {
+            component_meta_trace_custom!(
+                "materialize_member_route_candidate_materialized",
+                format!(
+                    "owner={} member={} candidate={:?}",
+                    scope_canonical_id, member_name, candidate,
+                ),
+            );
+            materialize_component_meta_type_expr_until_stable(
                 &candidate,
-            ) && !component_meta_type_expr_improves(&candidate, &best)
-            {
-                continue;
-            }
-            let candidate_materialized = {
-                component_meta_trace_custom!(
-                    "materialize_member_route_candidate_materialized",
-                    format!(
-                        "owner={} member={} candidate={:?}",
-                        scope_canonical_id, member_name, candidate,
-                    ),
-                );
-                materialize_component_meta_type_expr_until_stable(
-                    &candidate,
-                    materialize_scope_canonical_id.as_str(),
-                    query_engine,
-                )
-            };
-            if component_meta_type_expr_improves(&candidate_materialized, &best) {
-                best = candidate_materialized;
-            }
+                materialize_scope_canonical_id.as_str(),
+                crate::semantic_query::ProjectionMode::Expanded,
+                query_engine,
+            )
+        };
+        if component_meta_type_expr_improves(&candidate_materialized, &best) {
+            best = candidate_materialized;
         }
     }
 

@@ -279,6 +279,12 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::Function { .. } => SemanticNodeKind::Other {
             name: Arc::from("Function"),
         },
+        SemanticNodeData::DeclRef { .. } => SemanticNodeKind::Other {
+            name: Arc::from("DeclRef"),
+        },
+        SemanticNodeData::InstantiationRef { .. } => SemanticNodeKind::Other {
+            name: Arc::from("InstantiationRef"),
+        },
     }
 }
 
@@ -323,6 +329,14 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
         SemanticNodeData::Function { params, .. } => {
             Arc::from(format!("Function[{} params]", params.len()))
         }
+        SemanticNodeData::DeclRef { identity } => {
+            Arc::from(format!("DeclRef({})", identity.decl_name))
+        }
+        SemanticNodeData::InstantiationRef { base, args } => Arc::from(format!(
+            "InstantiationRef({}<{} args>)",
+            base.decl_name,
+            args.len()
+        )),
     }
 }
 

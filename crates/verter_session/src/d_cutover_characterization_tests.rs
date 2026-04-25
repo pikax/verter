@@ -1662,6 +1662,24 @@ fn type_expr_lowering_has_exactly_one_path() {
 }
 
 #[test]
+fn semantic_node_to_type_expr_has_exactly_one_path() {
+    // Sibling invariant of `type_expr_lowering_has_exactly_one_path`:
+    // the reverse direction (`SemanticNodeId → TypeExpr`) must also
+    // have exactly one production path. After Step 6.1 of the F2
+    // architectural unification, `fn raise_node_to_type_expr(`
+    // appears exactly once — in
+    // `project_semantic_dispatch/raise.rs`. The trailing `(` is part
+    // of the needle so the counter does not double-count
+    // `fn raise_node_to_type_expr_inner(` (which appears in the same
+    // module as the recursion helper).
+    let count = count_def_in_crates("fn raise_node_to_type_expr(");
+    assert_eq!(
+        count, 1,
+        "fn raise_node_to_type_expr must have exactly one definition; got {count}"
+    );
+}
+
+#[test]
 fn relation_memo_has_exactly_one_owner() {
     // `relation_memo: DashMap` field must appear exactly once in
     // production code — on `SemanticGraphStore`.

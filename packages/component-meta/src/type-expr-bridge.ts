@@ -2210,6 +2210,14 @@ function graphPrimitiveName(tag: number): Parameters<typeof primitive>[0] {
 
 function graphTypeExprToString(expr: GraphTypeExprRef): string {
   const node = expr.graph.getNode(expr.nodeId);
+  // Plan §3 Step 6.5 (D30): every graph node kind renders to a
+  // structural string form. The pre-Step-6.5 `default: graphNode(N)`
+  // fallback leaked operator-node kinds into compat-layer strings as
+  // diagnostic placeholders (Phase 3 §4.1 graphNode_leak bucket).
+  // Now every kind has explicit structural rendering; the exhaustive
+  // switch below replaces the fallback so future graph-node kinds
+  // surface as TypeScript compile errors at this site rather than
+  // silently leaking through.
   switch (node.kind) {
     case NODE_PRIMITIVE:
       return graphPrimitiveName(node.primitive);
@@ -2224,18 +2232,89 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
         return String(node.booleanValue);
       }
       return "literal";
-    case NODE_REF:
+    case NODE_REF: {
+      const name = expr.graph.getString(node.nameId);
+      if (node.typeArgumentNodeIds.length === 0) {
+        return name;
+      }
+      const args = node.typeArgumentNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(", ");
+      return `${name}<${args}>`;
+    }
+    case NODE_TYPE_PARAMETER:
       return expr.graph.getString(node.nameId);
+    case NODE_UNION:
+      return node.typeNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(" | ");
+    case NODE_INTERSECTION:
+      return node.typeNodeIds
+        .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
+        .join(" & ");
+    case NODE_ARRAY: {
+      const element = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.elementNodeId));
+      return node.readonly ? `readonly ${element}[]` : `${element}[]`;
+    }
+    case NODE_TUPLE: {
+      const items = node.elements
+        .map((e) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, e.typeNodeId)))
+        .join(", ");
+      return node.readonly ? `readonly [${items}]` : `[${items}]`;
+    }
+    case NODE_OBJECT:
+      return "object";
+    case NODE_FUNCTION:
+      return "function";
     case NODE_KEY_OF:
       return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
     case NODE_TYPE_OF:
       return `typeof ${node.pathIds.map((id) => expr.graph.getString(id)).join(".")}`;
+    case NODE_INDEXED_ACCESS: {
+      const obj = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.objectNodeId));
+      const idx = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.indexNodeId));
+      return `${obj}[${idx}]`;
+    }
+    case NODE_CONDITIONAL: {
+      const check = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.checkNodeId));
+      const ext = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.extendsNodeId));
+      const tt = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.trueTypeNodeId));
+      const ft = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.falseTypeNodeId));
+      return `${check} extends ${ext} ? ${tt} : ${ft}`;
+    }
+    case NODE_MAPPED:
+      return "mapped";
+    case NODE_TEMPLATE_LITERAL: {
+      const quasis = node.quasiIds.map((id) => expr.graph.getString(id));
+      const exprs = node.expressionNodeIds.map((id) =>
+        graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)),
+      );
+      let out = "`";
+      for (let i = 0; i < quasis.length; i += 1) {
+        out += quasis[i];
+        if (i < exprs.length) {
+          out += "${" + exprs[i] + "}";
+        }
+      }
+      out += "`";
+      return out;
+    }
+    case NODE_PARENTHESIZED:
+      return `(${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))})`;
+    case NODE_INFER:
+      return `infer ${expr.graph.getString(node.nameId)}`;
+    case NODE_REST:
+      return `...${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))}`;
     case NODE_RECURSIVE_REF:
       return expr.graph.getString(node.nameId);
     case NODE_UNKNOWN:
       return expr.graph.getString(node.rawId);
-    default:
-      return `graphNode(${node.kind})`;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(
+        `graphTypeExprToString: unhandled graph node kind ${(_exhaustive as { kind: number }).kind}`,
+      );
+    }
   }
 }
 

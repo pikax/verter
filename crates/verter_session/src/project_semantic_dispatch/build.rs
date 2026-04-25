@@ -175,6 +175,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
                 &mut substitutions,
+                crate::semantic_query::ProjectionMode::Expanded,
             )
         } else if let Some(shape) = prepared.object_shape.as_ref() {
             self.shallow_lower_type_expr(
@@ -184,6 +185,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
                 &mut substitutions,
+                crate::semantic_query::ProjectionMode::Expanded,
             )
         } else if let Some(sig) = prepared.function_signature.as_ref() {
             let function_expr = FunctionExpr {
@@ -207,6 +209,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
                 &mut substitutions,
+                crate::semantic_query::ProjectionMode::Expanded,
             )
         } else if let Some(members) = prepared.enum_members.as_ref() {
             let object_expr = ObjectExpr {
@@ -229,6 +232,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 &prepared.name_resolution,
                 scope_payload.as_ref(),
                 &mut substitutions,
+                crate::semantic_query::ProjectionMode::Expanded,
             )
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature());
@@ -333,6 +337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &prepared.name_resolution,
                     scope_payload.as_ref(),
                     &mut substitutions,
+                    crate::semantic_query::ProjectionMode::Expanded,
                 )
             } else {
                 continue;
@@ -375,6 +380,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &prepared.name_resolution,
             scope_payload.as_ref(),
             &mut substitutions,
+            crate::semantic_query::ProjectionMode::Expanded,
         );
         result = self.backfill_member_index_surface(
             result,
@@ -455,6 +461,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &prepared.name_resolution,
                     scope_payload,
                     substitutions,
+                    crate::semantic_query::ProjectionMode::Expanded,
                 );
                 SurfaceMember {
                     name: Arc::from(name.as_str()),

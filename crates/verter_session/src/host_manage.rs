@@ -8429,10 +8429,19 @@ fn choose_less_symbolic_component_meta_type_expr(
             .into_iter()
             .flatten()
             {
+                // Step 6.3 caller-update (D4 phase-by-construction): the
+                // rematerialize-phase descends from
+                // `rematerialize_public_component_meta_types`; Navigate
+                // mode preserves lazy `DeclRef` / `InstantiationRef`
+                // carriers in the resolved payload (D26 +
+                // raise_and_reduce). Compute callers continue to pass
+                // `Expanded` for eager resolution. F3 (Step 7) verifies
+                // the resulting lazy `Ref` shape on EditorToolbar.items.
                 let materialized =
                     crate::meta_resolve::materialize_component_meta_type_expr_until_stable(
                         &candidate,
                         scope.as_str(),
+                        crate::semantic_query::ProjectionMode::Navigate,
                         query_engine,
                     );
                 if candidate_beats_current(&best, &materialized) {
