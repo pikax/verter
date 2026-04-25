@@ -1667,6 +1667,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         exported_name: &str,
     ) -> Option<ResolvedImportedRegistrySymbol> {
         let key = (canonical_id.to_string(), exported_name.to_string());
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("imported_registry_symbols");
         if let Some(cached) = self.imported_registry_symbols.get(&key) {
             return cached.clone();
         }
@@ -1731,6 +1733,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         requested_name: &str,
     ) -> ResolvedTypeDeclaration {
         let key = (canonical_source.to_string(), requested_name.to_string());
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("declarations");
         if let Some(cached) = self.declarations.get(&key) {
             return cached.clone();
         }
@@ -1782,6 +1786,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .filter(|s| !s.is_empty())
             .unwrap_or(owner_canonical);
         let key = (source_key.to_string(), exported_name.to_string());
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("resolvable");
         if let Some(cached) = self.resolvable.get(&key) {
             return *cached;
         }
@@ -1801,6 +1807,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         owner_canonical: &str,
         name: &str,
     ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("owner_collection_exprs");
         if let Some(cached) = self.owner_collection_exprs.get(name) {
             return cached.clone();
         }
@@ -1834,6 +1842,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         expr: &TypeExpr,
         nested_surface: bool,
     ) -> Option<TypeExpr> {
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("materialized_member_surfaces");
         materialized_member_surface_key(scope_canonical_id, expr, nested_surface)
             .and_then(|key| self.materialized_member_surfaces.get(&key).cloned())
     }
@@ -2252,6 +2262,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             symbol_name: symbol_name.to_string(),
             substitutions: prepared_substitution_key(substitutions),
         };
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("prepared_surface_cache");
         if let Some(cached) = self.prepared_surface_cache.get(&cache_key) {
             return cached.clone();
         }
@@ -2578,6 +2590,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             kind: PreparedMemberCacheKind::Requested,
             substitutions: prepared_substitution_key(substitutions),
         };
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("prepared_member_cache");
         if let Some(cached) = self.prepared_member_cache.get(&cache_key) {
             return cached.clone();
         }
@@ -2850,6 +2864,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             decl_symbol_name: prepared.root_identity.symbol_name.clone(),
             requested_name: name.to_string(),
         };
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("prepared_target_cache");
         if let Some(cached) = self.prepared_target_cache.get(&cache_key) {
             return cached.clone();
         }
@@ -4069,6 +4085,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("routed_expr_surface_cache");
         self.routed_expr_surface_cache
             .get(&RoutedExprSurfaceCacheKey {
                 scope_canonical_id: scope_canonical_id.to_owned(),
@@ -5054,6 +5072,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             kind: PreparedMemberCacheKind::InheritedRoute,
             substitutions: PreparedSubstitutionKey::Empty,
         };
+        #[cfg(test)]
+        crate::spike_instrumentation::record_cache_read("prepared_member_cache");
         if let Some(cached) = self.prepared_member_cache.get(&cache_key) {
             return cached.clone();
         }

@@ -85,6 +85,8 @@ pub mod semantic_query_memo;
 pub(crate) mod session_runtime;
 mod shared;
 pub(crate) mod source_map_remap;
+#[cfg(test)]
+pub(crate) mod spike_instrumentation;
 pub mod template_convert;
 mod types;
 pub(crate) mod u64_as_decimal_string;

@@ -1425,6 +1425,8 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         expr.clone(),
         matches!(mode, crate::semantic_query::ProjectionMode::Navigate),
     );
+    #[cfg(test)]
+    crate::spike_instrumentation::record_cache_read("materialize_memo");
     if let Some(cached) = query_engine.materialize_memo.get(&memo_key) {
         return cached.clone();
     }

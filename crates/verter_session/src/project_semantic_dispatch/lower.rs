@@ -64,6 +64,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         mode: ProjectionMode,
     ) -> SemanticNodeId {
+        // Step 0 spike #2 hook: marks that dispatch lowering has been
+        // entered on this thread. Reads recorded *before* this call
+        // are PRE_LOWER (MIGRATE candidates); reads after are POST_LOWER.
+        // The hook is `#[cfg(test)]`-gated, no-op outside spike runs.
+        #[cfg(test)]
+        crate::spike_instrumentation::record_lower_called();
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
         match expr {

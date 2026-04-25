@@ -8848,3 +8848,522 @@ defineProps<TreeNode>()
         "TreeNode declaration should have canonical source (provenance)"
     );
 }
+
+// ===========================================================================
+// Step 0 spikes — Architectural Debt Closure Plan, revision 10.
+//
+// These tests are PRE-FLIGHT instrumentation only. They land alongside
+// the test-only `crate::spike_instrumentation` module + the eleven
+// `#[cfg(test)]` hook call sites (one in
+// `project_semantic_dispatch::lower::shallow_lower_type_expr` plus ten
+// at engine-local cache `.get(...)` read sites in
+// `resolver_core::component_meta_query_engine` and `meta_resolve`).
+//
+// They are removed once Step 1 lands its dispatch-substitution
+// regression test (subsuming spike #1) and Step 3 captures the spike
+// #2 classification table into its disposition commit body (subsuming
+// spike #2's discriminator assertion). The hook call sites and the
+// `spike_instrumentation` module are deleted in the same removal pass.
+// ===========================================================================
+
+/// Spike #1: validates that `dispatch.lower_type_expr_in_scope` +
+/// `ProjectPath` projection + `raise_node_to_type_expr` correctly
+/// substitute the script-setup-generic `T` when given the parent
+/// macro shell `Props<T>` directly.
+///
+/// PASS: closure-rewrite approach (Step 1) is viable — proceed.
+/// FAIL: dispatch substitution itself is broken upstream — HALT and
+///       open a sibling plan for `lower.rs` / `build.rs` substitution
+///       threading repair (per the plan's STOP CONDITION #1).
+#[test]
+fn spike_dispatch_handles_props_t_substitution_via_macro_shell() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
+    };
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Generic.vue",
+            r#"<script lang="ts">
+export interface Item {
+  id: string
+}
+
+export interface Props<U extends Item = Item> {
+  items?: U[]
+  selected?: U extends infer Selected ? Selected : never
+}
+</script>
+
+<script setup lang="ts" generic="T extends Item = Item">
+defineProps<Props<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let host = project.host();
+
+    // Force the host to register the file by issuing one shallow
+    // probe through the public API surface. `shallow_file_state` is
+    // pub(crate); we go through `evaluate_types` which seeds the
+    // same canonical state as the production component-meta path.
+    let _ = session.evaluate_types("/Generic.vue").unwrap().unwrap();
+
+    let dispatch = ProjectSemanticDispatch::new(host);
+
+    // Construct the macro's parent shell `Props<T>` as a TypeExpr —
+    // this is the *macro field's parent*, not the field itself. Step
+    // 1 routes the shell through dispatch in the rewired closure.
+    let props_t = TypeExpr::Ref {
+        name: StdArc::from("Props"),
+        type_arguments: StdArc::from(vec![TypeExpr::Ref {
+            name: StdArc::from("T"),
+            type_arguments: StdArc::from(Vec::<TypeExpr>::new()),
+        }]),
+    };
+    let lowered = dispatch
+        .lower_type_expr_in_scope("/Generic.vue", &props_t)
+        .expect("dispatch must lower the Props<T> shell rooted at /Generic.vue");
+
+    let projected = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: lowered,
+        path: StdArc::from(vec![PathSegment::Member(StdArc::from("items"))]),
+        mode: ProjectionMode::Expanded,
+    });
+
+    let raised = match projected {
+        QueryResult::Value(node_id) => dispatch
+            .raise_node_to_type_expr(node_id)
+            .expect("raise must succeed on a ProjectPath result"),
+        other => panic!(
+            "spike #1: dispatch returned non-Value for ProjectPath(Props<T>, ['items']): {other:?}\n\
+             this halts Step 1 — dispatch substitution is broken upstream.\n\
+             open a sibling plan for lower.rs / build.rs substitution-threading repair."
+        ),
+    };
+
+    match raised {
+        TypeExpr::Array { element, .. } => match element.as_ref() {
+            TypeExpr::TypeParameter(param) => {
+                assert_eq!(
+                    param.name, "T",
+                    "spike #1: array element parameter name must be `T` — got {:?}",
+                    param.name
+                );
+                assert!(
+                    matches!(
+                        param.constraint.as_deref(),
+                        Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"
+                    ),
+                    "spike #1: T's constraint must be `Item` — got {:?}",
+                    param.constraint
+                );
+            }
+            other => panic!(
+                "spike #1: items element must preserve the script-setup generic as a \
+                 TypeParameter — got {other:?}\n\
+                 this halts Step 1 — dispatch substitution is broken upstream."
+            ),
+        },
+        other => panic!(
+            "spike #1: items prop must lower to an Array — got {other:?}\n\
+             this halts Step 1 — dispatch substitution is broken upstream."
+        ),
+    }
+}
+
+/// Spike #2: empirical classification of the ten engine-local (b)
+/// caches as PRE_LOWER (MIGRATE) or POST_LOWER (DELETE candidate).
+///
+/// NOT a closed-world assertion. The spike runs a multi-fixture
+/// workload, instruments each cache's `.get(...)` read site against
+/// the dispatch lowering entry point, and prints the per-cache
+/// classification verbatim. Step 3's disposition table is written
+/// FROM this output.
+///
+/// HARD STOP per Codex P0 #1: a fixture suite that records zero
+/// reads for any cache is NOT delete authorization — it only proves
+/// the fixture missed that cache. The fixture suite must be
+/// expanded until every cache has `reads > 0`.
+#[test]
+fn spike_classify_engine_cache_work_origin() {
+    crate::spike_instrumentation::reset();
+    crate::spike_instrumentation::enable();
+
+    // The spike workload must collectively drive every cache. The
+    // fixture suite below was iterated in the spike commit body
+    // (`feedback-2026-04-25-spike.md`) until each of the ten caches
+    // recorded `reads > 0`.
+    run_spike_classification_fixture(run_classification_fixture_barrel_import);
+    run_spike_classification_fixture(run_classification_fixture_generic_macro);
+    run_spike_classification_fixture(run_classification_fixture_indexed_member_route);
+    run_spike_classification_fixture(run_classification_fixture_pick_through_barrel);
+    run_spike_classification_fixture(run_classification_fixture_pick_with_key_alias);
+    run_spike_classification_fixture(run_classification_fixture_omit_with_recursive_target);
+    run_spike_classification_fixture(run_classification_fixture_alias_to_imported_ref);
+    run_spike_classification_fixture(run_classification_fixture_direct_prepared_route_caches);
+
+    crate::spike_instrumentation::disable();
+    let snap = crate::spike_instrumentation::snapshot();
+    assert!(
+        snap.lower_called,
+        "spike #2 must observe at least one dispatch lower call; otherwise \
+         cache-read timing cannot be classified"
+    );
+
+    let ten_caches = [
+        "imported_registry_symbols",
+        "declarations",
+        "resolvable",
+        "owner_collection_exprs",
+        "prepared_target_cache",
+        "materialize_memo",
+        "materialized_member_surfaces",
+        "prepared_surface_cache",
+        "prepared_member_cache",
+        "routed_expr_surface_cache",
+    ];
+
+    let mut unused_caches: Vec<&'static str> = Vec::new();
+    for &cache_name in &ten_caches {
+        let reads = snap.reads.get(cache_name).copied().unwrap_or(0);
+        let had_pre_lower_read = snap.pre_lower_caches.contains(cache_name);
+        let classification = match (reads, had_pre_lower_read) {
+            (0, _) => {
+                unused_caches.push(cache_name);
+                "UNUSED_FIXTURE_INCOMPLETE"
+            }
+            (_, true) => "PRE_LOWER",
+            (_, false) => "POST_LOWER",
+        };
+        eprintln!("CACHE_CLASSIFICATION {cache_name}: {classification} (reads={reads})");
+    }
+
+    // HARD STOP per Codex P0 #1: zero reads means the fixture suite
+    // missed the cache's consumer path, NOT that the cache is dead.
+    // Expand the fixture suite (or take the static-rg tombstone path
+    // documented in the spike commit body) — UNUSED is never delete
+    // authorization.
+    assert!(
+        unused_caches.is_empty(),
+        "spike #2: caches {unused_caches:?} have zero reads on the classification \
+         fixture suite — fixture is incomplete. STOP and add fixtures covering \
+         each missing cache's consumer path. UNUSED is never delete authorization."
+    );
+
+    // Floor check (per revision 7): at least one PRE_LOWER cache.
+    // A fully-POST_LOWER outcome means instrumentation likely missed
+    // the read sites — do NOT proceed to Step 3 deletion based on
+    // such output.
+    let pre_lower_count = snap.pre_lower_caches.len();
+    assert!(
+        pre_lower_count > 0,
+        "spike #2 found zero PRE_LOWER caches — instrumentation likely missed \
+         read sites; do NOT proceed to Step 3 deletion based on this output"
+    );
+
+    eprintln!(
+        "spike #2 summary: {pre_lower_count}/{} caches PRE_LOWER (MIGRATE candidates), \
+         {} POST_LOWER (DELETE candidates — parity-test gated in Step 2/3).",
+        ten_caches.len(),
+        ten_caches.len() - pre_lower_count
+    );
+}
+
+fn run_spike_classification_fixture(fixture: fn()) {
+    crate::spike_instrumentation::reset_lower_marker();
+    fixture();
+}
+
+/// Fixture A — barrel-import owner SFC. Drives `prepared_target_cache`,
+/// `prepared_surface_cache`, `routed_expr_surface_cache`,
+/// `prepared_member_cache`, and `imported_registry_symbols` via a
+/// barrel-resolved generic Props target.
+fn run_classification_fixture_barrel_import() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/index.ts",
+            "export * from './props';\nexport * from './item';\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types/item.ts",
+            "export interface Item { id: string; label: string }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types/props.ts",
+            "import type { Item } from './item';\n\
+             export interface Props<U extends Item = Item> {\n\
+               items?: U[];\n\
+               selected?: U;\n\
+             }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Owner.vue",
+            r#"<script setup lang="ts">
+import type { Props } from './types';
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/Owner.vue").unwrap();
+}
+
+/// Fixture B — script-setup generic macro shell. Drives
+/// `materialize_memo`, `materialized_member_surfaces`, and
+/// `owner_collection_exprs` via the script-setup-generic substitution
+/// path (the same path Spike #1 exercises).
+fn run_classification_fixture_generic_macro() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Generic.vue",
+            r#"<script lang="ts">
+export interface Item { id: string }
+export interface Props<U extends Item = Item> {
+  items?: U[]
+  selected?: U extends infer Selected ? Selected : never
+}
+</script>
+<script setup lang="ts" generic="T extends Item = Item">
+defineProps<Props<T>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/Generic.vue").unwrap();
+}
+
+/// Fixture C — indexed-access member route. Drives `declarations` and
+/// `resolvable` via prepared-decl lookup at indexed-access projection
+/// hops.
+fn run_classification_fixture_indexed_member_route() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/registry.ts",
+            "export interface Registry {\n  \
+               foo: { kind: 'foo'; payload: string };\n  \
+               bar: { kind: 'bar'; payload: number };\n\
+             }\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/Indexed.vue",
+            r#"<script setup lang="ts">
+import type { Registry } from './types/registry';
+defineProps<Registry['foo']>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/Indexed.vue").unwrap();
+}
+
+/// Fixture D — `Pick<>` through a barrel import. Drives
+/// `prepared_target_cache` (imported-target normalization across the
+/// barrel re-export hop) and `prepared_member_cache` (per-member
+/// projection through the resolved prepared decl).
+fn run_classification_fixture_pick_through_barrel() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/inner.ts",
+            "export interface Inner {\n  a: string;\n  b: number;\n  c: boolean;\n}\n",
+        )
+        .unwrap();
+    project
+        .upsert_base("/types/index.ts", "export * from './inner';\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/PickOwner.vue",
+            r#"<script setup lang="ts">
+import type { Inner } from './types';
+defineProps<Pick<Inner, 'a' | 'b'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/PickOwner.vue").unwrap();
+}
+
+/// Fixture E — `Pick<Target, KeyAlias>` where the keys are referenced
+/// as a separate type alias (rather than inline string literals).
+/// Drives the `prepared_string_literal_keys` Ref-arm path which calls
+/// `resolve_prepared_surface_target` (recording `prepared_target_cache`)
+/// to normalize the alias's defining file before reading its body.
+fn run_classification_fixture_pick_with_key_alias() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/keys.ts",
+            "export type AlphaKeys = 'a' | 'b';\n\
+             export interface AlphaTarget {\n  a: string;\n  b: number;\n  c: boolean;\n}\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/KeyAliasOwner.vue",
+            r#"<script setup lang="ts">
+import type { AlphaTarget, AlphaKeys } from './types/keys';
+defineProps<Pick<AlphaTarget, AlphaKeys>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/KeyAliasOwner.vue").unwrap();
+}
+
+/// Fixture F — `Omit<>` over a recursively-extending interface, plus
+/// a route-keyed member projection that falls back through
+/// `project_type_member` when dispatch's surface lookup misses on a
+/// deeper hop. Drives `prepared_member_cache` via the `or_else`
+/// fallback at `project_type_member` (engine.rs:3508-3531).
+fn run_classification_fixture_omit_with_recursive_target() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/recursive.ts",
+            "export interface NodeBase {\n  id: string;\n  label: string;\n  parent?: NodeBase;\n}\n\
+             export interface ExtendedNode extends NodeBase {\n  extra: number;\n  children?: ExtendedNode[];\n}\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/RecursiveOmitOwner.vue",
+            r#"<script setup lang="ts">
+import type { ExtendedNode } from './types/recursive';
+defineProps<Omit<ExtendedNode, 'parent' | 'children'>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session
+        .get_component_meta("/RecursiveOmitOwner.vue")
+        .unwrap();
+}
+
+/// Fixture G — type alias whose body is a non-builtin Ref to an
+/// imported interface. The owner's prepared body is `TypeExpr::Ref`
+/// (not an Object literal), so `project_prepared_surface_from_ref`
+/// falls through to its `_ =>` arm which calls
+/// `resolve_prepared_surface_target` (recording `prepared_target_cache`).
+fn run_classification_fixture_alias_to_imported_ref() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/types/inner.ts",
+            "export interface Inner {\n  a: string;\n  b: number;\n  c: boolean;\n}\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/types/alias.ts",
+            "import type { Inner } from './inner';\n\
+             export type AliasOfInner = Inner;\n\
+             export type WrappedAlias = AliasOfInner;\n",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/AliasOwner.vue",
+            r#"<script setup lang="ts">
+import type { AliasOfInner, WrappedAlias } from './types/alias';
+defineProps<AliasOfInner & WrappedAlias>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.get_component_meta("/AliasOwner.vue").unwrap();
+}
+
+/// Fixture H — direct prepared-route API coverage for the two caches
+/// that the public `get_component_meta` fixtures do not currently
+/// hit. These are live engine APIs with production call sites, so the
+/// spike must characterize them instead of treating a public-fixture
+/// miss as dead code.
+fn run_classification_fixture_direct_prepared_route_caches() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/base.ts",
+            r#"
+export interface RootProps<T> {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  modelValue?: T
+}
+
+export interface BaseProps {
+  open?: boolean
+  defaultOpen?: boolean
+  disabled?: boolean
+  name?: string
+}
+
+export interface Props extends Pick<BaseProps, 'open' | 'defaultOpen' | 'disabled'> {
+  label?: string
+}
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script lang="ts">
+import type { RootProps } from './base'
+
+type Item = { label?: string }
+
+export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
+  items?: T
+}
+
+export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    assert!(host.ensure_loaded("/src/App.vue"));
+    assert!(host.ensure_loaded("/src/base.ts"));
+
+    let _store_view = host.resolver_store_view();
+    let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
+
+    let _ = query_engine
+        .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
+        .expect("generic inherited omit surface should project");
+
+    let route = crate::resolver_core::RouteDemand::Pick(vec![
+        "open".to_string(),
+        "defaultOpen".to_string(),
+        "disabled".to_string(),
+    ]);
+    let _ = query_engine
+        .project_route_surface_expr("/src/base.ts", "Props", &route)
+        .expect("prepared pick route should project");
+}
