@@ -3621,6 +3621,7 @@ name = "verter_bench"
 version = "0.0.1-beta.1"
 dependencies = [
  "criterion",
+ "glob",
  "hotpath",
  "oxc_allocator",
  "oxc_ast",

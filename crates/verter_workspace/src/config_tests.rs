@@ -685,3 +685,121 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
         "should have inherited @/* path from base"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// discover_tsconfigs — descent pruning
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn discover_tsconfigs_skips_node_modules_and_dot_dirs() {
+    // Anchors the prune-at-descent contract that replaced the glob walk.
+    //
+    // Pre-fix the function used `glob::glob("**/tsconfig.json")` which
+    // descended into every directory before post-filtering. Against any
+    // real PNPM-managed `node_modules` (where each `.pnpm/<pkg>/node_modules`
+    // contains symlinks back into `.pnpm/`) the walk fanned out
+    // exponentially and never terminated.
+    //
+    // Post-fix the function uses `walkdir::WalkDir` with
+    // `follow_links(false)` and a `filter_entry` that prunes descent
+    // into `node_modules` and any directory whose name starts with
+    // `.`. This test pins those two prunes by placing one tsconfig.json
+    // inside each forbidden directory and asserting they are absent
+    // from the discovered set, while the user-source tsconfigs are
+    // present.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+
+    // User-source: must be discovered.
+    touch("tsconfig.json");
+    touch("src/tsconfig.app.json");
+    touch("packages/lib/tsconfig.json");
+
+    // Forbidden subtrees: must be skipped.
+    touch("node_modules/foo/tsconfig.json");
+    touch("node_modules/.pnpm/bar/node_modules/bar/tsconfig.json");
+    touch(".nuxt/tsconfig.json");
+    touch(".git/tsconfig.json");
+    touch(".pnpm-store/tsconfig.json");
+
+    // Nested user-source one level inside a non-forbidden dir.
+    touch("apps/web/tsconfig.build.json");
+
+    let entries = super::discover_tsconfigs(root);
+    let mut paths: Vec<String> = entries.into_iter().map(|e| e.path).collect();
+    paths.sort();
+
+    let normalized_root = root.to_string_lossy().replace('\\', "/");
+    let expected = vec![
+        format!("{normalized_root}/apps/web/tsconfig.build.json"),
+        format!("{normalized_root}/packages/lib/tsconfig.json"),
+        format!("{normalized_root}/src/tsconfig.app.json"),
+        format!("{normalized_root}/tsconfig.json"),
+    ];
+    let mut expected = expected;
+    expected.sort();
+
+    assert_eq!(
+        paths, expected,
+        "discover_tsconfigs must skip node_modules + dot-dirs at descent",
+    );
+}
+
+#[test]
+fn discover_tsconfigs_matches_tsconfig_named_files_only() {
+    // Pin the filename predicate: `tsconfig.json` and
+    // `tsconfig.<suffix>.json` are matched; anything else is not.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let touch = |rel: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{}").unwrap();
+    };
+    touch("tsconfig.json");
+    touch("tsconfig.app.json");
+    touch("tsconfig.node.test.json");
+    // Negative: similar names that must NOT match.
+    touch("jsconfig.json");
+    touch("tsconfig.txt");
+    touch("a-tsconfig.json"); // filename does not start with `tsconfig.`
+    touch("tsconfigjson"); // missing dot before extension
+    touch("subdir/tsconfig.json");
+
+    let entries = super::discover_tsconfigs(root);
+    let mut names: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            std::path::Path::new(&e.path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let expected: Vec<String> = vec![
+        "tsconfig.app.json".into(),
+        "tsconfig.json".into(),
+        "tsconfig.node.test.json".into(),
+    ];
+    assert_eq!(
+        names, expected,
+        "must match only tsconfig[.suffix].json files"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.path.contains("tsconfig.json"))
+            .count(),
+        2, // root/tsconfig.json + subdir/tsconfig.json
+        "should find both root and nested user-source tsconfig.json",
+    );
+}

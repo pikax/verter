@@ -129,53 +129,94 @@ fn strip_trailing_commas(input: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tsconfig Discovery (uses glob — the one function that still needs disk)
+// Tsconfig Discovery — disk-walking, prunes node_modules / dot-dirs at descent
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Discover all tsconfig.json files under a workspace root.
-/// Uses glob patterns — this is the one function that still touches disk directly
-/// via `glob::glob`. All other functions take `&dyn WorkspaceAccess`.
+/// Discover all `tsconfig.json` (and `tsconfig.*.json`) files under a
+/// workspace root.
+///
+/// This is the one function in `verter_workspace::config` that still
+/// touches disk directly; all sibling helpers take a
+/// [`WorkspaceAccess`] and read through it.
+///
+/// Uses [`walkdir::WalkDir`] with [`follow_links(false)`][walkdir-follow]
+/// and a `filter_entry` that prunes descent into:
+///
+///   * `node_modules` — package-manager output, never authored project
+///     code. PNPM-managed `node_modules` is a symlink farm where each
+///     `.pnpm/<pkg>/node_modules/<pkg>` directory contains nested
+///     `node_modules` symlinks pointing back into `.pnpm/`. Recursive
+///     globbing into that graph fans out exponentially and never
+///     terminates in practice — it was the dominant source of
+///     `ProjectGraph::from_workspace_roots` hangs against real Vue/Nuxt
+///     projects.
+///   * Directories whose name starts with `.` — `.git`, `.nuxt`,
+///     `.pnpm`, `.output`, etc. They are never user source. Tsconfigs
+///     inside them (e.g. `.nuxt/tsconfig.json`) are still reachable
+///     through `extends` resolution in [`resolve_tsconfig_extends`],
+///     which uses [`WorkspaceAccess::read_file`] directly.
+///
+/// [walkdir-follow]: https://docs.rs/walkdir/latest/walkdir/struct.WalkDir.html#method.follow_links
 pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
     let mut entries = Vec::new();
-    let root_str = root.to_string_lossy().replace('\\', "/");
-    let root_component_count = root.components().count();
+    let mut seen = rustc_hash::FxHashSet::<String>::default();
 
-    for glob_pattern in &[
-        format!("{root_str}/**/tsconfig.json"),
-        format!("{root_str}/**/tsconfig.*.json"),
-    ] {
-        match glob::glob(glob_pattern) {
-            Ok(paths) => {
-                for entry in paths.flatten() {
-                    let relative_components: Vec<_> =
-                        entry.components().skip(root_component_count).collect();
-                    if relative_components
-                        .iter()
-                        .any(|c| c.as_os_str() == "node_modules")
-                    {
-                        continue;
-                    }
-                    if relative_components.iter().any(|c| {
-                        let name = c.as_os_str().to_string_lossy();
-                        name.starts_with('.') && name != "."
-                    }) {
-                        continue;
-                    }
-                    let entry_str = entry.to_string_lossy().replace('\\', "/");
-                    if entries.iter().any(|e: &TsConfigEntry| e.path == entry_str) {
-                        continue;
-                    }
-                    if let Some(dir) = entry.parent() {
-                        entries.push(TsConfigEntry {
-                            path: entry_str,
-                            root: dir.to_string_lossy().replace('\\', "/"),
-                        });
-                    }
-                }
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            // Always include the root itself.
+            if entry.depth() == 0 {
+                return true;
             }
-            Err(e) => {
-                tracing::warn!("failed to glob for tsconfig files: {}", e);
+            // The filter fires on every entry (file or directory), but
+            // it's only load-bearing for directories — pruning a file
+            // just hides one entry, while pruning a directory skips
+            // its entire subtree.
+            if !entry.file_type().is_dir() {
+                return true;
             }
+            let Some(name) = entry.file_name().to_str() else {
+                return true;
+            };
+            if name == "node_modules" {
+                return false;
+            }
+            if name.starts_with('.') {
+                return false;
+            }
+            true
+        });
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!("walkdir: {}", err);
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        let matches =
+            name == "tsconfig.json" || (name.starts_with("tsconfig.") && name.ends_with(".json"));
+        if !matches {
+            continue;
+        }
+        let path = entry.path();
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        if !seen.insert(path_str.clone()) {
+            continue;
+        }
+        if let Some(dir) = path.parent() {
+            entries.push(TsConfigEntry {
+                path: path_str,
+                root: dir.to_string_lossy().replace('\\', "/"),
+            });
         }
     }
 
