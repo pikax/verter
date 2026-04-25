@@ -1616,6 +1616,13 @@ impl VerterHost {
             .then(|| crate::resolver_store::hash_import_route_targets(&import_routes));
         let import_routes_arc = Arc::new(import_routes.clone());
 
+        // Step 8 / F5: route_hash mirror — see host_manage.rs equivalent
+        // for the rationale (cache content-derived hash so
+        // current_derived_fact_hash skips per-call rehashing).
+        let route_hash = shallow_state
+            .has_resolvable_surface()
+            .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
+
         // Publish the canonical post-parse artifact into IndexedReadyDb. This
         // is the single authoritative cache consumers read from; the retired
         // `IndexedReadyDb` no longer exists.
@@ -1624,6 +1631,7 @@ impl VerterHost {
             shallow_state: Arc::clone(&shallow_state),
             import_routes: Arc::clone(&import_routes_arc),
             import_route_hash,
+            route_hash,
             raw_source,
             eval_source,
             cached_parse,

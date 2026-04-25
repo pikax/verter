@@ -7579,8 +7579,23 @@ impl VerterHost {
                 self.current_or_read_whole_hash(canonical_id)
             }
             crate::resolver_core::DerivedFactKind::Route => {
-                // Read-only: only compute Route hash if shallow state already exists.
-                // Do NOT call ensure_shallow_* here — fact validation must be side-effect-free.
+                // Step 8 / F5: read the cached `route_hash` from
+                // IndexedReady when available — symmetric to
+                // `import_route_hash`. Falls back to recomputing via
+                // `hash_route_surface` only when the canonical isn't
+                // yet indexed (read-only: this code path must NOT
+                // call ensure_indexed because fact validation is
+                // side-effect-free). Same content-hash invalidation
+                // lifecycle as IndexedReady itself, so the cached
+                // hash is current as long as the entry is.
+                if let Some(cached) = self
+                    .project_type_store
+                    .indexed()
+                    .get_any(canonical_id)
+                    .and_then(|facts| facts.route_hash)
+                {
+                    return Some(cached);
+                }
                 let state = self.shallow_file_state(canonical_id)?;
                 state
                     .has_resolvable_surface()

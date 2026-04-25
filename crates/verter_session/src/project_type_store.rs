@@ -117,6 +117,16 @@ pub struct IndexedReady {
     /// cache validation so route-surface changes invalidate only the files
     /// whose imports actually shifted.
     pub import_route_hash: Option<Hash16>,
+    /// Optional hash-summary of the file's route surface (the
+    /// declaration-side data `hash_route_surface` digests). Symmetric
+    /// to [`import_route_hash`]; populated when
+    /// [`ShallowFileState::has_resolvable_surface`] returns `true`.
+    /// Used by `current_derived_fact_hash` (plan §3 Step 8 / F5) to
+    /// answer cached-route fact queries without rehashing per call.
+    /// Invalidation lifecycle == `IndexedReady`'s content-hash
+    /// lifecycle: when the canonical's whole_hash changes, a fresh
+    /// `IndexedReady` is built and `route_hash` is recomputed.
+    pub route_hash: Option<Hash16>,
     /// Raw file source as-read. Shared immutable handle across consumers.
     pub raw_source: Arc<str>,
     /// SFC-extracted `<script>` content used as the body of the eval
@@ -166,6 +176,7 @@ impl IndexedReady {
             shallow_state: Arc::new(shallow),
             import_routes: Arc::new(FxHashMap::default()),
             import_route_hash: None,
+            route_hash: None,
             raw_source: Arc::from(""),
             eval_source: Arc::from(""),
             cached_parse: None,
@@ -846,6 +857,7 @@ mod tests {
                 shallow_state: shallow,
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
+                route_hash: None,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,
@@ -900,6 +912,7 @@ mod tests {
                 ),
                 import_routes: Arc::new(FxHashMap::default()),
                 import_route_hash: None,
+                route_hash: None,
                 raw_source: Arc::from(""),
                 eval_source: Arc::from(""),
                 cached_parse: None,

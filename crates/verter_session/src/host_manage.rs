@@ -3538,6 +3538,19 @@ impl VerterHost {
 
             let import_routes = Arc::new(import_routes);
 
+            // Step 8 / F5: cache the route-surface hash on IndexedReady
+            // symmetric to import_route_hash. Populated only when the
+            // shallow state has a resolvable surface (matching
+            // host_resolve.rs:575's existing pattern). Invalidation
+            // lifecycle is identical to IndexedReady's content-hash
+            // lifecycle — when canonical's whole_hash changes, a fresh
+            // IndexedReady is built and route_hash is recomputed.
+            // `current_derived_fact_hash` (meta_resolve.rs) reads this
+            // cached hash instead of rehashing per call.
+            let route_hash = shallow_state
+                .has_resolvable_surface()
+                .then(|| crate::resolver_store::hash_route_surface(shallow_state.as_ref()));
+
             // Publish the canonical post-parse artifact into IndexedReadyDb.
             // This is the single authoritative cache consumers read from.
             let indexed = Arc::new(crate::project_type_store::IndexedReady {
@@ -3545,6 +3558,7 @@ impl VerterHost {
                 shallow_state: Arc::clone(&shallow_state),
                 import_routes: Arc::clone(&import_routes),
                 import_route_hash,
+                route_hash,
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
                 cached_parse,
