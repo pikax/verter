@@ -76,6 +76,17 @@ pub struct RustAuditRecord {
     /// `HostConfig::footprint_capture` is true and the accumulator
     /// collected work for this request.
     pub footprint: Option<RustSemanticFootprintAudit>,
+    /// Plan §3 Step 4 (architectural-debt-closure rev 10): true when
+    /// the audited request was satisfied from the warm component-meta
+    /// result cache (HostFenceValidator validated the cached
+    /// `dep_signature`). Cold cold-resolver runs leave this `false`.
+    /// Audit consumers may aggregate against this flag to separate
+    /// warm-cache replay from genuine resolver work.
+    ///
+    /// Serde-default for back-compat with old audit payloads that
+    /// predate the field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_cache: bool,
 }
 
 /// Phase timings in milliseconds.
@@ -999,6 +1010,7 @@ impl AuditBuilder {
             store: self.store,
             memory: self.memory,
             footprint: self.footprint,
+            from_cache: false,
         }
     }
 }

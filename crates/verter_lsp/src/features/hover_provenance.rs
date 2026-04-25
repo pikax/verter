@@ -345,6 +345,7 @@ mod tests {
             store: RustStoreAudit::default(),
             memory: RustMemoryAudit::default(),
             footprint: None,
+            from_cache: false,
         };
 
         // Missing footprint → the renderer surfaces a clear hint

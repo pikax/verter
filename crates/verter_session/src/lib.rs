@@ -49,6 +49,8 @@
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
 
+#[cfg(test)]
+mod audit_warm_cache_tests;
 pub mod audited_request;
 mod cache;
 mod compile;

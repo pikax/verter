@@ -499,7 +499,19 @@ memory: RustMemoryAudit,
  * `HostConfig::footprint_capture` is true and the accumulator
  * collected work for this request.
  */
-footprint: RustSemanticFootprintAudit | null, };
+footprint: RustSemanticFootprintAudit | null, 
+/**
+ * Plan §3 Step 4 (architectural-debt-closure rev 10): true when
+ * the audited request was satisfied from the warm component-meta
+ * result cache (HostFenceValidator validated the cached
+ * `dep_signature`). Cold cold-resolver runs leave this `false`.
+ * Audit consumers may aggregate against this flag to separate
+ * warm-cache replay from genuine resolver work.
+ *
+ * Serde-default for back-compat with old audit payloads that
+ * predate the field.
+ */
+from_cache: boolean, };
 
 /**
  * Memory snapshots.

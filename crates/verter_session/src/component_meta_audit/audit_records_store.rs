@@ -88,6 +88,7 @@ mod tests {
             store: RustStoreAudit::default(),
             memory: RustMemoryAudit::default(),
             footprint: None,
+            from_cache: false,
         }
     }
 

@@ -5042,7 +5042,12 @@ impl VerterHost {
         if !dep_sig_valid {
             return None;
         }
-        Some((*entry.payload).clone())
+        // Step 4 (architectural-debt-closure rev 10): the DB now stores
+        // `CachedComponentMetaResult { analysis, resolution_template, ... }`
+        // so the with_resolution path can rehydrate without re-running the
+        // cold resolver. The plain `get_component_meta` warm path returns
+        // only the analysis projection.
+        Some(entry.payload.analysis.clone())
     }
 
     /// Phase 3: publish the cold-build result into the project-global
@@ -5076,10 +5081,18 @@ impl VerterHost {
             self.project_type_store.project_generation(),
             &resolved.fact_versions,
         );
+        let resolution_template =
+            crate::component_meta_result_db::ResolutionTemplate::from_resolved_state(resolved);
+        let cached = crate::component_meta_result_db::CachedComponentMetaResult {
+            analysis: meta,
+            resolution_template,
+            canonical_id: Arc::from(canonical),
+            whole_hash,
+        };
         self.project_type_store.component_meta_results().insert(
             key,
             crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(meta),
+                payload: Arc::new(cached),
                 dep_signature,
             },
         );
@@ -5128,6 +5141,16 @@ impl VerterHost {
     /// analysis projection and the resolved-meta sidecar. Avoids the
     /// double `resolve_component_meta(Expanded)` that happens if callers
     /// invoke `get_component_meta()` + `resolve_component_meta()` separately.
+    ///
+    /// **Plan §3 Step 4 (architectural-debt-closure rev 10).** Consults
+    /// the `ComponentMetaResultDb` warm cache before falling through to
+    /// the cold resolver. On a cache hit with a valid `dep_signature`,
+    /// the cached `ResolutionTemplate` rehydrates a per-request
+    /// `ResolvedComponentMetaState` (snapshot reloaded from `IndexedReadyDb`)
+    /// and a synthesized `RustAuditRecord` with `from_cache = true`,
+    /// `total_ms = 0.0` is published into `host.audit_records` so audit
+    /// consumers via `take_audit_record(resolution.request_id)` work
+    /// uniformly.
     pub fn get_component_meta_with_resolution(
         &self,
         canonical_or_alias: &str,
@@ -5189,6 +5212,17 @@ impl VerterHost {
             self.workspace().register_audit_sink(sink).ok()
         });
 
+        // Plan §3 Step 4: warm-cache short-circuit AFTER request-context
+        // install (so `current_request_id()` returns the fresh id even
+        // on the warm path). Validates `dep_signature` against current
+        // host state; on success, rehydrates the resolution template
+        // and synthesizes a `from_cache: true` audit record.
+        if let Some((analysis, resolution)) =
+            self.try_with_resolution_cache_hit(canonical.as_str(), request_id)
+        {
+            return Some((analysis, resolution));
+        }
+
         let mut resolved = self
             .resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)?;
         resolved.request_id = request_id;
@@ -5200,7 +5234,81 @@ impl VerterHost {
             &resolved,
             true, // include_fallthrough
         );
+
+        // Plan §3 Step 4: cache-write so subsequent identical calls
+        // short-circuit through `try_with_resolution_cache_hit`.
+        self.publish_component_meta_cache_entry(canonical.as_str(), &resolved, analysis.clone());
+
         Some((analysis, resolved))
+    }
+
+    /// Plan §3 Step 4 cache-hit path (architectural-debt-closure rev 10).
+    /// Returns `Some((analysis, resolution))` on a valid warm hit; `None`
+    /// otherwise (miss, stale `dep_signature`, or eviction-race rehydrate
+    /// failure). Caller falls through to the cold resolver on `None`.
+    ///
+    /// Synthesizes a `RustAuditRecord` with `from_cache = true` and
+    /// `total_ms = 0.0` and publishes it into `host.audit_records` (when
+    /// audit is on) so `take_audit_record(resolution.request_id)`
+    /// returns it uniformly with cold-resolver records.
+    fn try_with_resolution_cache_hit(
+        &self,
+        canonical: &str,
+        request_id: u64,
+    ) -> Option<(
+        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        crate::meta_resolve::ResolvedComponentMetaState,
+    )> {
+        let shallow = self.shallow_file_state(canonical)?;
+        let key = crate::component_meta_result_db::ComponentMetaResultKey {
+            owner_canonical: Arc::from(canonical),
+            owner_whole_hash: shallow.whole_hash,
+            query_kind: crate::component_meta_result_db::ComponentMetaQueryKind::Native,
+            options_fingerprint: component_meta_options_fingerprint(
+                &ComponentMetaOptions::default(),
+            ),
+        };
+        let entry = self.project_type_store.component_meta_results().get(&key)?;
+        let validator = HostFenceValidator { host: self };
+        use crate::completion_fence::FenceValidator;
+        let dep_sig_valid = entry
+            .dep_signature
+            .iter()
+            .all(|(canonical_id, version)| validator.validate(canonical_id, version));
+        if !dep_sig_valid {
+            return None;
+        }
+
+        // Rehydrate the resolution template into a fresh per-request state.
+        // Returns None on the bounded eviction race where the snapshot
+        // was evicted between dep_signature validation and reload.
+        let cached = entry.payload;
+        let resolution = cached.resolution_template.rehydrate(
+            self,
+            &cached.canonical_id,
+            cached.whole_hash,
+            request_id,
+        )?;
+
+        // Synthesize a from_cache audit record so consumers via
+        // `take_audit_record(resolution.request_id)` get uniform
+        // observability.
+        if self.config.audit_enabled {
+            let synthesized = crate::component_meta_audit::RustAuditRecord {
+                request_id,
+                canonical_id: canonical.to_string(),
+                timings: crate::component_meta_audit::RustTimingAudit::default(),
+                solver: crate::component_meta_audit::RustSolverAudit::default(),
+                store: crate::component_meta_audit::RustStoreAudit::default(),
+                memory: crate::component_meta_audit::RustMemoryAudit::default(),
+                footprint: None,
+                from_cache: true,
+            };
+            debug_assert_eq!(synthesized.request_id, resolution.request_id);
+            self.publish_audit_record(synthesized);
+        }
+
+        Some((cached.analysis.clone(), resolution))
     }
 
     /// Monotonic request-id generator. Starts at 1; zero is reserved

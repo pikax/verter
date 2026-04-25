@@ -113,6 +113,7 @@ fn synthesize_record() -> RustAuditRecord {
             ..Default::default()
         },
         footprint: Some(footprint),
+        from_cache: false,
     }
 }
 

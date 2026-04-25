@@ -28,6 +28,7 @@ use dashmap::DashMap;
 use verter_semantic::analysis::Hash16;
 
 use crate::semantic_query::DepSignature;
+use crate::types::ProjectionMode;
 
 /// Output-affecting query shape. Expanded as new public component-meta
 /// query kinds land — every distinct output shape becomes a variant so
@@ -62,6 +63,125 @@ pub struct ComponentMetaResultKey {
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
     pub dep_signature: DepSignature,
+}
+
+/// Plan §3 Step 4 (architectural-debt-closure rev 10): sanitized snapshot
+/// of a [`crate::meta_resolve::ResolvedComponentMetaState`] suitable for
+/// cross-request reuse. Excludes per-request fields (`request_id`,
+/// `compute_audit`) and the [`FileAnalysisSnapshot`] (reloaded from
+/// `ProjectTypeStore::indexed()` at rehydrate time).
+///
+/// Field-by-field partition (per D4.1):
+///
+/// - **EXCLUDED — per-request, never cached:**
+///   - `request_id: u64` (allocated per request).
+///   - `compute_audit: Option<...>` (request-specific timings/counters).
+///
+/// - **EXCLUDED — snapshot-derived, reloaded from host:**
+///   - `snapshot: FileAnalysisSnapshot` (reload via
+///     `ProjectTypeStore::indexed().get(canonical, whole_hash)`).
+///
+/// - **INCLUDED — content-addressed via `dep_signature`:**
+///   - `mode`, `whole_hash`.
+///   - `resolved_macros`, `resolved_type_registry`,
+///     `resolved_type_registry_meta`.
+///   - `evaluated_types`.
+///   - `fact_versions`.
+///   - `surface_identities` (audit sidecar; cache, do not rehydrate as
+///     None).
+///   - `origin_graph` (audit sidecar; cache).
+#[derive(Debug, Clone)]
+pub struct ResolutionTemplate {
+    pub mode: ProjectionMode,
+    pub whole_hash: Hash16,
+    pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
+    pub resolved_type_registry:
+        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+    pub resolved_type_registry_meta: Vec<crate::meta_resolve::ResolvedTypeRegistryMeta>,
+    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
+    pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
+}
+
+/// Plan §3 Step 4: cached component-meta payload AND its sanitized
+/// resolution sidecar. The DB generic migrates from
+/// `ComponentMetaResultDb<ComponentMetaAnalysis>` to
+/// `ComponentMetaResultDb<CachedComponentMetaResult>` so warm-cache
+/// hits on the audit-enabled path
+/// (`VerterHost::get_component_meta_with_resolution`) can rehydrate
+/// both halves without rerunning the cold resolver.
+#[derive(Debug, Clone)]
+pub struct CachedComponentMetaResult {
+    pub analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    pub resolution_template: ResolutionTemplate,
+    /// Owner canonical id used to reload `snapshot` via
+    /// [`ProjectTypeStore::indexed()`] on rehydrate.
+    pub canonical_id: Arc<str>,
+    /// Owner whole-hash this template was produced against.
+    pub whole_hash: Hash16,
+}
+
+impl ResolutionTemplate {
+    /// Build a template by sanitizing a freshly-resolved
+    /// [`crate::meta_resolve::ResolvedComponentMetaState`]. Strips
+    /// `request_id`, `snapshot`, and `compute_audit`; keeps the
+    /// content-addressed sidecars.
+    #[must_use]
+    pub fn from_resolved_state(resolved: &crate::meta_resolve::ResolvedComponentMetaState) -> Self {
+        Self {
+            mode: resolved.mode,
+            whole_hash: resolved.whole_hash,
+            resolved_macros: resolved.resolved_macros.clone(),
+            resolved_type_registry: resolved.resolved_type_registry.clone(),
+            resolved_type_registry_meta: resolved.resolved_type_registry_meta.clone(),
+            evaluated_types: resolved.evaluated_types.clone(),
+            fact_versions: resolved.fact_versions.clone(),
+            surface_identities: resolved.surface_identities.clone(),
+            origin_graph: resolved.origin_graph.clone(),
+        }
+    }
+
+    /// Rehydrate the template into a per-request
+    /// [`crate::meta_resolve::ResolvedComponentMetaState`]:
+    ///
+    /// - **`snapshot`** reloaded from `host.project_type_store().indexed()`
+    ///   at `(canonical_id, whole_hash)`. Returns `None` on a bounded
+    ///   eviction race (snapshot evicted between the dep_signature
+    ///   validation and the reload); callers fall through to the cold
+    ///   resolver.
+    /// - **`request_id`** is the caller-allocated fresh id.
+    /// - **`compute_audit`** stays `None` on warm-cache hits — the
+    ///   audit-record consumer observes `from_cache = true` and
+    ///   `total_ms = 0` instead.
+    /// - All other fields are restored from the cached template.
+    pub fn rehydrate(
+        &self,
+        host: &crate::VerterHost,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        request_id: u64,
+    ) -> Option<crate::meta_resolve::ResolvedComponentMetaState> {
+        let indexed = host
+            .project_type_store()
+            .indexed()
+            .get(canonical_id, whole_hash)?;
+        let snapshot = (*indexed.snapshot).clone();
+        Some(crate::meta_resolve::ResolvedComponentMetaState {
+            snapshot,
+            mode: self.mode,
+            whole_hash: self.whole_hash,
+            resolved_macros: self.resolved_macros.clone(),
+            resolved_type_registry: self.resolved_type_registry.clone(),
+            resolved_type_registry_meta: self.resolved_type_registry_meta.clone(),
+            evaluated_types: self.evaluated_types.clone(),
+            fact_versions: self.fact_versions.clone(),
+            compute_audit: None,
+            surface_identities: self.surface_identities.clone(),
+            origin_graph: self.origin_graph.clone(),
+            request_id,
+        })
+    }
 }
 
 impl<P> Clone for ComponentMetaResultEntry<P> {

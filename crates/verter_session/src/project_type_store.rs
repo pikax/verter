@@ -522,12 +522,16 @@ pub struct ProjectTypeStore {
     owner_import_surfaces: OwnerImportSurfaceDb,
     /// Final component-meta result cache (Phase 3). Keyed by
     /// `(owner_canonical, owner_whole_hash, query_kind, options_fingerprint)`.
-    /// Payload is the native `ComponentMetaAnalysis` shape returned by
-    /// `get_component_meta`; Phase 3 wires `get_component_meta` to consult
-    /// the cache with completion-fence dep-signature validation before
-    /// falling back to the cold resolver path.
+    /// Payload is [`crate::component_meta_result_db::CachedComponentMetaResult`]
+    /// — the native `ComponentMetaAnalysis` plus the sanitized
+    /// resolution sidecar template. Phase 3 wires `get_component_meta`
+    /// to consult the cache with completion-fence dep-signature
+    /// validation before falling back to the cold resolver path; Step 4
+    /// (architectural-debt-closure rev 10) extends the same cache to
+    /// short-circuit `get_component_meta_with_resolution` so audit-mode
+    /// warm replays return in near-zero time.
     component_meta_results:
-        ComponentMetaResultDb<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult>,
     /// TypeScript `intrinsic` registry (Phase 2.1). Maps resolved
     /// declaration names that have `= intrinsic` bodies to their
     /// implementation arms. Userland aliases like `Pick` / `Omit` never
@@ -583,14 +587,13 @@ impl ProjectTypeStore {
         );
         let owner_import_surfaces =
             OwnerImportSurfaceDb::with_counter(Arc::clone(&counters.owner_import_live));
-        let component_meta_results =
-            ComponentMetaResultDb::with_counters(
-                ComponentMetaResultDb::<
-                    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-                >::DEFAULT_CAPACITY,
-                Arc::clone(&counters.component_meta_live),
-                Arc::clone(&counters.component_meta_stale_sweeps),
-            );
+        let component_meta_results = ComponentMetaResultDb::with_counters(
+            ComponentMetaResultDb::<
+                crate::component_meta_result_db::CachedComponentMetaResult,
+            >::DEFAULT_CAPACITY,
+            Arc::clone(&counters.component_meta_live),
+            Arc::clone(&counters.component_meta_stale_sweeps),
+        );
         let semantic_graph = match provenance {
             Some(prov) => Arc::new(SemanticGraphStore::with_provenance(prov)),
             None => Arc::new(SemanticGraphStore::new()),
@@ -654,8 +657,7 @@ impl ProjectTypeStore {
     /// Final component-meta result cache (Phase 3).
     pub fn component_meta_results(
         &self,
-    ) -> &ComponentMetaResultDb<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>
-    {
+    ) -> &ComponentMetaResultDb<crate::component_meta_result_db::CachedComponentMetaResult> {
         &self.component_meta_results
     }
 
@@ -991,7 +993,22 @@ mod tests {
                 options_fingerprint: [0u8; 16],
             },
             crate::component_meta_result_db::ComponentMetaResultEntry {
-                payload: Arc::new(empty_component_meta_analysis()),
+                payload: Arc::new(crate::component_meta_result_db::CachedComponentMetaResult {
+                    analysis: empty_component_meta_analysis(),
+                    resolution_template: crate::component_meta_result_db::ResolutionTemplate {
+                        mode: crate::types::ProjectionMode::Expanded,
+                        whole_hash: hash,
+                        resolved_macros: Vec::new(),
+                        resolved_type_registry: Vec::new(),
+                        resolved_type_registry_meta: Vec::new(),
+                        evaluated_types: None,
+                        fact_versions: Vec::new(),
+                        surface_identities: None,
+                        origin_graph: None,
+                    },
+                    canonical_id: Arc::from("/w/o.vue"),
+                    whole_hash: hash,
+                }),
                 dep_signature: Arc::from(Vec::new().into_boxed_slice()),
             },
         );
