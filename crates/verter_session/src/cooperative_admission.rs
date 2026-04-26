@@ -60,7 +60,6 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
-use rustc_hash::FxHashMap;
 
 /// Per-key in-flight slot. The winner publishes via `state.completed`;
 /// joiners wait on `ready` until publish or fail.
@@ -127,36 +126,6 @@ where
     }
 }
 
-/// Variant for `FxHashMap`-backed inflight tables. Identical semantics;
-/// the only difference is the hasher used for the per-cache slot map.
-/// Most callers will use `InflightTable<K>` (the std `HashMap` variant).
-pub struct FxInflightTable<K>
-where
-    K: Hash + Eq + Clone,
-{
-    table: Mutex<FxHashMap<K, Arc<InflightSlot>>>,
-}
-
-impl<K> Default for FxInflightTable<K>
-where
-    K: Hash + Eq + Clone,
-{
-    fn default() -> Self {
-        Self {
-            table: Mutex::new(FxHashMap::default()),
-        }
-    }
-}
-
-impl<K> FxInflightTable<K>
-where
-    K: Hash + Eq + Clone,
-{
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// RAII guard that fails the in-flight slot if the cold build panics or
 /// returns early. Without this, a panic inside `compute()` would leave
 /// `claimed = true, completed = false` forever — joiners would block on
@@ -214,60 +183,6 @@ where
         self.slot.ready.notify_all();
         // Retire the in-flight slot from the per-cache table so the next
         // caller starts a fresh build.
-        let mut table = self.table.lock();
-        table.remove(&self.key);
-    }
-}
-
-/// FxHashMap variant of `InflightPanicGuard`.
-struct FxInflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    slot: Arc<InflightSlot>,
-    table: &'a Mutex<FxHashMap<K, Arc<InflightSlot>>>,
-    key: K,
-    finished: bool,
-}
-
-impl<'a, K> FxInflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    fn new(
-        slot: Arc<InflightSlot>,
-        table: &'a Mutex<FxHashMap<K, Arc<InflightSlot>>>,
-        key: K,
-    ) -> Self {
-        Self {
-            slot,
-            table,
-            key,
-            finished: false,
-        }
-    }
-
-    fn mark_finished(&mut self) {
-        self.finished = true;
-    }
-}
-
-impl<'a, K> Drop for FxInflightPanicGuard<'a, K>
-where
-    K: Hash + Eq + Clone,
-{
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        {
-            let mut state = self.slot.state.lock();
-            if !state.completed {
-                state.completed = true;
-                state.failed = true;
-            }
-        }
-        self.slot.ready.notify_all();
         let mut table = self.table.lock();
         table.remove(&self.key);
     }
@@ -413,110 +328,6 @@ where
 
     // Retire the inflight slot. Future callers either hit the warm map
     // or start a fresh inflight if the publish was skipped.
-    inflight.table.lock().remove(&key);
-
-    value
-}
-
-/// FxHashMap-backed variant. Identical semantics to
-/// `cooperative_get_or_insert`; the inflight table uses `FxHashMap`
-/// rather than `std::HashMap`. Use this when key hashing is on a hot
-/// path and the std hasher overhead is measurable.
-#[allow(dead_code)] // wired by per-cache callers in sub-task 3.2.1+
-pub fn cooperative_get_or_insert_fx<K, Entry, V, Validate, Compute, Project, Revalidate>(
-    map: &DashMap<K, Arc<Entry>>,
-    inflight: &FxInflightTable<K>,
-    key: K,
-    validate: Validate,
-    compute: Compute,
-    project: Project,
-    revalidate_after_compute: Revalidate,
-) -> Option<V>
-where
-    K: Eq + Hash + Clone,
-    Entry: Send + Sync + 'static,
-    V: Clone,
-    Validate: FnOnce(&Entry) -> Option<V>,
-    Compute: FnOnce() -> Option<Entry>,
-    Project: FnOnce(&Entry) -> V,
-    Revalidate: FnOnce(&Entry) -> bool,
-{
-    // Phase 1.
-    if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
-        if let Some(value) = validate(&entry_arc) {
-            return Some(value);
-        }
-        map.remove(&key);
-    }
-
-    // Phase 2.
-    let slot = {
-        let mut table = inflight.table.lock();
-        table
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(InflightSlot::new()))
-            .clone()
-    };
-
-    let mut state = slot.state.lock();
-    if state.claimed {
-        slot.ready.wait_while(&mut state, |s| !s.completed);
-        if state.failed {
-            return None;
-        }
-        drop(state);
-        let entry_arc = map.get(&key).map(|e| e.clone())?;
-        return Some(project(&entry_arc));
-    }
-    state.claimed = true;
-    drop(state);
-
-    // Phase 3.
-    let mut panic_guard =
-        FxInflightPanicGuard::new(Arc::clone(&slot), &inflight.table, key.clone());
-
-    let computed = compute();
-
-    let value = match computed {
-        Some(entry) => {
-            if !revalidate_after_compute(&entry) {
-                {
-                    let mut state = slot.state.lock();
-                    state.completed = true;
-                    state.failed = true;
-                }
-                slot.ready.notify_all();
-                panic_guard.mark_finished();
-                drop(panic_guard);
-                inflight.table.lock().remove(&key);
-                return None;
-            }
-
-            let entry_arc = Arc::new(entry);
-            let value = project(&entry_arc);
-            map.insert(key.clone(), entry_arc);
-
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-            }
-            slot.ready.notify_all();
-
-            Some(value)
-        }
-        None => {
-            {
-                let mut state = slot.state.lock();
-                state.completed = true;
-                state.failed = true;
-            }
-            slot.ready.notify_all();
-            None
-        }
-    };
-
-    panic_guard.mark_finished();
-    drop(panic_guard);
     inflight.table.lock().remove(&key);
 
     value

@@ -7984,11 +7984,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
 // asserted `solve_count == 0 / 2` on the retired solver's rescue
 // pass. Without a solver the counter is always zero and the
 // predicates no longer discriminate. Projection routing is covered
-// end-to-end by `materialize_component_meta_member_surface_expr_*`
+// end-to-end by `walk_component_meta_member_surface_expr_*`
 // and the generic_ref rescue preservation tests below.
 
 #[test]
-fn materialize_component_meta_member_surface_expr_reuses_request_local_cache() {
+fn walk_component_meta_member_surface_expr_reuses_request_local_cache() {
     let project = make_project();
     project
         .upsert_base(
@@ -8044,7 +8044,7 @@ defineProps<{ first: Inner; second: Inner }>()
 }
 
 #[test]
-fn materialize_component_meta_member_surface_expr_caches_indexed_member_routes() {
+fn walk_component_meta_member_surface_expr_caches_indexed_member_routes() {
     let project = make_project();
     project
         .upsert_base(
@@ -8581,7 +8581,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn materialize_component_meta_member_surface_expr_caches_safe_structural_objects() {
+fn walk_component_meta_member_surface_expr_caches_safe_structural_objects() {
     let project = make_project();
     project
         .upsert_base(

@@ -66,19 +66,6 @@ pub(crate) fn dep_signature_valid_for_host(signature: &DepSignature, host: &Vert
         .all(|(canonical, version)| validator.validate(canonical.as_ref(), version))
 }
 
-/// Compute a `DepSignature` from a fresh entry. Used by callers whose
-/// compute closure tracks `(canonical_id, whole_hash)` facts directly.
-#[allow(dead_code)]
-pub(crate) fn dep_signature_from_facts(
-    facts: impl IntoIterator<Item = (Arc<str>, crate::semantic_query::DepVersion)>,
-) -> DepSignature {
-    let mut entries: Vec<(Arc<str>, crate::semantic_query::DepVersion)> =
-        facts.into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.dedup_by(|a, b| a.0 == b.0);
-    Arc::from(entries.into_boxed_slice())
-}
-
 // ===========================================================================
 // 1. ImportedRegistryDb — `(canonical, name) → Option<ResolvedImportedRegistrySymbol>`
 // ===========================================================================

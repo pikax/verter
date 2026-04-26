@@ -2459,7 +2459,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
 /// file-content grep so a regression that deletes the dispatch call
 /// surfaces immediately.
 #[test]
-fn migrate_engine_solve_expr_type_expr_preserves_env() {
+fn migrate_engine_lower_and_project_to_expanded_preserves_env() {
     let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
     assert!(
         cmqe_src.contains("dispatch.lower_type_expr_in_scope"),
@@ -2491,7 +2491,7 @@ fn migrate_engine_project_expr_surface_shape_preserves_env() {
 /// `TypeExpr::Ref`. Post-migration the function body is unchanged
 /// structurally; verified by asserting its key call sites remain.
 #[test]
-fn migrate_engine_expand_local_generic_ref_expr_preserves_env_and_args() {
+fn migrate_engine_instantiate_local_generic_ref_preserves_env_and_args() {
     let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
     assert!(
         cmqe_src.contains("fn instantiate_local_generic_ref"),
