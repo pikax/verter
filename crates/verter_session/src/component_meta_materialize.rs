@@ -2,14 +2,13 @@
 //! Session-layer structural materialiser. Plan §1 / §10 / §16.
 //!
 //! Replaces the legacy `walk_component_meta_member_surface_expr`
-//! family (`meta_resolve.rs:7669+`) with a dispatch-driven worklist
-//! materialiser that uses graph-native policy predicates,
-//! cooperative-admission post-compute revalidation for atomic
-//! publish/invalidate, and a content-hash bucketed Weak-ref
-//! `DepSignature` interner for `Arc::ptr_eq` cleanup of the
-//! reverse-index.
+//! family with a dispatch-driven materialiser that uses
+//! graph-native policy predicates, cooperative-admission
+//! post-compute revalidation for atomic publish/invalidate, and a
+//! content-hash bucketed Weak-ref `DepSignature` interner for
+//! `Arc::ptr_eq` cleanup of the reverse-index.
 //!
-//! **Phase 8a (this commit) lands the foundational types:**
+//! **Foundational types** (plan §1.2 / §1.5 / §1.7):
 //! - [`MaterializeOutcome`] — materialiser-local result enum
 //!   (Value / Miss / Recursive / Tainted / Error).
 //! - [`MaterializationScope`] — TopLevel vs Nested axis.
@@ -18,12 +17,36 @@
 //!   `QueryResult::Recursive` to `MaterializeOutcome::Tainted`
 //!   per plan §1.2.
 //!
-//! **Phase 8b/c/d will add:** the materialiser entry point,
-//! `MaterializeStructureDb` cache, per-shape handlers, graph-native
-//! policy predicates, the cooperative-admission `post_publish`
-//! wiring, the cycle-BFS port, and a comprehensive test suite.
-//! Phase 9 cuts over the 16 production call sites and deletes the
-//! walker family.
+//! **Materialiser entry** (plan §10):
+//! - [`materialize_component_meta_structure`] — five-phase entry
+//!   pipeline (warm peek → same-key cycle → depth fuse → package /
+//!   function policy gates → cooperative-admission cold build with
+//!   `post_publish` reverse-index registration).
+//! - [`materialize_object_surface`] — per-shape Object handler
+//!   that walks members + call/construct/index signatures at Nested
+//!   axis. Re-entry through the materialiser entry applies the
+//!   package-ref + function-skip policies, so function-valued
+//!   members and package-backed refs stay symbolic while local
+//!   refs continue to expand.
+//! - DeclRef / InstantiationRef handler resolves the carrier's
+//!   body via dispatch `Instantiate` (NOT `ResolveDecl`) and
+//!   recursively materialises the resolved body.
+//!
+//! **Policy predicates** (plan §1.6 / §1.12):
+//! - [`is_package_backed_ref`] — graph-native check that the input
+//!   carrier resolves under `/node_modules/`. Walker behavior:
+//!   keep symbolic at every axis.
+//! - Function-shape skip at Nested — the walker's
+//!   keep-function-bodies-symbolic invariant for Object-property
+//!   positions.
+//!
+//! Phase 9 cut over the legacy `walk_component_meta_member_surface_expr`
+//! shim to this entry, deleted the walker's inner body family
+//! (`walker_cycle_key_node`, `expand_generic_ref_via_scope_iteration`,
+//! `walk_component_meta_member_surface_expr_with_visited`), and
+//! deleted the `component_meta_dispatch_iteration` module that
+//! hosted the walker's visited-set helper. The static-grep gate
+//! at `tests/no_legacy_walker.rs` enforces the deletion permanently.
 
 use std::sync::Arc;
 
@@ -289,30 +312,35 @@ pub fn materialize_component_meta_structure(
 
     let _guard = MaterializeInFlightGuard::push(key.clone());
 
-    // Plan §1.6 — package-ref policy gate. At TopLevel, a bare
-    // DeclRef whose declaration resolves under `/node_modules/`
-    // materialises to itself unchanged (the walker kept these
-    // symbolic; expanding them would publish package internals).
-    {
+    // Plan §1.6 — package-ref policy gate. A DeclRef or
+    // InstantiationRef whose declaration resolves under
+    // `/node_modules/` materialises to itself unchanged (the walker
+    // kept these symbolic at every axis; expanding them would
+    // publish package internals into the consumer's component-meta
+    // surface).
+    if is_package_backed_ref(host, key.base) {
+        return crate::semantic_query::CacheRead {
+            value: MaterializeOutcome::Value(key.base),
+            dep_signature: empty_signature(),
+        };
+    }
+
+    // Plan §1.6 — function-shape skip at Nested axis. The walker
+    // kept function-typed Object members symbolic (their value
+    // node was not expanded). Without this gate, dispatch's
+    // ProjectPath { mode: Expanded } would unfold function bodies
+    // inside member positions.
+    if key.scope_axis == MaterializationScope::Nested {
         let graph = host.project_type_store().semantic_graph();
-        if key.scope_axis == MaterializationScope::TopLevel {
-            if let Some(data) = graph.node_data(key.base) {
-                use crate::semantic_query::SemanticNodeData;
-                let is_package_ref = match data.as_ref() {
-                    SemanticNodeData::DeclRef { identity } => {
-                        identity.canonical_id.contains("/node_modules/")
-                    }
-                    SemanticNodeData::InstantiationRef { base, .. } => {
-                        base.canonical_id.contains("/node_modules/")
-                    }
-                    _ => false,
+        if let Some(data) = graph.node_data(key.base) {
+            if matches!(
+                data.as_ref(),
+                crate::semantic_query::SemanticNodeData::Function { .. }
+            ) {
+                return crate::semantic_query::CacheRead {
+                    value: MaterializeOutcome::Value(key.base),
+                    dep_signature: empty_signature(),
                 };
-                if is_package_ref {
-                    return crate::semantic_query::CacheRead {
-                        value: MaterializeOutcome::Value(key.base),
-                        dep_signature: empty_signature(),
-                    };
-                }
             }
         }
     }
@@ -321,17 +349,124 @@ pub fn materialize_component_meta_structure(
     let key_for_compute = key.clone();
     let compute = move || {
         let dispatch = ProjectSemanticDispatch::new(host);
-        // Materialisation through dispatch: empty path = full
-        // surface expansion (plan §10).
-        let path: std::sync::Arc<[PathSegment]> =
-            std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
-        let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-            base: key_for_compute.base,
-            path,
-            mode: key_for_compute.mode,
-        });
-        let mut local_fence: Vec<(Arc<str>, DepVersion)> =
-            read.dep_signature.iter().cloned().collect();
+        let graph = host.project_type_store().semantic_graph();
+        let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
+
+        // Plan §1.6 / §10.7 — DeclRef / InstantiationRef handler.
+        // Resolve the carrier's body via `Instantiate` (NOT
+        // `ResolveDecl` which returns `Opaque(DeclPlaceholder)`) and
+        // recursively materialise the resolved body. The package-ref
+        // gate at the entry has already filtered out package-backed
+        // carriers, so this branch only fires for LOCAL refs that
+        // need full body expansion.
+        let ref_outcome = if let Some(data) = graph.node_data(key_for_compute.base) {
+            use crate::semantic_query::{DeclIdentity, SemanticNodeData};
+            let resolve_target: Option<(DeclIdentity, std::sync::Arc<[SemanticNodeId]>)> =
+                match data.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => Some((
+                        identity.clone(),
+                        std::sync::Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    )),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        Some((base.clone(), std::sync::Arc::clone(args)))
+                    }
+                    _ => None,
+                };
+            resolve_target.map(|(identity, args)| {
+                let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                    base: identity,
+                    args,
+                    body_mode: crate::semantic_query::ProjectionMode::Navigate,
+                });
+                local_fence.extend(read.dep_signature.iter().cloned());
+                match read.value {
+                    QueryResult::Value(body_id) => {
+                        // Recursively materialise the resolved body
+                        // at the same axis + mode. The body is
+                        // typically an Object, which the recursive
+                        // entry routes to `materialize_object_surface`
+                        // — that walk applies the per-member policy.
+                        let body_key = MaterializeStructureCacheKey {
+                            scope_canonical_id: Arc::clone(&key_for_compute.scope_canonical_id),
+                            base: body_id,
+                            scope_axis: key_for_compute.scope_axis,
+                            mode: key_for_compute.mode,
+                        };
+                        let body_read = materialize_component_meta_structure(host, body_key);
+                        local_fence.extend(body_read.dep_signature.iter().cloned());
+                        match body_read.value {
+                            MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => {
+                                MaterializeOutcome::Value(id)
+                            }
+                            MaterializeOutcome::Recursive(_)
+                            | MaterializeOutcome::Tainted(_)
+                            | MaterializeOutcome::Error(_) => {
+                                // Keep symbolic on non-cacheable
+                                // body outcomes.
+                                MaterializeOutcome::Value(key_for_compute.base)
+                            }
+                        }
+                    }
+                    QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
+                    QueryResult::Error(_) => {
+                        // Body unresolvable — keep the ref symbolic.
+                        MaterializeOutcome::Value(key_for_compute.base)
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        // Plan §1.8 — Object-shape handler. Walk the surface's
+        // members + call/construct/index signatures and recursively
+        // materialise each at Nested axis. The recursive entry
+        // applies the package-ref + function-skip policies, so
+        // function-valued members and package-backed refs are kept
+        // symbolic while local refs continue to expand. This is the
+        // load-bearing replacement for the legacy walker's
+        // per-Object-member walk.
+        let object_outcome = if ref_outcome.is_none() {
+            if let Some(data) = graph.node_data(key_for_compute.base) {
+                if let crate::semantic_query::SemanticNodeData::Object(surface) = data.as_ref() {
+                    let surface = surface.clone();
+                    Some(materialize_object_surface(
+                        host,
+                        &key_for_compute,
+                        &surface,
+                        &mut local_fence,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let outcome = match (ref_outcome, object_outcome) {
+            (Some(o), _) | (_, Some(o)) => o,
+            (None, None) => {
+                // Non-Object, non-Ref input — fall back to dispatch's
+                // canonical materialisation pipeline.
+                let path: std::sync::Arc<[PathSegment]> =
+                    std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+                let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                    base: key_for_compute.base,
+                    path,
+                    mode: key_for_compute.mode,
+                });
+                local_fence.extend(read.dep_signature.iter().cloned());
+                match read.value {
+                    QueryResult::Value(id) => MaterializeOutcome::Value(id),
+                    QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
+                    QueryResult::Error(err) => MaterializeOutcome::Error(err),
+                }
+            }
+        };
+
         // Seed local_fence with the root scope's whole_hash if
         // available — plan §1.9 dep-signature accumulation contract.
         if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
@@ -346,11 +481,6 @@ pub fn materialize_component_meta_structure(
                 ));
             }
         }
-        let outcome = match read.value {
-            QueryResult::Value(id) => MaterializeOutcome::Value(id),
-            QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
-            QueryResult::Error(err) => MaterializeOutcome::Error(err),
-        };
         if !outcome.is_cacheable() {
             // Don't publish non-cacheable outcomes.
             return None;
@@ -434,6 +564,141 @@ pub fn materialize_component_meta_structure(
 
 fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
+}
+
+/// Plan §1.6 / §1.12 — graph-native package-ref policy predicate.
+/// Returns `true` when `node` is a `DeclRef` or `InstantiationRef`
+/// whose declaration's canonical id resolves under `/node_modules/`.
+/// The walker's pre-cutover policy kept these refs symbolic at every
+/// axis (TopLevel + Nested) — expanding them would publish package
+/// internals into the consumer's component-meta surface.
+pub(crate) fn is_package_backed_ref(host: &VerterHost, node: SemanticNodeId) -> bool {
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    use crate::semantic_query::SemanticNodeData;
+    match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => identity.canonical_id.contains("/node_modules/"),
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            base.canonical_id.contains("/node_modules/")
+        }
+        _ => false,
+    }
+}
+
+/// Plan §1.8 — Object-shape materialisation. Walk the surface's
+/// members + call/construct/index signatures and recursively
+/// materialise each at Nested axis. Re-entry through
+/// `materialize_component_meta_structure` applies the package-ref +
+/// function-skip policies, so function-valued members and
+/// package-backed refs stay symbolic while local refs continue to
+/// expand.
+///
+/// Returns the materialised Object's outcome (typically `Value`
+/// carrying the new node id; falls back to the input id when the
+/// surface is unchanged).
+fn materialize_object_surface(
+    host: &VerterHost,
+    key: &MaterializeStructureCacheKey,
+    surface: &crate::semantic_query::SurfaceView,
+    local_fence: &mut Vec<(Arc<str>, DepVersion)>,
+) -> MaterializeOutcome {
+    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
+    let graph = host.project_type_store().semantic_graph();
+
+    let mut new_members = Vec::with_capacity(surface.members.len());
+    let mut any_changed = false;
+    for member in surface.members.iter() {
+        let (sub_id, changed) = materialize_child_at_nested(host, key, member.value, local_fence);
+        any_changed |= changed;
+        new_members.push(SurfaceMember {
+            name: Arc::clone(&member.name),
+            value: sub_id,
+            optional: member.optional,
+            readonly: member.readonly,
+            is_method: member.is_method,
+        });
+    }
+
+    let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());
+    for sig in surface.call_signatures.iter() {
+        let (sub_id, changed) = materialize_child_at_nested(host, key, *sig, local_fence);
+        any_changed |= changed;
+        new_call_signatures.push(sub_id);
+    }
+
+    let mut new_construct_signatures = Vec::with_capacity(surface.construct_signatures.len());
+    for sig in surface.construct_signatures.iter() {
+        let (sub_id, changed) = materialize_child_at_nested(host, key, *sig, local_fence);
+        any_changed |= changed;
+        new_construct_signatures.push(sub_id);
+    }
+
+    let mut new_index_signatures = Vec::with_capacity(surface.index_signatures.len());
+    for sig in surface.index_signatures.iter() {
+        let (sub_value, vc) = materialize_child_at_nested(host, key, sig.value_type, local_fence);
+        let (sub_key_ty, kc) = materialize_child_at_nested(host, key, sig.key_type, local_fence);
+        any_changed |= vc || kc;
+        new_index_signatures.push(IndexSignature {
+            key_type: sub_key_ty,
+            value_type: sub_value,
+            readonly: sig.readonly,
+        });
+    }
+
+    let new_keyspace = match surface.keyspace {
+        Some(k) => {
+            let (sub_id, changed) = materialize_child_at_nested(host, key, k, local_fence);
+            any_changed |= changed;
+            Some(sub_id)
+        }
+        None => None,
+    };
+
+    if !any_changed {
+        return MaterializeOutcome::Value(key.base);
+    }
+
+    let new_surface = SurfaceView {
+        members: Arc::from(new_members.into_boxed_slice()),
+        call_signatures: Arc::from(new_call_signatures.into_boxed_slice()),
+        construct_signatures: Arc::from(new_construct_signatures.into_boxed_slice()),
+        index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
+        keyspace: new_keyspace,
+        has_index_signature: surface.has_index_signature,
+    };
+    let new_id = graph.intern_preserving_scope(key.base, SemanticNodeData::Object(new_surface));
+    MaterializeOutcome::Value(new_id)
+}
+
+/// Helper for [`materialize_object_surface`] — recursively
+/// materialise one child node at Nested axis, merge its
+/// dep_signature into `local_fence`, and return `(materialised_id,
+/// changed)`. Non-Value outcomes resolve to the input id (Tainted /
+/// Recursive / Error keep the symbolic form).
+fn materialize_child_at_nested(
+    host: &VerterHost,
+    parent_key: &MaterializeStructureCacheKey,
+    child: SemanticNodeId,
+    local_fence: &mut Vec<(Arc<str>, DepVersion)>,
+) -> (SemanticNodeId, bool) {
+    let sub_key = MaterializeStructureCacheKey {
+        scope_canonical_id: Arc::clone(&parent_key.scope_canonical_id),
+        base: child,
+        scope_axis: MaterializationScope::Nested,
+        mode: parent_key.mode,
+    };
+    let sub_read = materialize_component_meta_structure(host, sub_key);
+    local_fence.extend(sub_read.dep_signature.iter().cloned());
+    let new_value = match sub_read.value {
+        MaterializeOutcome::Value(id) | MaterializeOutcome::Miss(id) => id,
+        // Non-cacheable outcomes — keep the input child id symbolic.
+        MaterializeOutcome::Recursive(_)
+        | MaterializeOutcome::Tainted(_)
+        | MaterializeOutcome::Error(_) => child,
+    };
+    (new_value, new_value != child)
 }
 
 /// Helper: drain a `local_fence` accumulator into a `DepSignature`

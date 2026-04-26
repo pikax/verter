@@ -59,7 +59,6 @@ pub mod component_meta_audit;
 pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
-pub mod component_meta_dispatch_iteration;
 pub mod component_meta_host;
 pub mod component_meta_materialize;
 pub mod component_meta_resolution_policy;

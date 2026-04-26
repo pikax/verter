@@ -3,15 +3,13 @@
 //! Guards against re-introduction of the legacy walker family after
 //! the Phase-9 cutover. The walker's `walk_component_meta_member_surface_expr`
 //! shim is RETAINED (it now delegates to the new
-//! `materialize_component_meta_structure` entry); its inner helpers
-//! (`walker_cycle_key_node`, `expand_generic_ref_via_scope_iteration`,
-//! `walk_component_meta_member_surface_expr_with_visited`) are
-//! retained `#[allow(dead_code)]` pending follow-up deletion.
-//!
-//! The gate detects RE-INTRODUCTION of the inner symbols at additional
-//! call sites — once the body deletions land, this file's
-//! `RETIRED_SYMBOLS` list will tighten to ban every name in the
-//! walker family.
+//! `materialize_component_meta_structure` entry); the entire inner
+//! body family (`walker_cycle_key_node`,
+//! `expand_generic_ref_via_scope_iteration`,
+//! `walk_component_meta_member_surface_expr_with_visited`) was
+//! deleted in the same commit, along with the
+//! `component_meta_dispatch_iteration` module that hosted the
+//! walker's visited-set helper.
 //!
 //! Self-exclusion: the first 5 lines of this file contain
 //! `LEGACY_GATE_SELF` so the recursive walk skips this file.
@@ -19,16 +17,19 @@
 use std::path::PathBuf;
 
 const RETIRED_SYMBOLS: &[&str] = &[
-    // Phase 9 cutover (plan §11.2): the inner helpers are dead post-
-    // cutover. Re-introduction at any non-walker site would break
-    // the cutover. The legacy `walk_component_meta_member_surface_expr`
-    // shim is RETAINED (it delegates to the new materialiser entry)
-    // so this gate intentionally does NOT list its name — we want to
-    // be alerted only when *new* references to the inner helpers
-    // appear.
+    // Phase 9 cutover (plan §11.2): the inner walker helpers are
+    // DELETED. Re-introduction at any site is forbidden. The legacy
+    // `walk_component_meta_member_surface_expr` shim name is
+    // RETAINED (it delegates to the new materialiser entry) — the
+    // gate intentionally does NOT list its name.
     "walker_cycle_key_node",
     "expand_generic_ref_via_scope_iteration",
     "walk_component_meta_member_surface_expr_with_visited",
+    // The dispatch-iteration module that hosted the visited-set +
+    // generic-rescue helpers was deleted in the same commit.
+    "component_meta_dispatch_iteration",
+    "WalkerVisitedNodes",
+    "VisitedPushOutcome",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];
@@ -134,27 +135,20 @@ fn no_legacy_walker_inner_helpers_outside_their_definitions() {
                 hit_files.push((file.clone(), lines));
             }
         }
-        // The symbol's own definition file is meta_resolve.rs — exactly
-        // ONE file is allowed to contain references to it (the
-        // definition + the dead-code annotation). Anywhere else is a
-        // re-introduction.
-        let allowed_file_suffix = "meta_resolve.rs";
+        // Post-cutover the inner walker helpers are DELETED — the
+        // only allowed references are in historical architecture
+        // documentation (`docs/arch/debt-closure/`).
         for (file, lines) in &hit_files {
             let path_str = file.to_string_lossy();
-            // Allow:
-            //   - the definition file itself (meta_resolve.rs)
-            //   - this test file (self-excluded by marker, defensive)
-            //   - historical docs that document the renamed/retired
-            //     symbol's history (`docs/arch/debt-closure/`)
-            let is_allowed = path_str.ends_with(allowed_file_suffix)
-                || path_str.contains("docs/arch/debt-closure/")
+            let is_allowed = path_str.contains("docs/arch/debt-closure/")
                 || path_str.contains("docs\\arch\\debt-closure\\");
             assert!(
                 is_allowed,
                 "Phase 9 static-grep gate (plan §11.4): retired walker-family \
-                 symbol `{symbol}` re-introduced at {file:?} lines {lines:?}. \
-                 Post-cutover this symbol has NO callers; its definition is \
-                 retained `#[allow(dead_code)]` pending follow-up deletion."
+                 symbol `{symbol}` reintroduced at {file:?} lines {lines:?}. \
+                 Post-cutover the inner walker family is DELETED — the only \
+                 allowed references are historical docs under \
+                 `docs/arch/debt-closure/`."
             );
         }
     }

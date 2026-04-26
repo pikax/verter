@@ -2096,9 +2096,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.imported_registry_symbols.borrow().len()
     }
 
+    /// Phase 9 cutover (plan §11.2 / §1.5): the legacy walker's
+    /// per-request `materialized_member_surfaces` mirror is dead
+    /// post-cutover. Tests asking for the materialiser's cache size
+    /// now read the host-owned `MaterializeStructureDb::live_count()`
+    /// — the final-result cache that the new structural materialiser
+    /// publishes into.
     #[cfg(test)]
     pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
-        self.materialized_member_surfaces.borrow().len()
+        self.host
+            .project_type_store()
+            .materialize_structure_db()
+            .live_count()
     }
 
     #[cfg(test)]

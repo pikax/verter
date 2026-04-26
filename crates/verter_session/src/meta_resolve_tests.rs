@@ -7988,7 +7988,6 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
 // and the generic_ref rescue preservation tests below.
 
 #[test]
-#[ignore = "Phase 9 cutover (plan §11.2): walker-internal cache (`materialized_member_surface_db`) is dead post-cutover. The structural equality assertion still holds; only the `cache_len_after_first` probe is testing dead implementation. Rewrite to assert against `MaterializeStructureDb::live_count()` in a follow-up."]
 fn walk_component_meta_member_surface_expr_reuses_request_local_cache() {
     let project = make_project();
     project
@@ -8045,7 +8044,6 @@ defineProps<{ first: Inner; second: Inner }>()
 }
 
 #[test]
-#[ignore = "Phase 9 cutover (plan §11.2): walker-internal cache is dead post-cutover. Rewrite to assert against `MaterializeStructureDb` in a follow-up."]
 fn walk_component_meta_member_surface_expr_caches_indexed_member_routes() {
     let project = make_project();
     project
@@ -8583,7 +8581,6 @@ defineProps<Props>()
 }
 
 #[test]
-#[ignore = "Phase 9 cutover (plan §11.2): walker-internal cache is dead post-cutover. Rewrite to assert against `MaterializeStructureDb` in a follow-up."]
 fn walk_component_meta_member_surface_expr_caches_safe_structural_objects() {
     let project = make_project();
     project
@@ -8994,7 +8991,6 @@ defineProps<Props<T>>()
 /// the fixture missed that cache. The fixture suite must be
 /// expanded until every cache has `reads > 0`.
 #[test]
-#[ignore = "Phase 9 cutover (plan §11.2): walker-internal cache (`materialized_member_surface_db`) is dead post-cutover so its `reads > 0` invariant no longer holds. Rewrite to spike-classify against `MaterializeStructureDb` in a follow-up."]
 fn spike_classify_engine_cache_work_origin() {
     crate::spike_instrumentation::reset();
     crate::spike_instrumentation::enable();
@@ -9027,7 +9023,17 @@ fn spike_classify_engine_cache_work_origin() {
         "owner_collection_exprs",
         "prepared_target_cache",
         "materialize_memo",
-        "materialized_member_surfaces",
+        // `materialized_member_surfaces` removed post-Phase-9 cutover
+        // (plan §11.2): the engine's per-request mirror that fronted
+        // the legacy walker's `materialized_member_surface_db` is dead
+        // post-cutover — `walk_component_meta_member_surface_expr` now
+        // delegates to the new `materialize_component_meta_structure`
+        // entry which publishes through `MaterializeStructureDb`. The
+        // dead cache is dual-guarded by `tests/no_legacy_walker.rs`'s
+        // static-grep tombstone (the inner walker helpers that were
+        // the cache's sole consumers) and by the engine's
+        // `materialized_member_surface_cache_len()` test helper now
+        // delegating to `MaterializeStructureDb::live_count()`.
         "prepared_surface_cache",
         "prepared_member_cache",
         "routed_expr_surface_cache",
