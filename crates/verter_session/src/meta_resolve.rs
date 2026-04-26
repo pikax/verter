@@ -7627,14 +7627,6 @@ use crate::resolver_core::component_meta_registry::{
     PendingComponentMetaRegistryRef,
 };
 
-/// Maximum recursion depth for type expression materialization.
-/// Prevents stack overflow on deeply nested generic types.
-const MAX_MATERIALIZE_DEPTH: u16 = 48;
-
-thread_local! {
-    static MATERIALIZE_DEPTH: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
-}
-
 /// Test-only call counter for `materialize_component_meta_type_expr_until_stable`
 /// (plan §3 Step 6.2 / D22). Incremented at function entry — memo hits and
 /// cold builds both count, since the counter discriminates the *entry*
@@ -7680,13 +7672,13 @@ fn walk_component_meta_member_surface_expr(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested_surface: bool,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let mut active = rustc_hash::FxHashSet::default();
-    walk_component_meta_member_surface_expr_with_active_stack(
+    let mut visited = crate::component_meta_dispatch_iteration::WalkerVisitedNodes::new();
+    walk_component_meta_member_surface_expr_with_visited(
         expr,
         scope_canonical_id,
         engine,
         nested_surface,
-        &mut active,
+        &mut visited,
     )
 }
 
@@ -9868,75 +9860,106 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
     })?
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn walk_component_meta_member_surface_expr_with_active_stack(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+/// Lower `expr` through dispatch in `scope_canonical_id` and return its
+/// `SemanticNodeId` for use as a cycle key in
+/// [`crate::component_meta_dispatch_iteration::WalkerVisitedNodes`].
+///
+/// Returns `None` when dispatch cannot lower the expression (e.g. the
+/// scope is unknown to the host) or when the lowered result is an
+/// opaque `Miss`. In those cases the walker proceeds without
+/// per-recursion cycle keying — non-`Ref` shapes are tree-walked
+/// structurally and cannot loop, and `Ref` shells that fail to lower
+/// have no body to recurse into.
+fn walker_cycle_key_node(
     scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    nested_surface: bool,
-    active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    if engine.has_fuse_tripped() {
-        return expr.clone();
-    }
-    let prev_depth = MATERIALIZE_DEPTH.get();
-    if prev_depth >= MAX_MATERIALIZE_DEPTH {
-        return expr.clone();
-    }
-    MATERIALIZE_DEPTH.set(prev_depth + 1);
-    let result = walk_component_meta_member_surface_expr_with_active_stack_guarded(
-        expr,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    engine: &crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<crate::semantic_query::SemanticNodeId> {
+    let host = engine.host();
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let node = dispatch.lower_type_expr_in_scope_with_mode(
         scope_canonical_id,
-        engine,
-        nested_surface,
-        active,
-    );
-    MATERIALIZE_DEPTH.set(prev_depth);
-    result
+        expr,
+        crate::semantic_query::ProjectionMode::Expanded,
+    )?;
+    let data = crate::project_semantic_dispatch::node_data_for(host, node)?;
+    if matches!(
+        data.as_ref(),
+        crate::semantic_query::SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)
+    ) {
+        return None;
+    }
+    Some(node)
 }
 
-fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
+/// Multi-scope iteration helper: tries `[owner_scope, imported_scope]`
+/// (Gap 1 caller-side iteration) by feeding each through
+/// `engine.instantiate_local_generic_ref`. Returns
+/// `(expansion_scope, expanded_ref, materialize_scope)` for the first
+/// scope whose expansion differs from the input expression.
+///
+/// Replaces the legacy walker's open-coded scope retry loop. The
+/// per-scope expander remains [`crate::resolver_core::ComponentMetaQueryEngine::instantiate_local_generic_ref`]
+/// — the architectural cleanup is removing the *manual iteration*
+/// over scope candidates from the walker body, not changing the
+/// per-scope substitution primitive (preserved by D-Cutover §5.8 row 5
+/// characterization).
+fn expand_generic_ref_via_scope_iteration(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> Option<(
+    String,
+    verter_semantic::analysis::type_expr::TypeExpr,
+    String,
+)> {
+    let imported_scope = select_imported_materialization_scope(expr, scope_canonical_id, engine);
+    let owner = scope_canonical_id.to_string();
+    let candidate_scopes: Vec<String> = match imported_scope.as_deref() {
+        Some(imp) if imp != scope_canonical_id => vec![owner, imp.to_string()],
+        _ => vec![owner],
+    };
+
+    for expansion_scope in candidate_scopes {
+        let Some(expanded_ref) =
+            engine.instantiate_local_generic_ref(expansion_scope.as_str(), expr)
+        else {
+            continue;
+        };
+        if expanded_ref == *expr {
+            continue;
+        }
+        let materialize_scope = imported_scope
+            .clone()
+            .unwrap_or_else(|| expansion_scope.clone());
+        return Some((expansion_scope, expanded_ref, materialize_scope));
+    }
+    None
+}
+
+/// Component-meta walker body. Plan §4A architectural completion: the
+/// pre-rename `walk_component_meta_member_surface_expr_with_active_stack[_guarded]`
+/// pair is collapsed into one function, the
+/// `MATERIALIZE_DEPTH` thread-local + `MAX_MATERIALIZE_DEPTH` constant
+/// are gone (cycle detection + defensive fuse via
+/// [`crate::component_meta_dispatch_iteration::WalkerVisitedNodes`]
+/// drives termination), and the
+/// `FxHashSet<TypeExpr>` active set is replaced by the
+/// `SemanticNodeId`-keyed visited set (Gap 3 cleanup). Manual scope
+/// iteration in the rescue path now routes through
+/// [`expand_generic_ref_via_scope_iteration`].
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn walk_component_meta_member_surface_expr_with_visited(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested_surface: bool,
-    active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
+    visited: &mut crate::component_meta_dispatch_iteration::WalkerVisitedNodes,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-    fn expand_generic_ref_for_materialization(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        scope_canonical_id: &str,
-        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    ) -> Option<(
-        String,
-        verter_semantic::analysis::type_expr::TypeExpr,
-        String,
-    )> {
-        let imported_scope =
-            select_imported_materialization_scope(expr, scope_canonical_id, engine);
-        let mut expansion_scopes = vec![scope_canonical_id.to_string()];
-        if let Some(imported_scope) = imported_scope.as_ref() {
-            if imported_scope != scope_canonical_id {
-                expansion_scopes.push(imported_scope.clone());
-            }
-        }
-
-        for expansion_scope in expansion_scopes {
-            let Some(expanded_ref) =
-                engine.instantiate_local_generic_ref(expansion_scope.as_str(), expr)
-            else {
-                continue;
-            };
-            if expanded_ref == *expr {
-                continue;
-            }
-            let materialize_scope = imported_scope
-                .clone()
-                .unwrap_or_else(|| expansion_scope.clone());
-            return Some((expansion_scope, expanded_ref, materialize_scope));
-        }
-        None
+    if engine.has_fuse_tripped() {
+        return expr.clone();
     }
 
     if let Some(cached) =
@@ -9945,9 +9968,26 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
         return cached;
     }
 
-    if !active.insert(expr.clone()) {
-        return expr.clone();
-    }
+    // Cycle protection via Gap 3 visited-set: lower the input expr
+    // through dispatch (cheap for repeated calls — dispatch is heavily
+    // cached) and key the visited set on the resolved
+    // `SemanticNodeId`. When the lowered node is already on the
+    // walker's call chain, return `expr.clone()` immediately to break
+    // the cycle. The defensive fuse
+    // (`VISITED_NODES_DEFENSIVE_FUSE = 4096`) is the safety rail —
+    // ordinary termination is via cycle detection, NOT a hard depth
+    // cap (plan §4A D4A.2 Gap 3, retiring `MATERIALIZE_DEPTH`).
+    let cycle_node = walker_cycle_key_node(scope_canonical_id, expr, engine);
+    let pushed_node = match cycle_node {
+        Some(node) => match visited.try_push(node) {
+            crate::component_meta_dispatch_iteration::VisitedPushOutcome::Inserted => Some(node),
+            crate::component_meta_dispatch_iteration::VisitedPushOutcome::Cycle
+            | crate::component_meta_dispatch_iteration::VisitedPushOutcome::FuseExhausted => {
+                return expr.clone();
+            }
+        },
+        None => None,
+    };
 
     if let TypeExpr::IndexedAccess { object, index } = expr {
         if let TypeExpr::Ref { type_arguments, .. } = object.as_ref() {
@@ -9960,12 +10000,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                         index: index.clone(),
                     };
                     if expanded_route != *expr {
-                        let result = walk_component_meta_member_surface_expr_with_active_stack(
+                        let result = walk_component_meta_member_surface_expr_with_visited(
                             &expanded_route,
                             scope_canonical_id,
                             engine,
                             nested_surface,
-                            active,
+                            visited,
                         );
                         engine.store_materialized_member_surface(
                             scope_canonical_id,
@@ -9973,7 +10013,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                             nested_surface,
                             result.clone(),
                         );
-                        active.remove(expr);
+                        if let Some(node) = pushed_node {
+                            visited.pop(node);
+                        }
                         return result;
                     }
                 }
@@ -9997,12 +10039,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                 )
             {
                 if inline_route_surface != *expr {
-                    let result = walk_component_meta_member_surface_expr_with_active_stack(
+                    let result = walk_component_meta_member_surface_expr_with_visited(
                         &inline_route_surface,
                         scope_canonical_id,
                         engine,
                         true,
-                        active,
+                        visited,
                     );
                     engine.store_materialized_member_surface(
                         scope_canonical_id,
@@ -10010,7 +10052,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                         nested_surface,
                         result.clone(),
                     );
-                    active.remove(expr);
+                    if let Some(node) = pushed_node {
+                        visited.pop(node);
+                    }
                     return result;
                 }
             }
@@ -10020,12 +10064,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                 walk_member_route_via_alias_body(expr, scope_canonical_id, engine)
             {
                 if alias_route_surface != *expr {
-                    let result = walk_component_meta_member_surface_expr_with_active_stack(
+                    let result = walk_component_meta_member_surface_expr_with_visited(
                         &alias_route_surface,
                         scope_canonical_id,
                         engine,
                         true,
-                        active,
+                        visited,
                     );
                     engine.store_materialized_member_surface(
                         scope_canonical_id,
@@ -10033,20 +10077,22 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                         nested_surface,
                         result.clone(),
                     );
-                    active.remove(expr);
+                    if let Some(node) = pushed_node {
+                        visited.pop(node);
+                    }
                     return result;
                 }
             }
         }
         if let Some((_, expanded_ref, materialize_scope_canonical_id)) =
-            expand_generic_ref_for_materialization(expr, scope_canonical_id, engine)
+            expand_generic_ref_via_scope_iteration(expr, scope_canonical_id, engine)
         {
-            let result = walk_component_meta_member_surface_expr_with_active_stack(
+            let result = walk_component_meta_member_surface_expr_with_visited(
                 &expanded_ref,
                 materialize_scope_canonical_id.as_str(),
                 engine,
                 true,
-                active,
+                visited,
             );
             engine.store_materialized_member_surface(
                 scope_canonical_id,
@@ -10054,7 +10100,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                 nested_surface,
                 result.clone(),
             );
-            active.remove(expr);
+            if let Some(node) = pushed_node {
+                visited.pop(node);
+            }
             return result;
         }
         let projected = match expr {
@@ -10089,23 +10137,23 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                                 })
                                 .unwrap_or_else(|| scope_canonical_id.to_string());
                         if projected_scope_canonical_id != scope_canonical_id {
-                            walk_component_meta_member_surface_expr_with_active_stack(
+                            walk_component_meta_member_surface_expr_with_visited(
                                 &projected,
                                 projected_scope_canonical_id.as_str(),
                                 engine,
                                 true,
-                                active,
+                                visited,
                             )
                         } else {
                             projected
                         }
                     }
-                    _ => walk_component_meta_member_surface_expr_with_active_stack(
+                    _ => walk_component_meta_member_surface_expr_with_visited(
                         &projected,
                         scope_canonical_id,
                         engine,
                         true,
-                        active,
+                        visited,
                     ),
                 };
                 engine.store_materialized_member_surface(
@@ -10114,21 +10162,23 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                     nested_surface,
                     result.clone(),
                 );
-                active.remove(expr);
+                if let Some(node) = pushed_node {
+                    visited.pop(node);
+                }
                 return result;
             }
         }
     }
 
     if let Some((_, expanded_ref, materialize_scope_canonical_id)) =
-        expand_generic_ref_for_materialization(expr, scope_canonical_id, engine)
+        expand_generic_ref_via_scope_iteration(expr, scope_canonical_id, engine)
     {
-        let result = walk_component_meta_member_surface_expr_with_active_stack(
+        let result = walk_component_meta_member_surface_expr_with_visited(
             &expanded_ref,
             materialize_scope_canonical_id.as_str(),
             engine,
             nested_surface,
-            active,
+            visited,
         );
         engine.store_materialized_member_surface(
             scope_canonical_id,
@@ -10136,7 +10186,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             nested_surface,
             result.clone(),
         );
-        active.remove(expr);
+        if let Some(node) = pushed_node {
+            visited.pop(node);
+        }
         return result;
     }
 
@@ -10150,12 +10202,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
         materialize_component_meta_registry_structural_expr(expr, scope_canonical_id, engine)
     };
     if structural != *expr {
-        let result = walk_component_meta_member_surface_expr_with_active_stack(
+        let result = walk_component_meta_member_surface_expr_with_visited(
             &structural,
             scope_canonical_id,
             engine,
             nested_surface,
-            active,
+            visited,
         );
         engine.store_materialized_member_surface(
             scope_canonical_id,
@@ -10163,7 +10215,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             nested_surface,
             result.clone(),
         );
-        active.remove(expr);
+        if let Some(node) = pushed_node {
+            visited.pop(node);
+        }
         return result;
     }
 
@@ -10171,21 +10225,21 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
         TypeExpr::Function(function) => {
             let mut function = function.as_ref().clone();
             for param in &mut function.parameters {
-                param.ty = walk_component_meta_member_surface_expr_with_active_stack(
+                param.ty = walk_component_meta_member_surface_expr_with_visited(
                     &param.ty,
                     scope_canonical_id,
                     engine,
                     true,
-                    active,
+                    visited,
                 );
             }
             if let Some(return_type) = function.return_type.as_mut() {
-                let materialized = walk_component_meta_member_surface_expr_with_active_stack(
+                let materialized = walk_component_meta_member_surface_expr_with_visited(
                     return_type,
                     scope_canonical_id,
                     engine,
                     true,
-                    active,
+                    visited,
                 );
                 *return_type = Arc::new(materialized);
             }
@@ -10230,75 +10284,71 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                             _ => nested_surface,
                         };
                         if should_materialize {
-                            property.ty = walk_component_meta_member_surface_expr_with_active_stack(
+                            property.ty = walk_component_meta_member_surface_expr_with_visited(
                                 &property.ty,
                                 scope_canonical_id,
                                 engine,
                                 true,
-                                active,
+                                visited,
                             );
                         }
                     }
                     ObjectMember::IndexSignature(signature) => {
-                        signature.key_type =
-                            walk_component_meta_member_surface_expr_with_active_stack(
-                                &signature.key_type,
-                                scope_canonical_id,
-                                engine,
-                                true,
-                                active,
-                            );
-                        signature.value_type =
-                            walk_component_meta_member_surface_expr_with_active_stack(
-                                &signature.value_type,
-                                scope_canonical_id,
-                                engine,
-                                true,
-                                active,
-                            );
+                        signature.key_type = walk_component_meta_member_surface_expr_with_visited(
+                            &signature.key_type,
+                            scope_canonical_id,
+                            engine,
+                            true,
+                            visited,
+                        );
+                        signature.value_type = walk_component_meta_member_surface_expr_with_visited(
+                            &signature.value_type,
+                            scope_canonical_id,
+                            engine,
+                            true,
+                            visited,
+                        );
                     }
                     ObjectMember::CallSignature(function)
                     | ObjectMember::ConstructSignature(function) => {
                         for param in &mut function.parameters {
-                            param.ty = walk_component_meta_member_surface_expr_with_active_stack(
+                            param.ty = walk_component_meta_member_surface_expr_with_visited(
                                 &param.ty,
                                 scope_canonical_id,
                                 engine,
                                 true,
-                                active,
+                                visited,
                             );
                         }
                         if let Some(return_type) = function.return_type.as_mut() {
-                            let materialized =
-                                walk_component_meta_member_surface_expr_with_active_stack(
-                                    return_type,
-                                    scope_canonical_id,
-                                    engine,
-                                    true,
-                                    active,
-                                );
+                            let materialized = walk_component_meta_member_surface_expr_with_visited(
+                                return_type,
+                                scope_canonical_id,
+                                engine,
+                                true,
+                                visited,
+                            );
                             *return_type = Arc::new(materialized);
                         }
                     }
                     ObjectMember::Method(method) => {
                         for param in &mut method.function.parameters {
-                            param.ty = walk_component_meta_member_surface_expr_with_active_stack(
+                            param.ty = walk_component_meta_member_surface_expr_with_visited(
                                 &param.ty,
                                 scope_canonical_id,
                                 engine,
                                 true,
-                                active,
+                                visited,
                             );
                         }
                         if let Some(return_type) = method.function.return_type.as_mut() {
-                            let materialized =
-                                walk_component_meta_member_surface_expr_with_active_stack(
-                                    return_type,
-                                    scope_canonical_id,
-                                    engine,
-                                    true,
-                                    active,
-                                );
+                            let materialized = walk_component_meta_member_surface_expr_with_visited(
+                                return_type,
+                                scope_canonical_id,
+                                engine,
+                                true,
+                                visited,
+                            );
                             *return_type = Arc::new(materialized);
                         }
                     }
@@ -10307,12 +10357,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             TypeExpr::Object(Arc::new(object))
         }
         TypeExpr::Array { element, readonly } => TypeExpr::Array {
-            element: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            element: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 element,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
             readonly: *readonly,
         },
@@ -10323,12 +10373,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                     .map(
                         |element| verter_semantic::analysis::type_expr::TupleElement {
                             label: element.label.clone(),
-                            ty: walk_component_meta_member_surface_expr_with_active_stack(
+                            ty: walk_component_meta_member_surface_expr_with_visited(
                                 &element.ty,
                                 scope_canonical_id,
                                 engine,
                                 nested_surface,
-                                active,
+                                visited,
                             ),
                             optional: element.optional,
                             rest: element.rest,
@@ -10347,12 +10397,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                         if !engine.allow_union_member() {
                             return ty.clone();
                         }
-                        walk_component_meta_member_surface_expr_with_active_stack(
+                        walk_component_meta_member_surface_expr_with_visited(
                             ty,
                             scope_canonical_id,
                             engine,
                             nested_surface,
-                            active,
+                            visited,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -10362,41 +10412,41 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             types
                 .iter()
                 .map(|ty| {
-                    walk_component_meta_member_surface_expr_with_active_stack(
+                    walk_component_meta_member_surface_expr_with_visited(
                         ty,
                         scope_canonical_id,
                         engine,
                         nested_surface,
-                        active,
+                        visited,
                     )
                 })
                 .collect::<Vec<_>>(),
         )),
         TypeExpr::Parenthesized(inner) => TypeExpr::Parenthesized(Arc::new(
-            walk_component_meta_member_surface_expr_with_active_stack(
+            walk_component_meta_member_surface_expr_with_visited(
                 inner,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             ),
         )),
         TypeExpr::Rest(inner) => TypeExpr::Rest(Arc::new(
-            walk_component_meta_member_surface_expr_with_active_stack(
+            walk_component_meta_member_surface_expr_with_visited(
                 inner,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             ),
         )),
         TypeExpr::KeyOf(inner) => TypeExpr::KeyOf(Arc::new(
-            walk_component_meta_member_surface_expr_with_active_stack(
+            walk_component_meta_member_surface_expr_with_visited(
                 inner,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             ),
         )),
         TypeExpr::Conditional {
@@ -10405,33 +10455,33 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             true_type,
             false_type,
         } => TypeExpr::Conditional {
-            check: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            check: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 check,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
-            extends: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            extends: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 extends,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
-            true_type: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            true_type: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 true_type,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
-            false_type: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            false_type: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 false_type,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
         },
         TypeExpr::Mapped {
@@ -10443,30 +10493,30 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
             value,
         } => TypeExpr::Mapped {
             parameter: parameter.clone(),
-            source: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            source: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 source,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
             optional: *optional,
             readonly: *readonly,
             name_type: name_type.as_deref().map(|name_type| {
-                Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+                Arc::new(walk_component_meta_member_surface_expr_with_visited(
                     name_type,
                     scope_canonical_id,
                     engine,
                     nested_surface,
-                    active,
+                    visited,
                 ))
             }),
-            value: Arc::new(walk_component_meta_member_surface_expr_with_active_stack(
+            value: Arc::new(walk_component_meta_member_surface_expr_with_visited(
                 value,
                 scope_canonical_id,
                 engine,
                 nested_surface,
-                active,
+                visited,
             )),
         },
         TypeExpr::TemplateLiteral {
@@ -10478,12 +10528,12 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
                 expressions
                     .iter()
                     .map(|expr| {
-                        walk_component_meta_member_surface_expr_with_active_stack(
+                        walk_component_meta_member_surface_expr_with_visited(
                             expr,
                             scope_canonical_id,
                             engine,
                             nested_surface,
-                            active,
+                            visited,
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -10498,7 +10548,9 @@ fn walk_component_meta_member_surface_expr_with_active_stack_guarded(
         nested_surface,
         result.clone(),
     );
-    active.remove(expr);
+    if let Some(node) = pushed_node {
+        visited.pop(node);
+    }
     result
 }
 
