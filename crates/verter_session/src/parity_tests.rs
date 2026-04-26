@@ -359,7 +359,7 @@ defineProps<MiddleProps>()
 // ============================================================================
 // Class 5: Direct symbol resolution
 //
-// `solve_expr_type_expr` was the legacy walker entry that resolved a
+// `lower_and_project_to_expanded` was the legacy walker entry that resolved a
 // `TypeExpr` against a scope by walking declarations. Test the dispatch
 // equivalent (`lower_type_expr_in_scope_with_mode` + `raise_node_to_type_expr`)
 // produces a structural surface for an imported alias.
@@ -367,7 +367,7 @@ defineProps<MiddleProps>()
 
 #[test]
 fn parity_class5_direct_symbol_resolution_dispatches_correctly() {
-    // `solve_expr_type_expr` and `expand_local_generic_ref_expr` were
+    // `lower_and_project_to_expanded` and `instantiate_local_generic_ref` were
     // legacy walker methods on `ComponentMetaQueryEngine` that resolved
     // a `TypeExpr` against a scope by walking declarations. Their
     // architectural successor is `dispatch.shallow_lower_type_expr →
@@ -377,7 +377,7 @@ fn parity_class5_direct_symbol_resolution_dispatches_correctly() {
     // on a fixture that previously routed through Class-5 direct symbol
     // resolution: a `typeof` reference whose value root is an exported
     // const, plus a generic helper alias that previously went through
-    // `expand_local_generic_ref_expr`.
+    // `instantiate_local_generic_ref`.
     let project = make_project();
     project
         .upsert_base(

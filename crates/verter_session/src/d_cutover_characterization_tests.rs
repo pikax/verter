@@ -2097,10 +2097,10 @@ fn no_deprecated_attributes_on_retired_symbols() {
         "TypeSurfaceOpResult",
         "dispatch_bridge",
         "shallow_relation_check",
-        "solve_expr_type_expr",
+        "lower_and_project_to_expanded",
         "project_expr_surface_as_type_expr",
         "project_expr_surface_shape",
-        "expand_local_generic_ref_expr",
+        "instantiate_local_generic_ref",
         "solver_host_for_scope",
         "owner_engine",
         "expand_macro_types",
@@ -2453,7 +2453,7 @@ fn migrate_owner_engine_project_expr_surface_as_type_expr_preserves_env() {
     }
 }
 
-/// Plan §9 row 3: `engine.solve_expr_type_expr` migration. Verifies the
+/// Plan §9 row 3: `engine.lower_and_project_to_expanded` migration. Verifies the
 /// dispatch-first path on ComponentMetaQueryEngine routes through
 /// dispatch before falling back to the legacy solver — checked by
 /// file-content grep so a regression that deletes the dispatch call
@@ -2463,11 +2463,11 @@ fn migrate_engine_solve_expr_type_expr_preserves_env() {
     let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
     assert!(
         cmqe_src.contains("dispatch.lower_type_expr_in_scope"),
-        "solve_expr_type_expr must attempt dispatch-first lowering post-migration"
+        "lower_and_project_to_expanded must attempt dispatch-first lowering post-migration"
     );
     assert!(
         cmqe_src.contains("ProjectPath"),
-        "solve_expr_type_expr must query ProjectPath post-migration"
+        "lower_and_project_to_expanded must query ProjectPath post-migration"
     );
 }
 
@@ -2485,25 +2485,25 @@ fn migrate_engine_project_expr_surface_shape_preserves_env() {
     );
 }
 
-/// Plan §9 row 5: `engine.expand_local_generic_ref_expr` never
+/// Plan §9 row 5: `engine.instantiate_local_generic_ref` never
 /// routed through `owner_engine` — it directly consumes
-/// `prepared_type_decl` + `substitute_type_expr_if_needed` on a
+/// `prepared_type_decl` + `apply_type_param_substitutions` on a
 /// `TypeExpr::Ref`. Post-migration the function body is unchanged
 /// structurally; verified by asserting its key call sites remain.
 #[test]
 fn migrate_engine_expand_local_generic_ref_expr_preserves_env_and_args() {
     let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
     assert!(
-        cmqe_src.contains("fn expand_local_generic_ref_expr"),
-        "expand_local_generic_ref_expr must survive post-migration (row 5)"
+        cmqe_src.contains("fn instantiate_local_generic_ref"),
+        "instantiate_local_generic_ref must survive post-migration (row 5)"
     );
     assert!(
-        cmqe_src.contains("prepared_type_param_substitutions"),
-        "expand_local_generic_ref_expr must still drive through prepared_type_param_substitutions"
+        cmqe_src.contains("build_default_type_param_substitutions"),
+        "instantiate_local_generic_ref must still drive through build_default_type_param_substitutions"
     );
     assert!(
-        cmqe_src.contains("substitute_type_expr_if_needed"),
-        "expand_local_generic_ref_expr must still call substitute_type_expr_if_needed"
+        cmqe_src.contains("apply_type_param_substitutions"),
+        "instantiate_local_generic_ref must still call apply_type_param_substitutions"
     );
 }
 

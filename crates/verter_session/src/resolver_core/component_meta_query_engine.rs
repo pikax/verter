@@ -2477,7 +2477,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
-                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                    build_default_type_param_substitutions(prepared.as_ref(), &[])
                 {
                     if !default_substitutions.is_empty() {
                         let result = self.project_prepared_surface_from_symbol(
@@ -2788,9 +2788,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 else {
                     return PreparedSurfaceProjection::Unsupported;
                 };
-                let Some(target_substitutions) =
-                    prepared_type_param_substitutions(target_prepared.as_ref(), type_arguments)
-                else {
+                let Some(target_substitutions) = build_default_type_param_substitutions(
+                    target_prepared.as_ref(),
+                    type_arguments,
+                ) else {
                     return PreparedSurfaceProjection::Unsupported;
                 };
                 self.project_prepared_surface_from_symbol(
@@ -2876,7 +2877,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
                 if let Some(default_substitutions) =
-                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                    build_default_type_param_substitutions(prepared.as_ref(), &[])
                 {
                     if !default_substitutions.is_empty() {
                         let result = self.project_prepared_requested_member_from_symbol(
@@ -2934,7 +2935,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 if let Some(member) = prepared.member(member_name) {
                     let projected_member = ProjectedMember {
                         name: member_name.to_string(),
-                        ty: substitute_type_expr_if_needed(&member.ty, substitutions),
+                        ty: apply_type_param_substitutions(&member.ty, substitutions),
                         optional: member.optional,
                         readonly: member.readonly,
                         is_method: member.is_method,
@@ -3037,7 +3038,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ObjectMember::Property(property) if property.name == member_name => {
                     Some(ProjectedMember {
                         name: property.name.clone(),
-                        ty: substitute_type_expr_if_needed(&property.ty, substitutions),
+                        ty: apply_type_param_substitutions(&property.ty, substitutions),
                         optional: property.optional,
                         readonly: property.readonly,
                         is_method: false,
@@ -3169,7 +3170,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             )?;
                         let target_prepared =
                             self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-                        let target_substitutions = prepared_type_param_substitutions(
+                        let target_substitutions = build_default_type_param_substitutions(
                             target_prepared.as_ref(),
                             type_arguments.as_ref(),
                         )?;
@@ -3357,13 +3358,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    fn projected_string_literal_keys(
+    fn enumerate_route_literal_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
         active_scope_canonical_id: &str,
         expr: &TypeExpr,
     ) -> Option<Vec<String>> {
-        self.projected_string_literal_keys_inner(
+        self.enumerate_route_literal_keys_inner(
             resolution_scope_canonical_id,
             active_scope_canonical_id,
             expr,
@@ -3371,7 +3372,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
-    fn projected_string_literal_keys_inner(
+    fn enumerate_route_literal_keys_inner(
         &mut self,
         resolution_scope_canonical_id: &str,
         active_scope_canonical_id: &str,
@@ -3389,7 +3390,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::Union(types) => {
                 let mut keys = Vec::new();
                 for ty in types.iter() {
-                    keys.extend(self.projected_string_literal_keys_inner(
+                    keys.extend(self.enumerate_route_literal_keys_inner(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         ty,
@@ -3400,7 +3401,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 keys.dedup();
                 Some(keys)
             }
-            TypeExpr::Parenthesized(inner) => self.projected_string_literal_keys_inner(
+            TypeExpr::Parenthesized(inner) => self.enumerate_route_literal_keys_inner(
                 resolution_scope_canonical_id,
                 active_scope_canonical_id,
                 inner,
@@ -3409,7 +3410,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::KeyOf(inner) => {
                 if let TypeExpr::IndexedAccess { object, index } = inner.as_ref() {
                     if let TypeExpr::Literal(LiteralValue::String(member_name)) = index.as_ref() {
-                        if let Some(keys) = self.projected_member_surface_keys(
+                        if let Some(keys) = self.enumerate_member_surface_keys_via_route(
                             resolution_scope_canonical_id,
                             active_scope_canonical_id,
                             object,
@@ -3429,7 +3430,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                     .filter(|projected| projected != expr)
                 {
-                    return self.projected_string_literal_keys_inner(
+                    return self.enumerate_route_literal_keys_inner(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         &projected_expr,
@@ -3463,7 +3464,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         let mut keys = Vec::new();
                         let mut any_enumerable = false;
                         for part in parts.iter() {
-                            if let Some(arm_keys) = self.projected_string_literal_keys_inner(
+                            if let Some(arm_keys) = self.enumerate_route_literal_keys_inner(
                                 resolution_scope_canonical_id,
                                 active_scope_canonical_id,
                                 &TypeExpr::KeyOf(std::sync::Arc::new(part.clone())),
@@ -3494,7 +3495,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         &projected,
                     )
                 } else {
-                    self.projected_string_literal_keys_inner(
+                    self.enumerate_route_literal_keys_inner(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         &projected,
@@ -3509,7 +3510,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// of this walker — the architectural target is `PathWalker`
     /// (in `project_semantic_dispatch/walk.rs`) as the only path-precise
     /// walker. The Step 11 tombstone command
-    /// `! grep -rn "projected_member_surface_keys" crates/ packages/ scripts/`
+    /// `! grep -rn "enumerate_member_surface_keys_via_route" crates/ packages/ scripts/`
     /// must return 0 hits.
     ///
     /// **Status (post Step 1.5).** The Step 1.5 dispatch-substitution
@@ -3517,16 +3518,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Method-as-Function lowering) closed the substitution-parity gap
     /// that previously blocked this walker's deletion. The walker
     /// remains in service of legacy member-route resolution and
-    /// projection-rescue helpers (`type_expr_needs_projection_rescue`,
-    /// `component_meta_type_expr_improves`,
-    /// `imported_component_meta_materialization_scope`,
-    /// `expr_has_transitively_recursive_generic_root`) that Step 2's
+    /// projection-rescue helpers (`expr_needs_projection_rescue`,
+    /// `compare_type_expr_improvement`,
+    /// `select_imported_materialization_scope`,
+    /// `ref_root_reaches_transitive_cycle`) that Step 2's
     /// caller-class parity matrix is responsible for migrating. Once
     /// those callers retire, this walker and its 13 internal call sites
     /// can ALL be deleted in the same commit (per CLAUDE.md
     /// "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn projected_member_surface_keys(
+    fn enumerate_member_surface_keys_via_route(
         &mut self,
         resolution_scope_canonical_id: &str,
         active_scope_canonical_id: &str,
@@ -3556,11 +3557,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .unwrap_or_else(|| expr.clone());
         if matches!(projected_expr, TypeExpr::Unknown { .. }) {
             if let Some(expanded) = self
-                .expand_local_generic_ref_expr(resolution_scope_canonical_id, expr)
-                .or_else(|| self.expand_local_generic_ref_expr(active_scope_canonical_id, expr))
+                .instantiate_local_generic_ref(resolution_scope_canonical_id, expr)
+                .or_else(|| self.instantiate_local_generic_ref(active_scope_canonical_id, expr))
                 .filter(|expanded| expanded != expr)
             {
-                return self.projected_member_surface_keys(
+                return self.enumerate_member_surface_keys_via_route(
                     resolution_scope_canonical_id,
                     active_scope_canonical_id,
                     &expanded,
@@ -3593,7 +3594,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
                 // Path C C11-residual-C: accumulate enumerable arms
                 // only — see the matching change in
-                // `projected_string_literal_keys_inner`. `keyof
+                // `enumerate_route_literal_keys_inner`. `keyof
                 // (typeof theme & GetComponentAppConfig<...>)['variants']
                 // ['color']` must merge `theme.variants.color`'s keys
                 // with the conditional's resolvable arm keys, even when
@@ -3601,7 +3602,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 let mut keys = Vec::new();
                 let mut any_enumerable = false;
                 for part in parts.iter() {
-                    if let Some(arm_keys) = self.projected_member_surface_keys(
+                    if let Some(arm_keys) = self.enumerate_member_surface_keys_via_route(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         part,
@@ -3625,7 +3626,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ..
             } => {
                 let mut keys = Vec::new();
-                if let Some(true_keys) = self.projected_member_surface_keys(
+                if let Some(true_keys) = self.enumerate_member_surface_keys_via_route(
                     resolution_scope_canonical_id,
                     active_scope_canonical_id,
                     true_type,
@@ -3634,7 +3635,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ) {
                     keys.extend(true_keys);
                 }
-                if let Some(false_keys) = self.projected_member_surface_keys(
+                if let Some(false_keys) = self.enumerate_member_surface_keys_via_route(
                     resolution_scope_canonical_id,
                     active_scope_canonical_id,
                     false_type,
@@ -3686,7 +3687,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 if let Some(object_shape) = prepared_value.object_shape.as_ref() {
                     let object_expr = TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
-                    return self.projected_member_surface_keys(
+                    return self.enumerate_member_surface_keys_via_route(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         &object_expr,
@@ -3696,7 +3697,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
 
                 if let Some(type_annotation) = prepared_value.type_annotation.as_ref() {
-                    return self.projected_member_surface_keys(
+                    return self.enumerate_member_surface_keys_via_route(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         type_annotation,
@@ -3707,7 +3708,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
                 None
             }
-            TypeExpr::Parenthesized(inner) => self.projected_member_surface_keys(
+            TypeExpr::Parenthesized(inner) => self.enumerate_member_surface_keys_via_route(
                 resolution_scope_canonical_id,
                 active_scope_canonical_id,
                 inner,
@@ -3741,7 +3742,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 object: std::sync::Arc::new(arm.clone()),
                                 index: index.clone(),
                             };
-                            if let Some(arm_keys) = self.projected_member_surface_keys(
+                            if let Some(arm_keys) = self.enumerate_member_surface_keys_via_route(
                                 resolution_scope_canonical_id,
                                 active_scope_canonical_id,
                                 &arm_indexed,
@@ -3772,7 +3773,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 object: std::sync::Arc::new(branch.clone()),
                                 index: index.clone(),
                             };
-                            if let Some(branch_keys) = self.projected_member_surface_keys(
+                            if let Some(branch_keys) = self.enumerate_member_surface_keys_via_route(
                                 resolution_scope_canonical_id,
                                 active_scope_canonical_id,
                                 &branch_indexed,
@@ -3799,12 +3800,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // type arguments), then retry the indexed access
                         // against the substituted body.
                         let expanded = if !type_arguments.is_empty() {
-                            self.expand_local_generic_ref_expr(
+                            self.instantiate_local_generic_ref(
                                 resolution_scope_canonical_id,
                                 object,
                             )
                             .or_else(|| {
-                                self.expand_local_generic_ref_expr(
+                                self.instantiate_local_generic_ref(
                                     active_scope_canonical_id,
                                     object,
                                 )
@@ -3834,7 +3835,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             object: std::sync::Arc::new(expanded),
                             index: index.clone(),
                         };
-                        self.projected_member_surface_keys(
+                        self.enumerate_member_surface_keys_via_route(
                             resolution_scope_canonical_id,
                             active_scope_canonical_id,
                             &expanded_indexed,
@@ -3857,7 +3858,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             object: std::sync::Arc::new(resolved_inner),
                             index: index.clone(),
                         };
-                        self.projected_member_surface_keys(
+                        self.enumerate_member_surface_keys_via_route(
                             resolution_scope_canonical_id,
                             active_scope_canonical_id,
                             &next,
@@ -3950,7 +3951,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             {
                 return Some(projected);
             }
-            if let Some(solved) = self.solve_expr_type_expr(scope_canonical_id, expr) {
+            if let Some(solved) = self.lower_and_project_to_expanded(scope_canonical_id, expr) {
                 return Some(solved);
             }
         }
@@ -4015,7 +4016,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///
     /// Returns `Some(reduced)` only when the dispatch result differs
     /// structurally from `expr`, matching the pre-migration contract.
-    pub fn solve_expr_type_expr(
+    pub fn lower_and_project_to_expanded(
         &mut self,
         scope_canonical_id: &str,
         expr: &TypeExpr,
@@ -4042,7 +4043,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .then_some(reduced)
     }
 
-    pub fn expand_local_generic_ref_expr(
+    pub fn instantiate_local_generic_ref(
         &mut self,
         scope_canonical_id: &str,
         expr: &TypeExpr,
@@ -4077,8 +4078,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return None;
         }
         let prepared = self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-        let substitutions = prepared_type_param_substitutions(prepared.as_ref(), type_arguments)?;
-        Some(substitute_type_expr_if_needed(
+        let substitutions =
+            build_default_type_param_substitutions(prepared.as_ref(), type_arguments)?;
+        Some(apply_type_param_substitutions(
             &prepared.body,
             &substitutions,
         ))
@@ -4164,7 +4166,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 }
             }
             if let Some(expanded_ref) =
-                query_engine.expand_local_generic_ref_expr(scope_canonical_id, target)
+                query_engine.instantiate_local_generic_ref(scope_canonical_id, target)
             {
                 if let Some(shape) =
                     query_engine.project_expr_surface_shape(scope_canonical_id, &expanded_ref)
@@ -4228,7 +4230,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             }
             ("NonNullable", [target]) => projected_target_shape(self, scope_canonical_id, target),
             ("Pick", [target, keys]) => {
-                let requested = self.projected_string_literal_keys(
+                let requested = self.enumerate_route_literal_keys(
                     scope_canonical_id,
                     scope_canonical_id,
                     keys,
@@ -4242,7 +4244,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 shape_has_surface(&shape).then_some(shape)
             }
             ("Omit", [target, keys]) => {
-                let omitted = self.projected_string_literal_keys(
+                let omitted = self.enumerate_route_literal_keys(
                     scope_canonical_id,
                     scope_canonical_id,
                     keys,
@@ -5050,7 +5052,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let mut last = None;
         for _ in 0..3 {
             let next = self
-                .solve_expr_type_expr(scope_canonical_id, &current)
+                .lower_and_project_to_expanded(scope_canonical_id, &current)
                 .or_else(|| self.project_expr_surface_expr(scope_canonical_id, &current));
             let Some(next) = next else {
                 return last;
@@ -5085,7 +5087,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.prepared_type_decl(resolution_scope_canonical_id, symbol_name)
             {
                 if let Some(default_substitutions) =
-                    prepared_type_param_substitutions(prepared.as_ref(), &[])
+                    build_default_type_param_substitutions(prepared.as_ref(), &[])
                 {
                     if !default_substitutions.is_empty() {
                         let result = self
@@ -5109,7 +5111,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .and_then(|prepared| {
                 if let Some(member_name) = path.first() {
                     if let Some(member) = prepared.member(member_name) {
-                        let member_ty = substitute_type_expr_if_needed(&member.ty, substitutions);
+                        let member_ty = apply_type_param_substitutions(&member.ty, substitutions);
                         if path.len() == 1 {
                             return self
                                 .solve_or_project_prepared_member_leaf_expr(
@@ -5159,7 +5161,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         use verter_semantic::analysis::type_expr::ObjectMember;
 
         let Some((member_name, tail)) = path.split_first() else {
-            let projected_expr = substitute_type_expr_if_needed(expr, substitutions);
+            let projected_expr = apply_type_param_substitutions(expr, substitutions);
             return self
                 .solve_or_project_prepared_member_leaf_expr(
                     resolution_scope_canonical_id,
@@ -5194,7 +5196,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             TypeExpr::Object(object) => {
                 let member_ty = object.properties.iter().find_map(|member| match member {
                     ObjectMember::Property(property) if property.name == *member_name => {
-                        Some(substitute_type_expr_if_needed(&property.ty, substitutions))
+                        Some(apply_type_param_substitutions(&property.ty, substitutions))
                     }
                     ObjectMember::Method(method) if method.name == *member_name => {
                         Some(TypeExpr::Function(std::sync::Arc::new(
@@ -5305,7 +5307,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             )?;
                         let target_prepared =
                             self.prepared_type_decl(&target_canonical_id, &target_symbol_name)?;
-                        let target_substitutions = prepared_type_param_substitutions(
+                        let target_substitutions = build_default_type_param_substitutions(
                             target_prepared.as_ref(),
                             type_arguments.as_ref(),
                         )?;
@@ -5353,14 +5355,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 name_type,
                 ..
             } if name_type.is_none() => {
-                let substituted_source = substitute_type_expr_if_needed(source, substitutions);
-                let Some(keys) = self.projected_string_literal_keys(
+                let substituted_source = apply_type_param_substitutions(source, substitutions);
+                let Some(keys) = self.enumerate_route_literal_keys(
                     resolution_scope_canonical_id,
                     active_scope_canonical_id,
                     &substituted_source,
                 ) else {
                     let nested_expr = path.iter().fold(
-                        substitute_type_expr_if_needed(expr, substitutions),
+                        apply_type_param_substitutions(expr, substitutions),
                         |object, member| TypeExpr::IndexedAccess {
                             object: std::sync::Arc::new(object),
                             index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
@@ -5381,9 +5383,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     parameter.clone(),
                     TypeExpr::string_literal(member_name.clone()),
                 );
-                let member_ty = substitute_type_expr_if_needed(value, &member_substitutions);
+                let member_ty = apply_type_param_substitutions(value, &member_substitutions);
                 if tail.is_empty() {
-                    if let Some(keys) = self.projected_string_literal_keys(
+                    if let Some(keys) = self.enumerate_route_literal_keys(
                         resolution_scope_canonical_id,
                         active_scope_canonical_id,
                         &member_ty,
@@ -5422,7 +5424,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             | TypeExpr::RecursiveRef { .. }
             | TypeExpr::Infer { .. } => {
                 let nested_expr = path.iter().fold(
-                    substitute_type_expr_if_needed(expr, substitutions),
+                    apply_type_param_substitutions(expr, substitutions),
                     |object, member| TypeExpr::IndexedAccess {
                         object: std::sync::Arc::new(object),
                         index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
@@ -6252,7 +6254,7 @@ fn projected_surface_from_object_expr_with_substitutions(
         match member {
             ObjectMember::Property(property) => members.push(ProjectedMember {
                 name: property.name.clone(),
-                ty: substitute_type_expr_if_needed(&property.ty, substitutions),
+                ty: apply_type_param_substitutions(&property.ty, substitutions),
                 optional: property.optional,
                 readonly: property.readonly,
                 is_method: false,
@@ -6456,7 +6458,7 @@ fn projected_surface_unwrap_or_clone(
     std::sync::Arc::try_unwrap(surface).unwrap_or_else(|shared| shared.as_ref().clone())
 }
 
-fn prepared_type_param_substitutions(
+fn build_default_type_param_substitutions(
     prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
     type_arguments: &[TypeExpr],
 ) -> Option<FxHashMap<String, TypeExpr>> {
@@ -6491,7 +6493,7 @@ fn is_identity_type_param_binding(expr: &TypeExpr, param_name: &str) -> bool {
     )
 }
 
-fn substitute_type_expr_if_needed(
+fn apply_type_param_substitutions(
     expr: &TypeExpr,
     substitutions: &FxHashMap<String, TypeExpr>,
 ) -> TypeExpr {
@@ -8332,7 +8334,7 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
 
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
         let expanded_target =
-            query_engine.expand_local_generic_ref_expr("/src/App.vue", &target_expr);
+            query_engine.instantiate_local_generic_ref("/src/App.vue", &target_expr);
         let projected_target = query_engine.project_expr_surface_expr("/src/App.vue", &target_expr);
         let shape = query_engine
             .project_expr_surface_shape("/src/App.vue", &expr)

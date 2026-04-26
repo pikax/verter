@@ -8021,20 +8021,12 @@ defineProps<{ first: Inner; second: Inner }>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
 
-    let first = materialize_component_meta_member_surface_expr(
-        &expr,
-        "/src/types.ts",
-        &mut query_engine,
-        true,
-    );
+    let first =
+        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second = materialize_component_meta_member_surface_expr(
-        &expr,
-        "/src/types.ts",
-        &mut query_engine,
-        true,
-    );
+    let second =
+        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
 
     assert_eq!(
         first, second,
@@ -8104,7 +8096,7 @@ defineProps<{ ui?: Button['ui'] }>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
 
-    let first = materialize_component_meta_member_surface_expr(
+    let first = walk_component_meta_member_surface_expr(
         &expr,
         "/src/button-types.ts",
         &mut query_engine,
@@ -8112,7 +8104,7 @@ defineProps<{ ui?: Button['ui'] }>()
     );
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second = materialize_component_meta_member_surface_expr(
+    let second = walk_component_meta_member_surface_expr(
         &expr,
         "/src/button-types.ts",
         &mut query_engine,
@@ -8276,7 +8268,7 @@ defineProps<TooltipProps>()
         bindings: Vec::new(),
     };
 
-    materialize_component_meta_macro_shape_member_types(
+    walk_component_meta_macro_shape_member_types(
         "/src/App.vue",
         &snapshot,
         &eval_source,
@@ -8419,7 +8411,7 @@ defineProps<Props>()
         bindings: Vec::new(),
     };
 
-    materialize_component_meta_macro_shape_member_types(
+    walk_component_meta_macro_shape_member_types(
         "/src/App.vue",
         &snapshot,
         &eval_source,
@@ -8572,7 +8564,7 @@ defineProps<Props>()
         bindings: Vec::new(),
     };
 
-    materialize_component_meta_macro_shape_member_types(
+    walk_component_meta_macro_shape_member_types(
         "/src/App.vue",
         &snapshot,
         &eval_source,
@@ -8619,20 +8611,12 @@ defineProps<{ first: Inner; second: Inner }>()
         "{ first: Inner; second: Inner }",
     );
 
-    let first = materialize_component_meta_member_surface_expr(
-        &expr,
-        "/src/types.ts",
-        &mut query_engine,
-        true,
-    );
+    let first =
+        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second = materialize_component_meta_member_surface_expr(
-        &expr,
-        "/src/types.ts",
-        &mut query_engine,
-        true,
-    );
+    let second =
+        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
 
     assert_eq!(
         first, second,

@@ -913,7 +913,7 @@ fn enrich_missing_slot_bindings(
     }
 }
 
-fn imported_component_meta_materialization_scope(
+fn select_imported_materialization_scope(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     owner_canonical: &str,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -952,7 +952,7 @@ fn imported_component_meta_materialization_scope(
 /// scope with full local visibility to every sibling helper, which can exhaust
 /// the structural-expansion budgets during a single projection call even
 /// though the owner-scope result is already a good surface.
-pub(crate) fn expr_has_transitively_recursive_generic_root(
+pub(crate) fn ref_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -982,14 +982,14 @@ pub(crate) fn expr_has_transitively_recursive_generic_root(
         declaration.resolved_name.clone()
     };
 
-    named_decl_body_reaches_cycle(
+    decl_body_reaches_cycle_via_walker(
         query_engine,
         scope_canonical.as_str(),
         resolved_name.as_str(),
     )
 }
 
-fn named_decl_body_reaches_cycle(
+fn decl_body_reaches_cycle_via_walker(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical: &str,
     root_name: &str,
@@ -1530,7 +1530,7 @@ fn type_expr_needs_member_route_materialization(
                 )
         }
         TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeParameter(_) => {
-            !expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, expr)
+            !ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, expr)
                 && !type_expr_has_package_backed_root(expr, scope_canonical_id, query_engine)
         }
         TypeExpr::Array { element, .. }
@@ -1563,7 +1563,7 @@ fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::
     }
 }
 
-pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
+pub(crate) fn walk_member_route_via_alias_body(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -1584,9 +1584,9 @@ pub(crate) fn materialize_member_route_from_alias_body_in_owner_scope(
             }
 
             let materialize_scope =
-                imported_component_meta_materialization_scope(&leaf, scope_canonical_id, engine)
+                select_imported_materialization_scope(&leaf, scope_canonical_id, engine)
                     .unwrap_or_else(|| scope_canonical_id.to_string());
-            let materialized = materialize_component_meta_member_surface_expr(
+            let materialized = walk_component_meta_member_surface_expr(
                 &leaf,
                 materialize_scope.as_str(),
                 engine,
@@ -1942,21 +1942,18 @@ fn materialize_component_meta_field_types(
         field: &mut verter_semantic::analysis::type_expand::ExpandedField,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
-        if !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &field.r#type) {
+        if !expr_needs_projection_rescue(query_engine, scope_canonical_id, &field.r#type) {
             return;
         }
 
-        let materialize_scope_canonical_id = imported_component_meta_materialization_scope(
-            &field.r#type,
-            scope_canonical_id,
-            query_engine,
-        )
-        .or_else(|| {
-            parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                imported_component_meta_materialization_scope(raw, scope_canonical_id, query_engine)
-            })
-        })
-        .unwrap_or_else(|| scope_canonical_id.to_string());
+        let materialize_scope_canonical_id =
+            select_imported_materialization_scope(&field.r#type, scope_canonical_id, query_engine)
+                .or_else(|| {
+                    parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                        select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+                    })
+                })
+                .unwrap_or_else(|| scope_canonical_id.to_string());
         let rescued = materialize_component_meta_type_expr_until_stable(
             &field.r#type,
             materialize_scope_canonical_id.as_str(),
@@ -2637,8 +2634,8 @@ fn materialize_component_meta_field_types(
             .find(|property| property.name == field.name)
             .map(|property| property.ty.clone())
         {
-            if component_meta_type_expr_improves(&candidate, &field.r#type)
-                && !type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
+            if compare_type_expr_improvement(&candidate, &field.r#type)
+                && !expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
             {
                 field.r#type = candidate;
             }
@@ -2691,22 +2688,19 @@ fn materialize_component_meta_field_types(
                     scope_canonical_id,
                     query_engine,
                 );
-                if component_meta_type_expr_improves(&rescued, &field.r#type) {
+                if compare_type_expr_improvement(&rescued, &field.r#type) {
                     field.r#type = rescued;
                 }
             }
         }
-        let materialize_scope_canonical_id = imported_component_meta_materialization_scope(
-            &field.r#type,
-            scope_canonical_id,
-            query_engine,
-        )
-        .or_else(|| {
-            parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                imported_component_meta_materialization_scope(raw, scope_canonical_id, query_engine)
-            })
-        })
-        .unwrap_or_else(|| scope_canonical_id.to_string());
+        let materialize_scope_canonical_id =
+            select_imported_materialization_scope(&field.r#type, scope_canonical_id, query_engine)
+                .or_else(|| {
+                    parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                        select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+                    })
+                })
+                .unwrap_or_else(|| scope_canonical_id.to_string());
         let raw_route_root_is_package_backed =
             parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
                 type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
@@ -2715,20 +2709,16 @@ fn materialize_component_meta_field_types(
             let mut owner_alias_route_rescued = false;
             if let Some(owner_alias_route_surface) =
                 parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                    materialize_member_route_from_alias_body_in_owner_scope(
-                        raw,
-                        scope_canonical_id,
-                        query_engine,
-                    )
+                    walk_member_route_via_alias_body(raw, scope_canonical_id, query_engine)
                 })
             {
-                let owner_alias_route_surface = materialize_component_meta_member_surface_expr(
+                let owner_alias_route_surface = walk_component_meta_member_surface_expr(
                     &owner_alias_route_surface,
                     materialize_scope_canonical_id.as_str(),
                     query_engine,
                     false,
                 );
-                if component_meta_type_expr_improves(&owner_alias_route_surface, &field.r#type)
+                if compare_type_expr_improvement(&owner_alias_route_surface, &field.r#type)
                     || route_leaf_beats_wrapper_object(&owner_alias_route_surface, &field.r#type)
                 {
                     field.r#type = owner_alias_route_surface;
@@ -2736,13 +2726,13 @@ fn materialize_component_meta_field_types(
                 }
             }
             if !owner_alias_route_rescued {
-                let routed_surface = materialize_component_meta_member_surface_expr(
+                let routed_surface = walk_component_meta_member_surface_expr(
                     &field.r#type,
                     materialize_scope_canonical_id.as_str(),
                     query_engine,
                     true,
                 );
-                if component_meta_type_expr_improves(&routed_surface, &field.r#type) {
+                if compare_type_expr_improvement(&routed_surface, &field.r#type) {
                     field.r#type = routed_surface;
                 }
                 if let Some(raw_route_surface) =
@@ -2751,13 +2741,13 @@ fn materialize_component_meta_field_types(
                             .project_expr_surface_expr(materialize_scope_canonical_id.as_str(), raw)
                     })
                 {
-                    let raw_route_surface = materialize_component_meta_member_surface_expr(
+                    let raw_route_surface = walk_component_meta_member_surface_expr(
                         &raw_route_surface,
                         materialize_scope_canonical_id.as_str(),
                         query_engine,
                         true,
                     );
-                    if component_meta_type_expr_improves(&raw_route_surface, &field.r#type)
+                    if compare_type_expr_improvement(&raw_route_surface, &field.r#type)
                         || route_leaf_beats_wrapper_object(&raw_route_surface, &field.r#type)
                     {
                         field.r#type = raw_route_surface;
@@ -2767,13 +2757,13 @@ fn materialize_component_meta_field_types(
                     materialize_scope_canonical_id.as_str(),
                     &field.r#type,
                 ) {
-                    let projected_route_surface = materialize_component_meta_member_surface_expr(
+                    let projected_route_surface = walk_component_meta_member_surface_expr(
                         &projected_route_surface,
                         materialize_scope_canonical_id.as_str(),
                         query_engine,
                         false,
                     );
-                    if component_meta_type_expr_improves(&projected_route_surface, &field.r#type)
+                    if compare_type_expr_improvement(&projected_route_surface, &field.r#type)
                         || route_leaf_beats_wrapper_object(&projected_route_surface, &field.r#type)
                     {
                         field.r#type = projected_route_surface;
@@ -2845,7 +2835,7 @@ fn materialize_component_meta_field_types(
                 query_engine,
             ),
         };
-        if component_meta_type_expr_improves(&rescued, &field.r#type) {
+        if compare_type_expr_improvement(&rescued, &field.r#type) {
             field.r#type = rescued;
         }
         if let Some(verter_semantic::analysis::type_expr::TypeExpr::Ref {
@@ -3022,16 +3012,16 @@ fn materialize_component_meta_field_types(
                     crate::semantic_query::ProjectionMode::Expanded,
                     query_engine,
                 );
-                if component_meta_type_expr_improves(&rescued, &field.r#type) {
+                if compare_type_expr_improvement(&rescued, &field.r#type) {
                     field.r#type = rescued;
                 }
-                let surface = materialize_component_meta_member_surface_expr(
+                let surface = walk_component_meta_member_surface_expr(
                     &candidate,
                     scope_hint,
                     query_engine,
                     false,
                 );
-                if component_meta_type_expr_improves(&surface, &field.r#type) {
+                if compare_type_expr_improvement(&surface, &field.r#type) {
                     field.r#type = surface;
                 }
             }
@@ -3140,7 +3130,7 @@ fn produce_macro_object_shapes_for_purpose(
                     });
                 let define_props_needs_projection_rescue =
                     define_props_lowered.is_some_and(|lowered| {
-                        type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                        expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
                     });
                 if define_props_prefers_prepared_projection {
                     if let Some(lowered) = define_props_lowered {
@@ -3498,7 +3488,7 @@ fn produce_macro_object_shapes_for_purpose(
                     || mac.slot_fields.iter().any(|slot| slot.bindings.is_empty());
                 let define_slots_needs_projection_rescue =
                     define_slots_lowered.is_some_and(|lowered| {
-                        type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
+                        expr_needs_projection_rescue(query_engine, owner_canonical, lowered)
                     });
                 if !define_slots_needs_projection_rescue {
                     if let Some((shape, source)) = synthesize_define_slots_shape_from_known_surface(
@@ -4403,14 +4393,14 @@ type ShapeResult = verter_semantic::analysis::type_expand::ExpansionResult<
     verter_semantic::analysis::type_expand::ExpandedObjectShape,
 >;
 
-fn type_expr_needs_projection_rescue(
+fn expr_needs_projection_rescue(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     owner_canonical: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
-    if expr_has_transitively_recursive_generic_root(query_engine, owner_canonical, expr) {
+    if ref_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
         return false;
     }
 
@@ -4625,8 +4615,8 @@ fn produce_one_macro_object_shape(
         )
     });
     let solver_count = shape_surface_count(&solver_result);
-    let rescue_projection = solver_count == 0
-        || type_expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
+    let rescue_projection =
+        solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
         query_engine
             .project_expr_surface_shape(owner_canonical, lowered)
@@ -5666,7 +5656,7 @@ impl VerterHost {
                     }
                     {
                         component_meta_trace_custom!(
-                            "materialize_component_meta_macro_shape_member_types",
+                            "walk_component_meta_macro_shape_member_types",
                             format!(
                                 "owner={} props={} slot_bindings={} define_props={} define_slots={}",
                                 canonical,
@@ -5676,7 +5666,7 @@ impl VerterHost {
                                 evaluated_types.define_slots.len(),
                             ),
                         );
-                        materialize_component_meta_macro_shape_member_types(
+                        walk_component_meta_macro_shape_member_types(
                             canonical,
                             &snapshot,
                             &eval_source,
@@ -5959,7 +5949,7 @@ impl VerterHost {
                         .map(|member| match member {
                             ObjectMember::Property(property) => {
                                 let materialized =
-                                    materialize_component_meta_member_surface_expr(
+                                    walk_component_meta_member_surface_expr(
                                         &property.ty,
                                         scope_canonical_id,
                                         query_engine,
@@ -5980,7 +5970,7 @@ impl VerterHost {
                                         if !type_arguments.is_empty() =>
                                     {
                                         let materialize_scope =
-                                            imported_component_meta_materialization_scope(
+                                            select_imported_materialization_scope(
                                                 &stabilized,
                                                 scope_canonical_id,
                                                 query_engine,
@@ -5990,18 +5980,18 @@ impl VerterHost {
                                                 scope_canonical_id.to_string()
                                             });
                                         let expanded = query_engine
-                                            .expand_local_generic_ref_expr(
+                                            .instantiate_local_generic_ref(
                                                 materialize_scope.as_str(),
                                                 &stabilized,
                                             )
                                             .unwrap_or_else(|| stabilized.clone());
                                         query_engine
-                                            .solve_expr_type_expr(
+                                            .lower_and_project_to_expanded(
                                                 materialize_scope.as_str(),
                                                 &expanded,
                                             )
                                             .map(|solved| {
-                                                materialize_component_meta_member_surface_expr(
+                                                walk_component_meta_member_surface_expr(
                                                     &solved,
                                                     materialize_scope.as_str(),
                                                     query_engine,
@@ -6014,17 +6004,17 @@ impl VerterHost {
                                 };
                                 ObjectMember::Property(ObjectProperty {
                                     name: property.name.clone(),
-                                    ty: if component_meta_type_expr_improves(
+                                    ty: if compare_type_expr_improvement(
                                         &solved,
                                         &property.ty,
                                     ) {
                                         solved
-                                    } else if component_meta_type_expr_improves(
+                                    } else if compare_type_expr_improvement(
                                         &stabilized,
                                         &property.ty,
                                     ) {
                                         stabilized
-                                    } else if component_meta_type_expr_improves(
+                                    } else if compare_type_expr_improvement(
                                         &materialized,
                                         &property.ty,
                                     ) {
@@ -6181,7 +6171,7 @@ impl VerterHost {
                     if let Some(projected) = raw_body.and_then(|expr| {
                         component_meta_registry_raw_member_path_surface(expr, path)
                     }) {
-                        return Some(materialize_component_meta_member_surface_expr(
+                        return Some(walk_component_meta_member_surface_expr(
                             &projected,
                             scope_canonical_id,
                             query_engine,
@@ -6205,7 +6195,7 @@ impl VerterHost {
                     {
                         return None;
                     }
-                    Some(materialize_component_meta_member_surface_expr(
+                    Some(walk_component_meta_member_surface_expr(
                         &wrap_registry_member_path_surface(path, leaf),
                         scope_canonical_id,
                         query_engine,
@@ -6228,7 +6218,7 @@ impl VerterHost {
                                 &member_route,
                             )
                             .or_else(|| {
-                                materialize_member_route_from_alias_body_in_owner_scope(
+                                walk_member_route_via_alias_body(
                                     &route_expr,
                                     scope_canonical_id,
                                     query_engine,
@@ -6239,13 +6229,13 @@ impl VerterHost {
                                     .project_expr_surface_expr(scope_canonical_id, &route_expr)
                             })
                             .unwrap_or(route_expr);
-                        let member_surface = materialize_component_meta_member_surface_expr(
+                        let member_surface = walk_component_meta_member_surface_expr(
                             &projected,
                             scope_canonical_id,
                             query_engine,
                             true,
                         );
-                        let stabilized_surface = materialize_component_meta_member_surface_expr(
+                        let stabilized_surface = walk_component_meta_member_surface_expr(
                             &materialize_component_meta_type_expr_until_stable(
                                 &member_surface,
                                 scope_canonical_id,
@@ -6259,26 +6249,26 @@ impl VerterHost {
                         let solved_surface = match &stabilized_surface {
                             TypeExpr::Ref { type_arguments, .. } if !type_arguments.is_empty() => {
                                 let materialize_scope_canonical_id =
-                                    imported_component_meta_materialization_scope(
+                                    select_imported_materialization_scope(
                                         &stabilized_surface,
                                         scope_canonical_id,
                                         query_engine,
                                     )
                                     .unwrap_or_else(|| scope_canonical_id.to_string());
                                 let expanded = query_engine
-                                    .expand_local_generic_ref_expr(
+                                    .instantiate_local_generic_ref(
                                         materialize_scope_canonical_id.as_str(),
                                         &stabilized_surface,
                                     )
                                     .unwrap_or_else(|| stabilized_surface.clone());
                                 query_engine
-                                    .solve_expr_type_expr(
+                                    .lower_and_project_to_expanded(
                                         materialize_scope_canonical_id.as_str(),
                                         &expanded,
                                     )
                                     .or(Some(expanded))
                                     .map(|solved| {
-                                        materialize_component_meta_member_surface_expr(
+                                        walk_component_meta_member_surface_expr(
                                             &solved,
                                             materialize_scope_canonical_id.as_str(),
                                             query_engine,
@@ -6287,9 +6277,12 @@ impl VerterHost {
                                     })
                             }
                             TypeExpr::Mapped { .. } => query_engine
-                                .solve_expr_type_expr(scope_canonical_id, &stabilized_surface)
+                                .lower_and_project_to_expanded(
+                                    scope_canonical_id,
+                                    &stabilized_surface,
+                                )
                                 .map(|solved| {
-                                    materialize_component_meta_member_surface_expr(
+                                    walk_component_meta_member_surface_expr(
                                         &solved,
                                         scope_canonical_id,
                                         query_engine,
@@ -6299,10 +6292,7 @@ impl VerterHost {
                             _ => None,
                         };
                         let best_surface = if let Some(solved_surface) = solved_surface {
-                            if component_meta_type_expr_improves(
-                                &solved_surface,
-                                &stabilized_surface,
-                            ) {
+                            if compare_type_expr_improvement(&solved_surface, &stabilized_surface) {
                                 solved_surface
                             } else {
                                 stabilized_surface
@@ -6312,8 +6302,7 @@ impl VerterHost {
                         };
                         properties.push(ObjectMember::Property(ObjectProperty {
                             name: member.clone(),
-                            ty: if component_meta_type_expr_improves(&best_surface, &member_surface)
-                            {
+                            ty: if compare_type_expr_improvement(&best_surface, &member_surface) {
                                 best_surface
                             } else {
                                 member_surface
@@ -6328,7 +6317,7 @@ impl VerterHost {
                             query_engine
                                 .project_route_surface_expr(scope_canonical_id, symbol_name, route)
                                 .map(|projected| {
-                                    materialize_component_meta_member_surface_expr(
+                                    walk_component_meta_member_surface_expr(
                                         &projected,
                                         scope_canonical_id,
                                         query_engine,
@@ -7159,7 +7148,7 @@ impl VerterHost {
                     entry.name.as_str()
                 },
             );
-            let materialized = materialize_component_meta_member_surface_expr(
+            let materialized = walk_component_meta_member_surface_expr(
                 &entry.type_expr,
                 scope_canonical,
                 query_engine,
@@ -7685,7 +7674,7 @@ pub(crate) fn reset_mtl_call_count_for_tests() {
 pub(crate) static MEMBER_ROUTE_FAST_PATH_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn materialize_component_meta_member_surface_expr(
+fn walk_component_meta_member_surface_expr(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -7701,7 +7690,7 @@ fn materialize_component_meta_member_surface_expr(
     )
 }
 
-fn materialize_component_meta_macro_shape_member_types(
+fn walk_component_meta_macro_shape_member_types(
     scope_canonical_id: &str,
     snapshot: &FileAnalysisSnapshot,
     eval_source: &str,
@@ -7778,7 +7767,7 @@ fn materialize_component_meta_macro_shape_member_types(
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) -> bool {
         shape.properties.iter().any(|property| {
-            type_expr_needs_projection_rescue(query_engine, scope_canonical_id, &property.ty)
+            expr_needs_projection_rescue(query_engine, scope_canonical_id, &property.ty)
         })
     }
 
@@ -7915,11 +7904,8 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
-                            query_engine,
-                            scope_canonical_id,
-                            lowered,
-                        );
+                        let lowered_needs_projection_rescue =
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
                         let needs_projection_rescue = lowered_needs_projection_rescue
                             || shape_needs_member_rescue(
                                 scope_canonical_id,
@@ -7971,12 +7957,11 @@ fn materialize_component_meta_macro_shape_member_types(
                                 ) {
                                     continue;
                                 }
-                                let property_needs_projection_rescue =
-                                    type_expr_needs_projection_rescue(
-                                        query_engine,
-                                        scope_canonical_id,
-                                        &property.ty,
-                                    );
+                                let property_needs_projection_rescue = expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    &property.ty,
+                                );
                                 if !property_needs_projection_rescue
                                     && !type_expr_needs_member_route_materialization(
                                         &property.ty,
@@ -8014,11 +7999,8 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
-                            query_engine,
-                            scope_canonical_id,
-                            lowered,
-                        );
+                        let lowered_needs_projection_rescue =
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
                         let needs_projection_rescue = lowered_needs_projection_rescue
                             || shape_needs_member_rescue(
                                 scope_canonical_id,
@@ -8048,7 +8030,7 @@ fn materialize_component_meta_macro_shape_member_types(
                                 }
                             }
                             for property in &mut define_emits.result.value.properties {
-                                if !type_expr_needs_projection_rescue(
+                                if !expr_needs_projection_rescue(
                                     query_engine,
                                     scope_canonical_id,
                                     &property.ty,
@@ -8083,11 +8065,8 @@ fn materialize_component_meta_macro_shape_member_types(
                         .iter_mut()
                         .find(|entry| entry.macro_index == macro_index)
                     {
-                        let lowered_needs_projection_rescue = type_expr_needs_projection_rescue(
-                            query_engine,
-                            scope_canonical_id,
-                            lowered,
-                        );
+                        let lowered_needs_projection_rescue =
+                            expr_needs_projection_rescue(query_engine, scope_canonical_id, lowered);
                         let needs_projection_rescue = lowered_needs_projection_rescue
                             || shape_needs_member_rescue(
                                 scope_canonical_id,
@@ -8125,12 +8104,11 @@ fn materialize_component_meta_macro_shape_member_types(
                                 }
                             }
                             for property in &mut define_slots.result.value.properties {
-                                let property_needs_projection_rescue =
-                                    type_expr_needs_projection_rescue(
-                                        query_engine,
-                                        scope_canonical_id,
-                                        &property.ty,
-                                    );
+                                let property_needs_projection_rescue = expr_needs_projection_rescue(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    &property.ty,
+                                );
                                 let binding_rescue_can_stay_symbolic =
                                     slot_member_binding_rescue_can_stay_symbolic(
                                         &property.ty,
@@ -8264,29 +8242,24 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         return current.clone();
     }
     let materialize_scope_canonical_id = if current_is_route_expr {
-        imported_component_meta_materialization_scope(current, scope_canonical_id, query_engine)
-            .or_else(|| {
-                imported_component_meta_materialization_scope(
-                    lowered,
-                    scope_canonical_id,
-                    query_engine,
-                )
-            })
+        select_imported_materialization_scope(current, scope_canonical_id, query_engine).or_else(
+            || select_imported_materialization_scope(lowered, scope_canonical_id, query_engine),
+        )
     } else {
-        imported_component_meta_materialization_scope(lowered, scope_canonical_id, query_engine)
+        select_imported_materialization_scope(lowered, scope_canonical_id, query_engine)
     }
     .unwrap_or_else(|| scope_canonical_id.to_string());
     let route_object_expr = match lowered {
         verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
             if !type_arguments.is_empty()
-                && !expr_has_transitively_recursive_generic_root(
+                && !ref_root_reaches_transitive_cycle(
                     query_engine,
                     materialize_scope_canonical_id.as_str(),
                     lowered,
                 ) =>
         {
             query_engine
-                .expand_local_generic_ref_expr(materialize_scope_canonical_id.as_str(), lowered)
+                .instantiate_local_generic_ref(materialize_scope_canonical_id.as_str(), lowered)
                 .unwrap_or_else(|| lowered.clone())
         }
         _ => lowered.clone(),
@@ -8307,11 +8280,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                 ),
             );
             if type_expr_has_package_backed_root(current, scope_canonical_id, query_engine)
-                || expr_has_transitively_recursive_generic_root(
-                    query_engine,
-                    scope_canonical_id,
-                    current,
-                )
+                || ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, current)
             {
                 None
             } else {
@@ -8387,7 +8356,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                         scope_canonical_id, member_name, candidate_scope, route_expr,
                     ),
                 );
-                query_engine.solve_expr_type_expr(candidate_scope.as_str(), &route_expr)
+                query_engine.lower_and_project_to_expanded(candidate_scope.as_str(), &route_expr)
             };
             for candidate in [projected, solved].into_iter().flatten() {
                 acc.push(candidate);
@@ -8409,8 +8378,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // observable contract the FAIL-FIRST test asserts — when a route
     // candidate succeeds, MTL_CALL_COUNT stays at 0.
     for candidate in &route_candidates {
-        if expr_has_transitively_recursive_generic_root(query_engine, scope_canonical_id, candidate)
-        {
+        if ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, candidate) {
             continue;
         }
         if candidate_is_good_enough(candidate) {
@@ -8450,7 +8418,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
         current_materialized
     };
     if let Some(candidate) = inline_route_candidate {
-        if component_meta_type_expr_improves(&candidate, &best) {
+        if compare_type_expr_improvement(&candidate, &best) {
             best = candidate;
         }
     }
@@ -8466,14 +8434,10 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                     scope_canonical_id, member_name, current,
                 ),
             );
-            materialize_member_route_from_alias_body_in_owner_scope(
-                current,
-                scope_canonical_id,
-                query_engine,
-            )
+            walk_member_route_via_alias_body(current, scope_canonical_id, query_engine)
         };
         if let Some(candidate) = alias_route_candidate {
-            if component_meta_type_expr_improves(&candidate, &best) {
+            if compare_type_expr_improvement(&candidate, &best) {
                 best = candidate;
             }
         }
@@ -8486,11 +8450,8 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // `materialize_component_meta_type_expr_until_stable(&candidate, …)`
     // recursion.
     for candidate in route_candidates {
-        if expr_has_transitively_recursive_generic_root(
-            query_engine,
-            scope_canonical_id,
-            &candidate,
-        ) && !component_meta_type_expr_improves(&candidate, &best)
+        if ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &candidate)
+            && !compare_type_expr_improvement(&candidate, &best)
         {
             continue;
         }
@@ -8509,7 +8470,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                 query_engine,
             )
         };
-        if component_meta_type_expr_improves(&candidate_materialized, &best) {
+        if compare_type_expr_improvement(&candidate_materialized, &best) {
             best = candidate_materialized;
         }
     }
@@ -8517,7 +8478,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     best
 }
 
-pub(crate) fn component_meta_type_expr_symbolic_score(
+pub(crate) fn count_symbolic_carriers_in_expr(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> usize {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
@@ -8638,9 +8599,7 @@ pub(crate) fn component_meta_type_expr_symbolic_score(
     score
 }
 
-fn component_meta_type_expr_generic_detail_score(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-) -> usize {
+fn count_generic_detail_in_expr(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> usize {
     use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
     let mut score = 0usize;
@@ -8783,13 +8742,13 @@ fn component_meta_type_expr_generic_detail_score(
     score
 }
 
-fn component_meta_type_expr_has_structural_top_level(
+fn type_expr_has_structural_top_level(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
     match expr {
-        TypeExpr::Parenthesized(inner) => component_meta_type_expr_has_structural_top_level(inner),
+        TypeExpr::Parenthesized(inner) => type_expr_has_structural_top_level(inner),
         TypeExpr::Ref { .. }
         | TypeExpr::IndexedAccess { .. }
         | TypeExpr::Conditional { .. }
@@ -8813,7 +8772,7 @@ fn component_meta_type_expr_has_structural_top_level(
     }
 }
 
-pub(crate) fn component_meta_type_expr_improves(
+pub(crate) fn compare_type_expr_improvement(
     candidate: &verter_semantic::analysis::type_expr::TypeExpr,
     current: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
@@ -8827,15 +8786,14 @@ pub(crate) fn component_meta_type_expr_improves(
         return true;
     }
 
-    let candidate_score = component_meta_type_expr_symbolic_score(candidate);
-    let current_score = component_meta_type_expr_symbolic_score(current);
+    let candidate_score = count_symbolic_carriers_in_expr(candidate);
+    let current_score = count_symbolic_carriers_in_expr(current);
 
     candidate_score < current_score
-        || (component_meta_type_expr_has_structural_top_level(candidate)
-            && !component_meta_type_expr_has_structural_top_level(current))
+        || (type_expr_has_structural_top_level(candidate)
+            && !type_expr_has_structural_top_level(current))
         || (candidate_score == current_score
-            && component_meta_type_expr_generic_detail_score(candidate)
-                > component_meta_type_expr_generic_detail_score(current))
+            && count_generic_detail_in_expr(candidate) > count_generic_detail_in_expr(current))
 }
 
 fn component_meta_registry_prefers_structural_materialization(
@@ -9818,7 +9776,7 @@ fn registry_member_route_inline_materializable(
     }
 
     if type_expr_has_package_backed_root(expr, scope_canonical_id, engine)
-        || expr_has_transitively_recursive_generic_root(engine, scope_canonical_id, expr)
+        || ref_root_reaches_transitive_cycle(engine, scope_canonical_id, expr)
     {
         return false;
     }
@@ -9956,7 +9914,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
         String,
     )> {
         let imported_scope =
-            imported_component_meta_materialization_scope(expr, scope_canonical_id, engine);
+            select_imported_materialization_scope(expr, scope_canonical_id, engine);
         let mut expansion_scopes = vec![scope_canonical_id.to_string()];
         if let Some(imported_scope) = imported_scope.as_ref() {
             if imported_scope != scope_canonical_id {
@@ -9966,7 +9924,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
 
         for expansion_scope in expansion_scopes {
             let Some(expanded_ref) =
-                engine.expand_local_generic_ref_expr(expansion_scope.as_str(), expr)
+                engine.instantiate_local_generic_ref(expansion_scope.as_str(), expr)
             else {
                 continue;
             };
@@ -9995,7 +9953,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
         if let TypeExpr::Ref { type_arguments, .. } = object.as_ref() {
             if !type_arguments.is_empty() {
                 if let Some(expanded_object) =
-                    engine.expand_local_generic_ref_expr(scope_canonical_id, object.as_ref())
+                    engine.instantiate_local_generic_ref(scope_canonical_id, object.as_ref())
                 {
                     let expanded_route = TypeExpr::IndexedAccess {
                         object: std::sync::Arc::new(expanded_object),
@@ -10060,11 +10018,7 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
         }
         if is_public_route && !inline_materializable {
             if let Some(alias_route_surface) =
-                materialize_member_route_from_alias_body_in_owner_scope(
-                    expr,
-                    scope_canonical_id,
-                    engine,
-                )
+                walk_member_route_via_alias_body(expr, scope_canonical_id, engine)
             {
                 if alias_route_surface != *expr {
                     let result = materialize_component_meta_member_surface_expr_with_active_stack(
@@ -10124,19 +10078,17 @@ fn materialize_component_meta_member_surface_expr_with_active_stack_guarded(
                 let result = match expr {
                     TypeExpr::Ref { name, .. } => {
                         let projected_scope_canonical_id =
-                            imported_component_meta_materialization_scope(
-                                expr,
-                                scope_canonical_id,
-                                engine,
-                            )
-                            .or_else(|| {
-                                let declaration = engine
-                                    .resolve_type_declaration(scope_canonical_id, name.as_ref());
-                                (!declaration.canonical_source.is_empty()
-                                    && declaration.canonical_source != scope_canonical_id)
-                                    .then_some(declaration.canonical_source)
-                            })
-                            .unwrap_or_else(|| scope_canonical_id.to_string());
+                            select_imported_materialization_scope(expr, scope_canonical_id, engine)
+                                .or_else(|| {
+                                    let declaration = engine.resolve_type_declaration(
+                                        scope_canonical_id,
+                                        name.as_ref(),
+                                    );
+                                    (!declaration.canonical_source.is_empty()
+                                        && declaration.canonical_source != scope_canonical_id)
+                                        .then_some(declaration.canonical_source)
+                                })
+                                .unwrap_or_else(|| scope_canonical_id.to_string());
                         if projected_scope_canonical_id != scope_canonical_id {
                             materialize_component_meta_member_surface_expr_with_active_stack(
                                 &projected,

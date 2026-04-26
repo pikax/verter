@@ -4736,7 +4736,7 @@ impl VerterHost {
                         // unknown, raise failed) emit a structured trace
                         // event and fall back to symbolic preservation —
                         // legacy walkers (project_expr_surface_expr /
-                        // solve_expr_type_expr) are no longer invoked from
+                        // lower_and_project_to_expanded) are no longer invoked from
                         // this closure (their other callers retire in Step 2).
                         use crate::project_semantic_dispatch::ProjectSemanticDispatch;
                         use crate::semantic_query::{
@@ -8181,7 +8181,7 @@ fn merge_evaluated_prop_types_into_meta(
                 continue;
             }
         }
-        if crate::meta_resolve::component_meta_type_expr_improves(evaluated, &prop.type_expr)
+        if crate::meta_resolve::compare_type_expr_improvement(evaluated, &prop.type_expr)
             || matches!(
                 (&prop.type_expr, *evaluated),
                 (

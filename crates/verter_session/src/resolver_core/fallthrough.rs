@@ -942,7 +942,7 @@ pub fn structural_substitute_typeof_refs(
 /// env-level substitutions (including injected prop-type overrides) take
 /// precedence; otherwise the lowered expression is routed through
 /// `ComponentMetaQueryEngine::project_expr_surface_expr` /
-/// `solve_expr_type_expr` in the owning canonical scope.
+/// `lower_and_project_to_expanded` in the owning canonical scope.
 pub fn evaluate_value_expression_via_env_or_dispatch(
     expression: &str,
     canonical_id: &str,
@@ -960,7 +960,7 @@ pub fn evaluate_value_expression_via_env_or_dispatch(
     if let Some(projected) = engine.project_expr_surface_expr(canonical_id, &lowered) {
         return Some(projected);
     }
-    engine.solve_expr_type_expr(canonical_id, &lowered)
+    engine.lower_and_project_to_expanded(canonical_id, &lowered)
 }
 
 pub fn resolve_usage_prop_type<F>(
