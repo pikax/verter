@@ -251,7 +251,7 @@ pub(crate) struct FastShallowFieldExpr {
 /// (CLAUDE.md host-owned cache principle) addressed in a separate
 /// follow-up plan.
 pub struct ComponentMetaQueryEngine<'a> {
-    host: &'a VerterHost,
+    pub(crate) host: &'a VerterHost,
     current_prepared_request_root: Option<String>,
     // Step 3 closure (architectural-debt-closure rev 10) — the 10 caches
     // below were authoritative `FxHashMap` storage prior to this commit.

@@ -7672,14 +7672,44 @@ fn walk_component_meta_member_surface_expr(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     nested_surface: bool,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
-    let mut visited = crate::component_meta_dispatch_iteration::WalkerVisitedNodes::new();
-    walk_component_meta_member_surface_expr_with_visited(
-        expr,
-        scope_canonical_id,
-        engine,
-        nested_surface,
-        &mut visited,
-    )
+    // Phase 9 cutover (plan §11). Delegates to the new session-layer
+    // materialiser entry. The walker function name + signature are
+    // preserved as a thin shim so the 16 production call sites do
+    // not need to migrate in this commit; the legacy walker body
+    // (`walk_component_meta_member_surface_expr_with_visited` and
+    // its supporting helpers) becomes unused.
+    use crate::component_meta_materialize::{
+        materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
+        MaterializeStructureCacheKey,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::ProjectionMode;
+
+    let dispatch = ProjectSemanticDispatch::new(engine.host);
+    let Some(base) = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr) else {
+        return expr.clone();
+    };
+    let key = MaterializeStructureCacheKey {
+        scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+        base,
+        scope_axis: if nested_surface {
+            MaterializationScope::Nested
+        } else {
+            MaterializationScope::TopLevel
+        },
+        mode: ProjectionMode::Expanded,
+    };
+    let read = materialize_component_meta_structure(engine.host, key);
+    let materialised_id = match read.value {
+        MaterializeOutcome::Value(id)
+        | MaterializeOutcome::Miss(id)
+        | MaterializeOutcome::Recursive(id)
+        | MaterializeOutcome::Tainted(id) => id,
+        MaterializeOutcome::Error(_) => return expr.clone(),
+    };
+    dispatch
+        .raise_node_to_type_expr(materialised_id)
+        .unwrap_or_else(|| expr.clone())
 }
 
 fn walk_component_meta_macro_shape_member_types(
@@ -9870,6 +9900,10 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
 /// per-recursion cycle keying — non-`Ref` shapes are tree-walked
 /// structurally and cannot loop, and `Ref` shells that fail to lower
 /// have no body to recurse into.
+#[allow(
+    dead_code,
+    reason = "Phase 9 cutover (plan §11.2): walker-family helper retained pending full body deletion in follow-up — `walk_component_meta_member_surface_expr` now delegates to the new materialiser entry, leaving this helper unused."
+)]
 fn walker_cycle_key_node(
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -9904,6 +9938,10 @@ fn walker_cycle_key_node(
 /// over scope candidates from the walker body, not changing the
 /// per-scope substitution primitive (preserved by D-Cutover §5.8 row 5
 /// characterization).
+#[allow(
+    dead_code,
+    reason = "Phase 9 cutover (plan §11.2): walker-family helper retained pending full body deletion in follow-up."
+)]
 fn expand_generic_ref_via_scope_iteration(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -9949,6 +9987,10 @@ fn expand_generic_ref_via_scope_iteration(
 /// iteration in the rescue path now routes through
 /// [`expand_generic_ref_via_scope_iteration`].
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[allow(
+    dead_code,
+    reason = "Phase 9 cutover (plan §11.2): walker-family helper retained pending full body deletion in follow-up — the public `walk_component_meta_member_surface_expr` now delegates to `materialize_component_meta_structure`."
+)]
 fn walk_component_meta_member_surface_expr_with_visited(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,

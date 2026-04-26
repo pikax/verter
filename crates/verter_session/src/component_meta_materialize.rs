@@ -289,6 +289,34 @@ pub fn materialize_component_meta_structure(
 
     let _guard = MaterializeInFlightGuard::push(key.clone());
 
+    // Plan §1.6 — package-ref policy gate. At TopLevel, a bare
+    // DeclRef whose declaration resolves under `/node_modules/`
+    // materialises to itself unchanged (the walker kept these
+    // symbolic; expanding them would publish package internals).
+    {
+        let graph = host.project_type_store().semantic_graph();
+        if key.scope_axis == MaterializationScope::TopLevel {
+            if let Some(data) = graph.node_data(key.base) {
+                use crate::semantic_query::SemanticNodeData;
+                let is_package_ref = match data.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => {
+                        identity.canonical_id.contains("/node_modules/")
+                    }
+                    SemanticNodeData::InstantiationRef { base, .. } => {
+                        base.canonical_id.contains("/node_modules/")
+                    }
+                    _ => false,
+                };
+                if is_package_ref {
+                    return crate::semantic_query::CacheRead {
+                        value: MaterializeOutcome::Value(key.base),
+                        dep_signature: empty_signature(),
+                    };
+                }
+            }
+        }
+    }
+
     // Phase 4 — cooperative-admission cold build with post_publish.
     let key_for_compute = key.clone();
     let compute = move || {
