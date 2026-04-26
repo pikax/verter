@@ -513,7 +513,32 @@ pub struct SemanticGraphStore {
     /// `execute_cooperative` to bucket owner vs joiner paths and held
     /// time on `MetaProvenance`.
     provenance: Option<Arc<crate::types::MetaProvenance>>,
+    /// Plan §6 / §13.2 Γ.B reverse index. For each canonical id,
+    /// holds the set of `(family, slot)` pairs whose published
+    /// dep_signature references it, paired with the dep_signature
+    /// `Arc` that was registered. `invalidate_canonical` consults
+    /// this map instead of linearly scanning the family memo.
+    ///
+    /// **`Arc` discrimination.** When evicting an entry the registered
+    /// `dep_signature` Arc is `ptr_eq`-compared against the current
+    /// entry's dep_signature. Under Phase 5 Γ.C interning this Arc is
+    /// shared across equivalent dep_signatures so ptr_eq matches a
+    /// concurrent fresh write only when its content really is the
+    /// same; pre-Γ.C the registered Arc is the exact one the publish
+    /// path stored, so ptr_eq distinguishes our entry from any later
+    /// fresh build's distinct Arc.
+    ///
+    /// **Lock order.** `entries → canonical_to_entries shards`. Code
+    /// must NEVER acquire a `canonical_to_entries` shard mutex while
+    /// holding `entries`, and never acquire `entries` while holding
+    /// any `canonical_to_entries` shard mutex. The DashMap shard
+    /// boundary is the per-canonical Mutex.
+    canonical_to_entries: CanonicalToEntries,
 }
+
+/// Plan §6 / §13.2 Γ.B reverse-index type alias. See
+/// [`SemanticGraphStore::canonical_to_entries`] for the contract.
+type CanonicalToEntries = DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot), DepSignature>>>;
 
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -644,14 +669,26 @@ impl FamilySlots {
     /// conservative "broader satisfies narrower" rule from plan §7.11; a
     /// dep-signature tightening pass against the actual narrower read-set
     /// is permitted follow-up work tracked in §1.4.
-    fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) {
+    ///
+    /// Returns the list of slots that this publish actually populated
+    /// (the primary slot + any previously-empty narrower slots that were
+    /// backfilled). Plan §6 / §13.2 — the caller registers a
+    /// reverse-index entry per populated slot in the per-canonical
+    /// `canonical_to_entries` index. Capped at 5 (single + identity +
+    /// navigate + shallow + expanded), so a stack `SmallVec` keeps
+    /// allocation off the hot path.
+    fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) -> smallvec::SmallVec<[ModeSlot; 5]> {
+        let mut populated = smallvec::SmallVec::<[ModeSlot; 5]>::new();
         *self.slot_mut(slot) = Some(entry.clone());
+        populated.push(slot);
         for narrower in backfill_targets(slot) {
             let cell = self.slot_mut(*narrower);
             if cell.is_none() {
                 *cell = Some(entry.clone());
+                populated.push(*narrower);
             }
         }
+        populated
     }
 
     fn populated_count(&self) -> usize {
@@ -1034,9 +1071,12 @@ fn dep_signature_references_canonical(sig: &DepSignature, canonical_id: &str) ->
         .any(|(canonical, _)| canonical.as_ref() == canonical_id)
 }
 
-/// Every [`ModeSlot`] variant as a static slice — used by invalidation
-/// sweeps that must visit every slot of a family to examine each stored
-/// dep-signature.
+/// Every [`ModeSlot`] variant as a static slice. Pre-Γ.B
+/// `invalidate_canonical` linearly walked every family × every slot
+/// here. Post-Γ.B the per-canonical reverse index drives the sweep,
+/// but the constant is retained for invalidate-all and diagnostic
+/// paths that still need to enumerate all slots.
+#[allow(dead_code)]
 const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::Single,
     ModeSlot::Identity,
@@ -1181,6 +1221,18 @@ impl SemanticGraphStore {
             .sum()
     }
 
+    /// Number of `(family, slot)` registrations under `canonical_id`
+    /// in the Γ.B `canonical_to_entries` reverse index. Returns 0 when
+    /// the canonical is not present. Test/diagnostic accessor — plan
+    /// §6 / §13.2.
+    #[must_use]
+    pub fn canonical_to_entries_count(&self, canonical_id: &str) -> usize {
+        self.canonical_to_entries
+            .get(canonical_id)
+            .map(|shard| shard.value().lock().len())
+            .unwrap_or(0)
+    }
+
     /// Invalidate every warm memo slot whose stored `DepSignature`
     /// references `canonical_id` (plan B3 dep-signature sweep, replacing
     /// the pre-B3 conservative `family_references_canonical` helper).
@@ -1213,43 +1265,106 @@ impl SemanticGraphStore {
     pub fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         use rustc_hash::FxHashSet;
 
-        // Phase 1: sweep warm slots. Track every (family, slot) whose
-        // dep-signature referenced `canonical_id` so phase 2 can drop
-        // matching in-flight entries.
-        let mut evicted = 0usize;
+        // Phase 1 (Γ.B reverse-index path): drain the per-canonical
+        // (family, slot) → registered_dep_signature map for
+        // `canonical_id`. The drain releases the per-canonical mutex
+        // before phase 2 acquires `entries`, preserving the
+        // documented `entries → canonical_to_entries shards` lock
+        // order. `affected_pairs` is retained so phase 3 (in-flight
+        // abort) can drop matching in-flight entries even when phase
+        // 2's `Arc::ptr_eq` check rejects an entry (e.g., a fresh
+        // post-publish write replaced the registered dep_signature).
         let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
-        {
-            let mut entries = self.entries.lock();
-            entries.retain(|family, slots| {
-                for slot in ALL_MODE_SLOTS {
-                    let Some(entry) = slots.slot(*slot) else {
-                        continue;
-                    };
-                    if dep_signature_references_canonical(&entry.dep_signature, canonical_id) {
-                        *slots.slot_mut(*slot) = None;
-                        evicted += 1;
-                        affected_pairs.insert((family.clone(), *slot));
-                    }
+        let drained: Vec<((FamilyKey, ModeSlot), DepSignature)> = {
+            crate::host_manage::record_family_map_lock_acquisition();
+            match self.canonical_to_entries.remove(canonical_id) {
+                Some((_, mutex)) => {
+                    let mut map = mutex.lock();
+                    let drained: Vec<_> = map.drain().collect();
+                    drained
                 }
-                slots.populated_count() > 0
-            });
+                None => Vec::new(),
+            }
+        };
+        for ((family, slot), _) in &drained {
+            affected_pairs.insert((family.clone(), *slot));
         }
 
-        // Phase 2: drop in-flight entries for any (family, slot) whose
-        // warm slot was just evicted. Joiners waiting on the condvar
-        // observe `aborted = true` on wake and re-enter dispatch from
-        // step 1 of `execute_cooperative`. The completed sentinel wakes
-        // any joiner whose wait predicate only checks `completed`.
+        // Phase 2 (entries eviction with `Arc::ptr_eq`): walk the
+        // drained set under the entries lock. Drop each slot whose
+        // current dep_signature `Arc::ptr_eq`-matches the registered
+        // dep_signature. ptr_eq distinguishes "our entry" from "a
+        // fresh post-publish write that beat us". Track a fallback
+        // dep-sig walk for any slot that did not ptr_eq (the
+        // registered dep_sig was replaced by a fresh build whose
+        // dep_sig also references the canonical).
+        let mut evicted = 0usize;
+        let mut evicted_dep_sigs: Vec<DepSignature> = Vec::new();
+        {
+            let mut entries = self.entries.lock();
+            for ((family, slot), registered_sig) in &drained {
+                let Some(slots) = entries.get_mut(family) else {
+                    continue;
+                };
+                let Some(current_entry) = slots.slot(*slot) else {
+                    continue;
+                };
+                let drop = Arc::ptr_eq(&current_entry.dep_signature, registered_sig)
+                    || dep_signature_references_canonical(
+                        &current_entry.dep_signature,
+                        canonical_id,
+                    );
+                if drop {
+                    let entry_sig = Arc::clone(&current_entry.dep_signature);
+                    *slots.slot_mut(*slot) = None;
+                    evicted += 1;
+                    evicted_dep_sigs.push(entry_sig);
+                }
+            }
+            entries.retain(|_, slots| slots.populated_count() > 0);
+        }
+
+        // Phase 3 (cross-canonical cleanup): for each evicted entry's
+        // dep_signature, walk every other canonical it referenced and
+        // drop the matching `(family, slot)` registration if it still
+        // ptr_eq-matches our dep_signature. Lock order respected:
+        // `entries` was unlocked at the close of phase 2 before any
+        // shard mutex is acquired here.
+        for entry_sig in &evicted_dep_sigs {
+            for (other_canonical, _) in entry_sig.iter() {
+                if other_canonical.as_ref() == canonical_id {
+                    continue;
+                }
+                crate::host_manage::record_family_map_lock_acquisition();
+                if let Some(shard) = self.canonical_to_entries.get(other_canonical) {
+                    let mut map = shard.value().lock();
+                    map.retain(|_, registered_sig| {
+                        // Keep entries whose registered_sig is a
+                        // different `Arc` (fresh build) — only drop
+                        // the exact registration tied to this
+                        // evicted entry.
+                        !Arc::ptr_eq(registered_sig, entry_sig)
+                    });
+                }
+            }
+        }
+
+        // Phase 4 (in-flight abort, was phase 2 pre-Γ.B): drop
+        // in-flight entries for any (family, slot) whose warm slot
+        // was just evicted. Joiners waiting on the condvar observe
+        // `aborted = true` on wake and re-enter dispatch from step 1
+        // of `execute_cooperative`. The completed sentinel wakes any
+        // joiner whose wait predicate only checks `completed`.
         //
-        // Single-pass `retain` — the closure runs once per in-flight
-        // entry. Matching entries abort their state + notify joiners and
-        // are removed; non-matching entries stay.
+        // `affected_pairs` is populated from the Γ.B drained set in
+        // phase 1 — even slots that phase 2's ptr_eq rejected (because
+        // a fresh post-publish write replaced the registered Arc) are
+        // included so any in-flight entry under that pair still aborts
+        // correctly.
         //
-        // The `affected_pairs.is_empty()` guard short-circuits the whole
-        // phase when the warm sweep evicted nothing, avoiding an
-        // unnecessary `self.inflight.lock()` acquisition + full-table
-        // walk in the common "no matches" case (e.g. invalidating a
-        // canonical that wasn't read by any warm entry).
+        // The `affected_pairs.is_empty()` guard short-circuits the
+        // whole phase when no canonical-keyed entries existed,
+        // avoiding an unnecessary `self.inflight.lock()` acquisition.
         if !affected_pairs.is_empty() {
             let mut table = self.inflight.lock();
             table.retain(|key, inflight| {
@@ -1272,12 +1387,13 @@ impl SemanticGraphStore {
             });
         }
 
-        // Phase 3 — Γ.A. Drop NodeArena shard-dedup entries keyed at
+        // Phase 5 (Γ.A NodeArena, was phase 3 pre-Γ.B): drop
+        // NodeArena shard-dedup entries keyed at
         // `File { canonical_id: c, .. }`. Preserves Global entries
         // and entries for any other canonical (plan §1.10 Γ.A). The
-        // arena Vec is append-only — this only clears the "next intern
-        // returns existing id" path; valid SemanticNodeIds for nodes
-        // already published into the arena are unaffected.
+        // arena Vec is append-only — this only clears the "next
+        // intern returns existing id" path; valid SemanticNodeIds for
+        // nodes already published into the arena are unaffected.
         self.arena.invalidate_for_canonical(canonical_id);
 
         evicted
@@ -1935,7 +2051,30 @@ impl SemanticGraphStore {
                         );
                     }
                 } else {
-                    entries.entry(family).or_default().publish(slot, entry);
+                    let populated_slots = entries
+                        .entry(family.clone())
+                        .or_default()
+                        .publish(slot, entry);
+                    // Phase 4 — Γ.B reverse-index registration. For
+                    // each populated slot (the primary plus any
+                    // backfilled narrower slots), register the
+                    // (family, slot) → dep_signature mapping under
+                    // every canonical the dep_signature references.
+                    // Lock order is `entries → canonical_to_entries
+                    // shards`: drop the entries lock before acquiring
+                    // any per-canonical mutex.
+                    drop(entries);
+                    for populated in &populated_slots {
+                        for (canonical, _) in dep_signature.iter() {
+                            crate::host_manage::record_family_map_lock_acquisition();
+                            let shard = self
+                                .canonical_to_entries
+                                .entry(Arc::clone(canonical))
+                                .or_insert_with(|| Mutex::new(FxHashMap::default()));
+                            let mut map = shard.value().lock();
+                            map.insert((family.clone(), *populated), Arc::clone(&dep_signature));
+                        }
+                    }
                 }
             }
         }
@@ -2051,7 +2190,7 @@ fn empty_signature() -> DepSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
+    use crate::semantic_query::{DepVersion, PrimitiveKind, ResolveDeclKey, ScopeId};
 
     fn scope(canonical: &str) -> ScopeId {
         ScopeId {
@@ -2445,6 +2584,173 @@ mod tests {
         assert!(store.get(&b_key).is_some());
         // a.ts gone — next call re-runs build.
         assert!(store.get(&a_key).is_none());
+    }
+
+    /// Phase 4 (plan §6 / §13.2 Γ.B) — `invalidate_canonical(c)`
+    /// uses the `canonical_to_entries` reverse index to find affected
+    /// `(family, slot)` pairs in O(referencing entries) instead of
+    /// O(all entries). A publish must register its dep_signature in
+    /// the reverse index for every canonical it references.
+    ///
+    /// Discriminating: warm a specific `(family, slot)` whose
+    /// dep_signature references "/w/a.ts". Assert
+    /// `canonical_to_entries_count("/w/a.ts") >= 1`. Pre-fix:
+    /// reverse index was never populated, count is 0; assertion
+    /// FAILS. Post-fix: count is at least 1 (one for the family +
+    /// each backfilled narrower slot).
+    #[test]
+    fn family_map_publish_registers_canonical_to_entries_reverse_index() {
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/a.ts"),
+            name: Arc::from("Foo"),
+        });
+        let _ = store.execute_cooperative(
+            key,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), dep_sig_for("/w/a.ts", 1))
+            },
+        );
+        assert!(
+            store.canonical_to_entries_count("/w/a.ts") >= 1,
+            "publish must register the (family, slot) → dep_signature mapping \
+             in canonical_to_entries[\"/w/a.ts\"] (Phase 4 Γ.B reverse index)"
+        );
+        assert_eq!(
+            store.canonical_to_entries_count("/w/missing.ts"),
+            0,
+            "unrelated canonicals must NOT have a reverse-index entry"
+        );
+    }
+
+    /// Phase 4 — `invalidate_canonical` drains the reverse-index
+    /// entry for the canonical AND propagates the cleanup to other
+    /// canonicals the evicted entry's dep_signature referenced
+    /// (cross-canonical cleanup, plan §6 phase 3).
+    ///
+    /// Discriminating: warm an entry whose dep_signature references
+    /// BOTH "/w/a.ts" AND "/w/b.ts". Verify both reverse-index
+    /// entries are populated (count == 1 each). Invalidate "/w/a.ts".
+    /// Verify both reverse-index entries are EMPTY (the "/w/a.ts"
+    /// shard via drain in phase 1, the "/w/b.ts" shard via cross-
+    /// canonical cleanup in phase 3). Pre-fix: cross-canonical
+    /// cleanup did not exist; the "/w/b.ts" entry would dangle.
+    #[test]
+    fn family_map_invalidate_canonical_propagates_cross_canonical_cleanup() {
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/a.ts"),
+            name: Arc::from("Bar"),
+        });
+        // Compose a dep_sig referencing two canonicals.
+        let dep_sig: DepSignature = Arc::from(
+            vec![
+                (
+                    Arc::<str>::from("/w/a.ts"),
+                    DepVersion::WholeHash([1u8; 16]),
+                ),
+                (
+                    Arc::<str>::from("/w/b.ts"),
+                    DepVersion::WholeHash([2u8; 16]),
+                ),
+            ]
+            .into_boxed_slice(),
+        );
+        let _ = store.execute_cooperative(
+            key,
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+                (QueryResult::Value(id), Arc::clone(&dep_sig))
+            },
+        );
+        assert!(
+            store.canonical_to_entries_count("/w/a.ts") >= 1,
+            "/w/a.ts reverse index must be populated post-publish"
+        );
+        assert!(
+            store.canonical_to_entries_count("/w/b.ts") >= 1,
+            "/w/b.ts reverse index must be populated post-publish"
+        );
+
+        let _ = store.invalidate_canonical("/w/a.ts");
+
+        assert_eq!(
+            store.canonical_to_entries_count("/w/a.ts"),
+            0,
+            "/w/a.ts reverse-index shard must be drained by invalidate_canonical \
+             (Phase 4 Γ.B phase 1 drain)"
+        );
+        assert_eq!(
+            store.canonical_to_entries_count("/w/b.ts"),
+            0,
+            "/w/b.ts reverse-index entry for the evicted (family, slot) must be \
+             cleaned up by cross-canonical cleanup (Phase 4 Γ.B phase 3); pre-fix \
+             this entry would dangle and bloat the reverse index over time"
+        );
+    }
+
+    /// Phase 4 — `invalidate_canonical` evicts the warm entry whose
+    /// dep_signature references the canonical (no behavioural change
+    /// from pre-Γ.B), but now via the reverse-index path. Existing
+    /// `invalidate_canonical_removes_only_matching_scope_keys` test
+    /// already covers correctness on the warm-slot side; this one
+    /// adds a pure regression guard against the reverse-index path
+    /// drifting out of sync.
+    ///
+    /// Discriminating: warm two entries (a.ts-referencing and
+    /// b.ts-referencing). Verify reverse index has one entry per
+    /// canonical. Invalidate "/w/a.ts". Verify a.ts-referencing
+    /// warm entry is gone; b.ts-referencing warm entry survives.
+    #[test]
+    fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
+        let store = SemanticGraphStore::new();
+        let a_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/a.ts"),
+            name: Arc::from("FooA"),
+        });
+        let b_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/b.ts"),
+            name: Arc::from("FooB"),
+        });
+        let _ = store.execute_cooperative(
+            a_key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+                (QueryResult::Value(id), dep_sig_for("/w/a.ts", 1))
+            },
+        );
+        let _ = store.execute_cooperative(
+            b_key.clone(),
+            || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+            || {
+                let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                (QueryResult::Value(id), dep_sig_for("/w/b.ts", 2))
+            },
+        );
+
+        assert!(store.canonical_to_entries_count("/w/a.ts") >= 1);
+        assert!(store.canonical_to_entries_count("/w/b.ts") >= 1);
+
+        let removed = store.invalidate_canonical("/w/a.ts");
+        assert_eq!(removed, 1);
+        assert!(store.get(&a_key).is_none(), "a.ts entry must be evicted");
+        assert!(
+            store.get(&b_key).is_some(),
+            "b.ts entry survives — its dep_sig never referenced /w/a.ts"
+        );
+        assert_eq!(
+            store.canonical_to_entries_count("/w/a.ts"),
+            0,
+            "a.ts reverse-index shard drained"
+        );
+        assert!(
+            store.canonical_to_entries_count("/w/b.ts") >= 1,
+            "b.ts reverse-index entry survives — its registration is independent"
+        );
     }
 
     /// Phase 3 (component-meta cold-path long-tail plan §5 / §1.10 Γ.A)
