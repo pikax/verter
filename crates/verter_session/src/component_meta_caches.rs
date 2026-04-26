@@ -1240,3 +1240,177 @@ impl Default for RoutedExprSurfaceDb {
         Self::new()
     }
 }
+
+// ===========================================================================
+// Plan §1.5 / Phase 8 — MaterializeStructureDb
+// ===========================================================================
+
+use crate::component_meta_materialize::{MaterializeOutcome, MaterializeStructureCacheKey};
+
+/// Plan §1.5 — entry stored in `MaterializeStructureDb`. Carries the
+/// cacheable `MaterializeOutcome` (`Value` or `Miss` only — `Recursive`
+/// and `Tainted` are non-cacheable per-call sentinels) plus the
+/// `dep_signature` that produced it.
+#[derive(Clone)]
+pub struct MaterializeStructureEntry {
+    /// The cached outcome. ONLY `Value` or `Miss` may be stored here.
+    /// The materialiser's publish path enforces this with
+    /// `debug_assert!`.
+    pub outcome: MaterializeOutcome,
+    /// `dep_signature` observed during the cold build. Used by
+    /// `peek` and the cooperative-admission post-publish revalidation
+    /// to detect stale entries after canonical invalidation.
+    pub dep_signature: DepSignature,
+}
+
+/// Plan §1.5 / §10.1 — final-result cache for the structural
+/// materialiser. Reverse-index `canonical_to_keys` enables
+/// `Arc::ptr_eq`-based invalidation cleanup; cooperative-admission's
+/// `post_publish` callback wires the registration.
+pub struct MaterializeStructureDb {
+    entries: DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>>,
+    inflight: InflightTable<MaterializeStructureCacheKey>,
+    /// Per-canonical reverse index: maps each canonical id to the set
+    /// of cache keys whose `dep_signature` references it, paired with
+    /// the registered `dep_signature` `Arc`. `invalidate_for_canonical`
+    /// drains this map and uses `Arc::ptr_eq` to discriminate stale
+    /// entries from fresh post-publish writes.
+    canonical_to_keys: DashMap<
+        Arc<str>,
+        parking_lot::Mutex<rustc_hash::FxHashMap<MaterializeStructureCacheKey, DepSignature>>,
+    >,
+    live_counter: Arc<AtomicU64>,
+}
+
+impl MaterializeStructureDb {
+    /// Construct a fresh cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            inflight: InflightTable::new(),
+            canonical_to_keys: DashMap::new(),
+            live_counter,
+        }
+    }
+
+    /// Read-only peek with proactive stale-entry removal. Plan §1.5:
+    /// when the entry's `dep_signature` is stale, remove it (orphan
+    /// reaping) and return `None`.
+    pub fn peek(
+        &self,
+        key: &MaterializeStructureCacheKey,
+        host: &VerterHost,
+    ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
+        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
+        if !dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+            self.entries
+                .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
+            return None;
+        }
+        crate::host_manage::record_materialize_structure_cache_hit();
+        Some(crate::semantic_query::CacheRead {
+            value: entry_arc.outcome.clone(),
+            dep_signature: entry_arc.dep_signature.clone(),
+        })
+    }
+
+    /// Drop every cache entry whose `dep_signature` references
+    /// `canonical_id`. Plan §1.5 — uses the `canonical_to_keys`
+    /// reverse index to find affected keys; uses `Arc::ptr_eq` to
+    /// discriminate "our entry" from concurrent fresh writes.
+    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let drained: Vec<(MaterializeStructureCacheKey, DepSignature)> =
+            match self.canonical_to_keys.remove(canonical_id) {
+                Some((_, mutex)) => mutex.lock().drain().collect(),
+                None => return,
+            };
+        for (key, registered_sig) in &drained {
+            let registered = Arc::clone(registered_sig);
+            let removed = self.entries.remove_if(key, move |_, entry_arc| {
+                Arc::ptr_eq(&entry_arc.dep_signature, &registered)
+            });
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                // Cross-canonical cleanup with ptr_eq — drop the
+                // matching registration in every other canonical's
+                // shard.
+                for (other_canonical, _) in registered_sig.iter() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
+                        let mut map = shard.lock();
+                        if let Some(existing_sig) = map.get(key) {
+                            if Arc::ptr_eq(existing_sig, registered_sig) {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop every cache entry. Used on project-generation bumps.
+    pub fn invalidate_all(&self) {
+        self.entries.clear();
+        self.canonical_to_keys.clear();
+        self.live_counter.store(0, Ordering::Relaxed);
+    }
+
+    /// Number of warm entries.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Internal — register a `(key, dep_signature)` pair under every
+    /// canonical in the dep_signature. Called from the materialiser's
+    /// `post_publish` callback.
+    pub(crate) fn register_post_publish(
+        &self,
+        key: MaterializeStructureCacheKey,
+        dep_signature: DepSignature,
+    ) {
+        for (canonical, _) in dep_signature.iter() {
+            crate::host_manage::record_family_map_lock_acquisition();
+            let shard = self
+                .canonical_to_keys
+                .entry(Arc::clone(canonical))
+                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let mut map = shard.value().lock();
+            map.insert(key.clone(), Arc::clone(&dep_signature));
+        }
+    }
+
+    /// Internal — get the inflight table. Used by the materialiser
+    /// for the cooperative-admission write path.
+    pub(crate) fn inflight(&self) -> &InflightTable<MaterializeStructureCacheKey> {
+        &self.inflight
+    }
+
+    /// Internal — get the entries map. Used by the materialiser for
+    /// the cooperative-admission write path.
+    pub(crate) fn entries(
+        &self,
+    ) -> &DashMap<MaterializeStructureCacheKey, Arc<MaterializeStructureEntry>> {
+        &self.entries
+    }
+
+    /// Internal — bump the live counter. Called from the
+    /// materialiser's compute closure on successful publish.
+    pub(crate) fn bump_live_counter(&self) {
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Default for MaterializeStructureDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -564,6 +564,11 @@ pub struct ProjectTypeStore {
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
     materialized_member_surface_db: MaterializedMemberSurfaceDb,
+    /// Plan §1.5 / Phase 8 — final-result cache for the structural
+    /// materialiser. Phase 9 will retire `materialized_member_surface_db`
+    /// in favour of this field; both coexist during Phase 8 to allow
+    /// incremental cutover.
+    materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
     prepared_surface_db: PreparedSurfaceDb,
     prepared_member_db: PreparedMemberDb,
     routed_expr_surface_db: RoutedExprSurfaceDb,
@@ -642,6 +647,10 @@ impl ProjectTypeStore {
         let materialized_member_surface_db = MaterializedMemberSurfaceDb::with_counter(Arc::clone(
             &counters.component_meta_cache_live,
         ));
+        let materialize_structure_db =
+            crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
+                &counters.component_meta_cache_live,
+            ));
         let prepared_surface_db =
             PreparedSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let prepared_member_db =
@@ -665,6 +674,7 @@ impl ProjectTypeStore {
             prepared_target_db,
             materialize_memo_db,
             materialized_member_surface_db,
+            materialize_structure_db,
             prepared_surface_db,
             prepared_member_db,
             routed_expr_surface_db,
@@ -758,6 +768,14 @@ impl ProjectTypeStore {
         &self.materialized_member_surface_db
     }
 
+    /// Plan §1.5 / Phase 8 — accessor for the structural-materialiser
+    /// final-result cache.
+    pub fn materialize_structure_db(
+        &self,
+    ) -> &crate::component_meta_caches::MaterializeStructureDb {
+        &self.materialize_structure_db
+    }
+
     pub fn prepared_surface_db(&self) -> &PreparedSurfaceDb {
         &self.prepared_surface_db
     }
@@ -818,6 +836,10 @@ impl ProjectTypeStore {
         self.materialize_memo_db.invalidate_canonical(canonical_id);
         self.materialized_member_surface_db
             .invalidate_canonical(canonical_id);
+        // Plan §1.5 / Phase 8 — Γ.B-style reverse-index drain on the
+        // structural-materialiser cache.
+        self.materialize_structure_db
+            .invalidate_for_canonical(canonical_id);
         self.prepared_surface_db.invalidate_canonical(canonical_id);
         self.prepared_member_db.invalidate_canonical(canonical_id);
         self.routed_expr_surface_db
@@ -859,6 +881,7 @@ impl ProjectTypeStore {
         self.prepared_target_db.invalidate_all();
         self.materialize_memo_db.invalidate_all();
         self.materialized_member_surface_db.invalidate_all();
+        self.materialize_structure_db.invalidate_all();
         self.prepared_surface_db.invalidate_all();
         self.prepared_member_db.invalidate_all();
         self.routed_expr_surface_db.invalidate_all();

@@ -157,6 +157,257 @@ pub fn convert_dispatch_result(
     }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Materialiser entry — plan §10
+// ──────────────────────────────────────────────────────────────────
+
+use std::cell::{Cell, RefCell};
+
+use crate::component_meta_caches::MaterializeStructureEntry;
+use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::semantic_query::{PathSegment, SemanticQueryKey};
+use crate::VerterHost;
+
+thread_local! {
+    /// Plan §1.4 — per-thread stack of in-flight materialiser keys.
+    /// Used for same-key recursion detection. Push on entry, pop on
+    /// exit (RAII via `MaterializeInFlightGuard`).
+    static MATERIALIZE_IN_FLIGHT: RefCell<Vec<MaterializeStructureCacheKey>> =
+        const { RefCell::new(Vec::new()) };
+
+    /// Plan §1.4 — per-thread depth counter. The materialiser's
+    /// defensive depth fuse trips at `MAX_DEPTH` to bound stack
+    /// growth on pathological recursive shapes.
+    static MATERIALIZE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Plan §1.4 — defensive depth fuse cap. A trip is a bug, not a
+/// soft-fail; the audit emits `MaterializeStructureDepthFuseTripped`
+/// with the input key + depth.
+pub const MAX_DEPTH: usize = 4096;
+
+/// Plan §1.4 — RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
+/// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
+/// pop on `Drop`. Panic-safe.
+pub struct MaterializeInFlightGuard {
+    key: Option<MaterializeStructureCacheKey>,
+}
+
+impl MaterializeInFlightGuard {
+    /// Push `key` onto the per-thread in-flight stack and increment
+    /// the depth counter. Returns the guard.
+    pub fn push(key: MaterializeStructureCacheKey) -> Self {
+        MATERIALIZE_IN_FLIGHT.with(|stack| stack.borrow_mut().push(key.clone()));
+        MATERIALIZE_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+        Self { key: Some(key) }
+    }
+
+    /// Test/diagnostic — current per-thread depth.
+    #[must_use]
+    pub fn current_depth() -> usize {
+        MATERIALIZE_DEPTH.with(Cell::get)
+    }
+
+    /// Internal — does the per-thread stack already contain `key`?
+    fn contains_key(key: &MaterializeStructureCacheKey) -> bool {
+        MATERIALIZE_IN_FLIGHT.with(|stack| stack.borrow().contains(key))
+    }
+}
+
+impl Drop for MaterializeInFlightGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            MATERIALIZE_IN_FLIGHT.with(|stack| {
+                let mut v = stack.borrow_mut();
+                if let Some(pos) = v.iter().rposition(|k| k == &key) {
+                    v.remove(pos);
+                }
+            });
+            MATERIALIZE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+}
+
+/// Plan §10 — materialiser entry. Produces a `CacheRead` carrying
+/// the materialisation outcome plus the dep_signature observed
+/// during the cold build.
+///
+/// **Cache hierarchy:**
+/// 1. Peek `MaterializeStructureDb` — warm hit returns immediately.
+/// 2. Same-key thread-local re-entry → `Recursive(opaque_miss)`,
+///    no cache write.
+/// 3. Pre-admission depth-fuse check → `Tainted(key.base)` if
+///    depth > `MAX_DEPTH`, no cache write.
+/// 4. Cooperative-admission cold build via
+///    `cooperative_get_or_insert_with_post_publish`. The compute
+///    closure dispatches `ProjectPath { base, [], mode }` to the
+///    canonical materialisation pipeline. The post_publish callback
+///    registers the (key, dep_signature) pair in the
+///    `canonical_to_keys` reverse index.
+///
+/// **Tainted is a sentinel propagation:** when the dispatch returns
+/// `QueryResult::Recursive`, `convert_dispatch_result` promotes it
+/// to `MaterializeOutcome::Tainted(input)`. The materialiser's
+/// publish gate skips cache writes for non-cacheable outcomes.
+///
+/// **Audit signal:** every entry/exit emits `MaterializeStructureEnter`
+/// and `MaterializeStructureExit` events with the resolved
+/// `CacheOutcomeKind` (`Hit` for warm, `ColdBuild` for cold,
+/// `Tainted` for tainted, `Miss` for opaque).
+pub fn materialize_component_meta_structure(
+    host: &VerterHost,
+    key: MaterializeStructureCacheKey,
+) -> crate::semantic_query::CacheRead<MaterializeOutcome> {
+    crate::host_manage::record_materialize_structure_call();
+
+    let db = host.project_type_store().materialize_structure_db();
+
+    // Phase 1 — warm-hit peek with proactive stale removal.
+    if let Some(cached) = db.peek(&key, host) {
+        return cached;
+    }
+
+    // Phase 2 — same-key thread-local re-entry detection.
+    if MaterializeInFlightGuard::contains_key(&key) {
+        let opaque = host.project_type_store().semantic_graph().intern_node(
+            crate::semantic_query::SemanticNodeData::Opaque(QueryError::Miss),
+        );
+        return crate::semantic_query::CacheRead {
+            value: MaterializeOutcome::Recursive(opaque),
+            dep_signature: empty_signature(),
+        };
+    }
+
+    // Phase 3 — pre-admission depth fuse (one-call-deep check).
+    if MaterializeInFlightGuard::current_depth() >= MAX_DEPTH {
+        return crate::semantic_query::CacheRead {
+            value: MaterializeOutcome::Tainted(key.base),
+            dep_signature: empty_signature(),
+        };
+    }
+
+    let _guard = MaterializeInFlightGuard::push(key.clone());
+
+    // Phase 4 — cooperative-admission cold build with post_publish.
+    let key_for_compute = key.clone();
+    let compute = move || {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        // Materialisation through dispatch: empty path = full
+        // surface expansion (plan §10).
+        let path: std::sync::Arc<[PathSegment]> =
+            std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+        let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+            base: key_for_compute.base,
+            path,
+            mode: key_for_compute.mode,
+        });
+        let mut local_fence: Vec<(Arc<str>, DepVersion)> =
+            read.dep_signature.iter().cloned().collect();
+        // Seed local_fence with the root scope's whole_hash if
+        // available — plan §1.9 dep-signature accumulation contract.
+        if !key_for_compute.scope_canonical_id.as_ref().is_empty() {
+            if let Some(indexed) = host
+                .project_type_store()
+                .indexed()
+                .get_any(key_for_compute.scope_canonical_id.as_ref())
+            {
+                local_fence.push((
+                    Arc::clone(&key_for_compute.scope_canonical_id),
+                    DepVersion::WholeHash(indexed.whole_hash),
+                ));
+            }
+        }
+        let outcome = match read.value {
+            QueryResult::Value(id) => MaterializeOutcome::Value(id),
+            QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key_for_compute.base),
+            QueryResult::Error(err) => MaterializeOutcome::Error(err),
+        };
+        if !outcome.is_cacheable() {
+            // Don't publish non-cacheable outcomes.
+            return None;
+        }
+        Some(MaterializeStructureEntry {
+            outcome,
+            dep_signature: dep_signature_from_fence(local_fence),
+        })
+    };
+
+    let key_for_register = key.clone();
+    let result = cooperative_get_or_insert_with_post_publish(
+        db.entries(),
+        db.inflight(),
+        key.clone(),
+        |entry: &MaterializeStructureEntry| {
+            if crate::component_meta_caches::dep_signature_valid_for_host(
+                &entry.dep_signature,
+                host,
+            ) {
+                Some(crate::semantic_query::CacheRead {
+                    value: entry.outcome.clone(),
+                    dep_signature: entry.dep_signature.clone(),
+                })
+            } else {
+                None
+            }
+        },
+        compute,
+        |entry: &MaterializeStructureEntry| crate::semantic_query::CacheRead {
+            value: entry.outcome.clone(),
+            dep_signature: entry.dep_signature.clone(),
+        },
+        // Plan §1.5 race-closer — post-compute revalidation.
+        |entry: &MaterializeStructureEntry| {
+            crate::component_meta_caches::dep_signature_valid_for_host(&entry.dep_signature, host)
+        },
+        // Plan §10.1 post_publish — register reverse-index AFTER
+        // entries.insert AND AFTER successful revalidation.
+        move |entry_arc: &Arc<MaterializeStructureEntry>, k: &MaterializeStructureCacheKey| {
+            db.bump_live_counter();
+            db.register_post_publish(
+                key_for_register.clone(),
+                Arc::clone(&entry_arc.dep_signature),
+            );
+            let _ = k; // unused — key_for_register is the same key
+        },
+    );
+
+    match result {
+        Some(read) => read,
+        None => {
+            // Compute returned None (non-cacheable outcome) OR
+            // revalidation failed. Re-dispatch and return the
+            // outcome inline without caching.
+            let dispatch = ProjectSemanticDispatch::new(host);
+            let path: std::sync::Arc<[PathSegment]> =
+                std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                base: key.base,
+                path,
+                mode: key.mode,
+            });
+            let mut local_fence: Vec<(Arc<str>, DepVersion)> =
+                read.dep_signature.iter().cloned().collect();
+            let outcome = match read.value {
+                QueryResult::Value(id) => MaterializeOutcome::Value(id),
+                QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key.base),
+                QueryResult::Error(err) => MaterializeOutcome::Error(err),
+            };
+            // Drop the seed canonical from fence for non-cacheable
+            // results — they don't propagate as cache deps.
+            local_fence.clear();
+            crate::semantic_query::CacheRead {
+                value: outcome,
+                dep_signature: dep_signature_from_fence(local_fence),
+            }
+        }
+    }
+}
+
+fn empty_signature() -> DepSignature {
+    Arc::from(Vec::new().into_boxed_slice())
+}
+
 /// Helper: drain a `local_fence` accumulator into a `DepSignature`
 /// `Arc`. Plan §1.5 — used by the materialiser's publish path to
 /// produce the final cache entry's dep_signature.
