@@ -4,6 +4,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 pub(crate) mod bare_name_resolve;
+pub(crate) mod cache_keys;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
 pub mod component_meta_registry;

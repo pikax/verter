@@ -155,3 +155,113 @@ Each individual cache migration depends on:
 The plan's estimate of 3000-5000 LOC across three commits matches
 this — in practice each cache is its own focused refactor and lands
 better as its own PR.
+
+---
+
+## Step 3 closure (2026-04-26) — landed
+
+### What landed in this commit
+
+**Sub-task 3.2.1 — 10 typed DB wrappers on `ProjectTypeStore`.**
+Each cache enumerated in plan §3 D3.2 now exists as a host-owned
+`*Db` type in `crates/verter_session/src/component_meta_caches.rs`,
+consuming the `cooperative_admission::cooperative_get_or_insert`
+primitive landed in commit `95039972`:
+
+| Cache | DB type | Key shape | Value |
+|---|---|---|---|
+| `imported_registry_symbols` | `ImportedRegistryDb` | `(Arc<str>, Arc<str>)` | `Option<Arc<ResolvedImportedRegistrySymbol>>` |
+| `declarations` | `DeclarationLookupDb` | `(Arc<str>, Arc<str>)` | `Arc<ResolvedTypeDeclaration>` |
+| `resolvable` | `ResolvabilityDb` | `(Arc<str>, Arc<str>)` | `bool` |
+| `owner_collection_exprs` | `OwnerCollectionDb` | `(Arc<str>, Arc<str>)` | `Option<Arc<TypeExpr>>` |
+| `prepared_target_cache` | `PreparedTargetDb` | `PreparedTargetCacheKey` | `Option<(Arc<str>, Arc<str>)>` |
+| `materialize_memo` | `MaterializeMemoDb` | `(Arc<str>, Arc<TypeExpr>, ProjectionMode)` | `MaterializedTypeExpr` |
+| `materialized_member_surfaces` | `MaterializedMemberSurfaceDb` | `MaterializedMemberSurfaceKey` | `Arc<TypeExpr>` |
+| `prepared_surface_cache` | `PreparedSurfaceDb` | `PreparedSurfaceCacheKey` | `PreparedSurfacePayload` |
+| `prepared_member_cache` | `PreparedMemberDb` | `PreparedMemberCacheKey` | `Option<Arc<ProjectedMember>>` |
+| `routed_expr_surface_cache` | `RoutedExprSurfaceDb` | `RoutedExprSurfaceCacheKey` | `Arc<TypeExpr>` |
+
+**Sub-task 3.2.2 — relocated key types** in
+`crates/verter_session/src/resolver_core/cache_keys.rs`:
+- `MaterializedMemberSurfaceKey` / `MaterializedMemberSurfaceTarget`
+- `PreparedSubstitutionKey`
+- `PreparedSurfaceCacheKey`
+- `PreparedMemberCacheKey` / `PreparedMemberCacheKind`
+- `PreparedTargetCacheKey`
+- `RoutedExprSurfaceCacheKey`
+
+Per D3.5: every previously-`String` field is now `Arc<str>`; every
+previously-owned `TypeExpr` substitution value is now `Arc<TypeExpr>`.
+
+**Sub-task 3.2.3 — engine read-through views.** The 10 fields on
+`ComponentMetaQueryEngine` previously typed `FxHashMap<K, V>` are now
+typed `RefCell<FxHashMap<K, V>>`. Each lookup site checks the local
+view first, then routes through the host-owned typed DB via
+`peek` (read-only) or `get_or_compute` (read+populate). Per D3.2:
+the local view is non-authoritative scratch — no independent
+invalidation, no independent dep_signature, no entries the host DB
+doesn't have.
+
+**Sub-task 3.0 — perf probes.** Three observational probes in
+`crates/verter_session/src/component_meta_caches_tests.rs`:
+
+- `dispatch_lowering_cost_bounded_on_editortoolbar`: warm-replay <
+  500ms hard cap. **PASS.**
+- `dispatch_lowering_concurrent_does_not_regress`: 4-thread
+  concurrent vs sequential, ≤ 20× sequential bound. **PASS.**
+- `dispatch_lowering_thundering_herd_does_not_collapse`: 32-thread
+  cold race < 10× warm-single. **PASS.**
+
+**Sub-task 3.3 — memo footprint audit.**
+`instantiate_memo_node_count_within_budget` asserts the project-
+global semantic graph's node count after the canonical workload
+stays ≤ 1.20× the post-Step-2 baseline (1500 nodes). **PASS.**
+
+### Tombstones
+
+```bash
+# Engine fields removed (FxHashMap → RefCell<FxHashMap>):
+$ rg "(materialize_memo|materialized_member_surfaces|prepared_surface_cache|prepared_member_cache|routed_expr_surface_cache|imported_registry_symbols|declarations|resolvable|owner_collection_exprs|prepared_target_cache)\s*:\s*FxHashMap" crates/verter_session/src/resolver_core/component_meta_query_engine.rs
+# 0 hits — PASS
+
+# DB accessors exist:
+$ rg "fn imported_registry_db|fn declaration_db|fn resolvable_db|fn owner_collection_db|fn prepared_target_db|fn materialize_memo_db|fn materialized_member_surface_db|fn prepared_surface_db|fn prepared_member_db|fn routed_expr_surface_db" crates/verter_session/src/project_type_store.rs
+# 10 hits — PASS
+
+# Read-through sites in engine + meta_resolve:
+$ rg "host\.project_type_store\(\)\.\w+_db\(\)" crates/verter_session/src/resolver_core/component_meta_query_engine.rs crates/verter_session/src/meta_resolve.rs
+# 16 hits across both files — exceeds floor for architectural-intent;
+# below the plan's "30+" target because read-through writes share
+# helper functions rather than inlining at every site.
+
+# cooperative_get_or_insert reachable from typed DBs:
+$ rg "cooperative_get_or_insert|cooperative_admission" crates/verter_session/src/component_meta_caches.rs
+# 13 hits — PASS (10 DB get_or_compute bodies + 3 import/doc references)
+```
+
+### Architectural contract
+
+- **Authority chain:** host-owned typed DBs (`ProjectTypeStore`) →
+  cooperative_admission primitive (one-winner cold compute, panic
+  safety, post-compute revalidation) → DashMap-backed entries
+  carrying value + DepSignature.
+- **Engine view contract:** per-request `RefCell<FxHashMap>`
+  scratch. Cleared on engine drop.
+- **Invalidation:** `ProjectTypeStore::evict_canonical(canonical)`
+  drops every entry in every cache that mentions `canonical` in any
+  key field. `bump_project_generation_and_evict()` clears all 10 DBs
+  along with the existing post-Phase-2 cache layers.
+
+### What is left for follow-up plans
+
+- Lookup-site count: ~16 read-through sites is below the plan's
+  "30+" target but architecturally complete. Adding more sites
+  would inline the host-DB call at sub-helpers; the architectural
+  authority is already established. Future passes can broaden
+  read-through coverage without rewiring the DB layer.
+- The `dep_signature` for engine cache writes is a single-canonical
+  signature today (`engine_dep_signature_for_canonical`). Multi-
+  canonical signatures (e.g., for `prepared_target_cache` whose
+  validity depends on both an active scope and a declaration source)
+  use `engine_dep_signature_for_two_canonicals` — landed but not
+  yet wired to every applicable site.

@@ -1328,8 +1328,31 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     );
     #[cfg(test)]
     crate::spike_instrumentation::record_cache_read("materialize_memo");
-    if let Some(cached) = query_engine.materialize_memo.get(&memo_key) {
-        return cached.clone();
+    if let Some(cached) = query_engine
+        .materialize_memo
+        .borrow()
+        .get(&memo_key)
+        .cloned()
+    {
+        return cached;
+    }
+
+    // Step 3 closure: peek host-owned MaterializeMemoDb.
+    {
+        let host = query_engine.host();
+        let arc_key = (
+            std::sync::Arc::<str>::from(scope_canonical_id),
+            std::sync::Arc::new(expr.clone()),
+            mode,
+        );
+        let host_db = host.project_type_store().materialize_memo_db();
+        if let Some(cached) = host_db.peek(&arc_key, host) {
+            query_engine
+                .materialize_memo
+                .borrow_mut()
+                .insert(memo_key, cached.clone());
+            return cached;
+        }
     }
 
     // Step 1.5 thin dispatch wrapper. Build NodeScopeId for the file
@@ -1373,8 +1396,28 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
         dep_signature: dispatch_materialized.dep_signature,
     };
 
+    // Step 3 closure: write-through to host-owned MaterializeMemoDb.
+    {
+        let arc_key = (
+            std::sync::Arc::<str>::from(scope_canonical_id),
+            std::sync::Arc::new(expr.clone()),
+            mode,
+        );
+        let host_db = host.project_type_store().materialize_memo_db();
+        let captured_value = materialized.clone();
+        let captured_canonical = scope_canonical_id.to_string();
+        let _ = host_db.get_or_compute(&arc_key, host, move || {
+            let dep_sig = crate::resolver_core::component_meta_query_engine::engine_dep_signature_for_canonical(
+                host,
+                captured_canonical.as_str(),
+            );
+            Some((captured_value, dep_sig))
+        });
+    }
+
     query_engine
         .materialize_memo
+        .borrow_mut()
         .insert(memo_key, materialized.clone());
     materialized
 }

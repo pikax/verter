@@ -286,3 +286,100 @@ Step 2 tombstones partially met:
   also be 0 (deleted alongside rematerialize). [tombstone met]
 - ❌ Other walker-family tombstones (projected_member_surface_keys,
   solve_expr_type_expr, etc.) deferred.
+
+---
+
+## Step 2 closure attempt (2026-04-26) — STOP CONDITION 4
+
+### Empirical finding
+
+Replacing the body of
+`materialize_component_meta_member_surface_expr_with_active_stack_guarded`
+with a dispatch round-trip
+(`dispatch.shallow_lower_type_expr → raise_and_reduce(Expanded)`, the
+same path Step 1.5 wired into
+`materialize_component_meta_type_expr_until_stable_full`) compiles
+cleanly but breaks 4 production tests covering input shapes that
+Step 1.5 did NOT close:
+
+| Test | Expected (legacy walker) | Actual (dispatch round-trip) | Root cause |
+|---|---|---|---|
+| `evaluate_types_cross_file_recursive_alias_through_reexport_preserves_recursive_transport` | `Object{children: Array<Object{children: Array<RecursiveRef("TreeNode")>}>}` | `Unknown { raw: "semanticMiss" }` | Dispatch's `shallow_lower_type_expr` does not resolve a cross-file re-exported recursive alias when invoked in the owner scope alone. The legacy walker iterated multiple scopes via `imported_component_meta_materialization_scope` and `expand_generic_ref_for_materialization`. |
+| `get_component_meta_uses_default_type_parameters_when_generic_args_are_omitted` | concrete `Item` body | `Ref { name: "Item", type_arguments: [] }` | Dispatch does not instantiate omitted generic parameters to their default-type bodies in the rescue path. The legacy walker's registry-aware `expand_local_generic_ref_expr` substituted defaults during expansion. |
+| `resolve_component_meta_keeps_deep_imported_registry_branches_shallow` | `Object(...)` (resolved) | `Ref { name: "Level1", type_arguments: [] }` (symbolic) | Dispatch keeps a deep imported registry branch symbolic where the legacy walker iteratively rescued through `materialize_member_route_from_alias_body_in_owner_scope` until it reached a concrete object. |
+| `resolve_component_meta_does_not_publish_package_helpers_from_imported_local_registry_entries` | `Ref` (symbolic, package-backed) | `Object(...)` (resolved) | Dispatch resolves package-backed member refs that the legacy walker preserved symbolic via `component_meta_ref_resolves_to_package` + the registry-aware lazy-on-package policy. |
+
+### Architectural gap analysis
+
+Step 1.5 closed three substitution-correctness gaps:
+- `Pick<X, K>['member']` IndexedAccess on Object surface
+- Mapped + Conditional `infer P` recursive name binding
+- Method-as-Function lowering
+
+It did NOT close these orthogonal capability gaps in dispatch:
+
+1. **Multi-scope resolution.** The legacy walker tries owner scope
+   AND imported scope; dispatch's
+   `lower_type_expr_in_scope_with_mode` only tries the supplied
+   scope. For cross-file re-exports, the imported scope is the only
+   one with the body in shallow state. Closing this gap requires
+   either: dispatch fallback-resolution across declaration sources,
+   or rescue caller iteration over multiple scopes via dispatch in
+   each.
+
+2. **Default type-parameter instantiation in rescue.** Dispatch's
+   `Instantiate` substitutes named type arguments into bodies, but
+   the rescue path receives `TypeExpr::Ref { name, type_arguments: [] }`
+   when generic args are omitted. The legacy walker's
+   `expand_local_generic_ref_expr` materialized the body with the
+   declared default applied. Dispatch needs an equivalent
+   "instantiate-with-defaults" entry, or the rescue caller must
+   detect omitted-generic-with-default and supply args explicitly.
+
+3. **Iterative rescue depth.** The legacy walker repeatedly fed its
+   own output back through `materialize_member_route_from_alias_body_in_owner_scope`
+   + `materialize_component_meta_member_surface_expr` to drill
+   through chained imported registry branches (`Level0` → `Level1`
+   → ... → concrete object). Dispatch's
+   `lower_type_expr_in_scope_with_mode(Expanded)` does one resolution
+   pass; it does not chain re-resolution across the resulting Refs.
+   Closing this requires either a dispatch-level fix-point loop or
+   rescue-side iteration with dispatch as the per-step engine.
+
+4. **Package-backed lazy-on-resolve policy.** Component-meta has a
+   Vue-specific policy: refs whose declarations live in `node_modules`
+   stay symbolic in the public payload; refs whose declarations are
+   project-local resolve eagerly. The legacy walker enforced this via
+   `component_meta_ref_resolves_to_package` gating. Dispatch is
+   uniformly eager and does not consult this policy. Closing this
+   requires routing the policy through a `ProjectionMode` variant or
+   a dispatch-side hook that consumers can install.
+
+### STOP CONDITION 4 declaration
+
+Per the architectural-debt-closure prompt's STOP CONDITION 4:
+
+> Step 2 closure: caller migration surfaces a dispatch-parity gap
+> not covered by Step 1.5 → halt and report.
+
+The 4 gaps above are real dispatch-capability gaps, not test-contract
+quirks (the analogous Outcome 3 update in commit `624b14d2`). They
+are also NOT scope concerns — they remain irrespective of how each
+of the ~50 callers is migrated, because dispatch is the single
+substitute for the entire walker family and these are inputs the
+walker resolves but dispatch does not.
+
+Closing these gaps is a dispatch-layer enhancement (project-semantic
+dispatch internals), not Step 2 caller migration work. The legacy
+walker family stays in place pending that enhancement. Step 2's
+landed deletions (rematerialize phase + `choose_less_symbolic`) are
+preserved; the broader walker-family tombstones remain unmet.
+
+### What Step 3 is unaffected by
+
+Step 3 closure (10 typed DB migrations on `ProjectTypeStore`) does
+NOT depend on Step 2's walker family being deleted. Step 3 migrates
+engine-local caches keyed on pre-lowering shapes (`TypeExpr`,
+`(canonical, name)` strings) into host-owned typed DBs that consume
+the existing `cooperative_admission` primitive. This proceeds
+independently in this session.

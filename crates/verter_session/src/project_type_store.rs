@@ -27,6 +27,11 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
+use crate::component_meta_caches::{
+    DeclarationLookupDb, ImportedRegistryDb, MaterializeMemoDb, MaterializedMemberSurfaceDb,
+    OwnerCollectionDb, PreparedMemberDb, PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb,
+    RoutedExprSurfaceDb,
+};
 use crate::component_meta_result_db::ComponentMetaResultDb;
 use crate::intrinsic_registry::IntrinsicRegistry;
 use crate::owner_import_surface::OwnerImportSurfaceDb;
@@ -456,6 +461,11 @@ pub struct ProjectTypeStoreCounters {
     pub component_meta_live: Arc<AtomicU64>,
     pub component_meta_stale_sweeps: Arc<AtomicU64>,
     pub inflight_waiters: Arc<AtomicU64>,
+    /// Live entry count summed across all 10 component-meta engine cache
+    /// DBs (Step 3 closure). Each typed DB shares this counter so the
+    /// snapshot reflects total host-owned cache occupancy without
+    /// per-DB plumbing in the snapshot surface.
+    pub component_meta_cache_live: Arc<AtomicU64>,
 }
 
 impl ProjectTypeStoreCounters {
@@ -473,6 +483,7 @@ impl ProjectTypeStoreCounters {
             component_meta_live: self.component_meta_live.load(Ordering::Relaxed),
             component_meta_stale_sweeps: self.component_meta_stale_sweeps.load(Ordering::Relaxed),
             inflight_waiters: self.inflight_waiters.load(Ordering::Relaxed),
+            component_meta_cache_live: self.component_meta_cache_live.load(Ordering::Relaxed),
         }
     }
 }
@@ -488,6 +499,7 @@ pub struct ProjectTypeStoreCounterSnapshot {
     pub component_meta_live: u64,
     pub component_meta_stale_sweeps: u64,
     pub inflight_waiters: u64,
+    pub component_meta_cache_live: u64,
 }
 
 /// One per [`crate::VerterHost`] / loaded project. Owns the project-global
@@ -538,6 +550,23 @@ pub struct ProjectTypeStore {
     /// reach this registry — it is consulted only after the normal
     /// declaration path resolves to `= intrinsic`.
     intrinsic_registry: IntrinsicRegistry,
+    // Step 3 closure (architectural-debt-closure rev 10) — 10 host-owned
+    // typed DB wrappers for the component-meta engine's previously
+    // engine-local caches. Each DB consumes the
+    // [`crate::cooperative_admission::cooperative_get_or_insert`]
+    // primitive (admission-control, panic safety, post-compute
+    // revalidation). The engine keeps a per-request
+    // `RefCell<FxHashMap>` mirror as non-authoritative scratch.
+    imported_registry_db: ImportedRegistryDb,
+    declaration_lookup_db: DeclarationLookupDb,
+    resolvability_db: ResolvabilityDb,
+    owner_collection_db: OwnerCollectionDb,
+    prepared_target_db: PreparedTargetDb,
+    materialize_memo_db: MaterializeMemoDb,
+    materialized_member_surface_db: MaterializedMemberSurfaceDb,
+    prepared_surface_db: PreparedSurfaceDb,
+    prepared_member_db: PreparedMemberDb,
+    routed_expr_surface_db: RoutedExprSurfaceDb,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -598,6 +627,27 @@ impl ProjectTypeStore {
             Some(prov) => Arc::new(SemanticGraphStore::with_provenance(prov)),
             None => Arc::new(SemanticGraphStore::new()),
         };
+        let imported_registry_db =
+            ImportedRegistryDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let declaration_lookup_db =
+            DeclarationLookupDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let resolvability_db =
+            ResolvabilityDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let owner_collection_db =
+            OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let prepared_target_db =
+            PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let materialize_memo_db =
+            MaterializeMemoDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let materialized_member_surface_db = MaterializedMemberSurfaceDb::with_counter(Arc::clone(
+            &counters.component_meta_cache_live,
+        ));
+        let prepared_surface_db =
+            PreparedSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let prepared_member_db =
+            PreparedMemberDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        let routed_expr_surface_db =
+            RoutedExprSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         Self {
             project_generation: AtomicU64::new(0),
             indexed,
@@ -608,6 +658,16 @@ impl ProjectTypeStore {
             owner_import_surfaces,
             component_meta_results,
             intrinsic_registry: IntrinsicRegistry::with_defaults(),
+            imported_registry_db,
+            declaration_lookup_db,
+            resolvability_db,
+            owner_collection_db,
+            prepared_target_db,
+            materialize_memo_db,
+            materialized_member_surface_db,
+            prepared_surface_db,
+            prepared_member_db,
+            routed_expr_surface_db,
             counters,
         }
     }
@@ -668,6 +728,48 @@ impl ProjectTypeStore {
         &self.intrinsic_registry
     }
 
+    // ----- Step 3 closure: 10 typed DB accessors -----
+
+    pub fn imported_registry_db(&self) -> &ImportedRegistryDb {
+        &self.imported_registry_db
+    }
+
+    pub fn declaration_db(&self) -> &DeclarationLookupDb {
+        &self.declaration_lookup_db
+    }
+
+    pub fn resolvable_db(&self) -> &ResolvabilityDb {
+        &self.resolvability_db
+    }
+
+    pub fn owner_collection_db(&self) -> &OwnerCollectionDb {
+        &self.owner_collection_db
+    }
+
+    pub fn prepared_target_db(&self) -> &PreparedTargetDb {
+        &self.prepared_target_db
+    }
+
+    pub fn materialize_memo_db(&self) -> &MaterializeMemoDb {
+        &self.materialize_memo_db
+    }
+
+    pub fn materialized_member_surface_db(&self) -> &MaterializedMemberSurfaceDb {
+        &self.materialized_member_surface_db
+    }
+
+    pub fn prepared_surface_db(&self) -> &PreparedSurfaceDb {
+        &self.prepared_surface_db
+    }
+
+    pub fn prepared_member_db(&self) -> &PreparedMemberDb {
+        &self.prepared_member_db
+    }
+
+    pub fn routed_expr_surface_db(&self) -> &RoutedExprSurfaceDb {
+        &self.routed_expr_surface_db
+    }
+
     /// Build a `(project_generation, whole_hash)` dep-signature pair that
     /// downstream callers merge into their active
     /// [`CompletionFence`](crate::completion_fence::CompletionFence).
@@ -704,6 +806,22 @@ impl ProjectTypeStore {
         self.semantic_graph.invalidate_canonical(canonical_id);
         self.semantic_graph
             .invalidate_resolved_named_types_for_canonical(canonical_id);
+        // Step 3 closure: invalidate every host-owned engine cache that
+        // keys on `canonical_id` so a content edit on the file invalidates
+        // its own resolved declarations / projections / materializations.
+        self.imported_registry_db.invalidate_canonical(canonical_id);
+        self.declaration_lookup_db
+            .invalidate_canonical(canonical_id);
+        self.resolvability_db.invalidate_canonical(canonical_id);
+        self.owner_collection_db.invalidate_canonical(canonical_id);
+        self.prepared_target_db.invalidate_canonical(canonical_id);
+        self.materialize_memo_db.invalidate_canonical(canonical_id);
+        self.materialized_member_surface_db
+            .invalidate_canonical(canonical_id);
+        self.prepared_surface_db.invalidate_canonical(canonical_id);
+        self.prepared_member_db.invalidate_canonical(canonical_id);
+        self.routed_expr_surface_db
+            .invalidate_canonical(canonical_id);
     }
 
     /// Targeted invalidation of a project-generation bump.
@@ -731,6 +849,19 @@ impl ProjectTypeStore {
         let _ = self.semantic_graph.invalidate_all();
         self.semantic_graph.clear_resolved_named_types();
         self.component_meta_results.invalidate_all();
+        // Step 3 closure: project-shape change invalidates every engine
+        // cache (entries depend on the same routes / intrinsics that
+        // change at the project-generation boundary).
+        self.imported_registry_db.invalidate_all();
+        self.declaration_lookup_db.invalidate_all();
+        self.resolvability_db.invalidate_all();
+        self.owner_collection_db.invalidate_all();
+        self.prepared_target_db.invalidate_all();
+        self.materialize_memo_db.invalidate_all();
+        self.materialized_member_surface_db.invalidate_all();
+        self.prepared_surface_db.invalidate_all();
+        self.prepared_member_db.invalidate_all();
+        self.routed_expr_surface_db.invalidate_all();
         generation
     }
 }

@@ -56,6 +56,9 @@ mod cache;
 mod compile;
 pub mod completion_fence;
 pub mod component_meta_audit;
+pub mod component_meta_caches;
+#[cfg(test)]
+mod component_meta_caches_tests;
 pub mod component_meta_host;
 pub mod component_meta_result_db;
 pub mod cooperative_admission;

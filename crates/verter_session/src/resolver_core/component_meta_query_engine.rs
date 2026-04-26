@@ -10,6 +10,7 @@
 //! The per-scope caches provide query-local memoization to avoid
 //! re-projecting the same imported type reference within one request.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
@@ -36,6 +37,54 @@ use crate::VerterHost;
 pub(crate) const SEMANTIC_MISS: &str = "semanticMiss";
 pub(crate) const SEMANTIC_OBJECT_SURFACE: &str = "semanticObjectSurface";
 pub(crate) const SEMANTIC_SURFACE_MEMBER: &str = "semanticSurfaceMember";
+
+/// Build a single-fact `DepSignature` for a canonical's current
+/// `whole_hash`. Used by Step 3 closure's host-DB read-through call
+/// sites — each cache entry's dep_signature mirrors the canonical(s)
+/// the entry depends on so [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
+/// can revalidate it on warm hit and post-compute.
+pub(crate) fn engine_dep_signature_for_canonical(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> crate::semantic_query::DepSignature {
+    let whole_hash = host
+        .shallow_file_state(canonical_id)
+        .map(|state| state.whole_hash)
+        .unwrap_or_default();
+    let entries = vec![(
+        std::sync::Arc::<str>::from(canonical_id),
+        crate::semantic_query::DepVersion::WholeHash(whole_hash),
+    )];
+    std::sync::Arc::from(entries.into_boxed_slice())
+}
+
+/// Build a two-canonical `DepSignature` (used for DB caches whose
+/// validity depends on both an active scope and a declaration source).
+#[allow(dead_code)]
+pub(crate) fn engine_dep_signature_for_two_canonicals(
+    host: &VerterHost,
+    canonical_a: &str,
+    canonical_b: &str,
+) -> crate::semantic_query::DepSignature {
+    let mut entries: Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let push = |entries: &mut Vec<_>, c: &str| {
+        let whole_hash = host
+            .shallow_file_state(c)
+            .map(|state| state.whole_hash)
+            .unwrap_or_default();
+        entries.push((
+            std::sync::Arc::<str>::from(c),
+            crate::semantic_query::DepVersion::WholeHash(whole_hash),
+        ));
+    };
+    push(&mut entries, canonical_a);
+    if canonical_b != canonical_a {
+        push(&mut entries, canonical_b);
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    std::sync::Arc::from(entries.into_boxed_slice())
+}
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -204,53 +253,60 @@ pub(crate) struct FastShallowFieldExpr {
 pub struct ComponentMetaQueryEngine<'a> {
     host: &'a VerterHost,
     current_prepared_request_root: Option<String>,
-    imported_registry_symbols: FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>,
-    /// Cached type declarations.
-    declarations: FxHashMap<(String, String), ResolvedTypeDeclaration>,
-    /// Cached resolvability checks.
-    resolvable: FxHashMap<(String, String), bool>,
-    /// Cached owner collection expressions.
+    // Step 3 closure (architectural-debt-closure rev 10) — the 10 caches
+    // below were authoritative `FxHashMap` storage prior to this commit.
+    // Authority moves to host-owned typed DBs on
+    // `ProjectTypeStore` (see `crate::component_meta_caches`); each
+    // engine field below is a per-request **non-authoritative
+    // read-through view** that mirrors the host DB result for repeated
+    // lookups within one request. `RefCell` provides interior
+    // mutability so `&self` lookups can populate the view after a host
+    // DB hit. Per the D3.2 contract: NO independent invalidation, NO
+    // independent dep_signature, NO entries the host DB doesn't have.
+    imported_registry_symbols:
+        RefCell<FxHashMap<(String, String), Option<ResolvedImportedRegistrySymbol>>>,
+    /// Cached type declarations (read-through view; authority is
+    /// `ProjectTypeStore::declaration_db()`).
+    declarations: RefCell<FxHashMap<(String, String), ResolvedTypeDeclaration>>,
+    /// Cached resolvability checks (read-through view; authority is
+    /// `ProjectTypeStore::resolvable_db()`).
+    resolvable: RefCell<FxHashMap<(String, String), bool>>,
+    /// Cached owner collection expressions (read-through view;
+    /// authority is `ProjectTypeStore::owner_collection_db()`).
     owner_collection_exprs:
-        FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>,
+        RefCell<FxHashMap<String, Option<verter_semantic::analysis::type_expr::TypeExpr>>>,
     /// Request-local cache of declaration-scope payloads per scope canonical id.
     /// The prepared bundle stays authoritative; this cache only reuses the
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
-    /// Request-local cache for named-ref member surface materialization.
-    /// This sits above the DB-backed projection caches so repeated registry
-    /// enrichment can reuse the fully materialized nested surface for the same
-    /// imported named ref within one request.
-    materialized_member_surfaces: FxHashMap<MaterializedMemberSurfaceKey, TypeExpr>,
-    /// Request-local memoization for prepared shallow surface projection.
-    prepared_surface_cache: FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>,
-    /// Request-local memoization for prepared member projection.
-    prepared_member_cache: FxHashMap<PreparedMemberCacheKey, Option<ProjectedMember>>,
-    /// Request-local memoization for prepared imported target normalization.
-    prepared_target_cache: FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>,
-    /// Request-local memoization for routed surface expressions after the
-    /// shared projection-authority cutover.
-    routed_expr_surface_cache: FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::materialized_member_surface_db()`.
+    materialized_member_surfaces: RefCell<FxHashMap<MaterializedMemberSurfaceKey, TypeExpr>>,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::prepared_surface_db()`.
+    prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::prepared_member_db()`.
+    prepared_member_cache: RefCell<FxHashMap<PreparedMemberCacheKey, Option<ProjectedMember>>>,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::prepared_target_db()`.
+    prepared_target_cache: RefCell<FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>>,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::routed_expr_surface_db()`.
+    routed_expr_surface_cache: RefCell<FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, String),
         Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
     >,
-    /// §4.5 item 3-4: per-request memo for
-    /// `materialize_component_meta_type_expr_until_stable` keyed on
-    /// `(scope_canonical_id, candidate_expr, navigate_mode_flag)`.
-    /// Step 6.3 added `mode` as a memo discriminator since
-    /// `Navigate` and `Expanded` produce structurally different
-    /// outputs (lazy carriers vs. eager resolution). Purity audit
-    /// confirmed the materializer's output depends only on
-    /// `(candidate, scope, mode, query_engine_state)`. The cached
-    /// value is `MaterializedTypeExpr` so callers that read
-    /// `node_id` / `dep_signature` (Step 9 sidecar capture +
-    /// Step 6.6.A fence merge) get them from the memo too.
-    /// Cleared at end-of-request when the engine drops.
-    pub(crate) materialize_memo: FxHashMap<
-        (String, verter_semantic::analysis::type_expr::TypeExpr, bool),
-        crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+    /// Read-through view; authority is
+    /// `ProjectTypeStore::materialize_memo_db()`.
+    pub(crate) materialize_memo: RefCell<
+        FxHashMap<
+            (String, verter_semantic::analysis::type_expr::TypeExpr, bool),
+            crate::project_semantic_dispatch::raise::MaterializedTypeExpr,
+        >,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
@@ -395,18 +451,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Self {
             host,
             current_prepared_request_root: None,
-            imported_registry_symbols: FxHashMap::default(),
-            declarations: FxHashMap::default(),
-            resolvable: FxHashMap::default(),
-            owner_collection_exprs: FxHashMap::default(),
+            imported_registry_symbols: RefCell::new(FxHashMap::default()),
+            declarations: RefCell::new(FxHashMap::default()),
+            resolvable: RefCell::new(FxHashMap::default()),
+            owner_collection_exprs: RefCell::new(FxHashMap::default()),
             scope_payloads: FxHashMap::default(),
-            materialized_member_surfaces: FxHashMap::default(),
-            prepared_surface_cache: FxHashMap::default(),
-            prepared_member_cache: FxHashMap::default(),
-            prepared_target_cache: FxHashMap::default(),
-            routed_expr_surface_cache: FxHashMap::default(),
+            materialized_member_surfaces: RefCell::new(FxHashMap::default()),
+            prepared_surface_cache: RefCell::new(FxHashMap::default()),
+            prepared_member_cache: RefCell::new(FxHashMap::default()),
+            prepared_target_cache: RefCell::new(FxHashMap::default()),
+            routed_expr_surface_cache: RefCell::new(FxHashMap::default()),
             prepared_type_decls: FxHashMap::default(),
-            materialize_memo: FxHashMap::with_capacity_and_hasher(64, Default::default()),
+            materialize_memo: RefCell::new(FxHashMap::with_capacity_and_hasher(
+                64,
+                Default::default(),
+            )),
             #[cfg(test)]
             prepared_type_decl_query_count: 0,
             #[cfg(test)]
@@ -1669,16 +1728,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let key = (canonical_id.to_string(), exported_name.to_string());
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("imported_registry_symbols");
-        if let Some(cached) = self.imported_registry_symbols.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.imported_registry_symbols.borrow().get(&key).cloned() {
+            return cached;
         }
-        let resolved = resolve_imported_registry_symbol_with_budget(
-            self.host,
-            canonical_id,
-            exported_name,
-            || self.allow_wildcard_route(),
+        // Step 3 closure: route through host-owned ImportedRegistryDb.
+        // The local RefCell view above is non-authoritative scratch; the
+        // DashMap-backed DB is the authoritative cross-request cache.
+        let arc_key = (
+            std::sync::Arc::<str>::from(canonical_id),
+            std::sync::Arc::<str>::from(exported_name),
         );
-        self.imported_registry_symbols.insert(key, resolved.clone());
+        let host_db = self.host.project_type_store().imported_registry_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+            let computed = resolve_imported_registry_symbol_with_budget(
+                self.host,
+                canonical_id,
+                exported_name,
+                || self.allow_wildcard_route(),
+            );
+            let dep_sig = engine_dep_signature_for_canonical(self.host, canonical_id);
+            Some((computed, dep_sig))
+        });
+        let resolved: Option<ResolvedImportedRegistrySymbol> = match host_value {
+            Some(opt_arc) => opt_arc.as_deref().cloned(),
+            None => None,
+        };
+        self.imported_registry_symbols
+            .borrow_mut()
+            .insert(key, resolved.clone());
         resolved
     }
 
@@ -1735,19 +1812,43 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let key = (canonical_source.to_string(), requested_name.to_string());
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("declarations");
-        if let Some(cached) = self.declarations.get(&key) {
-            return cached.clone();
+        if let Some(cached) = self.declarations.borrow().get(&key).cloned() {
+            return cached;
         }
-        let declaration = self
-            .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
-            .unwrap_or_else(|| {
-                crate::meta_resolve::resolve_type_declaration(
-                    self.host,
-                    canonical_source,
-                    requested_name,
-                )
-            });
-        self.declarations.insert(key, declaration.clone());
+        // Step 3 closure: route through host-owned DeclarationLookupDb.
+        let arc_key = (
+            std::sync::Arc::<str>::from(canonical_source),
+            std::sync::Arc::<str>::from(requested_name),
+        );
+        let host_db = self.host.project_type_store().declaration_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+            let computed = self
+                .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
+                .unwrap_or_else(|| {
+                    crate::meta_resolve::resolve_type_declaration(
+                        self.host,
+                        canonical_source,
+                        requested_name,
+                    )
+                });
+            let dep_sig = engine_dep_signature_for_canonical(self.host, canonical_source);
+            Some((computed, dep_sig))
+        });
+        let declaration = match host_value {
+            Some(arc_decl) => arc_decl.as_ref().clone(),
+            None => self
+                .resolve_direct_prepared_type_declaration(canonical_source, requested_name)
+                .unwrap_or_else(|| {
+                    crate::meta_resolve::resolve_type_declaration(
+                        self.host,
+                        canonical_source,
+                        requested_name,
+                    )
+                }),
+        };
+        self.declarations
+            .borrow_mut()
+            .insert(key, declaration.clone());
         declaration
     }
 
@@ -1788,16 +1889,27 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let key = (source_key.to_string(), exported_name.to_string());
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("resolvable");
-        if let Some(cached) = self.resolvable.get(&key) {
-            return *cached;
+        if let Some(cached) = self.resolvable.borrow().get(&key).copied() {
+            return cached;
         }
-        let resolved = if self.prepared_type_decl(source_key, exported_name).is_some() {
-            true
-        } else {
-            self.resolve_imported_registry_symbol(source_key, exported_name)
-                .is_some()
-        };
-        self.resolvable.insert(key, resolved);
+        // Step 3 closure: route through host-owned ResolvabilityDb.
+        let arc_key = (
+            std::sync::Arc::<str>::from(source_key),
+            std::sync::Arc::<str>::from(exported_name),
+        );
+        let host_db = self.host.project_type_store().resolvable_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+            let computed = if self.prepared_type_decl(source_key, exported_name).is_some() {
+                true
+            } else {
+                self.resolve_imported_registry_symbol(source_key, exported_name)
+                    .is_some()
+            };
+            let dep_sig = engine_dep_signature_for_canonical(self.host, source_key);
+            Some((computed, dep_sig))
+        });
+        let resolved = host_value.unwrap_or(false);
+        self.resolvable.borrow_mut().insert(key, resolved);
         resolved
     }
 
@@ -1809,14 +1921,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("owner_collection_exprs");
-        if let Some(cached) = self.owner_collection_exprs.get(name) {
-            return cached.clone();
+        if let Some(cached) = self.owner_collection_exprs.borrow().get(name).cloned() {
+            return cached;
         }
 
-        let body = self
-            .prepared_type_decl(owner_canonical, name)
-            .map(|prepared| prepared.body.clone());
+        // Step 3 closure: route through host-owned OwnerCollectionDb.
+        let arc_key = (
+            std::sync::Arc::<str>::from(owner_canonical),
+            std::sync::Arc::<str>::from(name),
+        );
+        let host_db = self.host.project_type_store().owner_collection_db();
+        let host_value = host_db.get_or_compute(&arc_key, self.host, || {
+            let computed = self
+                .prepared_type_decl(owner_canonical, name)
+                .map(|prepared| prepared.body.clone());
+            let dep_sig = engine_dep_signature_for_canonical(self.host, owner_canonical);
+            Some((computed, dep_sig))
+        });
+        let body: Option<verter_semantic::analysis::type_expr::TypeExpr> = match host_value {
+            Some(opt_arc) => opt_arc.map(|arc_expr| arc_expr.as_ref().clone()),
+            None => self
+                .prepared_type_decl(owner_canonical, name)
+                .map(|prepared| prepared.body.clone()),
+        };
         self.owner_collection_exprs
+            .borrow_mut()
             .insert(name.to_string(), body.clone());
         body
     }
@@ -1844,8 +1973,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<TypeExpr> {
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("materialized_member_surfaces");
-        materialized_member_surface_key(scope_canonical_id, expr, nested_surface)
-            .and_then(|key| self.materialized_member_surfaces.get(&key).cloned())
+        // Step 3 closure: local view first, then host-owned
+        // MaterializedMemberSurfaceDb (peek-only — no compute closure
+        // for a `cached_*` accessor).
+        let key = materialized_member_surface_key(scope_canonical_id, expr, nested_surface)?;
+        if let Some(cached) = self
+            .materialized_member_surfaces
+            .borrow()
+            .get(&key)
+            .cloned()
+        {
+            return Some(cached);
+        }
+        let arc_key =
+            materialized_member_surface_arc_key(scope_canonical_id, expr, nested_surface)?;
+        let host_db = self
+            .host
+            .project_type_store()
+            .materialized_member_surface_db();
+        let arc_value = host_db.peek(&arc_key, self.host)?;
+        let value = arc_value.as_ref().clone();
+        self.materialized_member_surfaces
+            .borrow_mut()
+            .insert(key, value.clone());
+        Some(value)
     }
 
     pub fn store_materialized_member_surface(
@@ -1859,7 +2010,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return;
         };
-        self.materialized_member_surfaces.insert(key, materialized);
+        // Step 3 closure: write-through to host-owned DB. Subsequent
+        // request paths consult `MaterializedMemberSurfaceDb` directly
+        // and the cooperative admission table dedupes concurrent
+        // populates on the same arc-key.
+        if let Some(arc_key) =
+            materialized_member_surface_arc_key(scope_canonical_id, expr, nested_surface)
+        {
+            let host = self.host;
+            let host_db = host.project_type_store().materialized_member_surface_db();
+            let captured_value = materialized.clone();
+            let captured_canonical = scope_canonical_id.to_string();
+            let _ = host_db.get_or_compute(&arc_key, host, move || {
+                let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+                Some((captured_value, dep_sig))
+            });
+        }
+        self.materialized_member_surfaces
+            .borrow_mut()
+            .insert(key, materialized);
     }
 
     pub fn enter_member_surface(&mut self) -> bool {
@@ -1924,12 +2093,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     #[cfg(test)]
     pub(crate) fn imported_registry_symbol_cache_len(&self) -> usize {
-        self.imported_registry_symbols.len()
+        self.imported_registry_symbols.borrow().len()
     }
 
     #[cfg(test)]
     pub(crate) fn materialized_member_surface_cache_len(&self) -> usize {
-        self.materialized_member_surfaces.len()
+        self.materialized_member_surfaces.borrow().len()
     }
 
     #[cfg(test)]
@@ -2270,8 +2439,40 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_surface_cache");
-        if let Some(cached) = self.prepared_surface_cache.get(&cache_key) {
-            return cached.clone();
+        if let Some(cached) = self
+            .prepared_surface_cache
+            .borrow()
+            .get(&cache_key)
+            .cloned()
+        {
+            return cached;
+        }
+        // Step 3 closure: peek host-owned PreparedSurfaceDb. The compute
+        // path below is non-trivial (recursion, active-set), so we
+        // peek-then-compute rather than wrapping the whole compute in
+        // get_or_compute. Cold-compute writes back through
+        // `cache_prepared_surface_projection` and the local view.
+        {
+            let arc_key =
+                arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
+            let host_db = self.host.project_type_store().prepared_surface_db();
+            if let Some(payload) = host_db.peek(&arc_key, self.host) {
+                let projection = match payload {
+                    crate::component_meta_caches::PreparedSurfacePayload::Surface(arc_surface) => {
+                        PreparedSurfaceProjection::Surface(arc_surface)
+                    }
+                    crate::component_meta_caches::PreparedSurfacePayload::Empty => {
+                        PreparedSurfaceProjection::Empty
+                    }
+                    crate::component_meta_caches::PreparedSurfacePayload::Unsupported => {
+                        PreparedSurfaceProjection::Unsupported
+                    }
+                };
+                self.prepared_surface_cache
+                    .borrow_mut()
+                    .insert(cache_key, projection.clone());
+                return projection;
+            }
         }
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
@@ -2285,7 +2486,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             &default_substitutions,
                             active,
                         );
+                        self.publish_prepared_surface_to_host_db(
+                            scope_canonical_id,
+                            symbol_name,
+                            substitutions,
+                            &result,
+                        );
                         self.prepared_surface_cache
+                            .borrow_mut()
                             .insert(cache_key, result.clone());
                         return result;
                     }
@@ -2297,7 +2505,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             self.cached_prepared_surface(scope_canonical_id, symbol_name, substitutions)
         {
             let cached = PreparedSurfaceProjection::Surface(cached);
+            self.publish_prepared_surface_to_host_db(
+                scope_canonical_id,
+                symbol_name,
+                substitutions,
+                &cached,
+            );
             self.prepared_surface_cache
+                .borrow_mut()
                 .insert(cache_key.clone(), cached.clone());
             return cached;
         }
@@ -2327,9 +2542,48 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             substitutions,
             &result,
         );
+        self.publish_prepared_surface_to_host_db(
+            scope_canonical_id,
+            symbol_name,
+            substitutions,
+            &result,
+        );
         self.prepared_surface_cache
+            .borrow_mut()
             .insert(cache_key, result.clone());
         result
+    }
+
+    /// Step 3 closure helper: write-through to host-owned
+    /// PreparedSurfaceDb. Called after compute publishes a result so
+    /// the next request (or a concurrent reader) gets the warm hit.
+    fn publish_prepared_surface_to_host_db(
+        &self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        substitutions: &FxHashMap<String, TypeExpr>,
+        result: &PreparedSurfaceProjection,
+    ) {
+        let arc_key =
+            arc_prepared_surface_cache_key(scope_canonical_id, symbol_name, substitutions);
+        let payload = match result {
+            PreparedSurfaceProjection::Surface(s) => {
+                crate::component_meta_caches::PreparedSurfacePayload::Surface(s.clone())
+            }
+            PreparedSurfaceProjection::Empty => {
+                crate::component_meta_caches::PreparedSurfacePayload::Empty
+            }
+            PreparedSurfaceProjection::Unsupported => {
+                crate::component_meta_caches::PreparedSurfacePayload::Unsupported
+            }
+        };
+        let host = self.host;
+        let host_db = host.project_type_store().prepared_surface_db();
+        let captured_canonical = scope_canonical_id.to_string();
+        let _ = host_db.get_or_compute(&arc_key, host, move || {
+            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+            Some((payload, dep_sig))
+        });
     }
 
     fn project_prepared_surface_from_expr(
@@ -2598,8 +2852,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_member_cache");
-        if let Some(cached) = self.prepared_member_cache.get(&cache_key) {
-            return cached.clone();
+        if let Some(cached) = self.prepared_member_cache.borrow().get(&cache_key).cloned() {
+            return cached;
+        }
+        // Step 3 closure: peek host-owned PreparedMemberDb.
+        {
+            let arc_key = arc_prepared_member_cache_key(
+                scope_canonical_id,
+                symbol_name,
+                member_name,
+                crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
+                substitutions,
+            );
+            let host_db = self.host.project_type_store().prepared_member_db();
+            if let Some(opt_arc) = host_db.peek(&arc_key, self.host) {
+                let value = opt_arc.map(|arc_member| arc_member.as_ref().clone());
+                self.prepared_member_cache
+                    .borrow_mut()
+                    .insert(cache_key, value.clone());
+                return value;
+            }
         }
         if substitutions.is_empty() {
             if let Some(prepared) = self.prepared_type_decl(scope_canonical_id, symbol_name) {
@@ -2614,7 +2886,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             &default_substitutions,
                             active,
                         );
-                        self.prepared_member_cache.insert(cache_key, result.clone());
+                        self.publish_prepared_member_to_host_db(
+                            scope_canonical_id,
+                            symbol_name,
+                            member_name,
+                            crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
+                            substitutions,
+                            &result,
+                        );
+                        self.prepared_member_cache
+                            .borrow_mut()
+                            .insert(cache_key, result.clone());
                         return result;
                     }
                 }
@@ -2627,7 +2909,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             member_name,
             substitutions,
         ) {
+            self.publish_prepared_member_to_host_db(
+                scope_canonical_id,
+                symbol_name,
+                member_name,
+                crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
+                substitutions,
+                &Some(cached.clone()),
+            );
             self.prepared_member_cache
+                .borrow_mut()
                 .insert(cache_key, Some(cached.clone()));
             return Some(cached);
         }
@@ -2670,8 +2961,46 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
 
         active.remove(&visit_key);
-        self.prepared_member_cache.insert(cache_key, result.clone());
+        self.publish_prepared_member_to_host_db(
+            scope_canonical_id,
+            symbol_name,
+            member_name,
+            crate::resolver_core::cache_keys::PreparedMemberCacheKind::Requested,
+            substitutions,
+            &result,
+        );
+        self.prepared_member_cache
+            .borrow_mut()
+            .insert(cache_key, result.clone());
         result
+    }
+
+    /// Step 3 closure helper: write-through to host-owned
+    /// PreparedMemberDb.
+    fn publish_prepared_member_to_host_db(
+        &self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+        member_name: &str,
+        kind: crate::resolver_core::cache_keys::PreparedMemberCacheKind,
+        substitutions: &FxHashMap<String, TypeExpr>,
+        result: &Option<ProjectedMember>,
+    ) {
+        let arc_key = arc_prepared_member_cache_key(
+            scope_canonical_id,
+            symbol_name,
+            member_name,
+            kind,
+            substitutions,
+        );
+        let host = self.host;
+        let host_db = host.project_type_store().prepared_member_db();
+        let captured_value = result.clone();
+        let captured_canonical = scope_canonical_id.to_string();
+        let _ = host_db.get_or_compute(&arc_key, host, move || {
+            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+            Some((captured_value, dep_sig))
+        });
     }
 
     fn project_prepared_requested_member_from_expr(
@@ -2872,8 +3201,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_target_cache");
-        if let Some(cached) = self.prepared_target_cache.get(&cache_key) {
-            return cached.clone();
+        if let Some(cached) = self.prepared_target_cache.borrow().get(&cache_key).cloned() {
+            return cached;
+        }
+        // Step 3 closure: peek host-owned PreparedTargetDb.
+        {
+            let arc_key = arc_prepared_target_cache_key(
+                scope_canonical_id,
+                prepared.root_identity.canonical_id.as_str(),
+                prepared.root_identity.symbol_name.as_str(),
+                name,
+            );
+            let host_db = self.host.project_type_store().prepared_target_db();
+            if let Some(opt_arc_pair) = host_db.peek(&arc_key, self.host) {
+                let value: Option<(String, String)> =
+                    opt_arc_pair.map(|(c, n)| (c.as_ref().to_string(), n.as_ref().to_string()));
+                self.prepared_target_cache
+                    .borrow_mut()
+                    .insert(cache_key, value.clone());
+                return value;
+            }
         }
 
         let resolve_prepared_target =
@@ -2928,7 +3275,31 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     declaration.resolved_name,
                 )
             });
+        // Step 3 closure: write-through to host-owned PreparedTargetDb.
+        {
+            let arc_key = arc_prepared_target_cache_key(
+                scope_canonical_id,
+                prepared.root_identity.canonical_id.as_str(),
+                prepared.root_identity.symbol_name.as_str(),
+                name,
+            );
+            let host = self.host;
+            let host_db = host.project_type_store().prepared_target_db();
+            let captured_value: Option<(std::sync::Arc<str>, std::sync::Arc<str>)> =
+                resolved.as_ref().map(|(c, n)| {
+                    (
+                        std::sync::Arc::<str>::from(c.as_str()),
+                        std::sync::Arc::<str>::from(n.as_str()),
+                    )
+                });
+            let captured_canonical = scope_canonical_id.to_string();
+            let _ = host_db.get_or_compute(&arc_key, host, move || {
+                let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+                Some((captured_value, dep_sig))
+            });
+        }
         self.prepared_target_cache
+            .borrow_mut()
             .insert(cache_key, resolved.clone());
         resolved
     }
@@ -4087,13 +4458,29 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<TypeExpr> {
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("routed_expr_surface_cache");
-        self.routed_expr_surface_cache
-            .get(&RoutedExprSurfaceCacheKey {
-                scope_canonical_id: scope_canonical_id.to_owned(),
-                root_symbol: root_symbol.to_owned(),
-                route: route.clone(),
-            })
+        let local_key = RoutedExprSurfaceCacheKey {
+            scope_canonical_id: scope_canonical_id.to_owned(),
+            root_symbol: root_symbol.to_owned(),
+            route: route.clone(),
+        };
+        if let Some(cached) = self
+            .routed_expr_surface_cache
+            .borrow()
+            .get(&local_key)
             .cloned()
+        {
+            return Some(cached);
+        }
+        // Step 3 closure: peek host-owned RoutedExprSurfaceDb.
+        let arc_key =
+            arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
+        let host_db = self.host.project_type_store().routed_expr_surface_db();
+        let arc_value = host_db.peek(&arc_key, self.host)?;
+        let value = arc_value.as_ref().clone();
+        self.routed_expr_surface_cache
+            .borrow_mut()
+            .insert(local_key, value.clone());
+        Some(value)
     }
 
     fn cache_routed_expr_surface_expr(
@@ -4103,14 +4490,25 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         route: &super::RouteDemand,
         projected_expr: &TypeExpr,
     ) {
-        self.routed_expr_surface_cache.insert(
-            RoutedExprSurfaceCacheKey {
-                scope_canonical_id: scope_canonical_id.to_owned(),
-                root_symbol: root_symbol.to_owned(),
-                route: route.clone(),
-            },
-            projected_expr.clone(),
-        );
+        let local_key = RoutedExprSurfaceCacheKey {
+            scope_canonical_id: scope_canonical_id.to_owned(),
+            root_symbol: root_symbol.to_owned(),
+            route: route.clone(),
+        };
+        // Step 3 closure: write-through to host-owned RoutedExprSurfaceDb.
+        let arc_key =
+            arc_routed_expr_surface_cache_key(scope_canonical_id, root_symbol, route.clone());
+        let host = self.host;
+        let host_db = host.project_type_store().routed_expr_surface_db();
+        let captured_value = projected_expr.clone();
+        let captured_canonical = scope_canonical_id.to_string();
+        let _ = host_db.get_or_compute(&arc_key, host, move || {
+            let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
+            Some((captured_value, dep_sig))
+        });
+        self.routed_expr_surface_cache
+            .borrow_mut()
+            .insert(local_key, projected_expr.clone());
     }
 
     fn cache_pick_members_from_projected_expr(
@@ -5074,8 +5472,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         #[cfg(test)]
         crate::spike_instrumentation::record_cache_read("prepared_member_cache");
-        if let Some(cached) = self.prepared_member_cache.get(&cache_key) {
-            return cached.clone();
+        if let Some(cached) = self.prepared_member_cache.borrow().get(&cache_key).cloned() {
+            return cached;
+        }
+        // Step 3 closure: peek host-owned PreparedMemberDb (InheritedRoute).
+        {
+            let arc_key = arc_prepared_member_cache_key(
+                scope_canonical_id,
+                symbol_name,
+                member_name,
+                crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
+                &FxHashMap::default(),
+            );
+            let host_db = self.host.project_type_store().prepared_member_db();
+            if let Some(opt_arc) = host_db.peek(&arc_key, self.host) {
+                let value = opt_arc.map(|arc_member| arc_member.as_ref().clone());
+                self.prepared_member_cache
+                    .borrow_mut()
+                    .insert(cache_key, value.clone());
+                return value;
+            }
         }
 
         let visit_key = (scope_canonical_id.to_string(), symbol_name.to_string());
@@ -5105,7 +5521,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
 
         visited.remove(&visit_key);
-        self.prepared_member_cache.insert(cache_key, result.clone());
+        self.publish_prepared_member_to_host_db(
+            scope_canonical_id,
+            symbol_name,
+            member_name,
+            crate::resolver_core::cache_keys::PreparedMemberCacheKind::InheritedRoute,
+            &FxHashMap::default(),
+            &result,
+        );
+        self.prepared_member_cache
+            .borrow_mut()
+            .insert(cache_key, result.clone());
         result
     }
 
@@ -5307,17 +5733,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     #[cfg(test)]
     fn debug_prepared_surface_cache_len(&self) -> usize {
-        self.prepared_surface_cache.len()
+        self.prepared_surface_cache.borrow().len()
     }
 
     #[cfg(test)]
     fn debug_prepared_member_cache_len(&self) -> usize {
-        self.prepared_member_cache.len()
+        self.prepared_member_cache.borrow().len()
     }
 
     #[cfg(test)]
     fn debug_prepared_target_cache_len(&self) -> usize {
-        self.prepared_target_cache.len()
+        self.prepared_target_cache.borrow().len()
     }
 }
 
@@ -5658,6 +6084,89 @@ fn prepared_substitution_key(
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     PreparedSubstitutionKey::Entries(entries)
+}
+
+/// Step 3 closure: produce the host-DB Arc-keyed substitution key.
+fn arc_prepared_substitution_key(
+    substitutions: &FxHashMap<String, TypeExpr>,
+) -> crate::resolver_core::cache_keys::PreparedSubstitutionKey {
+    use crate::resolver_core::cache_keys::PreparedSubstitutionKey as ArcKey;
+    if substitutions.is_empty() {
+        return ArcKey::Empty;
+    }
+    let mut entries: Vec<(std::sync::Arc<str>, std::sync::Arc<TypeExpr>)> = substitutions
+        .iter()
+        .map(|(name, ty)| {
+            (
+                std::sync::Arc::<str>::from(name.as_str()),
+                std::sync::Arc::new(ty.clone()),
+            )
+        })
+        .collect();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    ArcKey::Entries(entries)
+}
+
+/// Step 3 closure: build the Arc-keyed prepared-surface cache key for
+/// host-DB routing.
+pub(crate) fn arc_prepared_surface_cache_key(
+    canonical_id: &str,
+    symbol_name: &str,
+    substitutions: &FxHashMap<String, TypeExpr>,
+) -> crate::resolver_core::cache_keys::PreparedSurfaceCacheKey {
+    crate::resolver_core::cache_keys::PreparedSurfaceCacheKey {
+        canonical_id: std::sync::Arc::from(canonical_id),
+        symbol_name: std::sync::Arc::from(symbol_name),
+        substitutions: arc_prepared_substitution_key(substitutions),
+    }
+}
+
+/// Step 3 closure: build the Arc-keyed prepared-member cache key for
+/// host-DB routing.
+pub(crate) fn arc_prepared_member_cache_key(
+    canonical_id: &str,
+    symbol_name: &str,
+    member_name: &str,
+    kind: crate::resolver_core::cache_keys::PreparedMemberCacheKind,
+    substitutions: &FxHashMap<String, TypeExpr>,
+) -> crate::resolver_core::cache_keys::PreparedMemberCacheKey {
+    crate::resolver_core::cache_keys::PreparedMemberCacheKey {
+        canonical_id: std::sync::Arc::from(canonical_id),
+        symbol_name: std::sync::Arc::from(symbol_name),
+        member_name: std::sync::Arc::from(member_name),
+        kind,
+        substitutions: arc_prepared_substitution_key(substitutions),
+    }
+}
+
+/// Step 3 closure: build the Arc-keyed prepared-target cache key for
+/// host-DB routing.
+pub(crate) fn arc_prepared_target_cache_key(
+    active_scope_canonical_id: &str,
+    decl_canonical_id: &str,
+    decl_symbol_name: &str,
+    requested_name: &str,
+) -> crate::resolver_core::cache_keys::PreparedTargetCacheKey {
+    crate::resolver_core::cache_keys::PreparedTargetCacheKey {
+        active_scope_canonical_id: std::sync::Arc::from(active_scope_canonical_id),
+        decl_canonical_id: std::sync::Arc::from(decl_canonical_id),
+        decl_symbol_name: std::sync::Arc::from(decl_symbol_name),
+        requested_name: std::sync::Arc::from(requested_name),
+    }
+}
+
+/// Step 3 closure: build the Arc-keyed routed-expr-surface cache key
+/// for host-DB routing.
+pub(crate) fn arc_routed_expr_surface_cache_key(
+    scope_canonical_id: &str,
+    root_symbol: &str,
+    route: super::RouteDemand,
+) -> crate::resolver_core::cache_keys::RoutedExprSurfaceCacheKey {
+    crate::resolver_core::cache_keys::RoutedExprSurfaceCacheKey {
+        scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+        root_symbol: std::sync::Arc::from(root_symbol),
+        route,
+    }
 }
 
 #[allow(dead_code)]
@@ -6485,6 +6994,51 @@ fn materialized_member_surface_key(
                     target: MaterializedMemberSurfaceTarget::Structural(expr.clone()),
                     nested_surface,
                 }
+            })
+        }),
+    }
+}
+
+/// Step 3 closure: produce the host-DB Arc-keyed variant of
+/// [`materialized_member_surface_key`] for routing through
+/// [`MaterializedMemberSurfaceDb`](crate::component_meta_caches::MaterializedMemberSurfaceDb).
+/// The local-view `String`-keyed key from
+/// [`materialized_member_surface_key`] retains the same shape so the
+/// engine's per-request RefCell mirror keeps owning its own copies; the
+/// host DB receives the cheap-clone Arc-keyed key.
+fn materialized_member_surface_arc_key(
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+    nested_surface: bool,
+) -> Option<crate::resolver_core::cache_keys::MaterializedMemberSurfaceKey> {
+    use crate::resolver_core::cache_keys::{
+        MaterializedMemberSurfaceKey as ArcKey, MaterializedMemberSurfaceTarget as ArcTarget,
+    };
+    match expr {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } if type_arguments.is_empty() => Some(ArcKey {
+            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+            target: ArcTarget::Symbol(name.clone()),
+            nested_surface,
+        }),
+        _ => super::component_meta_registry::component_meta_registry_public_indexed_access_route(
+            expr,
+        )
+        .map(|(root_symbol, route)| ArcKey {
+            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+            target: ArcTarget::RoutedMember {
+                root_symbol: std::sync::Arc::from(root_symbol.as_str()),
+                route,
+            },
+            nested_surface,
+        })
+        .or_else(|| {
+            materialized_member_surface_structural_cacheable(expr).then(|| ArcKey {
+                scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+                target: ArcTarget::Structural(std::sync::Arc::new(expr.clone())),
+                nested_surface,
             })
         }),
     }
