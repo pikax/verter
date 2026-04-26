@@ -78,10 +78,10 @@ fn collect_text_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             }
             collect_text_files(&path, out);
         } else if path.is_file() {
-            let ext_ok = match path.extension().and_then(|e| e.to_str()) {
-                Some("rs" | "ts" | "tsx" | "js" | "vue" | "md") => true,
-                _ => false,
-            };
+            let ext_ok = matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("rs" | "ts" | "tsx" | "js" | "vue" | "md")
+            );
             if ext_ok && !is_self_excluded(&path) && !is_changelog(&path) {
                 out.push(path);
             }
