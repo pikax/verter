@@ -66,7 +66,10 @@ fn path_to_host_id(path: &Path) -> String {
 
 /// Resolve a target spec (env-var or default-list entry) to an absolute
 /// canonical id. Accepts:
-///   * a bare component name → `src/runtime/components/<name>.vue`
+///   * a bare component name → `src/runtime/components/<name>.vue`,
+///     falling back to a unique nested match (e.g. `LocaleSelect` →
+///     `src/runtime/components/locale/LocaleSelect.vue`) when no
+///     top-level file exists
 ///   * a relative path under the components dir → e.g. `prose/PCallout`
 ///     becomes `src/runtime/components/prose/PCallout.vue`
 ///   * a path that already begins with `src/` or `runtime/` → used as
@@ -89,7 +92,49 @@ fn target_id_for_name(project_root: &Path, spec: &str) -> String {
             .join("components")
             .join(&with_ext)
     };
+    // Bare-name fallback: if the nominal top-level file doesn't exist
+    // but a unique file with that basename lives deeper under
+    // `components/`, use it. Without this, a target like `LocaleSelect`
+    // (actually at `locale/LocaleSelect.vue`) silently produces
+    // `ResolutionFailed` because the host never sees the canonical.
+    if !with_ext.contains('/') && !path.exists() {
+        if let Some(found) = find_unique_component(project_root, &with_ext) {
+            return path_to_host_id(&found);
+        }
+    }
     path_to_host_id(&path)
+}
+
+fn find_unique_component(project_root: &Path, basename: &str) -> Option<PathBuf> {
+    let components_root = project_root.join("src").join("runtime").join("components");
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![components_root];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_dir() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if !name.starts_with('.') && name != "node_modules" {
+                    stack.push(p);
+                }
+            } else if p.file_name().and_then(|s| s.to_str()) == Some(basename) {
+                found.push(p);
+                if found.len() > 1 {
+                    // Ambiguous — bail to caller's nominal path.
+                    return None;
+                }
+            }
+        }
+    }
+    found.into_iter().next()
 }
 
 /// Walk `<project_root>/src/runtime` and return every `*.vue` file as a
