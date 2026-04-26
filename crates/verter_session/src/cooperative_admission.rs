@@ -242,6 +242,68 @@ where
     Project: FnOnce(&Entry) -> V,
     Revalidate: FnOnce(&Entry) -> bool,
 {
+    cooperative_get_or_insert_with_post_publish(
+        map,
+        inflight,
+        key,
+        validate,
+        compute,
+        project,
+        revalidate_after_compute,
+        |_, _| {},
+    )
+}
+
+/// Plan §1.5 / §10.1 — extension of [`cooperative_get_or_insert`]
+/// with a `post_publish` callback that fires AFTER `entries.insert`
+/// AND AFTER successful `revalidate_after_compute`. The callback
+/// receives the published `Arc<Entry>` and the key.
+///
+/// **Race-closure contract.** post_publish is NOT inside the
+/// inflight slot's state lock. Synchronisation against concurrent
+/// invalidation comes from `revalidate_after_compute`'s
+/// dep-signature check, which sees the host's CURRENT state. If
+/// invalidation happened during compute, the entry is stale and
+/// revalidation fails BEFORE post_publish runs.
+///
+/// **Eventually-consistent reverse-index window.** A concurrent
+/// invalidator that drains a canonical's reverse-index between
+/// `entries.insert` and `post_publish` would miss the
+/// registration. The orphan registration is caught by the next
+/// peek's stale-check (the entry references the invalidated
+/// canonical with its old dep_signature; the host has the new
+/// state) and proactively removed. The orphan window is bounded
+/// per edit-cycle.
+#[allow(clippy::too_many_arguments)]
+pub fn cooperative_get_or_insert_with_post_publish<
+    K,
+    Entry,
+    V,
+    Validate,
+    Compute,
+    Project,
+    Revalidate,
+    PostPublish,
+>(
+    map: &DashMap<K, Arc<Entry>>,
+    inflight: &InflightTable<K>,
+    key: K,
+    validate: Validate,
+    compute: Compute,
+    project: Project,
+    revalidate_after_compute: Revalidate,
+    post_publish: PostPublish,
+) -> Option<V>
+where
+    K: Eq + Hash + Clone,
+    Entry: Send + Sync + 'static,
+    V: Clone,
+    Validate: FnOnce(&Entry) -> Option<V>,
+    Compute: FnOnce() -> Option<Entry>,
+    Project: FnOnce(&Entry) -> V,
+    Revalidate: FnOnce(&Entry) -> bool,
+    PostPublish: FnOnce(&Arc<Entry>, &K),
+{
     // Phase 1: warm-hit + validation.
     if let Some(entry_arc) = map.get(&key).map(|e| e.clone()) {
         if let Some(value) = validate(&entry_arc) {
@@ -300,7 +362,16 @@ where
 
             let entry_arc = Arc::new(entry);
             let value = project(&entry_arc);
-            map.insert(key.clone(), entry_arc);
+            map.insert(key.clone(), Arc::clone(&entry_arc));
+
+            // Plan §1.5 / §10.1 post_publish: fires AFTER
+            // entries.insert AND AFTER successful revalidate.
+            // Reverse-index registration lives here. NOT inside
+            // the inflight slot's state lock — the race-closure
+            // is via the revalidate_after_compute check above
+            // (eventually-consistent for the reverse index per
+            // the function-level docs).
+            post_publish(&entry_arc, &key);
 
             // Mark slot completed; wake joiners.
             {

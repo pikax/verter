@@ -61,6 +61,7 @@ pub mod component_meta_caches;
 mod component_meta_caches_tests;
 pub mod component_meta_dispatch_iteration;
 pub mod component_meta_host;
+pub mod component_meta_materialize;
 pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
 pub mod cooperative_admission;
