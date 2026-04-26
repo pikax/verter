@@ -263,6 +263,38 @@ impl NodeArena {
     fn len(&self) -> usize {
         self.inner.read().nodes.len()
     }
+
+    /// Drop shard-dedup entries for the given canonical id. Plan §1.10
+    /// Γ.A invariant: invalidation does NOT drop `NodeScopeId::Global`
+    /// — only `File { canonical_id: c, .. }` matches. Entries keyed at
+    /// any other `File` canonical also survive.
+    ///
+    /// **Architectural property: the underlying arena Vec is
+    /// append-only.** Existing `SemanticNodeId`s remain valid and
+    /// resolve to the same payload via `get`/`scope`; this method
+    /// affects only the dedup-shard's view of "next intern of this
+    /// `(payload, scope)` pair returns the existing id". After
+    /// invalidation, a re-intern of the same `(payload, File{c})`
+    /// pair allocates a fresh node slot (and thus a fresh id),
+    /// guaranteeing freshness against the changed canonical's content
+    /// generation.
+    ///
+    /// Touches every shard mutex once. Each shard's retain walk is
+    /// O(shard size). When `node_arena_lock_acquisitions` is wired
+    /// into the audit context, each shard lock acquisition is recorded.
+    fn invalidate_for_canonical(&self, canonical_id: &str) {
+        for shard in self.shards.iter() {
+            crate::host_manage::record_node_arena_lock_acquisition();
+            let mut shard = shard.lock();
+            shard.index.retain(|(_, scope), _| match scope {
+                // Γ.A explicit invariant: Global never drops.
+                NodeScopeId::Global => true,
+                NodeScopeId::File {
+                    canonical_id: c, ..
+                } => c.as_ref() != canonical_id,
+            });
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1239,6 +1271,14 @@ impl SemanticGraphStore {
                 false // remove
             });
         }
+
+        // Phase 3 — Γ.A. Drop NodeArena shard-dedup entries keyed at
+        // `File { canonical_id: c, .. }`. Preserves Global entries
+        // and entries for any other canonical (plan §1.10 Γ.A). The
+        // arena Vec is append-only — this only clears the "next intern
+        // returns existing id" path; valid SemanticNodeIds for nodes
+        // already published into the arena are unaffected.
+        self.arena.invalidate_for_canonical(canonical_id);
 
         evicted
     }
@@ -2405,6 +2445,128 @@ mod tests {
         assert!(store.get(&b_key).is_some());
         // a.ts gone — next call re-runs build.
         assert!(store.get(&a_key).is_none());
+    }
+
+    /// Phase 3 (component-meta cold-path long-tail plan §5 / §1.10 Γ.A)
+    /// — Mandatory test gate. `invalidate_canonical(c)` must drop
+    /// `NodeArena` shard-dedup entries whose origin scope is
+    /// `NodeScopeId::File { canonical_id: c, .. }` while preserving:
+    ///   1. `NodeScopeId::Global` entries (purely structural nodes).
+    ///   2. `NodeScopeId::File { canonical_id: other, .. }` entries
+    ///      keyed at any unrelated canonical.
+    ///
+    /// Discriminating: re-intern after invalidation. A preserved
+    /// shard-dedup entry returns the same `SemanticNodeId`; an evicted
+    /// shard-dedup entry forces a new arena allocation (the arena is
+    /// append-only — node ids never compress).
+    ///
+    /// Pre-fix tree (no arena invalidation): the shard index for the
+    /// File-scope node is preserved; re-intern returns the SAME id, the
+    /// `assert_ne!` for the invalidated canonical FAILS.
+    /// Post-fix tree: shard entry dropped; re-intern allocates a fresh
+    /// id, the `assert_ne!` PASSES while the Global / unrelated File
+    /// scope `assert_eq!` PASS.
+    #[test]
+    fn node_arena_invalidation_preserves_global_scope() {
+        use crate::semantic_query::DeclIdentity;
+        use crate::types::Hash16;
+
+        let store = SemanticGraphStore::new();
+
+        // Distinct payload per scope so dedup operates per scope key.
+        let global_payload = || SemanticNodeData::Primitive(PrimitiveKind::String);
+        let canonical_a: Arc<str> = Arc::from("/w/a.ts");
+        let canonical_b: Arc<str> = Arc::from("/w/b.ts");
+        let whole_a: Hash16 = [1u8; 16];
+        let whole_b: Hash16 = [2u8; 16];
+        let scope_a = NodeScopeId::File {
+            canonical_id: Arc::clone(&canonical_a),
+            whole_hash: whole_a,
+            local_scope: None,
+        };
+        let scope_b = NodeScopeId::File {
+            canonical_id: Arc::clone(&canonical_b),
+            whole_hash: whole_b,
+            local_scope: None,
+        };
+        // File-scope nodes need a payload that varies per scope (so
+        // dedup keys are unique). Use TypeParam{decl} keyed on the
+        // canonical so the (payload, scope) pair lands in distinct
+        // shard entries.
+        let file_a_payload = SemanticNodeData::TypeParam {
+            decl: DeclIdentity {
+                canonical_id: Arc::clone(&canonical_a),
+                whole_hash: whole_a,
+                decl_name: Arc::from("Param_A"),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("Param_A"),
+        };
+        let file_b_payload = SemanticNodeData::TypeParam {
+            decl: DeclIdentity {
+                canonical_id: Arc::clone(&canonical_b),
+                whole_hash: whole_b,
+                decl_name: Arc::from("Param_B"),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("Param_B"),
+        };
+
+        let global_id_first = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
+        let file_a_id_first = store.intern_node_with_scope(file_a_payload.clone(), scope_a.clone());
+        let file_b_id_first = store.intern_node_with_scope(file_b_payload.clone(), scope_b.clone());
+
+        // Sanity: re-interning before invalidation deduplicates per
+        // scope. Without a pre-invalidation hit, the post-invalidation
+        // test cannot tell "drop happened" from "never deduped".
+        let global_id_second = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
+        let file_a_id_second =
+            store.intern_node_with_scope(file_a_payload.clone(), scope_a.clone());
+        let file_b_id_second =
+            store.intern_node_with_scope(file_b_payload.clone(), scope_b.clone());
+        assert_eq!(
+            global_id_first, global_id_second,
+            "pre-invalidation Global re-intern must dedup"
+        );
+        assert_eq!(
+            file_a_id_first, file_a_id_second,
+            "pre-invalidation File(/w/a.ts) re-intern must dedup"
+        );
+        assert_eq!(
+            file_b_id_first, file_b_id_second,
+            "pre-invalidation File(/w/b.ts) re-intern must dedup"
+        );
+
+        // Invalidate /w/a.ts. Per §1.10 Γ.A: only File { canonical_id:
+        // /w/a.ts, .. } shard entries are dropped. Global entries and
+        // File { canonical_id: /w/b.ts, .. } entries are preserved.
+        let _ = store.invalidate_canonical(canonical_a.as_ref());
+
+        // Discriminating assertions:
+        let global_id_post = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
+        let file_a_id_post = store.intern_node_with_scope(file_a_payload, scope_a);
+        let file_b_id_post = store.intern_node_with_scope(file_b_payload, scope_b);
+
+        assert_eq!(
+            global_id_post, global_id_first,
+            "Global-scope shard entry must SURVIVE invalidate_canonical \
+             (Phase 3 Γ.A invariant — invalidation does NOT drop Global)"
+        );
+        assert_eq!(
+            file_b_id_post, file_b_id_first,
+            "File(/w/b.ts) shard entry must SURVIVE invalidation of /w/a.ts \
+             (Phase 3 Γ.A invariant — invalidation drops only the matching canonical's File scope)"
+        );
+        assert_ne!(
+            file_a_id_post, file_a_id_first,
+            "File(/w/a.ts) shard entry must be DROPPED by invalidate_canonical(/w/a.ts); \
+             re-intern must allocate a new SemanticNodeId (the arena is append-only — \
+             ids never compress)"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
