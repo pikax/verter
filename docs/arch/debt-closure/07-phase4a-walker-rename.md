@@ -1,15 +1,11 @@
-# Phase 4A — Walker-family rename (architectural-debt-closure rev 11.3)
+# Phase 4A — Walker-family closure (architectural-debt-closure rev 11.3)
 
-**Status:** Sub-task 4A.5 closure via systematic rename. The legacy walker
-function names are removed from the active codebase; the rescue iteration
-logic stays put under non-tombstoned names. All four Phase 4A discriminator
-fixtures continue to pass.
-
-This sub-task closes the Phase 4A tombstones. Sub-tasks 4A.1/4A.2/4A.3
-(caller-side iteration helpers using dispatch alone) and the deeper
-"replace walker logic with caller-side iteration" architectural goal stay
-as future work; this commit closes the explicit tombstone gates without
-introducing new dispatch gaps.
+**Status:** Sub-tasks 4A.1 / 4A.2 / 4A.3 / 4A.5 closed in two commits
+beyond the systematic rename. The legacy walker function names are
+removed from the active codebase AND the architectural debt patterns
+the rename hid (`MATERIALIZE_DEPTH` thread-local, `FxHashSet<TypeExpr>`
+active set, inline manual scope iteration) are gone. All four Phase 4A
+discriminator fixtures continue to pass.
 
 ## Discriminator-test status (sub-task 4A.0)
 
@@ -25,7 +21,7 @@ All four Phase 4A discriminator fixtures continue to pass:
 The renamed iteration helpers continue to handle the same cases dispatch
 alone cannot.
 
-## Tombstone closure (sub-task 4A.5)
+## Tombstone closure (sub-task 4A.5 — rename pass)
 
 | Old name (tombstoned) | New name |
 |---|---|
@@ -58,11 +54,67 @@ The rename touches every caller across `crates/verter_session/src/`:
 - `d_cutover_characterization_tests.rs`
 - `meta_resolve_tests.rs`
 
-The deferred work (sub-tasks 4A.1/4A.2/4A.3 — replacing the renamed
-helpers' bodies with dispatch-driven iteration that doesn't require the
-walker's internal state) remains as a follow-up. The plan's tombstones do
-not require that deeper refactor; they require the legacy names to leave
-the active namespace, which this commit accomplishes.
+## Architectural completion (sub-tasks 4A.1 / 4A.2 / 4A.3 / 4A.5)
+
+Two follow-up commits close the architectural intent the rename alone
+did not satisfy.
+
+### `12d5f717` — `crates/verter_session/src/component_meta_dispatch_iteration.rs`
+
+New module with three caller-side helpers + the
+`SemanticNodeId`-keyed visited set:
+
+| Helper | Plan reference | Purpose |
+|---|---|---|
+| `lower_in_first_responsive_scope` | §4A D4A.2 Gap 1 | Iterates `[owner, imported_scope, …]` through `dispatch.lower_type_expr_in_scope_with_mode`; first non-opaque-miss wins. |
+| `rewrite_omitted_generic_args_with_defaults` | §4A D4A.2 Gap 2 | Rewrites `Ref { name, type_arguments: [] }` to `Ref { name, type_arguments: [defaults] }` when every prepared type parameter carries a default. |
+| `iterate_ref_chain_until_non_ref` | §4A D4A.2 Gap 3 | Caller-side `dispatch.lower → ProjectPath{[], mode} → raise` per hop, guarded by `WalkerVisitedNodes` cycle detector + defensive fuse. |
+| `WalkerVisitedNodes` (struct) | §4A D4A.2 Gap 3 | `FxHashSet<SemanticNodeId>` + `fuse_hops` counter (`VISITED_NODES_DEFENSIVE_FUSE = 4096`). Replaces the legacy `FxHashSet<TypeExpr>` active set. |
+
+The module ships with 11 helper-level FAIL-FIRST tests covering visited-set
+contracts (insert/cycle/pop/fuse) and the three Gap helpers' end-to-end
+behaviour against fixture projects.
+
+### `65f46a8c` — Walker bodies use the new helpers
+
+In `crates/verter_session/src/meta_resolve.rs`:
+
+- `MAX_MATERIALIZE_DEPTH = 48` constant + `MATERIALIZE_DEPTH`
+  thread-local **deleted**. The walker no longer carries a hard depth
+  cap as ordinary termination — cycle detection on resolved
+  `SemanticNodeId`s drives termination, with `WalkerVisitedNodes`'s
+  `VISITED_NODES_DEFENSIVE_FUSE = 4096` as the safety rail.
+- `walk_component_meta_member_surface_expr_with_active_stack` and
+  `_with_active_stack_guarded` collapsed into one function
+  `walk_component_meta_member_surface_expr_with_visited`. The two-stage
+  split existed solely to wrap depth-fuse manipulation around the body;
+  with `MATERIALIZE_DEPTH` retired the wrapper is no longer needed.
+- `active: &mut FxHashSet<TypeExpr>` parameter replaced with
+  `visited: &mut crate::component_meta_dispatch_iteration::WalkerVisitedNodes`
+  — `SemanticNodeId`-keyed instead of `TypeExpr`-keyed.
+- New file-level helper `walker_cycle_key_node` lowers an input
+  expression through dispatch and returns its `SemanticNodeId` for
+  visited-set keying (or `None` when the expression cannot be lowered
+  or returns `Opaque(Miss)`).
+- New file-level helper `expand_generic_ref_via_scope_iteration`
+  encapsulates the `[owner_scope, imported_scope]` retry pattern. The
+  per-scope expander remains
+  `engine.instantiate_local_generic_ref` (preserved by D-Cutover §5.8
+  row 5 characterization at
+  `d_cutover_characterization_tests.rs:2493-2508`); the architectural
+  cleanup is removing the *manual iteration* from the walker body.
+- 30+ recursive call sites updated mechanically to pass
+  `&mut visited` and call
+  `walk_component_meta_member_surface_expr_with_visited`.
+- Each early-return path's `active.remove(expr)` replaced with
+  `if let Some(node) = pushed_node { visited.pop(node); }` so cycle
+  detection is scoped per call frame (Object members both referencing
+  the same `Ref` each see a cleanly popped visited set).
+
+The remaining `FxHashSet<TypeExpr>` use in
+`materialize_component_meta_registry_structural_expr::inner`
+(`meta_resolve.rs:8830`) is a *separate* helper outside the renamed
+walker family and is unchanged. It is not in scope for plan §4A.
 
 ## Tombstone-gate verification
 
@@ -81,17 +133,32 @@ $ rg "fn prepared_type_param_substitutions|fn substitute_type_expr_if_needed" cr
 
 All five tombstone scans return empty.
 
+## Architectural-debt-pattern verification
+
+```bash
+# Architectural debt patterns named by handoff "Definition of done":
+$ rg "MATERIALIZE_DEPTH|MAX_MATERIALIZE_DEPTH" crates/verter_session/src/meta_resolve.rs
+# Only doc-comment references remain (retired patterns are documented).
+
+$ rg "fn .*active.*FxHashSet.*TypeExpr" crates/verter_session/src/meta_resolve.rs
+# Only `materialize_component_meta_registry_structural_expr::inner`
+# (a separate helper, not in the renamed walker family).
+
+$ rg "fn expand_generic_ref_for_materialization" crates/
+# (no output — superseded by `expand_generic_ref_via_scope_iteration`)
+```
+
 ## Verification
 
-- 1698/1698 verter_session lib tests pass (4 Phase 4A discriminator
-  fixtures included).
-- Full workspace `cargo test --workspace --tests` passes.
+- **1709/1709** verter_session lib tests pass (pre-existing 1698 + 11
+  helper tests from `12d5f717`).
+- All four Phase 4A discriminator fixtures pass.
+- Full workspace `cargo test --workspace --tests` green.
 - `cargo clippy --workspace -- -D warnings` clean.
-- `cargo fmt --all` clean.
-- `pnpm --filter @verter/component-meta test` (ran post-rename) — 231/231
-  pass.
+- `cargo fmt --all -- --check` clean.
+- `pnpm --filter @verter/component-meta test` 231/231 pass.
 
-## Final commit count beyond plan base 4b146ff4
+## Final commit count beyond plan base `4b146ff4`
 
 1. `cf56873d` — Step 0 spike.
 2. `281769ba` — Step 1 (Debt 1 closure rewire).
@@ -101,4 +168,10 @@ All five tombstone scans return empty.
 6. `af35f069` — Step 4 (audit warm-cache short-circuit).
 7. `fa073650` — Step 3 closure (10-DB migrations).
 8. `20d85e15` — Phase 4B (publication policy).
-9. `<this commit>` — Phase 4A walker-family rename.
+9. `5aea90b0` — Phase 4A walker-family rename (sub-task 4A.5 names).
+10. `e277cf25` — Phase 4A scope assessment + deferral note (superseded).
+11. `30200483` — Phase 1-4 audit (closes 5 quality issues).
+12. `12d5f717` — Phase 4A.1/4A.2/4A.3 dispatch-iteration helpers.
+13. `<this commit's parent>` — Phase 4A architectural completion: walker
+    bodies use Gap 1/2/3 helpers; `MATERIALIZE_DEPTH` +
+    `FxHashSet<TypeExpr>` + inline scope iteration retired.
