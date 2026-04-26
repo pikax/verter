@@ -2187,6 +2187,160 @@ fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Plan §7 / Phase 5 — DepSignatureInterner
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Content-hash bucketed `Weak<...>` interner for `DepSignature`. Plan
+/// §7 / §1.10 Γ.C. Equivalent dep_signatures (same `(canonical,
+/// version)` set after sort+dedup) share a single `Arc<[(...)]>` so:
+///
+/// 1. The Phase 4 reverse-index `Arc::ptr_eq` discrimination matches
+///    "our entry" vs "fresh post-publish write" correctly.
+/// 2. Memory pressure stays bounded — N publishes of the same dep
+///    closure store one allocation, not N.
+///
+/// **Liveness via `Weak<...>`:** the interner holds `Weak` references
+/// only. When the last strong `Arc` is dropped, `intern` notices the
+/// dead `Weak` on next lookup and prunes it. `sweep()` can be called
+/// periodically to reclaim empty buckets.
+///
+/// **Bucketing key:** `u64` content hash via `FxHash` over the
+/// canonicalised payload. Collisions are tolerated — within a bucket
+/// the `intern` path performs a content equality check before
+/// returning the existing Arc.
+#[derive(Debug, Default)]
+pub struct DepSignatureInterner {
+    table: DashMap<u64, Vec<DepSignatureWeak>>,
+    /// Plan §7 — counter-based auto-sweep trigger. Incremented on
+    /// every successful intern; sweep runs when the counter hits
+    /// `SWEEP_INTERVAL`. Cheap O(buckets) walk; off the hot path.
+    inserts_since_sweep: std::sync::atomic::AtomicU64,
+}
+
+/// `Weak` view of an interned `DepSignature` payload — see
+/// [`DepSignatureInterner`].
+type DepSignatureWeak = std::sync::Weak<[(Arc<str>, crate::semantic_query::DepVersion)]>;
+
+const SWEEP_INTERVAL: u64 = 1024;
+
+impl DepSignatureInterner {
+    /// Construct a fresh interner with no buckets.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Intern `payload`, returning a shared `Arc` whose pointer
+    /// equality (`Arc::ptr_eq`) matches every other equivalent intern.
+    ///
+    /// Equivalent dep_signatures are normalised before lookup: pairs
+    /// are sorted by `(canonical, version)` and adjacent duplicates
+    /// removed. This ensures `intern([(a, v1), (b, v2)])` returns the
+    /// same `Arc` as `intern([(b, v2), (a, v1), (a, v1)])`.
+    pub fn intern(
+        &self,
+        payload: &[(Arc<str>, crate::semantic_query::DepVersion)],
+    ) -> DepSignature {
+        // Normalise: sort + dedup so equivalent content collapses.
+        let mut normalised: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = payload.to_vec();
+        normalised.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()).then_with(|| a.1.cmp(&b.1)));
+        normalised.dedup();
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = rustc_hash::FxHasher::default();
+            normalised.len().hash(&mut hasher);
+            for (canonical, version) in &normalised {
+                canonical.hash(&mut hasher);
+                version.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+
+        let mut bucket = self.table.entry(hash).or_default();
+        // Prune dead Weaks while scanning.
+        bucket.retain(|w| w.strong_count() > 0);
+        for w in bucket.iter() {
+            if let Some(arc) = w.upgrade() {
+                if arc.iter().eq(normalised.iter()) {
+                    crate::host_manage::record_dep_signature_intern_hit();
+                    return Arc::clone(&arc) as DepSignature;
+                }
+            }
+        }
+        // Miss: insert a fresh Arc and downgrade for the bucket.
+        let fresh: Arc<[(Arc<str>, crate::semantic_query::DepVersion)]> =
+            Arc::from(normalised.into_boxed_slice());
+        bucket.push(Arc::downgrade(&fresh));
+        drop(bucket);
+
+        // Auto-sweep trigger. Plan §7: cheap O(buckets) walk every
+        // SWEEP_INTERVAL inserts.
+        let n = self
+            .inserts_since_sweep
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        if n.is_multiple_of(SWEEP_INTERVAL) {
+            self.sweep();
+        }
+
+        fresh
+    }
+
+    /// Intern a single `(canonical, version)` pair. Convenience for
+    /// call sites that build dep_signatures incrementally. Plan §7.
+    pub fn intern_canonical(
+        &self,
+        canonical: Arc<str>,
+        version: crate::semantic_query::DepVersion,
+    ) -> DepSignature {
+        debug_assert!(
+            !canonical.as_ref().is_empty(),
+            "intern_canonical: canonical id must be non-empty"
+        );
+        self.intern(&[(canonical, version)])
+    }
+
+    /// Periodic sweep — removes empty buckets and dead `Weak`s. Plan
+    /// §7 (round-7 Codex#2 P1 #2). Called by the host's idle-time
+    /// cleanup pipeline AND auto-triggered every `SWEEP_INTERVAL`
+    /// inserts.
+    ///
+    /// O(buckets) where buckets = distinct content hashes seen so
+    /// far. Cheap relative to a full warm-cache sweep because
+    /// dep_signature content is highly redundant in practice.
+    pub fn sweep(&self) {
+        self.table.retain(|_, bucket| {
+            bucket.retain(|w| w.strong_count() > 0);
+            !bucket.is_empty()
+        });
+    }
+
+    /// Test/diagnostic: number of distinct hash buckets currently
+    /// stored. May include empty buckets that have not yet been
+    /// reaped by `sweep`.
+    #[must_use]
+    pub fn bucket_count(&self) -> usize {
+        self.table.len()
+    }
+
+    /// Test/diagnostic: number of distinct interned dep_signatures
+    /// (i.e., total live `Weak`s across every bucket).
+    #[must_use]
+    pub fn live_signature_count(&self) -> usize {
+        self.table
+            .iter()
+            .map(|entry| {
+                entry
+                    .value()
+                    .iter()
+                    .filter(|w| w.strong_count() > 0)
+                    .count()
+            })
+            .sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2584,6 +2738,126 @@ mod tests {
         assert!(store.get(&b_key).is_some());
         // a.ts gone — next call re-runs build.
         assert!(store.get(&a_key).is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Phase 5 — DepSignatureInterner (Γ.C)
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Phase 5 (plan §7 / §1.10 Γ.C) — interner returns the SAME
+    /// `Arc` for two distinct calls with equivalent payload.
+    /// Discriminating: pre-fix tree has no interner, every publish
+    /// builds a fresh Arc. Post-fix tree: dedup via content hash.
+    #[test]
+    fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
+        let interner = DepSignatureInterner::new();
+        let payload_a = vec![
+            (
+                Arc::<str>::from("/w/a.ts"),
+                DepVersion::WholeHash([1u8; 16]),
+            ),
+            (
+                Arc::<str>::from("/w/b.ts"),
+                DepVersion::WholeHash([2u8; 16]),
+            ),
+        ];
+        // Reordered with a duplicate — must normalise to the same
+        // canonical form.
+        let payload_b = vec![
+            (
+                Arc::<str>::from("/w/b.ts"),
+                DepVersion::WholeHash([2u8; 16]),
+            ),
+            (
+                Arc::<str>::from("/w/a.ts"),
+                DepVersion::WholeHash([1u8; 16]),
+            ),
+            (
+                Arc::<str>::from("/w/a.ts"),
+                DepVersion::WholeHash([1u8; 16]),
+            ),
+        ];
+        let arc_a = interner.intern(&payload_a);
+        let arc_b = interner.intern(&payload_b);
+        assert!(
+            Arc::ptr_eq(&arc_a, &arc_b),
+            "equivalent payloads (modulo order + dups) must intern to the same Arc"
+        );
+        // Different content → different Arc.
+        let payload_c = vec![(
+            Arc::<str>::from("/w/c.ts"),
+            DepVersion::WholeHash([3u8; 16]),
+        )];
+        let arc_c = interner.intern(&payload_c);
+        assert!(
+            !Arc::ptr_eq(&arc_a, &arc_c),
+            "different payloads must intern to different Arcs"
+        );
+    }
+
+    /// Phase 5 — sweep removes empty buckets and dead-Weak buckets.
+    /// Plan §7 round-7 Codex#2 P1 #2 — mandatory test:
+    /// `dep_signature_intern_sweep_removes_empty_buckets`.
+    #[test]
+    fn dep_signature_intern_sweep_removes_empty_buckets() {
+        let interner = DepSignatureInterner::new();
+        let payload = vec![(
+            Arc::<str>::from("/w/sweep.ts"),
+            DepVersion::WholeHash([7u8; 16]),
+        )];
+
+        // Intern, drop the strong ref, sweep — bucket must be removed.
+        {
+            let _arc = interner.intern(&payload);
+            assert!(
+                interner.bucket_count() >= 1,
+                "intern must populate the bucket"
+            );
+            assert_eq!(
+                interner.live_signature_count(),
+                1,
+                "interned signature must be live"
+            );
+        } // _arc dropped here.
+
+        // Strong ref gone; bucket entry now contains a dead Weak.
+        // sweep() must reclaim the empty bucket.
+        assert_eq!(
+            interner.live_signature_count(),
+            0,
+            "after dropping the strong ref, the Weak is dead"
+        );
+        interner.sweep();
+        assert_eq!(
+            interner.bucket_count(),
+            0,
+            "sweep() must reclaim the empty bucket"
+        );
+    }
+
+    /// Phase 5 — auto-sweep trigger fires every `SWEEP_INTERVAL`
+    /// inserts. Discriminating: drop strong refs, then intern enough
+    /// distinct signatures to trip the auto-sweep. The bucket count
+    /// stays bounded.
+    #[test]
+    fn dep_signature_intern_auto_sweep_keeps_bucket_count_bounded() {
+        let interner = DepSignatureInterner::new();
+        // Insert and drop SWEEP_INTERVAL+1 distinct signatures — each
+        // bucket becomes orphaned immediately because the Arc never
+        // escapes the loop body. Auto-sweep is triggered when the
+        // counter hits SWEEP_INTERVAL.
+        for i in 0..(SWEEP_INTERVAL + 1) {
+            let canonical: Arc<str> = Arc::from(format!("/w/n{i}.ts"));
+            let _arc = interner.intern_canonical(canonical, DepVersion::ProjectGeneration(i));
+        }
+        // After auto-sweep, dead-Weak buckets should be reclaimed.
+        // Tolerate up to SWEEP_INTERVAL stragglers (the buckets that
+        // landed after the auto-sweep tick; counter resumes counting).
+        assert!(
+            interner.bucket_count() <= SWEEP_INTERVAL as usize,
+            "auto-sweep must keep bucket count bounded; got {}",
+            interner.bucket_count()
+        );
     }
 
     /// Phase 4 (plan §6 / §13.2 Γ.B) — `invalidate_canonical(c)`

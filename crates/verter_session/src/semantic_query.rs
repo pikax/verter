@@ -431,7 +431,12 @@ impl std::hash::Hash for SurfaceView {
 /// Warm hits return a recorded `DepSignature` that merges into the active
 /// [`CompletionFence`](crate::completion_fence::CompletionFence), so
 /// final-result validation is transitive, not root-key-only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Ord` is derived for plan §7 / Phase 5 — the `DepSignatureInterner`
+/// canonicalises bucket contents by sorting `(canonical, version)` pairs
+/// before equality comparison so dep_signatures with the same logical
+/// content but different declaration order share a single Arc.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum DepVersion {
     WholeHash(HashValue),
     RouteGeneration(u64),
