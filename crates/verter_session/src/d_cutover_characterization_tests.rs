@@ -47,16 +47,21 @@ fn substitute_visits_repeated_type_param_reference_across_siblings() {
 /// Plan §2 guard contract row: `substitute_semantic_type_param`
 /// returns the input node unchanged on cyclic re-entry. Verified by
 /// source-content inspection: the substitute driver in
-/// `substitute.rs` carries an `_ => node` catch-all arm for cycle
-/// termination, and a fresh host's graph is stable under repeated
-/// no-op substitution.
+/// `substitute.rs` carries a catch-all arm returning input unchanged.
+///
+/// Phase 6 (Fix D) strengthened this guarantee: every match arm now
+/// returns the input id when no descendant changed (not just the
+/// catch-all). The catch-all itself returns `(node, false)` from the
+/// internal change-tracking helper.
 #[test]
 fn substitute_returns_input_node_on_cyclic_reentry() {
     let substitute_src = include_str!("project_semantic_dispatch/substitute.rs");
-    // Catch-all arm returns `node` unchanged.
+    // Catch-all arm returns `node` unchanged. Post-Fix-D the helper
+    // returns a `(node, changed)` tuple, so accept either form.
     assert!(
-        substitute_src.contains("_ => node"),
-        "substitute_semantic_type_param must carry a catch-all arm returning input unchanged"
+        substitute_src.contains("_ => node") || substitute_src.contains("_ => (node, false)"),
+        "substitute_semantic_type_param (or its change-tracking helper) must carry a \
+         catch-all arm returning input unchanged"
     );
 }
 

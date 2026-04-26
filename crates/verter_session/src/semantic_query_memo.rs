@@ -868,6 +868,12 @@ struct AtomicSemanticGraphStats {
     projection_depth_samples: Mutex<SampleCollector>,
     decl_subexpression_lowering_count: AtomicU64,
     relation_check_count: AtomicU64,
+    /// Plan §8 / Phase 6 — count of `intern_preserving_scope` calls
+    /// observed by the store. Pre-Fix-D substitute helpers rebuilt
+    /// every match arm unconditionally; post-Fix-D the no-op
+    /// branches short-circuit and skip the call entirely.
+    /// Discriminating signal for the change-tracking optimization.
+    intern_preserving_scope_calls: AtomicU64,
 }
 
 impl Default for AtomicSemanticGraphStats {
@@ -893,6 +899,7 @@ impl Default for AtomicSemanticGraphStats {
             projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             decl_subexpression_lowering_count: AtomicU64::new(0),
             relation_check_count: AtomicU64::new(0),
+            intern_preserving_scope_calls: AtomicU64::new(0),
         }
     }
 }
@@ -1173,8 +1180,23 @@ impl SemanticGraphStore {
         origin: SemanticNodeId,
         data: SemanticNodeData,
     ) -> SemanticNodeId {
+        self.stats
+            .intern_preserving_scope_calls
+            .fetch_add(1, Ordering::Relaxed);
         let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
         self.arena.push_with_scope(data, scope)
+    }
+
+    /// Test/diagnostic — read the cumulative count of
+    /// `intern_preserving_scope` calls. Plan §8 / Phase 6
+    /// discriminating signal for the substitute change-tracking
+    /// optimization: a no-op substitution must increment this
+    /// counter by zero post-Fix-D.
+    #[must_use]
+    pub fn intern_preserving_scope_call_count(&self) -> u64 {
+        self.stats
+            .intern_preserving_scope_calls
+            .load(Ordering::Relaxed)
     }
 
     /// Return the recorded origin scope for `id`.

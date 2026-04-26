@@ -1824,6 +1824,158 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a
     }
 }
 
+/// Phase 6 (component-meta cold-path long-tail plan §8) — Fix D
+/// substitute change-tracking optimization. When the substituted
+/// parameter does NOT appear anywhere in the input tree, the
+/// recursive walk must short-circuit each rebuild instead of
+/// pushing identical-content nodes through `intern_preserving_scope`.
+///
+/// **Discriminating contract.** The output `SemanticNodeId` is
+/// identical between the pre-Fix-D and post-Fix-D paths (the shard
+/// dedup collapses identical rebuilds back to the same id), so
+/// observation through node identity alone cannot discriminate.
+/// Phase 6 wires `SemanticGraphStore::intern_preserving_scope_call_count()`
+/// — a cumulative counter incremented on every
+/// `intern_preserving_scope` call — so the test asserts the counter
+/// delta is zero across a no-op substitution.
+///
+/// Pre-fix tree: every match arm rebuilds unconditionally; counter
+/// delta is `>= 1` even for no-op substitutions. Test FAILS.
+/// Post-fix tree: each arm short-circuits on `!any_changed`, skipping
+/// `intern_preserving_scope` entirely. Counter delta is `0`. Test
+/// PASSES.
+#[test]
+fn substitute_no_op_short_circuits_intern_preserving_scope_phase_6_fix_d() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Build a deep tree that contains no TypeParam matching the
+    // substituted parameter. The walker descends through every arm
+    // (Union → Object → Array → Function → Conditional) but
+    // discovers no match — the post-Fix-D fast path returns the
+    // input id at every layer without rebuild.
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let array_node = graph.intern_node(SemanticNodeData::Array {
+        element: string_node,
+        readonly: false,
+    });
+    let surface = SurfaceView {
+        members: Arc::from(
+            vec![
+                SurfaceMember {
+                    name: Arc::from("a"),
+                    value: string_node,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                },
+                SurfaceMember {
+                    name: Arc::from("b"),
+                    value: number_node,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                },
+                SurfaceMember {
+                    name: Arc::from("c"),
+                    value: array_node,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let object_node = graph.intern_node(SemanticNodeData::Object(surface));
+    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![object_node, array_node, string_node].into_boxed_slice(),
+    )));
+
+    // Substituted parameter (TypeParam K) is not present anywhere
+    // in the tree above.
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let arg_node = primitive(&graph, PrimitiveKind::Boolean);
+
+    let calls_before = graph.intern_preserving_scope_call_count();
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, arg_node);
+    let calls_after = graph.intern_preserving_scope_call_count();
+
+    // Output identity — both pre- and post-fix produce the same id
+    // (the shard dedup collapses any rebuild back to the input id).
+    assert_eq!(
+        result, union_node,
+        "no-op substitution must return the input node id"
+    );
+    // The discriminator: post-Fix-D the no-op path skips
+    // `intern_preserving_scope` for every arm. Pre-Fix-D it would
+    // rebuild every arm and increment this counter (one call per
+    // sub-walk visit that had a `intern_preserving_scope` arm).
+    assert_eq!(
+        calls_after - calls_before,
+        0,
+        "Phase 6 Fix D contract: no-op substitution must not call \
+         `intern_preserving_scope`. Pre-fix tree always rebuilt \
+         (delta > 0) and relied on shard dedup to collapse the \
+         result back to the input id; post-fix the change-tracking \
+         helper short-circuits each arm."
+    );
+}
+
+/// Phase 6 — change-tracking does NOT regress correctness when the
+/// parameter DOES appear: substitute(T → string) produces a node
+/// whose `T` references are replaced. Standard correctness check
+/// to pair with the no-op discriminator above.
+#[test]
+fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![parameter_node, string_node].into_boxed_slice(),
+    )));
+
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, string_node);
+    // Post-substitution union has both arms = string_node; structural
+    // intern dedups equivalent arms but the arm count is preserved.
+    let data = graph.node_data(result).expect("result data");
+    match data.as_ref() {
+        SemanticNodeData::Union(arms) => {
+            assert_eq!(arms.len(), 2);
+            assert_eq!(arms[0], string_node);
+            assert_eq!(arms[1], string_node);
+        }
+        other => panic!("expected substituted Union, got {other:?}"),
+    }
+    // Sanity: result id differs from union_node since the union body changed.
+    assert_ne!(
+        result, union_node,
+        "substituted union must intern to a fresh node id"
+    );
+}
+
 /// `infer` inside a closed conditional binds via the shared relation
 /// engine and emits `InferBind` edges. Worked Example C: bare-infer
 /// extends always closes the conditional, substituting `check` into
