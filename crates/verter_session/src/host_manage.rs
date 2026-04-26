@@ -8864,6 +8864,16 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
     }
+    // Phase 4B: apply the publication policy that commit `624b14d2` deleted.
+    // The pass is PURE over (resolved_type_registry, resolved_type_registry_meta);
+    // see docs/arch/debt-closure/06-step4b-consumer-surface.md.
+    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
+        &mut meta,
+        &resolved.resolved_type_registry,
+        &resolved.resolved_type_registry_meta,
+        host,
+        canonical.as_str(),
+    );
     meta
 }
 
@@ -8912,6 +8922,16 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     } else {
         None
     };
+    // Phase 4B: apply the publication policy AFTER fallthrough merge so the
+    // pass operates on the final accepted_props/events. PURE over
+    // (resolved_type_registry, resolved_type_registry_meta).
+    crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
+        &mut meta,
+        &resolved.resolved_type_registry,
+        &resolved.resolved_type_registry_meta,
+        host,
+        canonical.as_str(),
+    );
     (meta, fallthrough_facts)
 }
 

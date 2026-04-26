@@ -60,6 +60,7 @@ pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
 pub mod component_meta_host;
+pub mod component_meta_resolution_policy;
 pub mod component_meta_result_db;
 pub mod cooperative_admission;
 pub mod cross_file;
