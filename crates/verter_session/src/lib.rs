@@ -70,7 +70,7 @@ mod d_cutover_characterization_tests;
 mod deps;
 mod hash;
 pub mod host_executor;
-mod host_manage;
+pub mod host_manage;
 mod host_resolve;
 mod host_upsert;
 pub(crate) mod i64_as_decimal_string;

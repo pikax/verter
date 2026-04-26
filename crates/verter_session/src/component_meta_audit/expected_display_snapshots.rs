@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use super::{
-    CacheOutcomeKind, DispatchKeyKind, MaterializationSubject,
-    StructuredComponentMetaEvent as Event, VfsLayer,
+    CacheOutcomeKind, DispatchKeyKind, MaterializationScopeAudit, MaterializationSubject,
+    MaterializeSkipReason, ProjectionModeAudit, StructuredComponentMetaEvent as Event, VfsLayer,
 };
 use crate::types::Hash16;
 
@@ -51,6 +51,16 @@ pub const EXPECTED_FALLTHROUGH_INHERITANCE_COMPUTED: &str =
     "FallthroughInheritanceComputed(FallthroughInheritance { owner: \"/x.vue\" })";
 pub const EXPECTED_RESOLVE_IMPORTED_TYPE_ROOT: &str = "ResolveImportedTypeRoot(/types.ts::Props)";
 pub const EXPECTED_CURRENT_EVAL_STATE: &str = "CurrentEvalState(/a.ts, 999ns)";
+pub const EXPECTED_MATERIALIZE_STRUCTURE_ENTER: &str =
+    "MaterializeStructureEnter(Object#7, TopLevel, Expanded, depth=1)";
+pub const EXPECTED_MATERIALIZE_STRUCTURE_EXIT: &str =
+    "MaterializeStructureExit(Object#7, TopLevel, Expanded, Hit, 1234ns)";
+pub const EXPECTED_MATERIALIZE_STRUCTURE_POLICY_SKIP: &str =
+    "MaterializeStructurePolicySkip(Object#7, Nested, FunctionPropertyAtNested)";
+pub const EXPECTED_MATERIALIZE_STRUCTURE_CYCLE_DETECTED: &str =
+    "MaterializeStructureCycleDetected(Object#7, Nested, Expanded, depth=3)";
+pub const EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED: &str =
+    "MaterializeStructureDepthFuseTripped(Object#7, Nested, Expanded, depth=4096)";
 pub const EXPECTED_CUSTOM: &str = "Custom(test_name, key=value)";
 
 // ──────────────────────────────────────────────────────────────────
@@ -211,6 +221,51 @@ pub fn fixture_current_eval_state() -> Event {
     }
 }
 
+pub fn fixture_materialize_structure_enter() -> Event {
+    Event::MaterializeStructureEnter {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::TopLevel,
+        mode: ProjectionModeAudit::Expanded,
+        depth: 1,
+    }
+}
+
+pub fn fixture_materialize_structure_exit() -> Event {
+    Event::MaterializeStructureExit {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::TopLevel,
+        mode: ProjectionModeAudit::Expanded,
+        outcome: CacheOutcomeKind::Hit,
+        duration_ns: 1234,
+    }
+}
+
+pub fn fixture_materialize_structure_policy_skip() -> Event {
+    Event::MaterializeStructurePolicySkip {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        reason: MaterializeSkipReason::FunctionPropertyAtNested,
+    }
+}
+
+pub fn fixture_materialize_structure_cycle_detected() -> Event {
+    Event::MaterializeStructureCycleDetected {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        mode: ProjectionModeAudit::Expanded,
+        depth: 3,
+    }
+}
+
+pub fn fixture_materialize_structure_depth_fuse_tripped() -> Event {
+    Event::MaterializeStructureDepthFuseTripped {
+        base: Arc::from("Object#7"),
+        scope_axis: MaterializationScopeAudit::Nested,
+        mode: ProjectionModeAudit::Expanded,
+        depth: 4096,
+    }
+}
+
 pub fn fixture_custom() -> Event {
     // Custom justified: canonical fixture for the Display snapshot test —
     // every variant needs coverage, including Custom.
@@ -275,6 +330,26 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             EXPECTED_RESOLVE_IMPORTED_TYPE_ROOT,
         ),
         (fixture_current_eval_state(), EXPECTED_CURRENT_EVAL_STATE),
+        (
+            fixture_materialize_structure_enter(),
+            EXPECTED_MATERIALIZE_STRUCTURE_ENTER,
+        ),
+        (
+            fixture_materialize_structure_exit(),
+            EXPECTED_MATERIALIZE_STRUCTURE_EXIT,
+        ),
+        (
+            fixture_materialize_structure_policy_skip(),
+            EXPECTED_MATERIALIZE_STRUCTURE_POLICY_SKIP,
+        ),
+        (
+            fixture_materialize_structure_cycle_detected(),
+            EXPECTED_MATERIALIZE_STRUCTURE_CYCLE_DETECTED,
+        ),
+        (
+            fixture_materialize_structure_depth_fuse_tripped(),
+            EXPECTED_MATERIALIZE_STRUCTURE_DEPTH_FUSE_TRIPPED,
+        ),
         (fixture_custom(), EXPECTED_CUSTOM),
     ]
 }
@@ -320,6 +395,11 @@ mod tests {
             | Event::FallthroughInheritanceComputed { .. }
             | Event::ResolveImportedTypeRoot { .. }
             | Event::CurrentEvalState { .. }
+            | Event::MaterializeStructureEnter { .. }
+            | Event::MaterializeStructureExit { .. }
+            | Event::MaterializeStructurePolicySkip { .. }
+            | Event::MaterializeStructureCycleDetected { .. }
+            | Event::MaterializeStructureDepthFuseTripped { .. }
             | Event::Custom { .. } => (),
         };
 
@@ -342,6 +422,11 @@ mod tests {
             "FallthroughInheritanceComputed",
             "ResolveImportedTypeRoot",
             "CurrentEvalState",
+            "MaterializeStructureEnter",
+            "MaterializeStructureExit",
+            "MaterializeStructurePolicySkip",
+            "MaterializeStructureCycleDetected",
+            "MaterializeStructureDepthFuseTripped",
             "Custom",
         ];
         let covered: Vec<&'static str> = all_snapshots()
@@ -364,6 +449,15 @@ mod tests {
                 Event::FallthroughInheritanceComputed { .. } => "FallthroughInheritanceComputed",
                 Event::ResolveImportedTypeRoot { .. } => "ResolveImportedTypeRoot",
                 Event::CurrentEvalState { .. } => "CurrentEvalState",
+                Event::MaterializeStructureEnter { .. } => "MaterializeStructureEnter",
+                Event::MaterializeStructureExit { .. } => "MaterializeStructureExit",
+                Event::MaterializeStructurePolicySkip { .. } => "MaterializeStructurePolicySkip",
+                Event::MaterializeStructureCycleDetected { .. } => {
+                    "MaterializeStructureCycleDetected"
+                }
+                Event::MaterializeStructureDepthFuseTripped { .. } => {
+                    "MaterializeStructureDepthFuseTripped"
+                }
                 Event::Custom { .. } => "Custom",
             })
             .collect();

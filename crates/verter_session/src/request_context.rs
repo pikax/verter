@@ -65,6 +65,26 @@ pub struct RequestContext {
     /// `ColdAbortSwept` — a cold entry reaped during generation
     /// reconciliation.
     pub cold_aborts_swept: AtomicU64,
+    /// Per-context counter — total
+    /// `materialize_component_meta_structure` invocations observed
+    /// during the request. Plan §3.2.
+    pub materialize_structure_calls: AtomicU64,
+    /// Per-context counter — subset of `materialize_structure_calls`
+    /// satisfied by the materialiser's `MaterializeStructureDb` peek.
+    /// Plan §3.2.
+    pub materialize_structure_cache_hits: AtomicU64,
+    /// Per-context counter — lock acquisitions on the per-scope
+    /// `NodeArena` dedup index. Plan §3.2.
+    pub node_arena_lock_acquisitions: AtomicU64,
+    /// Per-context counter — lock acquisitions on the family-map
+    /// dep-signature reverse index. Plan §3.2.
+    pub family_map_lock_acquisitions: AtomicU64,
+    /// Per-context counter — times a `dep_signature` was merged into
+    /// the materialiser's `local_fence`. Plan §3.2.
+    pub dep_signature_merges: AtomicU64,
+    /// Per-context counter — subset of `dep_signature_merges` that
+    /// hit an existing intern bucket. Plan §3.2 / §7.
+    pub dep_signature_intern_hits: AtomicU64,
 }
 
 impl RequestContext {
@@ -86,6 +106,12 @@ impl RequestContext {
             sentinels: AtomicU64::new(0),
             inflight_aborted_retries: AtomicU64::new(0),
             cold_aborts_swept: AtomicU64::new(0),
+            materialize_structure_calls: AtomicU64::new(0),
+            materialize_structure_cache_hits: AtomicU64::new(0),
+            node_arena_lock_acquisitions: AtomicU64::new(0),
+            family_map_lock_acquisitions: AtomicU64::new(0),
+            dep_signature_merges: AtomicU64::new(0),
+            dep_signature_intern_hits: AtomicU64::new(0),
         })
     }
 }

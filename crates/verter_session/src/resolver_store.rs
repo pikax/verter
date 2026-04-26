@@ -442,6 +442,35 @@ impl VerterHost {
             count.saturating_add(bundle.prepared_value_decls.len() as u32)
         });
 
+        // Phase-1 §3.2 — pull per-request materialiser/storage counters
+        // off the active `RequestContext` (zero ops when no context is
+        // installed; the audit pipeline always installs one before
+        // taking this snapshot).
+        let (
+            materialize_structure_calls,
+            materialize_structure_cache_hits,
+            node_arena_lock_acquisitions,
+            family_map_lock_acquisitions,
+            dep_signature_merges,
+            dep_signature_intern_hits,
+        ) = match crate::request_context::current_request_context() {
+            Some(ctx) => (
+                ctx.materialize_structure_calls
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ctx.materialize_structure_cache_hits
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ctx.node_arena_lock_acquisitions
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ctx.family_map_lock_acquisitions
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ctx.dep_signature_merges
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                ctx.dep_signature_intern_hits
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            None => (0, 0, 0, 0, 0, 0),
+        };
+
         crate::component_meta_audit::RustStoreAudit {
             store_view_hits: u32::from(store_view.is_some()),
             store_view_misses: u32::from(store_view.is_none()),
@@ -450,6 +479,12 @@ impl VerterHost {
             imported_dependency_bytes: indexed_bytes,
             prepared_type_decls,
             prepared_value_decls,
+            materialize_structure_calls,
+            materialize_structure_cache_hits,
+            node_arena_lock_acquisitions,
+            family_map_lock_acquisitions,
+            dep_signature_merges,
+            dep_signature_intern_hits,
         }
     }
 

@@ -16,7 +16,7 @@ alias_name: string, };
 /**
  * Cache-outcome discriminator for per-event tallies.
  */
-export type CacheOutcomeKind = "Hit" | "Miss" | "JoinedWait" | "Sentinel" | "ColdBuild" | "InflightAbortedRetry" | "ColdAbortSwept";
+export type CacheOutcomeKind = "Hit" | "Miss" | "JoinedWait" | "Sentinel" | "ColdBuild" | "InflightAbortedRetry" | "ColdAbortSwept" | "Tainted";
 
 /**
  * Per-context cache-event tally. No `is_approximate` field — values
@@ -208,6 +208,15 @@ subject: MaterializationSubject,
 duration_ms: number, };
 
 /**
+ * PUB mirror of the materialiser's `MaterializationScope` axis. Kept
+ * out of `verter_session::component_meta_materialize` so audit
+ * consumers (TS bindings, harness) do not depend on the materialiser
+ * type. Plan §3.4 — must be `pub` (not `pub(crate)`) for the
+ * Phase-1 e2e test integration.
+ */
+export type MaterializationScopeAudit = "TopLevel" | "Nested";
+
+/**
  * Subject of a materialization envelope — which owner+member
  * (or other identity) the envelope covers.
  */
@@ -239,7 +248,31 @@ member: string, } } | { "FallthroughInheritance": {
 /**
  * Owner file's canonical id.
  */
-owner: string, } };
+owner: string, } } | { "Structure": { 
+/**
+ * Owner scope's canonical id (the scope the materialiser was
+ * dispatched in — `MaterializeStructureCacheKey.scope_canonical_id`).
+ */
+owner: string, 
+/**
+ * Stable display key for the input `SemanticNodeId` — see
+ * [`audit_key_for_node`].
+ */
+node_key: string, 
+/**
+ * Axis the input was lowered at.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Caller-side projection mode the materialiser ran with.
+ */
+mode: ProjectionModeAudit, } };
+
+/**
+ * Reason a `MaterializeStructurePolicySkip` event fired — captures
+ * the policy-table arm that bailed before dispatch. Plan §3.3.
+ */
+export type MaterializeSkipReason = "FunctionPropertyAtNested" | "GenericRefWithArgsTopLevel" | "PackageRefTopLevel" | "RegistryRouteNotInlineMaterialisable" | "NonStructuralTopLevel";
 
 /**
  * Named-type identity projection — `(canonical, symbol, args)` triple
@@ -378,6 +411,13 @@ name: string, } } | { "Index": {
  * Literal key used as the index.
  */
 key: string, } } | "KeyOf";
+
+/**
+ * PUB mirror of `verter_session::semantic_query::ProjectionMode`. Same
+ * rationale as [`MaterializationScopeAudit`] — keeps audit consumers
+ * independent of the dispatch types. Plan §3.4.
+ */
+export type ProjectionModeAudit = "Identity" | "Navigate" | "Shallow" | "Expanded";
 
 /**
  * One projection step (indexed-access / member-access / keyof / …).
@@ -650,7 +690,38 @@ prepared_type_decls: number,
 /**
  * Prepared value declarations.
  */
-prepared_value_decls: number, };
+prepared_value_decls: number, 
+/**
+ * Total `materialize_component_meta_structure` invocations
+ * observed during the request. Plan §3.2.
+ */
+materialize_structure_calls: string, 
+/**
+ * Subset of `materialize_structure_calls` that were satisfied by
+ * the materialiser's `MaterializeStructureDb` peek (warm cache
+ * hit). Plan §3.2.
+ */
+materialize_structure_cache_hits: string, 
+/**
+ * Lock acquisitions on the per-scope `NodeArena` dedup index.
+ * Plan §3.2.
+ */
+node_arena_lock_acquisitions: string, 
+/**
+ * Lock acquisitions on the family-map dep-signature reverse
+ * index. Plan §3.2.
+ */
+family_map_lock_acquisitions: string, 
+/**
+ * Times a `dep_signature` was merged into the materialiser's
+ * `local_fence`. Plan §3.2.
+ */
+dep_signature_merges: string, 
+/**
+ * Subset of `dep_signature_merges` that hit an existing intern
+ * bucket (avoided allocation). Plan §3.2 / §7.
+ */
+dep_signature_intern_hits: string, };
 
 /**
  * Phase timings in milliseconds.
@@ -854,7 +925,89 @@ canonical_id: string,
 /**
  * Wall-clock duration (ns).
  */
-duration_ns: string, } } | { "Custom": { 
+duration_ns: string, } } | { "MaterializeStructureEnter": { 
+/**
+ * Stable display key for the input `SemanticNodeId`.
+ */
+base: string, 
+/**
+ * Axis the input was lowered at.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Caller-side projection mode the materialiser ran with.
+ */
+mode: ProjectionModeAudit, 
+/**
+ * Materialiser stack depth at the entry (post-increment).
+ */
+depth: number, } } | { "MaterializeStructureExit": { 
+/**
+ * Stable display key for the input `SemanticNodeId`.
+ */
+base: string, 
+/**
+ * Axis the input was lowered at.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Caller-side projection mode the materialiser ran with.
+ */
+mode: ProjectionModeAudit, 
+/**
+ * Cache outcome recorded for the materialiser entry.
+ * `Tainted` discriminates depth-fuse and scope-unloaded
+ * outcomes from regular Hit/Miss.
+ */
+outcome: CacheOutcomeKind, 
+/**
+ * Wall-clock duration (ns).
+ */
+duration_ns: string, } } | { "MaterializeStructurePolicySkip": { 
+/**
+ * Stable display key for the input `SemanticNodeId`.
+ */
+base: string, 
+/**
+ * Axis the input was at when the gate fired.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Specific policy arm that bailed.
+ */
+reason: MaterializeSkipReason, } } | { "MaterializeStructureCycleDetected": { 
+/**
+ * Stable display key for the input `SemanticNodeId`.
+ */
+base: string, 
+/**
+ * Axis the input was at when the cycle was detected.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Caller-side projection mode the materialiser ran with.
+ */
+mode: ProjectionModeAudit, 
+/**
+ * Materialiser stack depth at detection.
+ */
+depth: number, } } | { "MaterializeStructureDepthFuseTripped": { 
+/**
+ * Stable display key for the input `SemanticNodeId`.
+ */
+base: string, 
+/**
+ * Axis the input was at when the fuse tripped.
+ */
+scope_axis: MaterializationScopeAudit, 
+/**
+ * Caller-side projection mode the materialiser ran with.
+ */
+mode: ProjectionModeAudit, 
+/**
+ * Materialiser stack depth at trip.
+ */
+depth: number, } } | { "Custom": { 
 /**
  * Short identifier for the event kind.
  */

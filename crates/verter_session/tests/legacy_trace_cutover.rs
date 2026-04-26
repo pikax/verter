@@ -278,10 +278,20 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
         .join("host_manage.rs");
     let text = read_file(&host_manage);
     // Find the push_structured_event fn body and check it has no
-    // stderr/file writes.
-    let Some(start) = text.find("pub(crate) fn push_structured_event(") else {
+    // stderr/file writes. Visibility is irrelevant to the no-I/O
+    // contract; locate by signature suffix only.
+    let signature_suffix = " fn push_structured_event(";
+    let Some(suffix_offset) = text.find(signature_suffix) else {
         panic!("push_structured_event not found in host_manage.rs");
     };
+    // Walk back to the start of the line so the snippet captures the
+    // visibility prefix and the surrounding context (matching the
+    // historical 800-char window).
+    let line_start = text[..suffix_offset]
+        .rfind('\n')
+        .map(|n| n + 1)
+        .unwrap_or(0);
+    let start = line_start;
     // Take from function start to end of its body (matching braces).
     // Simple heuristic: take next 500 chars; if a violation is there
     // it will surface.

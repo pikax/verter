@@ -145,6 +145,37 @@ pub struct RustStoreAudit {
     pub prepared_type_decls: u32,
     /// Prepared value declarations.
     pub prepared_value_decls: u32,
+    /// Total `materialize_component_meta_structure` invocations
+    /// observed during the request. Plan §3.2.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub materialize_structure_calls: u64,
+    /// Subset of `materialize_structure_calls` that were satisfied by
+    /// the materialiser's `MaterializeStructureDb` peek (warm cache
+    /// hit). Plan §3.2.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub materialize_structure_cache_hits: u64,
+    /// Lock acquisitions on the per-scope `NodeArena` dedup index.
+    /// Plan §3.2.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub node_arena_lock_acquisitions: u64,
+    /// Lock acquisitions on the family-map dep-signature reverse
+    /// index. Plan §3.2.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub family_map_lock_acquisitions: u64,
+    /// Times a `dep_signature` was merged into the materialiser's
+    /// `local_fence`. Plan §3.2.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub dep_signature_merges: u64,
+    /// Subset of `dep_signature_merges` that hit an existing intern
+    /// bucket (avoided allocation). Plan §3.2 / §7.
+    #[serde(default, with = "crate::u64_as_decimal_string")]
+    #[ts(type = "string")]
+    pub dep_signature_intern_hits: u64,
 }
 
 /// Memory snapshots.
@@ -822,6 +853,86 @@ pub enum MaterializationSubject {
         /// Owner file's canonical id.
         owner: Arc<str>,
     },
+    /// Generic structural materialisation envelope. Subject of every
+    /// `materialize_component_meta_structure` invocation. Plan §3.4.
+    Structure {
+        /// Owner scope's canonical id (the scope the materialiser was
+        /// dispatched in — `MaterializeStructureCacheKey.scope_canonical_id`).
+        owner: Arc<str>,
+        /// Stable display key for the input `SemanticNodeId` — see
+        /// [`audit_key_for_node`].
+        node_key: Arc<str>,
+        /// Axis the input was lowered at.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+    },
+}
+
+/// PUB mirror of the materialiser's `MaterializationScope` axis. Kept
+/// out of `verter_session::component_meta_materialize` so audit
+/// consumers (TS bindings, harness) do not depend on the materialiser
+/// type. Plan §3.4 — must be `pub` (not `pub(crate)`) for the
+/// Phase-1 e2e test integration.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum MaterializationScopeAudit {
+    /// Top-level entry — input came from a caller's first
+    /// `materialize_component_meta_structure` invocation.
+    TopLevel,
+    /// Nested entry — input came from a parent materialise frame
+    /// recursing into a child shape.
+    Nested,
+}
+
+/// PUB mirror of `verter_session::semantic_query::ProjectionMode`. Same
+/// rationale as [`MaterializationScopeAudit`] — keeps audit consumers
+/// independent of the dispatch types. Plan §3.4.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum ProjectionModeAudit {
+    /// Identity — pass-through, no projection.
+    Identity,
+    /// Navigate — preserve carriers, no expansion.
+    Navigate,
+    /// Shallow — expose one level of surface members.
+    Shallow,
+    /// Expanded — recursively materialize.
+    Expanded,
+}
+
+impl From<crate::semantic_query::ProjectionMode> for ProjectionModeAudit {
+    fn from(m: crate::semantic_query::ProjectionMode) -> Self {
+        match m {
+            crate::semantic_query::ProjectionMode::Identity => Self::Identity,
+            crate::semantic_query::ProjectionMode::Navigate => Self::Navigate,
+            crate::semantic_query::ProjectionMode::Shallow => Self::Shallow,
+            crate::semantic_query::ProjectionMode::Expanded => Self::Expanded,
+        }
+    }
+}
+
+/// Reason a `MaterializeStructurePolicySkip` event fired — captures
+/// the policy-table arm that bailed before dispatch. Plan §3.3.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]
+#[ts(export, export_to = "audit.generated.ts")]
+pub enum MaterializeSkipReason {
+    /// Object-property lookup hit a function-typed property at
+    /// `Nested` depth — function bodies are not materialised through
+    /// member position.
+    FunctionPropertyAtNested,
+    /// Top-level generic ref carried explicit type arguments —
+    /// reserved for the dedicated InstantiationRef arm.
+    GenericRefWithArgsTopLevel,
+    /// Top-level ref resolved to a node under `node_modules/` —
+    /// package types are kept opaque.
+    PackageRefTopLevel,
+    /// Registry-route check rejected the input as not inline-
+    /// materializable (e.g., `Pick`/`Omit` over a non-bare root).
+    RegistryRouteNotInlineMaterialisable,
+    /// Top-level input shape is non-structural (primitive, literal,
+    /// type-param, etc.) — nothing to materialise.
+    NonStructuralTopLevel,
 }
 
 /// Dispatch key kind — semantic-query cache key discriminator.
@@ -862,6 +973,11 @@ pub enum CacheOutcomeKind {
     InflightAbortedRetry,
     /// Cold entry reaped during generation reconciliation.
     ColdAbortSwept,
+    /// Path-dependent outcome — the materialiser's depth fuse
+    /// tripped, the owner scope was unloaded mid-compute, or a
+    /// dispatch sub-call returned `Recursive`. Non-cacheable;
+    /// propagates upward as `MaterializeOutcome::Tainted`. Plan §3.3.
+    Tainted,
 }
 
 /// Which VFS layer served the read — mirrored from the workspace's
@@ -1244,6 +1360,91 @@ pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: Hash16) {
             whole_hash,
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stable display key for SemanticNodeId — plan §3.5
+// ---------------------------------------------------------------------------
+
+/// Produce a deterministic, human-readable key for a
+/// [`SemanticNodeId`] suitable for audit trace output and
+/// `MaterializationSubject::Structure.node_key` field. Plan §3.5.
+///
+/// The key is deterministic under one project generation: identical
+/// `(graph, id)` pairs produce identical strings. The format favours
+/// recognisability (variant tag + identity-bearing fields) over
+/// minimality — audit consumers grep these keys.
+///
+/// Returns `<unknown:{id}>` when the id has not been interned in
+/// `graph` (defensive: an audit lookup must not panic on a stale
+/// id from a prior generation).
+#[must_use]
+pub fn audit_key_for_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    id: crate::semantic_query::SemanticNodeId,
+) -> Arc<str> {
+    use crate::semantic_query::{IndexKey, LiteralValue, SemanticNodeData};
+    let Some(data) = graph.node_data(id) else {
+        return Arc::from(format!("<unknown:{}>", id.0));
+    };
+    let label = match data.as_ref() {
+        SemanticNodeData::Alias(inner) => format!("Alias({})", inner.0),
+        SemanticNodeData::Object(_) => format!("Object#{}", id.0),
+        SemanticNodeData::Union(arms) => format!("Union[{}]", arms.len()),
+        SemanticNodeData::Intersection(arms) => format!("Intersection[{}]", arms.len()),
+        SemanticNodeData::Primitive(p) => format!("Primitive({p:?})"),
+        SemanticNodeData::Literal(LiteralValue::String(s)) => format!("Literal(\"{s}\")"),
+        SemanticNodeData::Literal(other) => format!("Literal({other:?})"),
+        SemanticNodeData::Opaque(_) => format!("Opaque#{}", id.0),
+        SemanticNodeData::Array { element, readonly } => {
+            format!("Array{{element={},readonly={}}}", element.0, readonly)
+        }
+        SemanticNodeData::Tuple { elements, readonly } => {
+            format!("Tuple[{},readonly={}]", elements.len(), readonly)
+        }
+        SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        } => format!("TemplateLiteral[{}q,{}e]", quasis.len(), expressions.len()),
+        SemanticNodeData::KeyOf { base } => format!("KeyOf({})", base.0),
+        SemanticNodeData::IndexedAccess { object, index } => match index {
+            IndexKey::String(s) => format!("IndexedAccess({}[\"{}\"])", object.0, s),
+            IndexKey::Number(n) => format!("IndexedAccess({}[{}])", object.0, n),
+            IndexKey::TypeNode(n) => format!("IndexedAccess({}[<type:{}>])", object.0, n.0),
+        },
+        SemanticNodeData::Mapped { source, .. } => format!("Mapped(source={})", source.0),
+        SemanticNodeData::TypeOf { value_root, path } => format!(
+            "TypeOf({}::{},path[{}])",
+            value_root.scope.canonical_id,
+            value_root.name,
+            path.len()
+        ),
+        SemanticNodeData::TypeParam {
+            decl,
+            display_name,
+            param_index,
+            ..
+        } => format!(
+            "TypeParam({}::{}#{})",
+            decl.canonical_id, display_name, param_index
+        ),
+        SemanticNodeData::Infer { name } => format!("Infer({name})"),
+        SemanticNodeData::Conditional { distributive, .. } => {
+            format!("Conditional(distributive={distributive})")
+        }
+        SemanticNodeData::VueMacroElements(_) => format!("VueMacroElements#{}", id.0),
+        SemanticNodeData::Function { params, .. } => format!("Function[{}p]", params.len()),
+        SemanticNodeData::DeclRef { identity } => {
+            format!("DeclRef({}::{})", identity.canonical_id, identity.decl_name)
+        }
+        SemanticNodeData::InstantiationRef { base, args } => format!(
+            "InstantiationRef({}::{}[{}])",
+            base.canonical_id,
+            base.decl_name,
+            args.len()
+        ),
+    };
+    Arc::from(label)
 }
 
 // ---------------------------------------------------------------------------

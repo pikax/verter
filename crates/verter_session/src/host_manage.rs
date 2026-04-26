@@ -489,11 +489,71 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
 
 /// Push a structured event into the active request's accumulator.
 /// No-op when no request context is installed.
-pub(crate) fn push_structured_event(
-    event: crate::component_meta_audit::StructuredComponentMetaEvent,
-) {
+pub fn push_structured_event(event: crate::component_meta_audit::StructuredComponentMetaEvent) {
     if let Some(acc) = crate::request_context::current_accumulator() {
         acc.push_structured_event(event);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-request counter helpers (plan §3.6)
+// ---------------------------------------------------------------------------
+//
+// Cost contract: zero ops when `current_request_context().is_none()`;
+// one `Relaxed` `fetch_add` when present. The hot-path counters never
+// take a lock and never allocate.
+
+/// Bump `materialize_structure_calls` on the current request's
+/// context. No-op without a context. Plan §3.6.
+pub fn record_materialize_structure_call() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.materialize_structure_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bump `materialize_structure_cache_hits` on the current request's
+/// context. No-op without a context. Plan §3.6.
+pub fn record_materialize_structure_cache_hit() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.materialize_structure_cache_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bump `node_arena_lock_acquisitions` on the current request's
+/// context. No-op without a context. Plan §3.6.
+pub fn record_node_arena_lock_acquisition() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.node_arena_lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bump `family_map_lock_acquisitions` on the current request's
+/// context. No-op without a context. Plan §3.6.
+pub fn record_family_map_lock_acquisition() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.family_map_lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bump `dep_signature_merges` on the current request's context.
+/// No-op without a context. Plan §3.6.
+pub fn record_dep_signature_merge() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.dep_signature_merges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bump `dep_signature_intern_hits` on the current request's context.
+/// No-op without a context. Plan §3.6.
+pub fn record_dep_signature_intern_hit() {
+    if let Some(ctx) = crate::request_context::current_request_context() {
+        ctx.dep_signature_intern_hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

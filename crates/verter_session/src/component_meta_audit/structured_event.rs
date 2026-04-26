@@ -22,7 +22,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{DispatchKeyKind, MaterializationSubject, VfsLayer};
+use super::{
+    CacheOutcomeKind, DispatchKeyKind, MaterializationScopeAudit, MaterializationSubject,
+    MaterializeSkipReason, ProjectionModeAudit, VfsLayer,
+};
 use crate::types::Hash16;
 
 /// Typed structured event emitted by the component-meta call chain.
@@ -95,7 +98,7 @@ pub enum StructuredComponentMetaEvent {
         /// Kind of dispatch key that was resolved.
         key_kind: DispatchKeyKind,
         /// Cache outcome recorded for the dispatch.
-        outcome: super::CacheOutcomeKind,
+        outcome: CacheOutcomeKind,
         /// Wall-clock duration in nanoseconds (decimal-string transport).
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
@@ -154,6 +157,68 @@ pub enum StructuredComponentMetaEvent {
         #[serde(with = "crate::u64_as_decimal_string")]
         #[ts(type = "string")]
         duration_ns: u64,
+    },
+    /// Entering `materialize_component_meta_structure`. Plan §3.3.
+    MaterializeStructureEnter {
+        /// Stable display key for the input `SemanticNodeId`.
+        base: Arc<str>,
+        /// Axis the input was lowered at.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at the entry (post-increment).
+        depth: u16,
+    },
+    /// Leaving `materialize_component_meta_structure`. Plan §3.3.
+    MaterializeStructureExit {
+        /// Stable display key for the input `SemanticNodeId`.
+        base: Arc<str>,
+        /// Axis the input was lowered at.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Cache outcome recorded for the materialiser entry.
+        /// `Tainted` discriminates depth-fuse and scope-unloaded
+        /// outcomes from regular Hit/Miss.
+        outcome: CacheOutcomeKind,
+        /// Wall-clock duration (ns).
+        #[serde(with = "crate::u64_as_decimal_string")]
+        #[ts(type = "string")]
+        duration_ns: u64,
+    },
+    /// Policy gate fired before dispatch — input was rejected by
+    /// shape policy. Plan §3.3.
+    MaterializeStructurePolicySkip {
+        /// Stable display key for the input `SemanticNodeId`.
+        base: Arc<str>,
+        /// Axis the input was at when the gate fired.
+        scope_axis: MaterializationScopeAudit,
+        /// Specific policy arm that bailed.
+        reason: MaterializeSkipReason,
+    },
+    /// Same-key re-entry detected on the materialiser's thread-local
+    /// in-flight stack. Plan §3.3.
+    MaterializeStructureCycleDetected {
+        /// Stable display key for the input `SemanticNodeId`.
+        base: Arc<str>,
+        /// Axis the input was at when the cycle was detected.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at detection.
+        depth: u16,
+    },
+    /// Defensive depth fuse tripped (input depth exceeded the
+    /// materialiser's hard cap). Plan §3.3.
+    MaterializeStructureDepthFuseTripped {
+        /// Stable display key for the input `SemanticNodeId`.
+        base: Arc<str>,
+        /// Axis the input was at when the fuse tripped.
+        scope_axis: MaterializationScopeAudit,
+        /// Caller-side projection mode the materialiser ran with.
+        mode: ProjectionModeAudit,
+        /// Materialiser stack depth at trip.
+        depth: u16,
     },
     /// Escape hatch for ad-hoc events. Every construction site MUST
     /// carry a `// Custom justified: <reason>` comment — the grep
@@ -271,6 +336,51 @@ impl std::fmt::Display for StructuredComponentMetaEvent {
             } => {
                 write!(f, "CurrentEvalState({canonical_id}, {duration_ns}ns)")
             }
+            Self::MaterializeStructureEnter {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureEnter({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
+            Self::MaterializeStructureExit {
+                base,
+                scope_axis,
+                mode,
+                outcome,
+                duration_ns,
+            } => write!(
+                f,
+                "MaterializeStructureExit({base}, {scope_axis:?}, {mode:?}, {outcome:?}, {duration_ns}ns)"
+            ),
+            Self::MaterializeStructurePolicySkip {
+                base,
+                scope_axis,
+                reason,
+            } => write!(
+                f,
+                "MaterializeStructurePolicySkip({base}, {scope_axis:?}, {reason:?})"
+            ),
+            Self::MaterializeStructureCycleDetected {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureCycleDetected({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
+            Self::MaterializeStructureDepthFuseTripped {
+                base,
+                scope_axis,
+                mode,
+                depth,
+            } => write!(
+                f,
+                "MaterializeStructureDepthFuseTripped({base}, {scope_axis:?}, {mode:?}, depth={depth})"
+            ),
             Self::Custom { name, detail } => write!(f, "Custom({name}, {detail})"),
         }
     }
