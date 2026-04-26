@@ -371,7 +371,7 @@ fn dump_record(out_dir: &Path, pass: &str, slug: &str, record: &RustAuditRecord)
     // Replace path separators in slug with `--` so nested components
     // (e.g. `prose/PCallout`) produce flat files like
     // `prose--PCallout.json` and we don't need to mkdir parents.
-    let flat_slug = slug.replace('/', "--").replace('\\', "--");
+    let flat_slug = slug.replace(['/', '\\'], "--");
     let dir = out_dir.join(pass);
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{flat_slug}.json"));

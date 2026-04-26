@@ -190,7 +190,7 @@ fn dispatch_lowering_concurrent_does_not_regress() {
     // weaker contract — no thundering-herd-style collapse where the
     // host DB is fully serialized and each thread blocks on every
     // other thread.
-    let limit = (seq_ns as u128).saturating_mul(20).max(HARD_CAP_NS);
+    let limit = seq_ns.saturating_mul(20).max(HARD_CAP_NS);
     assert!(
         concurrent_ns <= limit,
         "concurrent {concurrent_ns} ns exceeds 20× sequential {seq_ns} ns (limit {limit}) — \
@@ -236,7 +236,7 @@ fn dispatch_lowering_thundering_herd_does_not_collapse() {
     // warm joins. We assert the elapsed is < 10× a single warm query
     // (loose bound to avoid flakiness; tightens the more we trust the
     // primitive).
-    let limit = (baseline_ns as u128).saturating_mul(10).max(HARD_CAP_NS);
+    let limit = baseline_ns.saturating_mul(10).max(HARD_CAP_NS);
     assert!(
         elapsed_ns < limit,
         "32-thread thundering herd took {elapsed_ns} ns vs limit {limit} ns — \
