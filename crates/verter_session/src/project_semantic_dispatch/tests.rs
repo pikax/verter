@@ -1638,6 +1638,192 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
     );
 }
 
+/// Phase 2 (component-meta cold-path long-tail plan §4) — Fix A
+/// regression guard. The deferred-conditional sub-dispatch in
+/// `walk.rs` must inherit the OUTER caller's mode, NOT downgrade to
+/// `ProjectionMode::Navigate`. The historical `mode_for_hop` bug
+/// would have downgraded both per-branch projections to `Navigate`,
+/// breaking outer-terminal expansion semantics for paths like
+/// `(T extends U ? A : B)["x"]` under `mode: Expanded`.
+///
+/// **Discrimination by source grep, not runtime cache peek.** The
+/// memo's broader-satisfies-narrower backfill (Expanded → Shallow →
+/// Navigate → Identity, see `backfill_targets`) means a single
+/// Expanded write populates every narrower slot for the same
+/// `(family)`. A runtime peek therefore cannot distinguish
+/// "Expanded-mode sub-dispatch backfilling Navigate" from
+/// "Navigate-mode sub-dispatch directly populating Navigate" — the
+/// observable cache state matches in both cases. The only sound
+/// regression mechanism is to assert the source code itself: both
+/// per-branch sub-dispatch sites in the `Conditional` arm of
+/// `advance_step` must pass `mode: self.mode`.
+///
+/// **TDD discriminating contract.** Pre-fix tree (`mode: ProjectionMode::Navigate`
+/// hardcoded, or `mode: mode_for_hop(...)` returning Navigate): test
+/// FAILS — the literal `mode: self.mode` does not appear inside the
+/// captured `Conditional` arm window. Post-fix tree (current state):
+/// test PASSES — both per-branch dispatches carry `mode: self.mode`.
+#[test]
+fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode_phase_2_fix_a() {
+    let walk_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("project_semantic_dispatch")
+        .join("walk.rs");
+    let source =
+        std::fs::read_to_string(&walk_path).unwrap_or_else(|e| panic!("read `{walk_path:?}`: {e}"));
+
+    // Locate the `SemanticNodeData::Conditional { ... } => {` handler
+    // inside `advance_step`. Pin it by the unique field-list signature
+    // so a future rename of the variant does not silently disable the
+    // assertion.
+    let signature = "SemanticNodeData::Conditional {\n";
+    let arm_start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("Conditional arm signature not found in `{walk_path:?}`"));
+
+    // The handler body extends until the next `SemanticNodeData::` arm
+    // header (every walker arm starts that way). Use that as a precise
+    // upper bound — the captured window covers exactly the Conditional
+    // body, no neighbours.
+    let arm_body_start = arm_start + signature.len();
+    let next_arm_offset = source[arm_body_start..]
+        .find("SemanticNodeData::")
+        .unwrap_or_else(|| {
+            panic!(
+                "could not locate next `SemanticNodeData::` arm after Conditional in `{walk_path:?}`"
+            )
+        });
+    let window = &source[arm_start..arm_body_start + next_arm_offset];
+
+    // Both per-branch `ProjectPath` sub-dispatches must carry the
+    // OUTER caller's mode. The conditional handler distributes the
+    // remaining path into both branches; the per-branch dispatches
+    // must read `mode: self.mode` so the outer-terminal contract is
+    // preserved.
+    let mode_self_count = window.matches("mode: self.mode").count();
+    assert!(
+        mode_self_count >= 2,
+        "Conditional arm in walk.rs must contain at least two `mode: self.mode` \
+         sub-dispatches (one per branch). Found {mode_self_count}. Window:\n{window}"
+    );
+
+    // No per-branch dispatch may hardcode a different mode. The
+    // historical bug threaded `mode_for_hop(...)` (returning Navigate)
+    // — both that helper and any literal `mode: ProjectionMode::Navigate`
+    // / `mode: ProjectionMode::Identity` / `mode: ProjectionMode::Shallow`
+    // would defeat the outer-terminal contract.
+    for forbidden in [
+        "mode: mode_for_hop",
+        "mode: ProjectionMode::Navigate",
+        "mode: ProjectionMode::Identity",
+        "mode: ProjectionMode::Shallow",
+    ] {
+        assert!(
+            !window.contains(forbidden),
+            "Conditional arm must not hardcode `{forbidden}` for sub-dispatch — \
+             the outer caller's `self.mode` is the load-bearing terminal mode \
+             (Phase 2 Fix A). Window:\n{window}"
+        );
+    }
+
+    // Cross-check at runtime: dispatching a path through a deferred
+    // conditional with mode=Expanded must succeed and produce a
+    // wrapper Conditional referencing the per-branch projections.
+    // (Behavioural smoke test; primary assertion is the source-grep
+    // above. This part rules out total breakage in the dispatch path.)
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let foo = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Foo"),
+    });
+    let bar = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Bar"),
+    });
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let true_surface = SurfaceView {
+        members: Arc::from(
+            vec![SurfaceMember {
+                name: Arc::from("x"),
+                value: string_node,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let false_surface = SurfaceView {
+        members: Arc::from(
+            vec![SurfaceMember {
+                name: Arc::from("x"),
+                value: number_node,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let true_branch = graph.intern_node(SemanticNodeData::Object(true_surface));
+    let false_branch = graph.intern_node(SemanticNodeData::Object(false_surface));
+    let conditional_node = match dispatch.execute(SemanticQueryKey::Conditional {
+        check: foo,
+        extends: bar,
+        true_branch,
+        false_branch,
+        distributive: false,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected deferred Conditional Value, got {other:?}"),
+    };
+    let outer_mode = ProjectionMode::Expanded;
+    let path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("x"))].into_boxed_slice());
+    let result_id = match dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: conditional_node,
+        path: Arc::clone(&path),
+        mode: outer_mode,
+    }) {
+        QueryResult::Value(id) => id,
+        other => panic!("expected ProjectPath Value, got {other:?}"),
+    };
+    // Result is a wrapper Conditional whose branch refs are the two
+    // per-branch projections (string_node and number_node). This
+    // confirms the conditional handler ran and the per-branch
+    // dispatches resolved.
+    match graph.node_data(result_id).expect("result node").as_ref() {
+        SemanticNodeData::Conditional {
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => {
+            assert_eq!(*true_branch_ref, string_node);
+            assert_eq!(*false_branch_ref, number_node);
+        }
+        other => panic!("expected wrapper Conditional in result, got {other:?}"),
+    }
+}
+
 /// `infer` inside a closed conditional binds via the shared relation
 /// engine and emits `InferBind` edges. Worked Example C: bare-infer
 /// extends always closes the conditional, substituting `check` into
