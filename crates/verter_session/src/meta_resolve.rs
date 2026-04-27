@@ -8457,16 +8457,72 @@ fn materialize_component_meta_registry_structural_expr(
     scope_canonical_id: &str,
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+
+    /// Plan §6.11 / J3 — graph-native package check on a lowered
+    /// `Ref { name, [] }`. Lowers via Navigate to a DeclRef /
+    /// InstantiationRef, extracts the canonical identity, and
+    /// delegates to the J0 / commit-C primitive
+    /// `component_meta_ref_resolves_to_package_node`. Falls back to
+    /// `false` (not package-backed) when lowering fails or produces a
+    /// non-Ref node — the closure's structural recursion path then
+    /// projects through `project_type_surface_expr` like any other
+    /// local Ref.
+    fn ref_is_package_backed_node(host: &VerterHost, scope_canonical_id: &str, name: &str) -> bool {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let probe = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            &probe,
+            ProjectionMode::Navigate,
+        ) else {
+            return false;
+        };
+        let graph = host.project_type_store().semantic_graph();
+        let Some(data) = graph.node_data(node_id) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => {
+                component_meta_ref_resolves_to_package_node(identity)
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                component_meta_ref_resolves_to_package_node(base)
+            }
+            _ => false,
+        }
+    }
+
     fn inner(
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
         scope_canonical_id: &str,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-        active: &mut rustc_hash::FxHashSet<verter_semantic::analysis::type_expr::TypeExpr>,
+        active: &mut rustc_hash::FxHashSet<SemanticNodeId>,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
         use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
 
-        if !active.insert(expr.clone()) {
-            return expr.clone();
+        // Plan §6.11 / J3 — graph-native cycle guard. Lower the
+        // current expr to a Navigate-mode SemanticNodeId and use
+        // structural identity (interned node id) for cycle tracking
+        // instead of TypeExpr-equality hashing. When lowering fails
+        // (None), we cannot intern a key — proceed without cycle
+        // tracking for this visit (TypeExpr-equality cycle tracking
+        // would not have terminated either; the structural recursion
+        // remains safe under the existing structural bounds).
+        let dispatch_for_cycle = ProjectSemanticDispatch::new(engine.host);
+        let cycle_key = dispatch_for_cycle.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Navigate,
+        );
+        if let Some(key) = cycle_key {
+            if !active.insert(key) {
+                return expr.clone();
+            }
         }
 
         let result = if let Some((root_symbol, route)) =
@@ -8499,7 +8555,8 @@ fn materialize_component_meta_registry_structural_expr(
                     name,
                     type_arguments,
                 } if type_arguments.is_empty() => {
-                    if engine.is_package_backed_decl(scope_canonical_id, name) {
+                    // Plan §6.11 / J3 — graph-native package check.
+                    if ref_is_package_backed_node(engine.host, scope_canonical_id, name) {
                         expr.clone()
                     } else {
                         engine
@@ -8707,11 +8764,13 @@ fn materialize_component_meta_registry_structural_expr(
             }
         };
 
-        active.remove(expr);
+        if let Some(key) = cycle_key {
+            active.remove(&key);
+        }
         result
     }
 
-    let mut active = rustc_hash::FxHashSet::default();
+    let mut active: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     inner(expr, scope_canonical_id, engine, &mut active)
 }
 

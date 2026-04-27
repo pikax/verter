@@ -11303,4 +11303,113 @@ defineProps<{ value: Foo }>()
         // pathological recursion. Either way, must not panic.
         let _ = type_node_has_package_backed_root(graph, current, 0);
     }
+
+    /// Plan §6.11 / J3 — refactored
+    /// `materialize_component_meta_registry_structural_expr` (inner
+    /// closure migrated to graph-native cycle tracking). Equivalence
+    /// fixture: package-backed `Ref { name, [] }` short-circuits
+    /// (returns the input unchanged), local `Ref { name, [] }`
+    /// projects through `project_type_surface_expr` (returns the
+    /// projected surface). Tests both branches of the no-args Ref
+    /// arm where the package check landed graph-native.
+    #[test]
+    fn registry_structural_expr_handles_package_vs_local_no_args_ref() {
+        use crate::meta_resolve::materialize_component_meta_registry_structural_expr;
+        use crate::resolver_core::ComponentMetaQueryEngine;
+        use std::sync::Arc as StdArc;
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        let project = make_project();
+        // Local interface — projects through surface.
+        project
+            .upsert_base(
+                "/local.ts",
+                "export interface LocalLeaf { x: number; y: string }",
+            )
+            .unwrap();
+        // Package-backed type — must short-circuit (stay symbolic).
+        project
+            .upsert_base(
+                "/node_modules/some-pkg/index.d.ts",
+                "export interface FromPkg { p: number }",
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { LocalLeaf } from './local'
+import type { FromPkg } from 'some-pkg'
+defineProps<{ a: LocalLeaf; b: FromPkg }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+        project.host().set_import_dependencies(
+            "/Owner.vue",
+            vec![
+                crate::types::DependencyResolution {
+                    specifier: "./local".to_string(),
+                    resolved_canonical_id: Some("/local.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::types::DependencyResolution {
+                    specifier: "some-pkg".to_string(),
+                    resolved_canonical_id: Some("/node_modules/some-pkg/index.d.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+        let host = session.host();
+        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        // Package-backed `FromPkg` — short-circuits unchanged.
+        // Discriminating assertion: the result MUST be exactly the
+        // input Ref (cloned). If the refactor accidentally inverts the
+        // package check or skips it, FromPkg would be projected and
+        // fail this assertion.
+        let pkg_ref = TypeExpr::Ref {
+            name: StdArc::from("FromPkg"),
+            type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+        };
+        let materialized_pkg = materialize_component_meta_registry_structural_expr(
+            &pkg_ref,
+            "/Owner.vue",
+            &mut engine,
+        );
+        assert_eq!(
+            materialized_pkg, pkg_ref,
+            "package-backed Ref must short-circuit unchanged; \
+             refactor regression if this fails (e.g., inverted package check)"
+        );
+
+        // Local `LocalLeaf` — must NOT short-circuit to itself; must
+        // produce SOMETHING different from the input (either projected
+        // Object surface or whatever the projection returns). The key
+        // discriminator: local refs do NOT use the package short-circuit
+        // path. If the refactor accidentally treats local refs as
+        // package-backed, this assertion fails.
+        let local_ref = TypeExpr::Ref {
+            name: StdArc::from("LocalLeaf"),
+            type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+        };
+        let materialized_local = materialize_component_meta_registry_structural_expr(
+            &local_ref,
+            "/Owner.vue",
+            &mut engine,
+        );
+        // Local Ref should project through the surface API; since
+        // LocalLeaf is a real interface, project_type_surface_expr
+        // returns the Object surface, so materialized_local must NOT
+        // be the input Ref unchanged.
+        assert_ne!(
+            materialized_local, local_ref,
+            "local LocalLeaf with projectable interface body must NOT \
+             short-circuit unchanged — refactor regression if this fails \
+             (e.g., local refs misclassified as package-backed)"
+        );
+    }
 }
