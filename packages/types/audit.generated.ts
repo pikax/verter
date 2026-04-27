@@ -272,7 +272,7 @@ mode: ProjectionModeAudit, } };
  * Reason a `MaterializeStructurePolicySkip` event fired — captures
  * the policy-table arm that bailed before dispatch. Plan §3.3.
  */
-export type MaterializeSkipReason = "FunctionPropertyAtNested" | "GenericRefWithArgsTopLevel" | "PackageRefTopLevel" | "RegistryRouteNotInlineMaterialisable" | "NonStructuralTopLevel";
+export type MaterializeSkipReason = "FunctionPropertyAtNested" | "GenericRefWithArgsTopLevel" | "PackageRefTopLevel" | "RegistryRouteNotInlineMaterialisable" | "NonStructuralTopLevel" | "RegistryRouteCycleGuard" | "RecursiveHelperCycleGuard";
 
 /**
  * Named-type identity projection — `(canonical, symbol, args)` triple

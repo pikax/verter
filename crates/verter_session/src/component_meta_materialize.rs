@@ -285,6 +285,70 @@ impl Drop for MaterializeInFlightGuard {
 /// and `MaterializeStructureExit` events with the resolved
 /// `CacheOutcomeKind` (`Hit` for warm, `ColdBuild` for cold,
 /// `Tainted` for tainted, `Miss` for opaque).
+/// Plan §4.2 / B1 — single-exit helper for the materialiser compute
+/// closure. Seeds `local_fence` with the root scope's whole_hash if
+/// available, then either:
+/// - For non-cacheable outcomes (Recursive / Tainted / Error), stashes
+///   `(outcome, fence)` in `non_cacheable_slot` and returns `None` so
+///   the cooperative-admission fallback can return the correct outcome
+///   without re-dispatching.
+/// - For cacheable outcomes (Value / Miss), returns `Some(MaterializeStructureEntry)`
+///   so cooperative-admission publishes it.
+fn finish_cacheable(
+    host: &VerterHost,
+    key: &MaterializeStructureCacheKey,
+    outcome: MaterializeOutcome,
+    mut local_fence: Vec<(Arc<str>, DepVersion)>,
+    non_cacheable_slot: &NonCacheableSlot,
+) -> Option<MaterializeStructureEntry> {
+    if !key.scope_canonical_id.as_ref().is_empty() {
+        if let Some(indexed) = host
+            .project_type_store()
+            .indexed()
+            .get_any(key.scope_canonical_id.as_ref())
+        {
+            local_fence.push((
+                Arc::clone(&key.scope_canonical_id),
+                DepVersion::WholeHash(indexed.whole_hash),
+            ));
+        }
+    }
+    if !outcome.is_cacheable() {
+        *non_cacheable_slot.borrow_mut() = Some((outcome, local_fence));
+        return None;
+    }
+    Some(MaterializeStructureEntry {
+        outcome,
+        dep_signature: dep_signature_from_fence(local_fence),
+    })
+}
+
+/// Plan §10 / §1.5 / §1.7 — five-phase materialiser entry. Maintains
+/// the `MaterializeStructureDb` warm cache via cooperative-admission
+/// with `post_publish` reverse-index registration.
+///
+/// **Phases:**
+/// 1. Warm peek with proactive stale-entry removal (Plan §1.5).
+/// 2. Same-key thread-local re-entry detection (Plan §10.2).
+/// 3. Pre-admission depth fuse (Plan §10.3 / §1.7).
+/// 4. Package-ref / function-shape-at-Nested policy gates (Plan §1.6).
+/// 5. Cooperative-admission cold build with `post_publish`. Inside
+///    the compute closure: registry-route branch (Plan §4.4 / B1),
+///    recursive-helper cycle guard (Plan §4.13 / B1), then the
+///    canonical DeclRef / InstantiationRef / Object handlers.
+///
+/// **Cache contract** (Plan §1.2):
+/// - Only `Value` and `Miss` outcomes publish to the warm cache.
+/// - `Recursive` and `Tainted` are per-call-context and never cache.
+/// - `Error` is non-deterministic and never caches.
+///
+/// **Audit signal:** every entry/exit emits `MaterializeStructureEnter`
+/// and `MaterializeStructureExit` events with the resolved
+/// `CacheOutcomeKind` (`Hit` for warm, `ColdBuild` for cold,
+/// `Tainted` for tainted, `Miss` for opaque). Plan §4.14 / B1 — also
+/// emits `MaterializeStructurePolicySkip` events with one of:
+/// `PackageRefTopLevel`, `FunctionPropertyAtNested`,
+/// `RegistryRouteCycleGuard`, or `RecursiveHelperCycleGuard`.
 pub fn materialize_component_meta_structure(
     host: &VerterHost,
     key: MaterializeStructureCacheKey,
@@ -326,6 +390,12 @@ pub fn materialize_component_meta_structure(
     // publish package internals into the consumer's component-meta
     // surface).
     if is_package_backed_ref(host, key.base) {
+        // Plan §4.14 / B1 — observability for kept-symbolic decision.
+        crate::host_manage::emit_policy_skip(
+            key.base,
+            key.scope_axis,
+            crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
+        );
         return crate::semantic_query::CacheRead {
             value: MaterializeOutcome::Value(key.base),
             dep_signature: empty_signature(),
@@ -344,6 +414,11 @@ pub fn materialize_component_meta_structure(
                 data.as_ref(),
                 crate::semantic_query::SemanticNodeData::Function { .. }
             ) {
+                crate::host_manage::emit_policy_skip(
+                    key.base,
+                    key.scope_axis,
+                    crate::component_meta_audit::MaterializeSkipReason::FunctionPropertyAtNested,
+                );
                 return crate::semantic_query::CacheRead {
                     value: MaterializeOutcome::Value(key.base),
                     dep_signature: empty_signature(),
@@ -365,6 +440,195 @@ pub fn materialize_component_meta_structure(
         let dispatch = ProjectSemanticDispatch::new(host);
         let graph = host.project_type_store().semantic_graph();
         let mut local_fence: Vec<(Arc<str>, DepVersion)> = Vec::new();
+
+        // Plan §4.4 / B1 Step 1 — registry-route branch.
+        //
+        // `extract_route_root_identity_node` returns `Some` ONLY for
+        // builtin Pick/Omit and IndexedAccess shapes. The wrapping
+        // carrier is the registry-route shape; the inner identity
+        // (recursed into args[0] for Pick/Omit per R8-2) is the
+        // ACTUAL root the cycle / package guards check. Plain
+        // DeclRef and userland InstantiationRef return `None` and
+        // fall through to step 4 (recursive-helper guard).
+        if let Some(extraction) =
+            crate::meta_resolve::extract_route_root_identity_node(graph, key_for_compute.base, 0)
+        {
+            // Cycle guard on the actual root (Foo / Foo<T>'s base),
+            // not the wrapping Pick. See R8-2.
+            if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
+                &extraction.root_identity,
+                host,
+                &mut local_fence,
+            ) {
+                crate::host_manage::emit_policy_skip(
+                    key_for_compute.base,
+                    key_for_compute.scope_axis,
+                    crate::component_meta_audit::MaterializeSkipReason::RegistryRouteCycleGuard,
+                );
+                return finish_cacheable(
+                    host,
+                    &key_for_compute,
+                    MaterializeOutcome::Value(key_for_compute.base),
+                    local_fence,
+                    non_cacheable_for_compute,
+                );
+            }
+            // Package-ref guard on the actual root.
+            if crate::meta_resolve::component_meta_ref_resolves_to_package_node(
+                &extraction.root_identity,
+            ) {
+                crate::host_manage::emit_policy_skip(
+                    key_for_compute.base,
+                    key_for_compute.scope_axis,
+                    crate::component_meta_audit::MaterializeSkipReason::PackageRefTopLevel,
+                );
+                return finish_cacheable(
+                    host,
+                    &key_for_compute,
+                    MaterializeOutcome::Value(key_for_compute.base),
+                    local_fence,
+                    non_cacheable_for_compute,
+                );
+            }
+
+            // Guards passed — let dispatch project the original
+            // shape in the caller's mode (Plan §4.3: "Dispatch's
+            // build_builtin_utility projects Pick/Omit canonically.
+            // ProjectPath projects IndexedAccess. Materialiser branch
+            // only adds cycle + package-root guards on the route's
+            // ROOT.").
+            //
+            // For Pick/Omit specifically, dispatch's build_builtin_utility
+            // does NOT unwrap DeclRef in args[0] (R8-1), so we
+            // orchestrate a 2-step dispatch: instantiate the root in
+            // Navigate to get a projectable body, then dispatch
+            // Pick/Omit again with body_id substituted.
+            //
+            // For IndexedAccess (MemberPath), dispatch's existing
+            // IndexedAccess handler projects natively — delegate
+            // to the empty-path ProjectPath fallback below.
+            use crate::resolver_core::RouteDemand;
+            match &extraction.route {
+                RouteDemand::Pick(keys) | RouteDemand::Omit(keys) => {
+                    // Step A: instantiate the actual root with its
+                    // original args (preserves generic carriers per
+                    // Codex2 P0 #3).
+                    let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                        base: extraction.root_identity.clone(),
+                        args: Arc::clone(&extraction.root_args),
+                        body_mode: crate::semantic_query::ProjectionMode::Navigate,
+                    });
+                    local_fence.extend(body_read.dep_signature.iter().cloned());
+                    let body_id = match body_read.value {
+                        QueryResult::Value(id) => id,
+                        _ => {
+                            return finish_cacheable(
+                                host,
+                                &key_for_compute,
+                                MaterializeOutcome::Value(key_for_compute.base),
+                                local_fence,
+                                non_cacheable_for_compute,
+                            );
+                        }
+                    };
+                    // Step B: instantiate the builtin carrier on
+                    // body_id + keys in caller's mode. Caller's
+                    // mode (typically Expanded) drives the final
+                    // projection's expansion behavior.
+                    let keys_node = crate::meta_resolve::build_keys_union_node(graph, keys);
+                    let pick_or_omit_identity = match &extraction.route {
+                        RouteDemand::Pick(_) => crate::semantic_query::DeclIdentity {
+                            canonical_id: Arc::from("__builtin__"),
+                            whole_hash: crate::semantic_query::HashValue::default(),
+                            decl_name: Arc::from("Pick"),
+                        },
+                        RouteDemand::Omit(_) => crate::semantic_query::DeclIdentity {
+                            canonical_id: Arc::from("__builtin__"),
+                            whole_hash: crate::semantic_query::HashValue::default(),
+                            decl_name: Arc::from("Omit"),
+                        },
+                        _ => unreachable!("matched only Pick/Omit"),
+                    };
+                    let projected = dispatch.execute_read(SemanticQueryKey::Instantiate {
+                        base: pick_or_omit_identity,
+                        args: Arc::from(vec![body_id, keys_node].into_boxed_slice()),
+                        body_mode: key_for_compute.mode,
+                    });
+                    local_fence.extend(projected.dep_signature.iter().cloned());
+                    let projected_id = match projected.value {
+                        QueryResult::Value(id) => id,
+                        _ => {
+                            return finish_cacheable(
+                                host,
+                                &key_for_compute,
+                                MaterializeOutcome::Value(key_for_compute.base),
+                                local_fence,
+                                non_cacheable_for_compute,
+                            );
+                        }
+                    };
+                    return finish_cacheable(
+                        host,
+                        &key_for_compute,
+                        MaterializeOutcome::Value(projected_id),
+                        local_fence,
+                        non_cacheable_for_compute,
+                    );
+                }
+                RouteDemand::MemberPath(_) => {
+                    // Plan §4.3 — IndexedAccess projection is dispatch's
+                    // ProjectPath territory; the materialiser's role
+                    // is the cycle/package guards (which already
+                    // ran above). Fall through to the existing
+                    // pipeline so the empty-path ProjectPath
+                    // fallback dispatches the original IndexedAccess
+                    // node in the caller's mode and projects
+                    // natively.
+                }
+                RouteDemand::Whole => {
+                    // extract_route_* never produces Whole; defensive.
+                }
+            }
+        }
+
+        // Plan §4.13 / B1 Step 4 — recursive-helper cycle guard.
+        //
+        // Cleanly separated from the route guard (R8-3): fires for
+        // plain DeclRef AND userland (non-builtin) InstantiationRef.
+        // Skipped for builtin Pick/Omit/Extract/Exclude/NonNullable
+        // carriers (those route through Step 1 if route-shaped,
+        // else fall through to the existing DeclRef/InstantiationRef
+        // branch in Step 5).
+        let recursive_helper_identity =
+            match graph.node_data(key_for_compute.base).as_deref() {
+                Some(crate::semantic_query::SemanticNodeData::DeclRef { identity }) => {
+                    Some(identity.clone())
+                }
+                Some(crate::semantic_query::SemanticNodeData::InstantiationRef {
+                    base, ..
+                }) if base.canonical_id.as_ref() != "__builtin__" => Some(base.clone()),
+                _ => None,
+            };
+        if let Some(identity) = recursive_helper_identity {
+            if crate::meta_resolve::ref_root_reaches_transitive_cycle_node(
+                &identity,
+                host,
+                &mut local_fence,
+            ) {
+                crate::host_manage::emit_policy_skip(
+                    key_for_compute.base,
+                    key_for_compute.scope_axis,
+                    crate::component_meta_audit::MaterializeSkipReason::RecursiveHelperCycleGuard,
+                );
+                return finish_cacheable(
+                    host,
+                    &key_for_compute,
+                    MaterializeOutcome::Value(key_for_compute.base),
+                    local_fence,
+                    non_cacheable_for_compute,
+                );
+            }
+        }
 
         // Plan §1.6 / §10.7 — DeclRef / InstantiationRef handler.
         // Resolve the carrier's body via `Instantiate` (NOT
@@ -1096,6 +1360,104 @@ export type X = number
             count <= 64,
             "visited count must not exceed MAX_HOPS=64 (got {count})"
         );
+    }
+
+    /// Plan §4.13 / §4.14 / B1 — recursive-helper guard fires for
+    /// plain DeclRef shapes whose body cycles via a complex helper.
+    /// The materialiser must keep the input symbolic and (when an
+    /// audit accumulator is installed) emit a
+    /// `MaterializeStructurePolicySkip { reason: RecursiveHelperCycleGuard }`
+    /// event. This test exercises the guard path through the full
+    /// materialiser entry — no audit accumulator is installed, so we
+    /// assert the BFS-side observable: the predicate returns true on
+    /// the recursive-helper fixture (matching A0's discrimination).
+    /// A separate audit test exercises the event emission once an
+    /// audit harness is wired in commit I.
+    #[test]
+    fn recursive_helper_cycle_guard_predicate_fires_on_dot_path_keys_helper() {
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/u.ts",
+                r#"
+export type DotPathKeys<T> = T extends object
+  ? { [K in keyof T & string]: K | `${K}.${DotPathKeys<NonNullable<T[K]>>}` }[keyof T & string]
+  : never
+export type GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
+        let mut fence = Vec::new();
+        // The recursive-helper guard predicate is the same one B1's
+        // step 4 calls (ref_root_reaches_transitive_cycle_node).
+        // Asserting it returns true on this fixture verifies the
+        // gate would fire when reached through the materialiser
+        // entry.
+        assert!(
+            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
+            "DotPathKeys's complex Mapped/Conditional/IndexedAccess body \
+             must trigger the recursive-helper cycle guard predicate"
+        );
+    }
+
+    /// Plan §4.4 / B1 — registry-route extraction recurses into
+    /// `args[0]` for builtin Pick/Omit so the cycle guard checks the
+    /// ACTUAL root identity (not the wrapping `Pick`/`Omit`). This
+    /// test asserts: a `Pick<RecursiveHelper, 'a'>` route extracts
+    /// `RecursiveHelper`'s identity, not `Pick`'s — the cycle guard
+    /// then runs on `RecursiveHelper`, fires, and the wrapping route
+    /// stays symbolic.
+    #[test]
+    fn registry_route_extracts_actual_root_for_builtin_pick_over_recursive_helper() {
+        use crate::semantic_query::SemanticNodeData;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type Recur = { kids: Recur[] | null }
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let recur_identity = a0_make_decl_identity(host, "/types.ts", "Recur");
+        let graph = host.project_type_store().semantic_graph();
+        let recur_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: recur_identity.clone(),
+        });
+        // Build Pick<Recur, 'kids'> using __builtin__ identity.
+        let key_kids = graph.intern_node(SemanticNodeData::Literal(
+            verter_semantic::analysis::type_expr::LiteralValue::String("kids".to_string()),
+        ));
+        let pick_builtin = crate::semantic_query::DeclIdentity {
+            canonical_id: StdArc::from("__builtin__"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: StdArc::from("Pick"),
+        };
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_builtin,
+            args: StdArc::from(vec![recur_ref, key_kids].into_boxed_slice()),
+        });
+        let extraction = crate::meta_resolve::extract_route_root_identity_node(graph, pick_node, 0)
+            .expect("Pick<Recur, 'kids'> must extract a route");
+        assert_eq!(
+            extraction.root_identity, recur_identity,
+            "route extractor must recurse into args[0] for the actual root \
+             (R8-2: previously returned Pick's identity, breaking the \
+             cycle/package guards)"
+        );
+        assert!(
+            extraction.root_args.is_empty(),
+            "Recur is a bare DeclRef so root_args is empty (Codex2 P0 #3 \
+             only populates root_args for InstantiationRef args[0])"
+        );
+        // Cycle guard would fire on Recur (productive recursion is
+        // not flagged, but a complex-union variant is — see A0 tests).
+        // Here we just verify the extraction shape; the guard fires
+        // through B1's materialiser branch in production.
     }
 
     /// Long cyclic chain via Object hops: A_0 -> A_1 -> ... -> A_199

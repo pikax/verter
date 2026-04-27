@@ -10127,20 +10127,26 @@ mod node_predicates_tests {
     }
 
     fn pick_or_omit_identity(name: &'static str) -> DeclIdentity {
+        // Plan §4.4 / B0+B1: builtin Pick/Omit use the `__builtin__`
+        // sentinel canonical id; the registry-route extractor only
+        // dispatches builtin (not userland) Pick/Omit through the
+        // route branch so userland shadowing is preserved.
         DeclIdentity {
-            canonical_id: StdArc::from("/lib/lib.es5.d.ts"),
+            canonical_id: StdArc::from("__builtin__"),
             whole_hash: [0u8; 16],
             decl_name: StdArc::from(name),
         }
     }
 
-    /// Round-7 parity row 1: `Pick<Foo<T>, 'a'>` — generic root rejected.
-    /// The route extractor must accept ONLY a fully-bare `DeclRef` as the
-    /// root; `InstantiationRef` (i.e. `Foo<T>`) is reserved for the
-    /// dedicated InstantiationRef arm and must NOT be flattened into a
-    /// route.
+    /// Plan §4.4 / Codex2 P0 #3: `Pick<Foo<T>, 'a'>` — generic root
+    /// is accepted; the extractor recurses into `args[0]` to find the
+    /// actual root identity (`Foo`) and preserves the generic
+    /// arguments via `RouteExtraction.root_args`. This replaces the
+    /// rev-7 generic-root rejection: Codex2 P0 #3 requires the route
+    /// branch to project `Pick<Foo<T>, 'a'>` shapes through dispatch
+    /// with the original carriers.
     #[test]
-    fn extract_route_rejects_generic_root_pick() {
+    fn extract_route_accepts_generic_root_pick_with_root_args() {
         let project = make_project();
         let host = project.host();
         let graph = host.project_type_store().semantic_graph();
@@ -10151,22 +10157,36 @@ mod node_predicates_tests {
             identity: t_identity.clone(),
         });
         let foo_t = graph.intern_node(SemanticNodeData::InstantiationRef {
-            base: foo_identity,
+            base: foo_identity.clone(),
             args: StdArc::from(vec![t_ref].into_boxed_slice()),
         });
         let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "a".to_string(),
         )));
+        // Builtin Pick — base.canonical_id MUST be "__builtin__" for
+        // the registry-route branch to fire.
+        let pick_builtin = DeclIdentity {
+            canonical_id: StdArc::from("__builtin__"),
+            whole_hash: [0u8; 16],
+            decl_name: StdArc::from("Pick"),
+        };
         let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
-            base: pick_or_omit_identity("Pick"),
+            base: pick_builtin,
             args: StdArc::from(vec![foo_t, key_a].into_boxed_slice()),
         });
 
-        assert!(
-            extract_route_root_identity_node(graph, pick_node).is_none(),
-            "Pick<Foo<T>, 'a'> must be rejected (root is InstantiationRef, not bare DeclRef) \
-             — generic-root tightening (round-7 parity)"
+        let extraction = extract_route_root_identity_node(graph, pick_node, 0)
+            .expect("Pick<Foo<T>, 'a'> must be accepted with root_args populated");
+        assert_eq!(
+            extraction.root_identity, foo_identity,
+            "root_identity must be the inner Foo, not the wrapping Pick"
         );
+        assert_eq!(
+            extraction.root_args.len(),
+            1,
+            "root_args must preserve the generic [T] carrier (Codex2 P0 #3)"
+        );
+        assert_eq!(extraction.root_args[0], t_ref);
     }
 
     /// Round-7 parity row 2: `Foo[0]` — numeric index rejected.
@@ -10187,7 +10207,7 @@ mod node_predicates_tests {
         });
 
         assert!(
-            extract_route_root_identity_node(graph, indexed).is_none(),
+            extract_route_root_identity_node(graph, indexed, 0).is_none(),
             "Foo[0] must be rejected (numeric index) — round-7 parity"
         );
     }
@@ -10220,7 +10240,7 @@ mod node_predicates_tests {
             args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
         });
 
-        let extraction = extract_route_root_identity_node(graph, pick_node)
+        let extraction = extract_route_root_identity_node(graph, pick_node, 0)
             .expect("Pick<Foo, 'a' | 'b' | 'c'> must be accepted (round-7 parity row 3)");
         assert_eq!(extraction.root_identity, foo_identity);
         match extraction.route {
@@ -10252,7 +10272,7 @@ mod node_predicates_tests {
         });
 
         assert!(
-            extract_route_root_identity_node(graph, pick_node).is_none(),
+            extract_route_root_identity_node(graph, pick_node, 0).is_none(),
             "Pick<Foo> (1-arg) must be rejected (args.len() != 2) — round-7 parity"
         );
     }
@@ -10280,7 +10300,7 @@ mod node_predicates_tests {
         });
 
         assert!(
-            extract_route_root_identity_node(graph, pick_node).is_none(),
+            extract_route_root_identity_node(graph, pick_node, 0).is_none(),
             "Pick<Foo, 'a', 'b'> (3-arg) must be rejected — round-7 parity"
         );
     }
@@ -10306,7 +10326,7 @@ mod node_predicates_tests {
         });
 
         assert!(
-            extract_route_root_identity_node(graph, pick_node).is_none(),
+            extract_route_root_identity_node(graph, pick_node, 0).is_none(),
             "Pick<Foo, never> (empty key set) must be rejected — round-7 parity"
         );
     }
@@ -10332,7 +10352,7 @@ mod node_predicates_tests {
             index: IndexKey::String(StdArc::from("full")),
         });
 
-        let extraction = extract_route_root_identity_node(graph, level_two)
+        let extraction = extract_route_root_identity_node(graph, level_two, 0)
             .expect("Foo['c']['full'] must be accepted");
         assert_eq!(extraction.root_identity, foo_identity);
         match extraction.route {

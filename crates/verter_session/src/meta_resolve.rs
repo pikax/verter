@@ -9940,7 +9940,7 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
 // repointed at the `_node` predicates after non-walker callers migrate.
 // ===========================================================================
 
-/// Plan §1.12 — return type for [`extract_route_root_identity_node`].
+/// Plan §1.12 / §4.4 — return type for [`extract_route_root_identity_node`].
 ///
 /// Pairs the bare-root declaration identity with the route shape that
 /// the Pick/Omit/IndexedAccess wrapping carries. Distinct from the
@@ -9948,116 +9948,229 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
 /// `component_meta_registry_public_*_route` helpers because
 /// `DeclIdentity` carries the full canonical-id + whole-hash pair the
 /// graph layer needs for dispatch keys and package-ref checks.
+///
+/// Plan §4.4 / Codex2 P0 #3 — `root_args` preserves the generic root
+/// carrier's type arguments so `Pick<Foo<T>, 'a'>` and `Foo<T>['a']`
+/// shapes can project. Empty for bare-DeclRef roots; non-empty for
+/// `InstantiationRef` roots (i.e., the original generic shell).
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
 pub(crate) struct RouteExtraction {
     pub root_identity: crate::semantic_query::DeclIdentity,
+    pub root_args: Arc<[crate::semantic_query::SemanticNodeId]>,
     pub route: crate::resolver_core::RouteDemand,
 }
 
-/// Plan §1.12 — graph-native variant of the `TypeExpr`-based registry
-/// route extraction (`component_meta_registry_public_utility_route` +
+/// Plan §1.12 / §4.4 — graph-native variant of the `TypeExpr`-based
+/// registry route extraction (`component_meta_registry_public_utility_route` +
 /// `component_meta_registry_public_indexed_access_route`).
 ///
-/// Returns `Some(RouteExtraction)` when `node` matches one of:
+/// Returns `Some(RouteExtraction)` ONLY when `node` matches one of:
 ///
-/// - `Pick<Foo, 'a' | 'b' | …>` — `InstantiationRef` with
-///   `base.decl_name == "Pick"`, `args.len() == 2`, arg[0] is a bare
-///   `DeclRef` (no type arguments), arg[1] is a string-literal or a
-///   union of string-literals (must yield ≥ 1 key).
-/// - `Omit<Foo, 'a' | 'b' | …>` — same shape with `decl_name == "Omit"`.
+/// - `Pick<X, 'a' | 'b' | …>` — `InstantiationRef` with
+///   `base.canonical_id == "__builtin__"` AND
+///   `base.decl_name == "Pick"`, `args.len() == 2`, arg[1] is a
+///   string-literal or a union of string-literals (must yield ≥ 1
+///   key). arg[0] may be a bare `DeclRef` OR an `InstantiationRef`
+///   (generic root preserved via `root_args` per Codex2 P0 #3 / R8-2).
+/// - `Omit<X, 'a' | 'b' | …>` — same shape with `decl_name == "Omit"`.
 /// - `Foo['a']['b']…` — chained `IndexedAccess` whose innermost
-///   `object` is a bare `DeclRef`, with every `IndexKey` a `String`
-///   literal (rejects `IndexKey::Number` / `IndexKey::TypeNode`).
+///   `object` is a bare `DeclRef` OR `InstantiationRef`, with every
+///   `IndexKey` a `String` literal (rejects `IndexKey::Number` /
+///   `IndexKey::TypeNode`).
 ///
-/// Round-7 parity tightenings (vs the original `TypeExpr` extractors):
+/// Plain `DeclRef` and userland (non-builtin) `InstantiationRef`
+/// return `None` — they are NOT route shapes; they fall through to the
+/// recursive-helper guard in B1 step 4.
 ///
-/// - Generic root rejected: `Pick<Foo<T>, 'a'>` is NOT a registry route.
+/// Round-7 parity tightenings:
+///
+/// - Userland Pick/Omit (a userland `Pick`/`Omit` decl that shadows
+///   the builtin) is NOT a registry route — only `__builtin__` Pick/
+///   Omit dispatch through this branch.
 /// - 1-arg / 3-arg `Pick` rejected: `args.len() != 2` returns `None`.
 /// - Empty union rejected: `Pick<Foo, never>` returns `None`.
 /// - Numeric/type indices rejected: `Foo[0]` and `Foo[K]` return `None`.
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
+///
+/// `depth` fuses recursion at 256 to bound runtime on adversarial
+/// inputs (Plan §4.11).
 pub(crate) fn extract_route_root_identity_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
 ) -> Option<RouteExtraction> {
-    use crate::resolver_core::RouteDemand;
     use crate::semantic_query::SemanticNodeData;
 
+    if depth > 256 {
+        return None;
+    }
     let data = graph.node_data(node)?;
     match data.as_ref() {
-        SemanticNodeData::InstantiationRef { base, args } => {
-            if args.len() != 2 {
-                return None;
-            }
-            let route_kind = match base.decl_name.as_ref() {
-                "Pick" => 0u8,
-                "Omit" => 1u8,
-                _ => return None,
-            };
-            let root_identity = bare_decl_ref_identity_node(graph, args[0])?;
-            let keys = collect_string_literal_union_keys_node(graph, args[1])?;
-            if keys.is_empty() {
-                return None;
-            }
-            let route = if route_kind == 0 {
-                RouteDemand::Pick(keys)
-            } else {
-                RouteDemand::Omit(keys)
-            };
-            Some(RouteExtraction {
-                root_identity,
-                route,
-            })
+        SemanticNodeData::InstantiationRef { base, args }
+            if base.canonical_id.as_ref() == "__builtin__"
+                && matches!(base.decl_name.as_ref(), "Pick" | "Omit") =>
+        {
+            extract_pick_omit_route(graph, base, args, depth + 1)
         }
         SemanticNodeData::IndexedAccess { .. } => {
-            let mut path: Vec<String> = Vec::new();
-            let root_id = collect_indexed_access_path_node(graph, node, &mut path)?;
-            if path.is_empty() {
-                return None;
-            }
-            let root_identity = bare_decl_ref_identity_node(graph, root_id)?;
-            Some(RouteExtraction {
-                root_identity,
-                route: RouteDemand::MemberPath(path),
-            })
+            extract_indexed_access_route(graph, node, depth + 1)
         }
+        // Plain DeclRef → step 4 (recursive-helper guard).
+        // Userland InstantiationRef → step 4 (recursive-helper guard).
+        // Builtin Extract/Exclude/NonNullable → existing flow (lower
+        // already eager-resolves them; they don't reach this branch).
         _ => None,
     }
 }
 
-/// Helper: extract the `DeclIdentity` of a bare `DeclRef` node (rejects
-/// `InstantiationRef` and every other variant). Round-7 parity: the
-/// route extractor only accepts a fully-bare root.
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
-fn bare_decl_ref_identity_node(
+/// Helper: extract `Pick<X, keys>` / `Omit<X, keys>` route. Recurses
+/// into `args[0]` to find the actual root identity (R8-2 fix —
+/// previously returned `Pick`'s `__builtin__` identity, breaking the
+/// cycle / package guards).
+///
+/// Plan §4.4 / Codex2 P0 #3 — preserves generic root carriers: when
+/// `args[0]` is `InstantiationRef { base: G, args: [..gargs..] }`,
+/// the extracted `root_identity` is `G` and `root_args` is `[..gargs..]`.
+/// Bare `DeclRef` arms produce empty `root_args`.
+fn extract_pick_omit_route(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    base: &crate::semantic_query::DeclIdentity,
+    args: &Arc<[crate::semantic_query::SemanticNodeId]>,
+    depth: u32,
+) -> Option<RouteExtraction> {
+    use crate::resolver_core::RouteDemand;
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 {
+        return None;
+    }
+    if args.len() != 2 {
+        return None;
+    }
+    // R8-2 fix — recurse into args[0] for the actual root identity
+    // and preserve generic carriers via root_args.
+    let inner_data = graph.node_data(args[0])?;
+    let (root_identity, root_args) = match inner_data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => (
+            identity.clone(),
+            Arc::<[crate::semantic_query::SemanticNodeId]>::from(Vec::new().into_boxed_slice()),
+        ),
+        SemanticNodeData::InstantiationRef {
+            base: gen_base,
+            args: gen_args,
+        } => (gen_base.clone(), Arc::clone(gen_args)),
+        // Plan §4.4 / R8-1 — symbolic-keep behavior for non-ref roots
+        // depends on `evaluate_deferred_semantic_node` not unwrapping
+        // carriers (verified at evaluate.rs:39). If a future change
+        // there adds carrier unwrapping, this branch must keep
+        // explicitly returning `None` so we don't materialise a
+        // non-projectable shape.
+        _ => return None,
+    };
+    let keys = collect_string_literal_union_keys_node(graph, args[1])?;
+    if keys.is_empty() {
+        return None;
+    }
+    let route = if base.decl_name.as_ref() == "Pick" {
+        RouteDemand::Pick(keys)
+    } else {
+        RouteDemand::Omit(keys)
+    };
+    Some(RouteExtraction {
+        root_identity,
+        root_args,
+        route,
+    })
+}
+
+/// Plan §4.4 — build a string-literal-union node from a list of keys
+/// for the 2-step Pick/Omit dispatch orchestration. Used by the
+/// materialiser registry-route branch to construct the keys argument
+/// for the second-step `Instantiate { Pick/Omit, [body_id, keys_node] }`
+/// dispatch.
+///
+/// Single-key fast path produces a bare `Literal` node; multi-key
+/// produces a `Union` of literals. Both are interned at global scope
+/// (no file scope) since the keys are workspace-shared sentinels.
+pub(crate) fn build_keys_union_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    keys: &[String],
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::SemanticNodeData;
+    use verter_semantic::analysis::type_expr::LiteralValue;
+
+    if keys.len() == 1 {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            keys[0].clone(),
+        )))
+    } else {
+        let key_ids: Vec<crate::semantic_query::SemanticNodeId> = keys
+            .iter()
+            .map(|k| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(k.clone()))))
+            .collect();
+        graph.intern_node(SemanticNodeData::Union(Arc::from(
+            key_ids.into_boxed_slice(),
+        )))
+    }
+}
+
+/// Helper: walk an `IndexedAccess` chain and produce a
+/// `RouteExtraction` whose route is `RouteDemand::MemberPath`.
+/// Innermost root may be a bare `DeclRef` OR `InstantiationRef`;
+/// generic carriers are preserved via `root_args` per Codex2 P0 #3.
+fn extract_indexed_access_route(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
-) -> Option<crate::semantic_query::DeclIdentity> {
-    use crate::semantic_query::SemanticNodeData;
-    let data = graph.node_data(node)?;
-    match data.as_ref() {
-        SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
-        _ => None,
+    depth: u32,
+) -> Option<RouteExtraction> {
+    use crate::resolver_core::RouteDemand;
+    use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+
+    let mut hops_reverse: Vec<String> = Vec::new();
+    let mut current: SemanticNodeId = node;
+    let mut d = depth;
+    loop {
+        if d > 256 {
+            return None;
+        }
+        d += 1;
+        let data = graph.node_data(current)?;
+        match data.as_ref() {
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let hop = match index {
+                    IndexKey::String(s) => s.to_string(),
+                    // Round-7 parity: numeric/type indices are not
+                    // legal route hops.
+                    IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+                };
+                hops_reverse.push(hop);
+                current = *object;
+            }
+            SemanticNodeData::DeclRef { identity } => {
+                hops_reverse.reverse();
+                return Some(RouteExtraction {
+                    root_identity: identity.clone(),
+                    root_args: Arc::from(Vec::new().into_boxed_slice()),
+                    route: RouteDemand::MemberPath(hops_reverse),
+                });
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                // Codex2 P0 #3 — preserve generic root carriers like
+                // `Foo<T>['a']`.
+                hops_reverse.reverse();
+                return Some(RouteExtraction {
+                    root_identity: base.clone(),
+                    root_args: Arc::clone(args),
+                    route: RouteDemand::MemberPath(hops_reverse),
+                });
+            }
+            _ => return None,
+        }
     }
 }
 
 /// Helper: collect all string-literal members of a literal-or-union
 /// node. Returns `None` when any member is non-literal-string (rejects
 /// `Pick<Foo, 'a' | number>` and similar mixed unions).
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
 fn collect_string_literal_union_keys_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
@@ -10083,43 +10196,17 @@ fn collect_string_literal_union_keys_node(
     }
 }
 
-/// Helper: walk an `IndexedAccess` chain pushing each segment onto
-/// `path`. Returns `Some(root_id)` for the innermost non-IndexedAccess
-/// node (the candidate root). Round-7 parity: rejects every non-string
-/// `IndexKey` (`Number`, `TypeNode`).
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
-fn collect_indexed_access_path_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
-    path: &mut Vec<String>,
-) -> Option<crate::semantic_query::SemanticNodeId> {
-    use crate::semantic_query::{IndexKey, SemanticNodeData};
-
-    let data = graph.node_data(node)?;
-    match data.as_ref() {
-        SemanticNodeData::IndexedAccess { object, index } => {
-            let root = collect_indexed_access_path_node(graph, *object, path)?;
-            let key = match index {
-                IndexKey::String(s) => s.to_string(),
-                IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
-            };
-            path.push(key);
-            Some(root)
-        }
-        _ => Some(node),
-    }
-}
+// `collect_indexed_access_path_node` and `bare_decl_ref_identity_node`
+// were retired in B1: `extract_indexed_access_route` now walks the
+// chain inline (preserving generic root carriers via `root_args`),
+// and `extract_pick_omit_route` recurses into `args[0]` directly to
+// find the actual root identity (R8-2 fix). Both functions had
+// `_node` allow_dead_code annotations and no remaining production
+// callers; deleted to keep the surface minimal.
 
 /// Plan §1.12 — graph-native variant of
 /// `component_meta_ref_resolves_to_package`. Pure check on the
 /// declaration identity's canonical id; no graph traversal needed.
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
 pub(crate) fn component_meta_ref_resolves_to_package_node(
     identity: &crate::semantic_query::DeclIdentity,
 ) -> bool {
@@ -10148,7 +10235,7 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
         SemanticNodeData::Alias(inner) => {
             declaration_body_prefers_inline_materialization_node(graph, *inner)
         }
-        _ => extract_route_root_identity_node(graph, body_id).is_some(),
+        _ => extract_route_root_identity_node(graph, body_id, 0).is_some(),
     }
 }
 
@@ -10178,13 +10265,8 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
 /// - `MAX_HOPS = 64`; when the budget is exhausted, returns the
 ///   path's complex-signal flag (matches legacy fallback).
 ///
-/// `#[allow(dead_code)]` is preserved through A0; commit B1 wires the
-/// predicate into the materialiser registry-route + recursive-helper
-/// guards and drops the allow per plan §4.13.
-#[allow(
-    dead_code,
-    reason = "wired in B1; covered by unit tests in component_meta_materialize.rs"
-)]
+/// Wired in production by B1's materialiser registry-route +
+/// recursive-helper guards (plan §4.13).
 pub(crate) fn ref_root_reaches_transitive_cycle_node(
     root_identity: &crate::semantic_query::DeclIdentity,
     host: &VerterHost,
@@ -10277,10 +10359,6 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 ///
 /// Walks the same shallow shapes as
 /// [`collect_ref_identities_node`]; depth-fused at 256.
-#[allow(
-    dead_code,
-    reason = "wired in B1 via ref_root_reaches_transitive_cycle_node"
-)]
 fn body_contains_recursive_ref_to_name(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
@@ -10399,10 +10477,6 @@ fn body_contains_recursive_ref_to_name(
 /// graphs (Plan §4.11). The fuse intentionally returns `false` on
 /// hit — a runaway recursion is treated as "not complex" so the
 /// caller continues the BFS rather than terminating prematurely.
-#[allow(
-    dead_code,
-    reason = "wired in B1 via ref_root_reaches_transitive_cycle_node; covered by unit tests"
-)]
 fn has_complex_cycle_guard_surface_node(
     host: &VerterHost,
     node: crate::semantic_query::SemanticNodeId,
@@ -10455,10 +10529,6 @@ fn has_complex_cycle_guard_surface_node(
 /// `depth` fuses recursion at 256 (Plan §4.11). The fuse returns
 /// without recording new identities to bound runtime on
 /// pathological graphs.
-#[allow(
-    dead_code,
-    reason = "wired in B1 via ref_root_reaches_transitive_cycle_node; covered by unit tests"
-)]
 fn collect_ref_identities_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
@@ -10611,7 +10681,7 @@ pub(crate) fn registry_member_route_inline_materializable_node(
 
     let extraction = {
         let graph = host.project_type_store().semantic_graph();
-        match extract_route_root_identity_node(graph, node) {
+        match extract_route_root_identity_node(graph, node, 0) {
             Some(extraction) => extraction,
             None => return false,
         }

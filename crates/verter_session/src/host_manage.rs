@@ -521,6 +521,32 @@ pub fn record_materialize_structure_cache_hit() {
     }
 }
 
+/// Plan §4.14 / B1 — emit a `MaterializeStructurePolicySkip` event
+/// into the active audit accumulator. No-op when no request context
+/// or accumulator is installed.
+///
+/// `base` is the input semantic node id; `scope_axis` is the
+/// materialiser axis at the point the gate fired; `reason` identifies
+/// which policy arm bailed. The audit framework's footprint miner
+/// reads these events to attribute kept-symbolic shapes to specific
+/// policy decisions.
+pub(crate) fn emit_policy_skip(
+    base: crate::semantic_query::SemanticNodeId,
+    scope_axis: crate::component_meta_materialize::MaterializationScope,
+    reason: crate::component_meta_audit::MaterializeSkipReason,
+) {
+    if crate::request_context::current_accumulator().is_some() {
+        let base_str: std::sync::Arc<str> = std::sync::Arc::from(format!("Node#{}", base.0));
+        push_structured_event(
+            crate::component_meta_audit::StructuredComponentMetaEvent::MaterializeStructurePolicySkip {
+                base: base_str,
+                scope_axis: scope_axis.into(),
+                reason,
+            },
+        );
+    }
+}
+
 /// Bump `node_arena_lock_acquisitions` on the current request's
 /// context. No-op without a context. Plan §3.6.
 pub fn record_node_arena_lock_acquisition() {

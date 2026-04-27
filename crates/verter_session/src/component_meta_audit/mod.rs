@@ -933,6 +933,19 @@ pub enum MaterializeSkipReason {
     /// Top-level input shape is non-structural (primitive, literal,
     /// type-param, etc.) — nothing to materialise.
     NonStructuralTopLevel,
+    /// Plan §4.4 / §4.14 / B1 — the registry-route guard's cycle
+    /// check (`ref_root_reaches_transitive_cycle_node` over the
+    /// route's actual root identity) fired. The wrapping `Pick`/
+    /// `Omit`/`IndexedAccess` is kept symbolic because expanding a
+    /// recursive helper would publish a circular shape into the
+    /// component-meta surface.
+    RegistryRouteCycleGuard,
+    /// Plan §4.13 / §4.14 / B1 — the recursive-helper cycle guard
+    /// fired on a plain `DeclRef` or userland `InstantiationRef`. The
+    /// declaration body reaches itself via a complex helper (e.g.,
+    /// `GetItemKeys<T> = DotPathKeys<T>` -> `GetItemKeys<T>`); kept
+    /// symbolic.
+    RecursiveHelperCycleGuard,
 }
 
 /// Dispatch key kind — semantic-query cache key discriminator.
