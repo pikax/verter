@@ -14,9 +14,61 @@ diff if the two drift.
 | `RustAuditRecord`              | Top-level envelope. Carries timings, solver, store, memory, footprint. |
 | `RustTimingAudit`              | Phase timings in milliseconds (`f64`).                                 |
 | `RustSolverAudit`              | Solver counters (`total_resolve_steps`, `solve_count`).                |
-| `RustStoreAudit`               | Store/view counters + imported-dependency byte total.                  |
+| `RustStoreAudit`               | Store/view counters + imported-dependency byte total + materialiser counters (plan §3.2). |
 | `RustMemoryAudit`              | RSS + host-cache + workspace byte snapshots.                           |
 | `RustSemanticFootprintAudit`   | Derived footprint — see below.                                         |
+
+### `RustStoreAudit` materialiser counters (plan §3.2)
+
+Six `u64` counters (decimal-string serialized, `string` in TS)
+were added to `RustStoreAudit` for the session-layer materialiser
+cutover:
+
+| Field                          | Meaning                                                                                |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| `materialize_structure_calls`  | Total `materialize_component_meta_structure` invocations during the request.           |
+| `materialize_structure_cache_hits` | Subset satisfied by the materialiser's `MaterializeStructureDb` peek (warm cache).  |
+| `node_arena_lock_acquisitions` | Lock acquisitions on the per-scope `NodeArena` dedup index.                            |
+| `family_map_lock_acquisitions` | Lock acquisitions on the family-map dep-signature reverse index.                       |
+| `dep_signature_merges`         | Times a `dep_signature` was merged into the materialiser's `local_fence`.              |
+| `dep_signature_intern_hits`    | Subset of `dep_signature_merges` that hit an existing intern bucket (no allocation).   |
+
+Cache hit rate: `materialize_structure_cache_hits /
+materialize_structure_calls` — should be `> 0` on warm/cold-seq
+passes (warm peek satisfies repeat lookups). Intern hit rate:
+`dep_signature_intern_hits / dep_signature_merges` — exercises
+the content-hash bucketed `Weak`-ref interner; `> 0` on cold-seq
+where a second pass re-merges the same dep facts into a fresh
+fence.
+
+### Cache-outcome enum
+
+`CacheOutcomeKind` (used by both `RustStoreAudit::cache_outcomes`
+and `StructuredComponentMetaEvent::MaterializeStructureExit`):
+
+| Variant                | Meaning                                                                  |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `Hit`                  | Warm cache hit.                                                          |
+| `Miss`                 | Cache miss (no entry present).                                           |
+| `JoinedWait`           | Joined a peer's in-flight slot and waited.                               |
+| `Sentinel`             | Observed a sentinel (placeholder) entry.                                 |
+| `ColdBuild`            | Performed a cold build from source.                                      |
+| `InflightAbortedRetry` | Retry loop after an in-flight slot was aborted.                          |
+| `ColdAbortSwept`       | Cold entry reaped during generation reconciliation.                      |
+| `Tainted`              | Path-dependent outcome (depth-fuse trip, scope-unloaded mid-compute, or `Recursive` sub-call). Non-cacheable; propagates as `MaterializeOutcome::Tainted`. Plan §3.3. |
+
+### Materialise-skip-reason enum
+
+`MaterializeSkipReason` (carried by
+`StructuredComponentMetaEvent::MaterializeStructurePolicySkip`):
+
+| Variant                                | Meaning                                                                 |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| `FunctionPropertyAtNested`             | Object-property lookup hit a function-typed property at `Nested` axis.  |
+| `GenericRefWithArgsTopLevel`           | Top-level generic ref carried explicit type arguments (reserved for the `InstantiationRef` arm). |
+| `PackageRefTopLevel`                   | Top-level ref resolved under `node_modules/` — package types stay opaque. |
+| `RegistryRouteNotInlineMaterialisable` | Registry-route check rejected the input as not inline-materialisable (e.g. `Pick`/`Omit` over a non-bare root). |
+| `NonStructuralTopLevel`                | Top-level shape is non-structural (primitive, literal, type-param, etc.). |
 
 ### Footprint
 
