@@ -1781,30 +1781,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
-    /// Plan §6.5 / D — temporary adapter for graph-native package-ref
-    /// detection. Resolves the declaration via [`Self::resolve_type_declaration`]
-    /// (cached per query) and delegates the canonical-string check to
-    /// the shared [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
-    /// primitive (commit C).
-    ///
-    /// Replaces the deleted TypeExpr package-ref free function. This
-    /// adapter is itself deleted in commit O after Phase 11 migrates
-    /// the 5 remaining TypeExpr-walking callers to graph-native
-    /// `_node` predicates.
-    #[allow(
-        dead_code,
-        reason = "Plan §6.15 / O — adapter retired post-N (last production caller migrated); definition deleted in O"
-    )]
-    pub(crate) fn is_package_backed_decl(&mut self, scope: &str, name: &str) -> bool {
-        let declaration = self.resolve_type_declaration(scope, name);
-        let canonical = if declaration.canonical_source.is_empty() {
-            scope
-        } else {
-            declaration.canonical_source.as_str()
-        };
-        crate::meta_resolve::canonical_resolves_to_package(canonical)
-    }
-
     /// Plan §4.5 / §6.8 — graph-native replacement for the deleted
     /// legacy walker shim. Lowers `expr` to a `SemanticNodeId` via
     /// Navigate, runs the materialiser, accumulates the dep_signature

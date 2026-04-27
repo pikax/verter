@@ -9896,10 +9896,12 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 }
 
 // Plan §6.5 / D — the TypeExpr-keyed free package-ref check was
-// retired in commit D. The 5 callers migrated to
-// `engine.is_package_backed_decl` (a temporary adapter
-// in commit D, deleted in commit O after Phase 11 K3 migrates to
-// graph-native predicates).
+// retired in commit D. The 5 callers migrated to a temporary engine
+// method adapter (commit D), which was itself retired in commit O
+// after Phase 11 K3 migrated production callers to graph-native
+// predicates. The graph-native primitive
+// `component_meta_ref_resolves_to_package_node` is the canonical
+// authority for package-backed decl identity.
 
 // Plan §6.6 / E — the inline-registry-route candidate family was
 // retired in commit E. The inline-registry-route candidate path is
@@ -10480,8 +10482,8 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
             .iter()
             .all(|&m| slot_binding_param_can_stay_symbolic_node(host, m, depth + 1)),
         // Lowered `Ref { name, type_arguments: [non-empty] }` —
-        // mirrors the TypeExpr `Ref { name, type_arguments }` arm with
-        // `!type_arguments.is_empty() && !is_package_backed_decl(...)`.
+        // mirrors the legacy TypeExpr `Ref { name, type_arguments }` arm
+        // with the `!type_arguments.is_empty() && !package_backed` guard.
         SemanticNodeData::InstantiationRef { base, .. } => {
             if component_meta_ref_resolves_to_package_node(base) {
                 return false;

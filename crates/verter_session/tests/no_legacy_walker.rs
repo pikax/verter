@@ -90,6 +90,14 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "type_expr_needs_member_route_materialization",
     "slot_binding_param_can_stay_symbolic_typeexpr",
     "preserve_package_backed_symbolic_refs",
+    // Commit O (plan §6.15) — the temporary
+    // `engine.is_package_backed_decl` adapter (introduced in commit D
+    // to satisfy the TypeExpr-walking caller migrations) is deleted.
+    // After commit N migrated the last production caller to graph-
+    // native predicates that consume `DeclIdentity` directly via
+    // `component_meta_ref_resolves_to_package_node`, the adapter has
+    // zero callers and is retired.
+    "is_package_backed_decl",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

@@ -10531,75 +10531,40 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
             .expect("Pick<Foo, 'a'> eval must succeed after E's chain deletion");
     }
 
-    /// Plan §6.5 / D — `engine.is_package_backed_decl` adapter
-    /// produces the same result as the canonical primitive
-    /// `canonical_resolves_to_package` (commit C). Discriminates
-    /// local-file decls from `/node_modules/`-rooted decls.
+    /// Plan §6.5 / D + §6.15 / O — `canonical_resolves_to_package`
+    /// (commit C) is the canonical primitive that classifies a
+    /// canonical id as `/node_modules/`-rooted. With commit O having
+    /// retired the temporary engine adapter, this primitive plus the
+    /// graph-native `component_meta_ref_resolves_to_package_node`
+    /// (which delegates to it) are the only authorities. This test
+    /// discriminates local vs package canonical ids and ensures the
+    /// primitive is not accidentally collapsed.
     #[test]
-    fn engine_is_package_backed_decl_matches_canonical_predicate() {
+    fn canonical_resolves_to_package_discriminates_local_vs_package() {
         use crate::meta_resolve::canonical_resolves_to_package;
-        use crate::resolver_core::ComponentMetaQueryEngine;
 
-        let project = make_project();
-        project
-            .upsert_base("/local.ts", "export type Local = { x: number };")
-            .unwrap();
-        project
-            .upsert_base(
-                "/node_modules/foo/index.d.ts",
-                "export type FromPkg = { y: string };",
-            )
-            .unwrap();
-        // Seed a consumer that imports both — needed so the
-        // resolver's prepared-decl bundle picks up the imports.
-        project
-            .upsert_base(
-                "/Owner.vue",
-                r#"<script setup lang="ts">
-import type { Local } from './local'
-import type { FromPkg } from 'foo'
-defineProps<{ local: Local; pkg: FromPkg }>()
-</script>
-<template><div /></template>"#,
-            )
-            .unwrap();
-        project.host().set_import_dependencies(
-            "/Owner.vue",
-            vec![
-                crate::types::DependencyResolution {
-                    specifier: "./local".to_string(),
-                    resolved_canonical_id: Some("/local.ts".to_string()),
-                    possible_canonical_ids: Vec::new(),
-                },
-                crate::types::DependencyResolution {
-                    specifier: "foo".to_string(),
-                    resolved_canonical_id: Some("/node_modules/foo/index.d.ts".to_string()),
-                    possible_canonical_ids: Vec::new(),
-                },
-            ],
-        );
-
-        let session = project.open_session_batch().unwrap();
-        let _ = session.evaluate_types("/Owner.vue").unwrap();
-        let host = session.host();
-        let mut engine = ComponentMetaQueryEngine::new(host);
-
-        // Local decl — engine adapter returns false.
-        assert!(
-            !engine.is_package_backed_decl("/Owner.vue", "Local"),
-            "Local decl resolves to /local.ts (NOT /node_modules/) — \
-             engine adapter must return false"
-        );
-        // Package decl — engine adapter returns true.
-        assert!(
-            engine.is_package_backed_decl("/Owner.vue", "FromPkg"),
-            "FromPkg resolves under /node_modules/ — engine adapter \
-             must return true"
-        );
-        // Primitive matches: false on /local.ts, true on /node_modules/.
+        // Local files (any path NOT containing `/node_modules/` segment)
+        // resolve to false.
         assert!(!canonical_resolves_to_package("/local.ts"));
+        assert!(!canonical_resolves_to_package("/src/components/App.vue"));
+        assert!(!canonical_resolves_to_package(""));
+
+        // Files under `/node_modules/` resolve to true.
         assert!(canonical_resolves_to_package(
             "/node_modules/foo/index.d.ts"
+        ));
+        assert!(canonical_resolves_to_package(
+            "/project/node_modules/@scope/pkg/types.d.ts"
+        ));
+
+        // Defensive: a path that mentions `node_modules` as a substring
+        // but NOT as a directory boundary must not match. The primitive
+        // should be robust against false positives — required because
+        // `_node` predicates downstream of this primitive treat its
+        // result as the canonical authority for "is this declaration
+        // package-backed".
+        assert!(!canonical_resolves_to_package(
+            "/src/my_node_modules_helper.ts"
         ));
     }
 
@@ -11249,7 +11214,8 @@ defineProps<{ value: Foo }>()
         );
 
         // InstantiationRef with package-backed base — false (mirrors the
-        // TypeExpr predicate's `!query_engine.is_package_backed_decl(...)` guard).
+        // legacy TypeExpr predicate's `!package_backed` guard now
+        // expressed as `component_meta_ref_resolves_to_package_node(base)`).
         let pkg = package_decl_identity("FromPkg");
         let pkg_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: pkg.clone(),
