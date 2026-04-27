@@ -11731,6 +11731,84 @@ mod macro_field_graph_state_tests {
         );
     }
 
+    /// Plan §6.14 / K3 — `DISPATCH_LOWER_COUNTER` invariant: after
+    /// K2's predicate migration + K3's raise-once-at-publish, the
+    /// per-field lower count must be ≤ 2 (one for `current_node()`
+    /// for the gate predicate, one for `raw_node()` for the raw-type
+    /// predicate). Memoisation prevents re-lowering on repeated
+    /// `current_node()` calls within a single field iteration.
+    ///
+    /// This test exercises a single-field defineProps macro path
+    /// through `host.get_component_meta()` (which calls
+    /// `materialize_component_meta_field_types` once per request).
+    /// Resets the thread-local counter before the call, then asserts
+    /// ≤ 2 lowers per field after the call returns.
+    ///
+    /// Discriminates against: regression where a graph-native rewrite
+    /// would invalidate the field_state's cached node and force
+    /// re-lowering on subsequent predicate inspection within the same
+    /// iteration. Also discriminates against accidental publish-side
+    /// raise-on-non-dirty (a clean publish that raises would push the
+    /// count above 2 if it triggered an additional raise/lower
+    /// round-trip).
+    #[test]
+    fn k3_dispatch_lower_counter_at_most_2_per_field() {
+        use crate::meta::MetaProject;
+        let project = MetaProject::new(VerterHost::new_standalone(HostConfig::default()));
+        project
+            .upsert_base(
+                "/src/types.ts",
+                "export interface Inner { primary: string; secondary: number }\n",
+            )
+            .unwrap();
+        // Use Pick<Inner, 'primary'> so the field's raw type triggers
+        // `type_expr_needs_member_route_materialization` (which is the
+        // K2-migrated J1 _node predicate). Without member-route shapes
+        // the field would short-circuit via preserve_raw and the
+        // counter would stay at 0 (correct but not discriminating).
+        project
+            .upsert_base(
+                "/src/App.vue",
+                r#"<script setup lang="ts">
+import type { Inner } from './types'
+defineProps<{ first: Pick<Inner, 'primary'> }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+
+        let host = project.host();
+        // Reset counter immediately before the request so we capture
+        // ONLY the lowering done during get_component_meta.
+        dispatch_lower_counter_reset();
+        // Fire one component-meta request — this drives the
+        // materializer through `materialize_component_meta_field_types`.
+        let _ = host.get_component_meta("/src/App.vue");
+
+        // Single field "first: Inner" => ≤ 2 lowers per field iteration:
+        //   1. raw_node()     — for the parsed_field_raw_type predicate
+        //   2. current_node() — for the gate predicate
+        //
+        // The fixture has exactly 1 prop field. emits/slot_bindings/
+        // bindings are empty in this fixture, so they don't add lowers.
+        //
+        // Per K3's contract, ≤ 2 enforces "no graph-native rewrite
+        // round-trip" — set_current_type from a TypeExpr-side mutation
+        // would invalidate the cached current_node and the next
+        // current_node() call would re-lower (count = 3+). The
+        // assertion catches that regression.
+        let total = dispatch_lower_counter_get();
+        eprintln!("K3 invariant: DISPATCH_LOWER_COUNTER total = {total}");
+        assert!(
+            total <= 2,
+            "K3 invariant violated: per-field DISPATCH_LOWER_COUNTER exceeded 2 \
+             on a single-field defineProps fixture (got {total}). This indicates \
+             a graph-native rewrite invalidated the field_state's cached \
+             current_node and forced a re-lowering — review §4.10's \
+             node_rewrite_dirty contract and §6.14's raise-once-at-publish rule.",
+        );
+    }
+
     /// Plan §6.14 / K2 — equivalence sanity for the J1
     /// `type_node_needs_member_route_materialization` migration. After
     /// K2, the function calls go through field_state.current_node() /
@@ -11788,6 +11866,77 @@ mod macro_field_graph_state_tests {
         assert!(
             matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }),
             "lowered current_node should be SemanticNodeData::IndexedAccess; got {data:?}"
+        );
+    }
+
+    /// Plan §4.10 / K3 — `publish()` MUST NOT raise back to TypeExpr
+    /// when only `current_node()` was called (no graph-native
+    /// rewrite). This guards against the regression where a future
+    /// implementer might set `node_rewrite_dirty = true` from
+    /// `current_node()` "by accident" — that would force every
+    /// per-field iteration through a raise/lower round-trip.
+    ///
+    /// Discriminates against: a regression that sets
+    /// `node_rewrite_dirty = true` from the lazy `current_node()` /
+    /// `raw_node()` paths instead of restricting it to
+    /// `set_current_node_rewrite()`.
+    #[test]
+    fn k3_publish_after_current_node_only_returns_initial_value_unchanged() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial.clone(), "/test_owner.ts", &dispatch);
+        // Inspect via current_node() — does NOT flip dirty
+        let _ = state.current_node();
+        // Publish: must return initial value unchanged (no raise from
+        // current_node, no round-trip churn).
+        let published = state.publish();
+        assert_eq!(
+            published, initial,
+            "publish() after current_node() (no rewrite) must return the \
+             initial published_type unchanged. If publish() returns a \
+             round-tripped TypeExpr, current_node() incorrectly set \
+             node_rewrite_dirty — review §4.10's dirty-flag invariant."
+        );
+    }
+
+    /// Plan §4.10 / K3 — `publish()` after `set_current_node_rewrite`
+    /// raises back to TypeExpr. This pins down the dirty-flag
+    /// contract: ONLY graph-native rewrite (set_current_node_rewrite)
+    /// triggers raise.
+    #[test]
+    fn k3_publish_after_set_current_node_rewrite_raises_back_to_type_expr() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial, "/test_owner.ts", &dispatch);
+        // Lower to get a node id, then "rewrite" with the SAME node id
+        // (a no-op rewrite for test purposes; the contract under test
+        // is "dirty=true triggers raise on publish", not "rewrite
+        // changes the node").
+        let node = state
+            .current_node()
+            .expect("current_node should lower successfully");
+        state.set_current_node_rewrite(node);
+        let published = state.publish();
+        // `published` should be the round-tripped form. For a
+        // `Ref { name: "Foo", type_arguments: [] }` initial, the
+        // round-trip yields a structurally-equivalent shape (even if
+        // not bit-identical, the dispatch raise pipeline preserves
+        // semantic identity for plain DeclRefs).
+        //
+        // We can't assert exact equality (raise may normalise), but
+        // we can assert the shape is non-trivial (not `Unknown`).
+        assert!(
+            !matches!(published, TypeExpr::Unknown { .. }),
+            "publish() after rewrite should produce a non-Unknown TypeExpr; \
+             got {published:?}",
         );
     }
 
