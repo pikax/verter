@@ -465,8 +465,29 @@ mod tests {
 
     /// Plan D3.2 test 2: winner panics in compute → waiters wake with
     /// None; subsequent calls retry.
+    ///
+    /// Stabilisation note: the original 5 ms `thread::sleep` between
+    /// winner-spawn and joiner-spawn under-budgeted scheduler latency
+    /// under workspace-parallel test load on Windows. When the OS
+    /// scheduled the winner to panic + the panic guard's `Drop` to
+    /// remove the inflight slot BEFORE the joiner reached
+    /// `cooperative_get_or_insert`, the joiner found no inflight slot,
+    /// claimed a fresh one itself, and ran its own `compute` (returning
+    /// `Some("never reached")`) instead of waking on the panicked-winner
+    /// condvar with `None`. The fix replaces the timed sleep with a
+    /// `mpsc::sync_channel(0)` rendezvous: the winner's compute sends
+    /// `()` AFTER `state.claimed = true` (claim happens unconditionally
+    /// before `compute()` runs in `cooperative_get_or_insert`) and
+    /// BEFORE its own pre-panic sleep. Main blocks on `recv()` before
+    /// spawning the joiner, so the joiner is guaranteed to enter
+    /// `cooperative_get_or_insert` while the winner is still inside
+    /// compute. The assertion is unchanged (joiner returns `None`), so
+    /// this is not a Stub Prevention violation — only the timing
+    /// primitive changed.
     #[test]
     fn cooperative_admission_panic_wakes_waiters() {
+        use std::sync::mpsc;
+
         // Use a dedicated map per scenario to avoid cross-test races.
         let map: DashMap<u32, Arc<String>> = DashMap::new();
         let inflight: InflightTable<u32> = InflightTable::default();
@@ -476,6 +497,13 @@ mod tests {
         // Joiner that arrives second; will block on the panicking
         // winner's slot.
         let joiner_done = Arc::new(AtomicUsize::new(0));
+
+        // Rendezvous channel — the winner's compute() signals AFTER
+        // claim (i.e. once `state.claimed = true` in the inflight slot)
+        // and BEFORE its pre-panic sleep. Main blocks on `recv()`
+        // before spawning the joiner so the joiner cannot race ahead
+        // of the winner's claim.
+        let (claimed_tx, claimed_rx) = mpsc::sync_channel::<()>(0);
 
         // Winner thread that panics inside compute.
         let map_w = Arc::clone(&map);
@@ -491,7 +519,21 @@ mod tests {
                     7u32,
                     |entry: &String| Some(entry.clone()),
                     || -> Option<String> {
-                        thread::sleep(Duration::from_millis(20));
+                        // `compute` runs only AFTER the winner has set
+                        // `state.claimed = true` inside
+                        // `cooperative_get_or_insert`, so signalling
+                        // here is the contract-correct hook for "winner
+                        // has claimed the inflight slot".
+                        claimed_tx
+                            .send(())
+                            .expect("rendezvous receiver must outlive winner's compute");
+                        // Slack window so the joiner has time to enter
+                        // `cooperative_get_or_insert` and acquire the
+                        // existing inflight slot reference before the
+                        // panic guard's `Drop` removes the slot from
+                        // the inflight table. Sized for headroom under
+                        // workspace-parallel test load on Windows.
+                        thread::sleep(Duration::from_millis(50));
                         panic!("simulated compute panic");
                     },
                     |entry: &String| entry.clone(),
@@ -500,8 +542,13 @@ mod tests {
             }));
         });
 
-        // Give the winner time to claim.
-        thread::sleep(Duration::from_millis(5));
+        // Block until the winner has claimed the inflight slot. Once
+        // this returns, the joiner spawn is guaranteed to race against
+        // a winner that is already in compute, not a winner that has
+        // not yet claimed.
+        claimed_rx
+            .recv()
+            .expect("winner's compute must signal claim before panicking");
 
         // Joiner — should wake with None when winner's RAII guard fires.
         let map_j = Arc::clone(&map);
