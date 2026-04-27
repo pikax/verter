@@ -9898,6 +9898,468 @@ pub(crate) fn materialize_inline_registry_member_route_if_materializable(
     })?
 }
 
+// ===========================================================================
+// Plan §1.12 — graph-native registry-route + cycle-BFS predicates.
+//
+// These `_node` variants operate on `SemanticNodeId` directly instead of
+// round-tripping through `TypeExpr`. They share the round-7 parity
+// tightenings with the TypeExpr-based originals: Pick/Omit `args.len() == 2`,
+// bare DeclRef root only, literal-string keys only; IndexedAccess uses
+// `IndexKey::String` only with a bare DeclRef root.
+//
+// The TypeExpr-based originals (`extract_route_root_identity`-equivalent,
+// `component_meta_ref_resolves_to_package`, ...) are retained — they still
+// have non-walker call sites per plan §11.2. The materialiser entry will be
+// repointed at the `_node` predicates after non-walker callers migrate.
+// ===========================================================================
+
+/// Plan §1.12 — return type for [`extract_route_root_identity_node`].
+///
+/// Pairs the bare-root declaration identity with the route shape that
+/// the Pick/Omit/IndexedAccess wrapping carries. Distinct from the
+/// TypeExpr-based `(String, RouteDemand)` tuple in the existing
+/// `component_meta_registry_public_*_route` helpers because
+/// `DeclIdentity` carries the full canonical-id + whole-hash pair the
+/// graph layer needs for dispatch keys and package-ref checks.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) struct RouteExtraction {
+    pub root_identity: crate::semantic_query::DeclIdentity,
+    pub route: crate::resolver_core::RouteDemand,
+}
+
+/// Plan §1.12 — graph-native variant of the `TypeExpr`-based registry
+/// route extraction (`component_meta_registry_public_utility_route` +
+/// `component_meta_registry_public_indexed_access_route`).
+///
+/// Returns `Some(RouteExtraction)` when `node` matches one of:
+///
+/// - `Pick<Foo, 'a' | 'b' | …>` — `InstantiationRef` with
+///   `base.decl_name == "Pick"`, `args.len() == 2`, arg[0] is a bare
+///   `DeclRef` (no type arguments), arg[1] is a string-literal or a
+///   union of string-literals (must yield ≥ 1 key).
+/// - `Omit<Foo, 'a' | 'b' | …>` — same shape with `decl_name == "Omit"`.
+/// - `Foo['a']['b']…` — chained `IndexedAccess` whose innermost
+///   `object` is a bare `DeclRef`, with every `IndexKey` a `String`
+///   literal (rejects `IndexKey::Number` / `IndexKey::TypeNode`).
+///
+/// Round-7 parity tightenings (vs the original `TypeExpr` extractors):
+///
+/// - Generic root rejected: `Pick<Foo<T>, 'a'>` is NOT a registry route.
+/// - 1-arg / 3-arg `Pick` rejected: `args.len() != 2` returns `None`.
+/// - Empty union rejected: `Pick<Foo, never>` returns `None`.
+/// - Numeric/type indices rejected: `Foo[0]` and `Foo[K]` return `None`.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) fn extract_route_root_identity_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<RouteExtraction> {
+    use crate::resolver_core::RouteDemand;
+    use crate::semantic_query::SemanticNodeData;
+
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::InstantiationRef { base, args } => {
+            if args.len() != 2 {
+                return None;
+            }
+            let route_kind = match base.decl_name.as_ref() {
+                "Pick" => 0u8,
+                "Omit" => 1u8,
+                _ => return None,
+            };
+            let root_identity = bare_decl_ref_identity_node(graph, args[0])?;
+            let keys = collect_string_literal_union_keys_node(graph, args[1])?;
+            if keys.is_empty() {
+                return None;
+            }
+            let route = if route_kind == 0 {
+                RouteDemand::Pick(keys)
+            } else {
+                RouteDemand::Omit(keys)
+            };
+            Some(RouteExtraction {
+                root_identity,
+                route,
+            })
+        }
+        SemanticNodeData::IndexedAccess { .. } => {
+            let mut path: Vec<String> = Vec::new();
+            let root_id = collect_indexed_access_path_node(graph, node, &mut path)?;
+            if path.is_empty() {
+                return None;
+            }
+            let root_identity = bare_decl_ref_identity_node(graph, root_id)?;
+            Some(RouteExtraction {
+                root_identity,
+                route: RouteDemand::MemberPath(path),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Helper: extract the `DeclIdentity` of a bare `DeclRef` node (rejects
+/// `InstantiationRef` and every other variant). Round-7 parity: the
+/// route extractor only accepts a fully-bare root.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+fn bare_decl_ref_identity_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<crate::semantic_query::DeclIdentity> {
+    use crate::semantic_query::SemanticNodeData;
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
+        _ => None,
+    }
+}
+
+/// Helper: collect all string-literal members of a literal-or-union
+/// node. Returns `None` when any member is non-literal-string (rejects
+/// `Pick<Foo, 'a' | number>` and similar mixed unions).
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+fn collect_string_literal_union_keys_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Option<Vec<String>> {
+    use crate::semantic_query::SemanticNodeData;
+    use verter_semantic::analysis::type_expr::LiteralValue;
+
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::Literal(LiteralValue::String(s)) => Some(vec![s.clone()]),
+        SemanticNodeData::Union(members) => {
+            let mut keys: Vec<String> = Vec::with_capacity(members.len());
+            for &member_id in members.iter() {
+                let member_data = graph.node_data(member_id)?;
+                match member_data.as_ref() {
+                    SemanticNodeData::Literal(LiteralValue::String(s)) => keys.push(s.clone()),
+                    _ => return None,
+                }
+            }
+            Some(keys)
+        }
+        _ => None,
+    }
+}
+
+/// Helper: walk an `IndexedAccess` chain pushing each segment onto
+/// `path`. Returns `Some(root_id)` for the innermost non-IndexedAccess
+/// node (the candidate root). Round-7 parity: rejects every non-string
+/// `IndexKey` (`Number`, `TypeNode`).
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+fn collect_indexed_access_path_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    path: &mut Vec<String>,
+) -> Option<crate::semantic_query::SemanticNodeId> {
+    use crate::semantic_query::{IndexKey, SemanticNodeData};
+
+    let data = graph.node_data(node)?;
+    match data.as_ref() {
+        SemanticNodeData::IndexedAccess { object, index } => {
+            let root = collect_indexed_access_path_node(graph, *object, path)?;
+            let key = match index {
+                IndexKey::String(s) => s.to_string(),
+                IndexKey::Number(_) | IndexKey::TypeNode(_) => return None,
+            };
+            path.push(key);
+            Some(root)
+        }
+        _ => Some(node),
+    }
+}
+
+/// Plan §1.12 — graph-native variant of
+/// `component_meta_ref_resolves_to_package`. Pure check on the
+/// declaration identity's canonical id; no graph traversal needed.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) fn component_meta_ref_resolves_to_package_node(
+    identity: &crate::semantic_query::DeclIdentity,
+) -> bool {
+    identity.canonical_id.contains("/node_modules/")
+}
+
+/// Plan §1.12 — graph-native variant of
+/// `declaration_body_prefers_inline_materialization`. Returns `true`
+/// when the body shape is suitable for inline materialisation through
+/// the registry-route entry.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) fn declaration_body_prefers_inline_materialization_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    body_id: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    let Some(data) = graph.node_data(body_id) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Object(_) => true,
+        SemanticNodeData::DeclRef { .. } => true,
+        SemanticNodeData::Alias(inner) => {
+            declaration_body_prefers_inline_materialization_node(graph, *inner)
+        }
+        _ => extract_route_root_identity_node(graph, body_id).is_some(),
+    }
+}
+
+/// Plan §1.12 — graph-native BFS port of `decl_body_reaches_cycle_via_walker`.
+///
+/// Walks decl bodies via `dispatch.execute_read(SemanticQueryKey::Instantiate {
+/// body_mode: Navigate })` to detect transitive cycles. Returns `true`
+/// when the BFS rediscovers `root_identity` as a child reference within
+/// `MAX_HOPS` steps.
+///
+/// Each `Instantiate` dispatch's `dep_signature` is merged into
+/// `local_fence` so the caller's completion fence remains complete. The
+/// `owner_canonical_id` parameter mirrors the TypeExpr variant's signature
+/// — currently only used to match its API surface; future revisions may
+/// thread it into a route lookup if cross-owner cycle detection needs it.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) fn ref_root_reaches_transitive_cycle_node(
+    root_identity: &crate::semantic_query::DeclIdentity,
+    _owner_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+) -> bool {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
+    use rustc_hash::FxHashSet;
+    use std::collections::VecDeque;
+
+    const MAX_HOPS: usize = 64;
+
+    let dispatch = ProjectSemanticDispatch::new(engine.host);
+    let mut visited: FxHashSet<crate::semantic_query::DeclIdentity> = FxHashSet::default();
+    let mut queue: VecDeque<crate::semantic_query::DeclIdentity> = VecDeque::new();
+    visited.insert(root_identity.clone());
+    queue.push_back(root_identity.clone());
+
+    let mut hops = 0usize;
+    while let Some(current) = queue.pop_front() {
+        if hops >= MAX_HOPS {
+            return false;
+        }
+        hops += 1;
+
+        let key = SemanticQueryKey::Instantiate {
+            base: current,
+            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Navigate,
+        };
+        let read = dispatch.execute_read(key);
+        local_fence.extend(read.dep_signature.iter().cloned());
+        let body_id = match read.value {
+            QueryResult::Value(id) => id,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => continue,
+        };
+
+        if has_complex_cycle_guard_surface_node(engine.host, body_id) {
+            // Walker parity: stop expansion when the body has a
+            // complex (non-Object) surface that may trigger BFS
+            // thrashing. Don't return true; just skip enqueueing
+            // children from this body.
+            continue;
+        }
+
+        let graph = engine.host.project_type_store().semantic_graph();
+        let mut child_identities: Vec<crate::semantic_query::DeclIdentity> = Vec::new();
+        collect_ref_identities_node(graph, body_id, &mut child_identities);
+        for child in child_identities {
+            if &child == root_identity {
+                return true;
+            }
+            if visited.insert(child.clone()) {
+                queue.push_back(child);
+            }
+        }
+    }
+    false
+}
+
+/// Helper: walker-parity check for "complex" cycle-guard surfaces.
+/// Mirrors `has_complex_cycle_guard_surface` from the TypeExpr path:
+/// a body whose top shape is something other than a plain Object /
+/// Function / Array / Tuple / primitive / literal counts as "complex"
+/// and stops the cycle BFS at that hop.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+fn has_complex_cycle_guard_surface_node(
+    host: &VerterHost,
+    node: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Alias(inner) => has_complex_cycle_guard_surface_node(host, *inner),
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            members
+                .iter()
+                .any(|&m| has_complex_cycle_guard_surface_node(host, m))
+                || members.iter().any(|&m| {
+                    let d = graph.node_data(m);
+                    !matches!(d.as_deref(), Some(SemanticNodeData::Object(_)))
+                })
+        }
+        SemanticNodeData::DeclRef { .. }
+        | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TemplateLiteral { .. } => true,
+        _ => false,
+    }
+}
+
+/// Helper: collect every reachable `DeclRef` / `InstantiationRef`
+/// identity from `node`'s shallow surface (one level deep). Used by
+/// the cycle BFS to enqueue child decl identities.
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+fn collect_ref_identities_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    out: &mut Vec<crate::semantic_query::DeclIdentity>,
+) {
+    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+    use rustc_hash::FxHashSet;
+
+    let mut stack: Vec<SemanticNodeId> = vec![node];
+    let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(data) = graph.node_data(current) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => out.push(identity.clone()),
+            SemanticNodeData::InstantiationRef { base, args } => {
+                out.push(base.clone());
+                for &arg in args.iter() {
+                    stack.push(arg);
+                }
+            }
+            SemanticNodeData::Alias(inner) => stack.push(*inner),
+            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                for &m in members.iter() {
+                    stack.push(m);
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                for member in surface.members.iter() {
+                    stack.push(member.value);
+                }
+            }
+            SemanticNodeData::Array { element, .. } => stack.push(*element),
+            SemanticNodeData::IndexedAccess { object, .. } => stack.push(*object),
+            SemanticNodeData::KeyOf { base } => stack.push(*base),
+            SemanticNodeData::Function { return_type, .. } => stack.push(*return_type),
+            _ => {}
+        }
+    }
+}
+
+/// Plan §1.12 — graph-native composition predicate. Mirrors
+/// `registry_member_route_inline_materializable` over `SemanticNodeId`
+/// inputs.
+///
+/// Returns `true` only when ALL of the following hold:
+///
+/// 1. `extract_route_root_identity_node` succeeds (round-7 parity
+///    tightenings apply).
+/// 2. The root is NOT package-backed
+///    (`component_meta_ref_resolves_to_package_node`).
+/// 3. The root does NOT reach a transitive cycle within `MAX_HOPS`.
+/// 4. The decl body (resolved via `Instantiate(Navigate)`) shape
+///    prefers inline materialisation per
+///    `declaration_body_prefers_inline_materialization_node`.
+///
+/// Each `Instantiate` dispatch's `dep_signature` is merged into
+/// `local_fence` (combining contributions from the cycle BFS and the
+/// terminal body-shape probe).
+#[allow(
+    dead_code,
+    reason = "wired in by `_node` migration follow-up; covered by unit tests"
+)]
+pub(crate) fn registry_member_route_inline_materializable_node(
+    node: crate::semantic_query::SemanticNodeId,
+    scope: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+) -> bool {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
+
+    let extraction = {
+        let graph = engine.host.project_type_store().semantic_graph();
+        match extract_route_root_identity_node(graph, node) {
+            Some(extraction) => extraction,
+            None => return false,
+        }
+    };
+
+    if component_meta_ref_resolves_to_package_node(&extraction.root_identity) {
+        return false;
+    }
+
+    if ref_root_reaches_transitive_cycle_node(&extraction.root_identity, scope, engine, local_fence)
+    {
+        return false;
+    }
+
+    let dispatch = ProjectSemanticDispatch::new(engine.host);
+    let key = SemanticQueryKey::Instantiate {
+        base: extraction.root_identity.clone(),
+        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        body_mode: ProjectionMode::Navigate,
+    };
+    let read = dispatch.execute_read(key);
+    local_fence.extend(read.dep_signature.iter().cloned());
+    let body_id = match read.value {
+        QueryResult::Value(id) => id,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
+    };
+
+    let graph = engine.host.project_type_store().semantic_graph();
+    declaration_body_prefers_inline_materialization_node(graph, body_id)
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn build_origin_graph(
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,

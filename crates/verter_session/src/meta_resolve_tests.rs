@@ -10067,3 +10067,492 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
          plan — got {binding_names:?}; param={first_param_ty:?}"
     );
 }
+
+// ===========================================================================
+// Plan §1.12 — graph-native registry-route + cycle-BFS predicates
+//
+// Discriminating tests for the round-7 parity matrix (plan §1.12 / §10.8):
+//
+// 1. `Pick<Foo<T>, 'a'>` (generic root) — rejected.
+// 2. `Foo[0]` (numeric index) — rejected.
+// 3. `Pick<Foo, 'a' | 'b' | 'c'>` (3+ literal-union keys) — accepted.
+// 4. `Pick<Foo>` (1-arg) — rejected.
+// 5. `Pick<Foo, 'a', 'b'>` (3-arg) — rejected.
+// 6. `Pick<Foo, never>` (empty union) — rejected.
+// 7. A → B → C → A cycle through three distinct decls — `ref_root_
+//    reaches_transitive_cycle_node` returns true after at most three
+//    `Instantiate` dispatches; their dep_signatures appear in `local_fence`.
+// ===========================================================================
+
+mod node_predicates_tests {
+    use super::make_project;
+    use crate::meta_resolve::{
+        component_meta_ref_resolves_to_package_node,
+        declaration_body_prefers_inline_materialization_node, extract_route_root_identity_node,
+        ref_root_reaches_transitive_cycle_node, registry_member_route_inline_materializable_node,
+    };
+    use crate::resolver_core::RouteDemand;
+    use crate::semantic_query::{
+        DeclIdentity, IndexKey, IndexSignature, NodeScopeId, SemanticNodeData, SemanticNodeId,
+        SurfaceMember, SurfaceView,
+    };
+    use std::sync::Arc as StdArc;
+    use verter_semantic::analysis::type_expr::LiteralValue;
+
+    fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
+        SurfaceView {
+            members: StdArc::from(members.into_boxed_slice()),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }
+    }
+
+    fn synthetic_decl_identity(decl_name: &str) -> DeclIdentity {
+        DeclIdentity {
+            canonical_id: StdArc::from("/test/local.ts"),
+            whole_hash: [0u8; 16],
+            decl_name: StdArc::from(decl_name),
+        }
+    }
+
+    fn package_decl_identity(decl_name: &str) -> DeclIdentity {
+        DeclIdentity {
+            canonical_id: StdArc::from("/repo/node_modules/some-pkg/index.ts"),
+            whole_hash: [0u8; 16],
+            decl_name: StdArc::from(decl_name),
+        }
+    }
+
+    fn pick_or_omit_identity(name: &'static str) -> DeclIdentity {
+        DeclIdentity {
+            canonical_id: StdArc::from("/lib/lib.es5.d.ts"),
+            whole_hash: [0u8; 16],
+            decl_name: StdArc::from(name),
+        }
+    }
+
+    /// Round-7 parity row 1: `Pick<Foo<T>, 'a'>` — generic root rejected.
+    /// The route extractor must accept ONLY a fully-bare `DeclRef` as the
+    /// root; `InstantiationRef` (i.e. `Foo<T>`) is reserved for the
+    /// dedicated InstantiationRef arm and must NOT be flattened into a
+    /// route.
+    #[test]
+    fn extract_route_rejects_generic_root_pick() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let t_identity = synthetic_decl_identity("T");
+        let t_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: t_identity.clone(),
+        });
+        let foo_t = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: foo_identity,
+            args: StdArc::from(vec![t_ref].into_boxed_slice()),
+        });
+        let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_t, key_a].into_boxed_slice()),
+        });
+
+        assert!(
+            extract_route_root_identity_node(graph, pick_node).is_none(),
+            "Pick<Foo<T>, 'a'> must be rejected (root is InstantiationRef, not bare DeclRef) \
+             — generic-root tightening (round-7 parity)"
+        );
+    }
+
+    /// Round-7 parity row 2: `Foo[0]` — numeric index rejected.
+    /// Only `IndexKey::String` literals are valid registry-route hops.
+    #[test]
+    fn extract_route_rejects_numeric_indexed_access() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity,
+        });
+        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: foo_ref,
+            index: IndexKey::Number(0),
+        });
+
+        assert!(
+            extract_route_root_identity_node(graph, indexed).is_none(),
+            "Foo[0] must be rejected (numeric index) — round-7 parity"
+        );
+    }
+
+    /// Round-7 parity row 3: `Pick<Foo, 'a' | 'b' | 'c'>` — accepted.
+    /// Three-way literal-string union is the canonical accept case.
+    #[test]
+    fn extract_route_accepts_three_literal_union_pick() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity.clone(),
+        });
+        let literals: Vec<SemanticNodeId> = ["a", "b", "c"]
+            .iter()
+            .map(|s| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    s.to_string(),
+                )))
+            })
+            .collect();
+        let union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+            literals.into_boxed_slice(),
+        )));
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
+        });
+
+        let extraction = extract_route_root_identity_node(graph, pick_node)
+            .expect("Pick<Foo, 'a' | 'b' | 'c'> must be accepted (round-7 parity row 3)");
+        assert_eq!(extraction.root_identity, foo_identity);
+        match extraction.route {
+            RouteDemand::Pick(keys) => {
+                assert_eq!(
+                    keys,
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                    "all three literal-union keys must be preserved in order"
+                );
+            }
+            other => panic!("expected RouteDemand::Pick, got {other:?}"),
+        }
+    }
+
+    /// Round-7 parity row 4: `Pick<Foo>` — 1-arg rejected.
+    #[test]
+    fn extract_route_rejects_one_arg_pick() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity,
+        });
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_ref].into_boxed_slice()),
+        });
+
+        assert!(
+            extract_route_root_identity_node(graph, pick_node).is_none(),
+            "Pick<Foo> (1-arg) must be rejected (args.len() != 2) — round-7 parity"
+        );
+    }
+
+    /// Round-7 parity row 5: `Pick<Foo, 'a', 'b'>` — 3-arg rejected.
+    #[test]
+    fn extract_route_rejects_three_arg_pick() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity,
+        });
+        let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "b".to_string(),
+        )));
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_ref, key_a, key_b].into_boxed_slice()),
+        });
+
+        assert!(
+            extract_route_root_identity_node(graph, pick_node).is_none(),
+            "Pick<Foo, 'a', 'b'> (3-arg) must be rejected — round-7 parity"
+        );
+    }
+
+    /// Round-7 parity row 6: `Pick<Foo, never>` — empty union rejected.
+    /// Modeled as an empty `Union` node (representing the `never` identity).
+    #[test]
+    fn extract_route_rejects_empty_union_pick() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity,
+        });
+        let empty_union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+            Vec::<SemanticNodeId>::new().into_boxed_slice(),
+        )));
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_ref, empty_union].into_boxed_slice()),
+        });
+
+        assert!(
+            extract_route_root_identity_node(graph, pick_node).is_none(),
+            "Pick<Foo, never> (empty key set) must be rejected — round-7 parity"
+        );
+    }
+
+    /// Bonus discriminator: a chained `IndexedAccess` with all-string
+    /// keys must yield a `MemberPath` carrying every segment in order.
+    #[test]
+    fn extract_route_accepts_chained_string_indexed_access() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let foo_identity = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: foo_identity.clone(),
+        });
+        let level_one = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: foo_ref,
+            index: IndexKey::String(StdArc::from("c")),
+        });
+        let level_two = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: level_one,
+            index: IndexKey::String(StdArc::from("full")),
+        });
+
+        let extraction = extract_route_root_identity_node(graph, level_two)
+            .expect("Foo['c']['full'] must be accepted");
+        assert_eq!(extraction.root_identity, foo_identity);
+        match extraction.route {
+            RouteDemand::MemberPath(segments) => {
+                assert_eq!(segments, vec!["c".to_string(), "full".to_string()]);
+            }
+            other => panic!("expected RouteDemand::MemberPath, got {other:?}"),
+        }
+    }
+
+    /// `component_meta_ref_resolves_to_package_node` — pure check on the
+    /// canonical id. Must reject local refs and accept `node_modules`.
+    #[test]
+    fn package_ref_predicate_discriminates_local_vs_node_modules() {
+        let local = synthetic_decl_identity("Foo");
+        let pkg = package_decl_identity("Bar");
+
+        assert!(
+            !component_meta_ref_resolves_to_package_node(&local),
+            "local /test/local.ts decl must NOT be classified as package-backed"
+        );
+        assert!(
+            component_meta_ref_resolves_to_package_node(&pkg),
+            "node_modules-rooted decl must be classified as package-backed"
+        );
+    }
+
+    /// `declaration_body_prefers_inline_materialization_node` — body
+    /// shapes that should and should not pass the inline-mat gate.
+    #[test]
+    fn inline_mat_predicate_discriminates_object_vs_function() {
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let object_body = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
+        assert!(
+            declaration_body_prefers_inline_materialization_node(graph, object_body),
+            "Object body must be inline-materialisable"
+        );
+
+        let function_body = graph.intern_node(SemanticNodeData::Function {
+            params: StdArc::from(Vec::new().into_boxed_slice()),
+            return_type: object_body,
+            type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
+        });
+        assert!(
+            !declaration_body_prefers_inline_materialization_node(graph, function_body),
+            "Function body must NOT be inline-materialisable"
+        );
+
+        let mapped_body = graph.intern_node(SemanticNodeData::KeyOf { base: object_body });
+        assert!(
+            !declaration_body_prefers_inline_materialization_node(graph, mapped_body),
+            "KeyOf body must NOT be inline-materialisable (no route extracted)"
+        );
+    }
+
+    /// Round-7 parity row 7: A → B → C → A cycle.
+    ///
+    /// Build a real fixture where decl `A` aliases to `B`, `B` aliases
+    /// to `C`, and `C` aliases back to `A`. The graph-native cycle BFS
+    /// must rediscover `A` as a child reachable from `A`'s body within
+    /// at most three `Instantiate` dispatches; their `dep_signatures`
+    /// must accumulate into `local_fence`.
+    #[test]
+    fn ref_root_cycle_bfs_detects_three_decl_cycle_and_accumulates_dep_facts() {
+        use crate::resolver_core::ComponentMetaQueryEngine;
+
+        let project = make_project();
+        // Three-decl cycle expressed as Object aliases (so the cycle
+        // body itself is not "complex" — the BFS guard only short-
+        // circuits on Conditional / Mapped / KeyOf / Template etc.;
+        // Object aliasing through DeclRef stays in scope for the BFS).
+        project
+            .upsert_base(
+                "/cycle.ts",
+                r#"
+export interface A { next: B }
+export interface B { next: C }
+export interface C { next: A }
+"#,
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { A } from './cycle'
+defineProps<{ value: A }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+
+        let session = project.open_session_batch().unwrap();
+        // Seed the host: this populates IndexedReady + analysis for
+        // `/cycle.ts` so `Instantiate` dispatches against the
+        // declarations succeed.
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+
+        let host = session.host();
+        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        // In MemoryWorkspace fixtures the upsert path is itself the
+        // canonical id; resolve via `shallow_file_state` to obtain the
+        // matching whole_hash.
+        let cycle_canonical = "/cycle.ts";
+        let shallow = host
+            .shallow_file_state(cycle_canonical)
+            .expect("cycle.ts must be indexed");
+        let a_identity = DeclIdentity {
+            canonical_id: StdArc::from(cycle_canonical),
+            whole_hash: shallow.whole_hash,
+            decl_name: StdArc::from("A"),
+        };
+
+        let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        let detected = ref_root_reaches_transitive_cycle_node(
+            &a_identity,
+            cycle_canonical,
+            &mut engine,
+            &mut local_fence,
+        );
+
+        assert!(
+            detected,
+            "A → B → C → A cycle must be detected by the graph-native BFS"
+        );
+        assert!(
+            !local_fence.is_empty(),
+            "Instantiate dispatches must accumulate dep_signatures into local_fence — \
+             empty fence indicates the BFS skipped the dispatch path"
+        );
+        // Fence should contain at least one fact about `/cycle.ts`
+        // (the file under traversal).
+        let touches_cycle_file = local_fence
+            .iter()
+            .any(|(canonical, _)| canonical.as_ref() == cycle_canonical);
+        assert!(
+            touches_cycle_file,
+            "local_fence must include a dep fact for /cycle.ts — got {local_fence:?}"
+        );
+    }
+
+    /// `registry_member_route_inline_materializable_node` composition —
+    /// a `Pick<Foo, 'a' | 'b'>` over a local-file `Foo` interface must
+    /// pass the composition (extract OK + non-package + non-cyclic +
+    /// Object body).
+    #[test]
+    fn registry_route_composition_accepts_local_pick_over_object_interface() {
+        use crate::resolver_core::ComponentMetaQueryEngine;
+        use crate::semantic_query::SemanticNodeData;
+
+        let project = make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"export interface Foo { a: string; b: number; c: boolean }
+"#,
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { Foo } from './types'
+defineProps<{ picked: Pick<Foo, 'a' | 'b'> }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+        let host = session.host();
+
+        let types_canonical = "/types.ts";
+        let shallow = host
+            .shallow_file_state(types_canonical)
+            .expect("/types.ts must be indexed");
+
+        // Build the Pick<Foo, 'a' | 'b'> graph node directly so the
+        // test exercises the composition predicate, not whatever the
+        // real macro flow produced.
+        let graph = host.project_type_store().semantic_graph();
+        let foo_ref = graph.intern_node_with_scope(
+            SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: StdArc::from(types_canonical),
+                    whole_hash: shallow.whole_hash,
+                    decl_name: StdArc::from("Foo"),
+                },
+            },
+            NodeScopeId::Global,
+        );
+        let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "a".to_string(),
+        )));
+        let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "b".to_string(),
+        )));
+        let union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+            vec![key_a, key_b].into_boxed_slice(),
+        )));
+        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pick_or_omit_identity("Pick"),
+            args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
+        });
+
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        assert!(
+            registry_member_route_inline_materializable_node(
+                pick_node,
+                types_canonical,
+                &mut engine,
+                &mut local_fence,
+            ),
+            "Pick<Foo, 'a' | 'b'> over a local Object interface must be inline-materialisable"
+        );
+    }
+}
