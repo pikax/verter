@@ -30,6 +30,15 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "component_meta_dispatch_iteration",
     "WalkerVisitedNodes",
     "VisitedPushOutcome",
+    // Plan §11.2 cleanup: the legacy walker's `MaterializedMemberSurfaceDb`
+    // family had zero callers post-Phase-9 (the walker shim now delegates
+    // to `materialize_component_meta_structure` which publishes through
+    // `MaterializeStructureDb`). Re-introducing any of these names at a
+    // call site would re-wire the dead cache lane.
+    "MaterializedMemberSurfaceDb",
+    "MaterializedMemberSurfaceEntry",
+    "MaterializedMemberSurfaceKey",
+    "MaterializedMemberSurfaceTarget",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

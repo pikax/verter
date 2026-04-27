@@ -12,9 +12,8 @@
 //! ## D3.5 — `Arc<str>` / `Arc<TypeExpr>` field migration
 //!
 //! Each previously-`String` field becomes `Arc<str>` and each previously-
-//! owned `TypeExpr` (only in `PreparedSubstitutionKey::Entries` and
-//! `MaterializedMemberSurfaceTarget::Structural`) becomes `Arc<TypeExpr>`.
-//! Two reasons:
+//! owned `TypeExpr` (in `PreparedSubstitutionKey::Entries`) becomes
+//! `Arc<TypeExpr>`. Two reasons:
 //!
 //! 1. **Cheap cloning across threads.** Host DBs are shared across all
 //!    request threads via `DashMap<K, Arc<Entry>>`. Cloning a key on
@@ -33,23 +32,6 @@ use std::sync::Arc;
 use verter_semantic::analysis::type_expr::TypeExpr;
 
 use crate::resolver_core::RouteDemand;
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct MaterializedMemberSurfaceKey {
-    pub scope_canonical_id: Arc<str>,
-    pub target: MaterializedMemberSurfaceTarget,
-    pub nested_surface: bool,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum MaterializedMemberSurfaceTarget {
-    Symbol(Arc<str>),
-    RoutedMember {
-        root_symbol: Arc<str>,
-        route: RouteDemand,
-    },
-    Structural(Arc<TypeExpr>),
-}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum PreparedSubstitutionKey {

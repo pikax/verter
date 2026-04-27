@@ -302,14 +302,12 @@ fn step3_db_accessors_are_distinct_instances() {
     let own_addr = store.owner_collection_db() as *const _ as usize;
     let prt_addr = store.prepared_target_db() as *const _ as usize;
     let mat_addr = store.materialize_memo_db() as *const _ as usize;
-    let mms_addr = store.materialized_member_surface_db() as *const _ as usize;
     let psr_addr = store.prepared_surface_db() as *const _ as usize;
     let pmr_addr = store.prepared_member_db() as *const _ as usize;
     let res2_addr = store.routed_expr_surface_db() as *const _ as usize;
 
     let addrs = [
-        imp_addr, dec_addr, res_addr, own_addr, prt_addr, mat_addr, mms_addr, psr_addr, pmr_addr,
-        res2_addr,
+        imp_addr, dec_addr, res_addr, own_addr, prt_addr, mat_addr, psr_addr, pmr_addr, res2_addr,
     ];
     let mut sorted = addrs.to_vec();
     sorted.sort();
@@ -317,7 +315,9 @@ fn step3_db_accessors_are_distinct_instances() {
     assert_eq!(
         sorted.len(),
         addrs.len(),
-        "Step 3 DB accessors must return 10 distinct instances; some accessor returned an alias"
+        "Step 3 DB accessors must return 9 distinct instances; some accessor returned an alias \
+         (post-Phase-9 the legacy walker's `materialized_member_surface_db` was retired — \
+         plan §11.2)"
     );
 }
 

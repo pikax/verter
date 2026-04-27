@@ -28,9 +28,8 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::{AnalysisScope, Hash16};
 
 use crate::component_meta_caches::{
-    DeclarationLookupDb, ImportedRegistryDb, MaterializeMemoDb, MaterializedMemberSurfaceDb,
-    OwnerCollectionDb, PreparedMemberDb, PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb,
-    RoutedExprSurfaceDb,
+    DeclarationLookupDb, ImportedRegistryDb, MaterializeMemoDb, OwnerCollectionDb,
+    PreparedMemberDb, PreparedSurfaceDb, PreparedTargetDb, ResolvabilityDb, RoutedExprSurfaceDb,
 };
 use crate::component_meta_result_db::ComponentMetaResultDb;
 use crate::intrinsic_registry::IntrinsicRegistry;
@@ -563,11 +562,11 @@ pub struct ProjectTypeStore {
     owner_collection_db: OwnerCollectionDb,
     prepared_target_db: PreparedTargetDb,
     materialize_memo_db: MaterializeMemoDb,
-    materialized_member_surface_db: MaterializedMemberSurfaceDb,
     /// Plan §1.5 / Phase 8 — final-result cache for the structural
-    /// materialiser. Phase 9 will retire `materialized_member_surface_db`
-    /// in favour of this field; both coexist during Phase 8 to allow
-    /// incremental cutover.
+    /// materialiser. Sole authoritative host-owned materialiser cache
+    /// post-Phase-9 (the legacy walker's per-shape DB was retired in
+    /// plan §11.2; the canonical retired-symbol list lives in
+    /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`).
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
     prepared_surface_db: PreparedSurfaceDb,
     prepared_member_db: PreparedMemberDb,
@@ -644,9 +643,6 @@ impl ProjectTypeStore {
             PreparedTargetDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let materialize_memo_db =
             MaterializeMemoDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let materialized_member_surface_db = MaterializedMemberSurfaceDb::with_counter(Arc::clone(
-            &counters.component_meta_cache_live,
-        ));
         let materialize_structure_db =
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -673,7 +669,6 @@ impl ProjectTypeStore {
             owner_collection_db,
             prepared_target_db,
             materialize_memo_db,
-            materialized_member_surface_db,
             materialize_structure_db,
             prepared_surface_db,
             prepared_member_db,
@@ -764,12 +759,11 @@ impl ProjectTypeStore {
         &self.materialize_memo_db
     }
 
-    pub fn materialized_member_surface_db(&self) -> &MaterializedMemberSurfaceDb {
-        &self.materialized_member_surface_db
-    }
-
     /// Plan §1.5 / Phase 8 — accessor for the structural-materialiser
-    /// final-result cache.
+    /// final-result cache. Sole authoritative materialiser cache
+    /// post-Phase-9 cutover (the legacy walker's per-shape materialiser
+    /// DB was retired in plan §11.2 — see `RETIRED_SYMBOLS` in
+    /// `tests/no_legacy_walker.rs`).
     pub fn materialize_structure_db(
         &self,
     ) -> &crate::component_meta_caches::MaterializeStructureDb {
@@ -834,10 +828,10 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_canonical(canonical_id);
         self.prepared_target_db.invalidate_canonical(canonical_id);
         self.materialize_memo_db.invalidate_canonical(canonical_id);
-        self.materialized_member_surface_db
-            .invalidate_canonical(canonical_id);
         // Plan §1.5 / Phase 8 — Γ.B-style reverse-index drain on the
-        // structural-materialiser cache.
+        // structural-materialiser cache (sole materialiser cache
+        // post-Phase-9; the legacy walker's per-shape materialiser DB
+        // was retired in plan §11.2).
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
         self.prepared_surface_db.invalidate_canonical(canonical_id);
@@ -880,7 +874,6 @@ impl ProjectTypeStore {
         self.owner_collection_db.invalidate_all();
         self.prepared_target_db.invalidate_all();
         self.materialize_memo_db.invalidate_all();
-        self.materialized_member_surface_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
         self.prepared_surface_db.invalidate_all();
         self.prepared_member_db.invalidate_all();

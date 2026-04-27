@@ -42,11 +42,12 @@
 //!
 //! Phase 9 cut over the legacy `walk_component_meta_member_surface_expr`
 //! shim to this entry, deleted the walker's inner body family
-//! (`walker_cycle_key_node`, `expand_generic_ref_via_scope_iteration`,
-//! `walk_component_meta_member_surface_expr_with_visited`), and
-//! deleted the `component_meta_dispatch_iteration` module that
-//! hosted the walker's visited-set helper. The static-grep gate
-//! at `tests/no_legacy_walker.rs` enforces the deletion permanently.
+//! (cycle-key, scope-iteration, and visited-set helpers), and
+//! deleted the dispatch-iteration module that hosted the walker's
+//! visited-set helper. The static-grep gate at
+//! `tests/no_legacy_walker.rs` enforces the deletion permanently —
+//! see that file's `RETIRED_SYMBOLS` array for the canonical list
+//! of names that must not reappear.
 
 use std::sync::Arc;
 

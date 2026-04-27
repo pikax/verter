@@ -132,23 +132,6 @@ pub struct ResolvedImportedRegistrySymbol {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct MaterializedMemberSurfaceKey {
-    scope_canonical_id: String,
-    target: MaterializedMemberSurfaceTarget,
-    nested_surface: bool,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum MaterializedMemberSurfaceTarget {
-    Symbol(String),
-    RoutedMember {
-        root_symbol: String,
-        route: super::RouteDemand,
-    },
-    Structural(TypeExpr),
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 enum PreparedSubstitutionKey {
     Empty,
     Entries(Vec<(String, TypeExpr)>),
@@ -233,7 +216,6 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `imported_registry_symbols` | (b) | Caches `(canonical, name) → ResolvedImportedRegistrySymbol` at TypeExpr level. Dispatch's `ResolveDecl` memo operates on `SemanticNodeId`s; cannot subsume the pre-lowering identity. |
 /// | `declarations` / `resolvable` / `owner_collection_exprs` | (b) | Same kind — pre-lowering memos keyed on `(canonical, name)` strings. |
 /// | `scope_payloads` | (a) | Per-request `Arc<DeclarationScopePayload>` clones; the bundle is host-owned, this just reuses the Arc within one request. |
-/// | `materialized_member_surfaces` | (b) | Pre-materialize-call memo on `(scope, target, nested_surface)` — dispatch's per-key memo doesn't have this composite identity. |
 /// | `prepared_surface_cache` / `prepared_member_cache` / `prepared_target_cache` / `routed_expr_surface_cache` | (b) | All four are pre-lowering route projections — same justification as above. |
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from host; no semantic computation — only refcount avoidance. |
 /// | `materialize_memo` | (b) | Plan §3 Step 6.3 — `(scope, expr, navigate_flag) → MaterializedTypeExpr` memo. Dispatch's post-lowering memo cannot replace this because the key is the un-lowered `TypeExpr`. |
@@ -280,9 +262,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// bundle-derived names/bindings within one request so repeated projections
     /// do not keep recloning them.
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
-    /// Read-through view; authority is
-    /// `ProjectTypeStore::materialized_member_surface_db()`.
-    materialized_member_surfaces: RefCell<FxHashMap<MaterializedMemberSurfaceKey, TypeExpr>>,
     /// Read-through view; authority is
     /// `ProjectTypeStore::prepared_surface_db()`.
     prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
@@ -456,7 +435,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             resolvable: RefCell::new(FxHashMap::default()),
             owner_collection_exprs: RefCell::new(FxHashMap::default()),
             scope_payloads: FxHashMap::default(),
-            materialized_member_surfaces: RefCell::new(FxHashMap::default()),
             prepared_surface_cache: RefCell::new(FxHashMap::default()),
             prepared_member_cache: RefCell::new(FxHashMap::default()),
             prepared_target_cache: RefCell::new(FxHashMap::default()),
@@ -1963,72 +1941,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<TypeExpr> {
         self.prepared_type_decl(canonical_id, symbol_name)
             .and_then(|prepared| prepared.member(member_name).map(|member| member.ty.clone()))
-    }
-
-    pub fn cached_materialized_member_surface(
-        &self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-        nested_surface: bool,
-    ) -> Option<TypeExpr> {
-        #[cfg(test)]
-        crate::spike_instrumentation::record_cache_read("materialized_member_surfaces");
-        // Step 3 closure: local view first, then host-owned
-        // MaterializedMemberSurfaceDb (peek-only — no compute closure
-        // for a `cached_*` accessor).
-        let key = materialized_member_surface_key(scope_canonical_id, expr, nested_surface)?;
-        if let Some(cached) = self
-            .materialized_member_surfaces
-            .borrow()
-            .get(&key)
-            .cloned()
-        {
-            return Some(cached);
-        }
-        let arc_key =
-            materialized_member_surface_arc_key(scope_canonical_id, expr, nested_surface)?;
-        let host_db = self
-            .host
-            .project_type_store()
-            .materialized_member_surface_db();
-        let arc_value = host_db.peek(&arc_key, self.host)?;
-        let value = arc_value.as_ref().clone();
-        self.materialized_member_surfaces
-            .borrow_mut()
-            .insert(key, value.clone());
-        Some(value)
-    }
-
-    pub fn store_materialized_member_surface(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &TypeExpr,
-        nested_surface: bool,
-        materialized: TypeExpr,
-    ) {
-        let Some(key) = materialized_member_surface_key(scope_canonical_id, expr, nested_surface)
-        else {
-            return;
-        };
-        // Step 3 closure: write-through to host-owned DB. Subsequent
-        // request paths consult `MaterializedMemberSurfaceDb` directly
-        // and the cooperative admission table dedupes concurrent
-        // populates on the same arc-key.
-        if let Some(arc_key) =
-            materialized_member_surface_arc_key(scope_canonical_id, expr, nested_surface)
-        {
-            let host = self.host;
-            let host_db = host.project_type_store().materialized_member_surface_db();
-            let captured_value = materialized.clone();
-            let captured_canonical = scope_canonical_id.to_string();
-            let _ = host_db.get_or_compute(&arc_key, host, move || {
-                let dep_sig = engine_dep_signature_for_canonical(host, captured_canonical.as_str());
-                Some((captured_value, dep_sig))
-            });
-        }
-        self.materialized_member_surfaces
-            .borrow_mut()
-            .insert(key, materialized);
     }
 
     pub fn enter_member_surface(&mut self) -> bool {
@@ -6973,157 +6885,6 @@ fn routed_expr_surface_key_expr(root_symbol: &str, route: &super::RouteDemand) -
             ]),
         }),
         _ => None,
-    }
-}
-
-fn materialized_member_surface_key(
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-    nested_surface: bool,
-) -> Option<MaterializedMemberSurfaceKey> {
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.is_empty() => Some(MaterializedMemberSurfaceKey {
-            scope_canonical_id: scope_canonical_id.to_string(),
-            target: MaterializedMemberSurfaceTarget::Symbol(name.to_string()),
-            nested_surface,
-        }),
-        _ => super::component_meta_registry::component_meta_registry_public_indexed_access_route(
-            expr,
-        )
-        .map(|(root_symbol, route)| MaterializedMemberSurfaceKey {
-            scope_canonical_id: scope_canonical_id.to_string(),
-            target: MaterializedMemberSurfaceTarget::RoutedMember { root_symbol, route },
-            nested_surface,
-        })
-        .or_else(|| {
-            materialized_member_surface_structural_cacheable(expr).then(|| {
-                MaterializedMemberSurfaceKey {
-                    scope_canonical_id: scope_canonical_id.to_string(),
-                    target: MaterializedMemberSurfaceTarget::Structural(expr.clone()),
-                    nested_surface,
-                }
-            })
-        }),
-    }
-}
-
-/// Step 3 closure: produce the host-DB Arc-keyed variant of
-/// [`materialized_member_surface_key`] for routing through
-/// [`MaterializedMemberSurfaceDb`](crate::component_meta_caches::MaterializedMemberSurfaceDb).
-/// The local-view `String`-keyed key from
-/// [`materialized_member_surface_key`] retains the same shape so the
-/// engine's per-request RefCell mirror keeps owning its own copies; the
-/// host DB receives the cheap-clone Arc-keyed key.
-fn materialized_member_surface_arc_key(
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-    nested_surface: bool,
-) -> Option<crate::resolver_core::cache_keys::MaterializedMemberSurfaceKey> {
-    use crate::resolver_core::cache_keys::{
-        MaterializedMemberSurfaceKey as ArcKey, MaterializedMemberSurfaceTarget as ArcTarget,
-    };
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if type_arguments.is_empty() => Some(ArcKey {
-            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
-            target: ArcTarget::Symbol(name.clone()),
-            nested_surface,
-        }),
-        _ => super::component_meta_registry::component_meta_registry_public_indexed_access_route(
-            expr,
-        )
-        .map(|(root_symbol, route)| ArcKey {
-            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
-            target: ArcTarget::RoutedMember {
-                root_symbol: std::sync::Arc::from(root_symbol.as_str()),
-                route,
-            },
-            nested_surface,
-        })
-        .or_else(|| {
-            materialized_member_surface_structural_cacheable(expr).then(|| ArcKey {
-                scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
-                target: ArcTarget::Structural(std::sync::Arc::new(expr.clone())),
-                nested_surface,
-            })
-        }),
-    }
-}
-
-fn materialized_member_surface_structural_cacheable(expr: &TypeExpr) -> bool {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-
-    match expr {
-        TypeExpr::Primitive(_)
-        | TypeExpr::Literal(_)
-        | TypeExpr::Unknown { .. }
-        | TypeExpr::RecursiveRef { .. } => true,
-        TypeExpr::Ref { type_arguments, .. } => type_arguments.is_empty(),
-        TypeExpr::IndexedAccess { .. } => {
-            super::component_meta_registry::component_meta_registry_public_indexed_access_route(
-                expr,
-            )
-            .is_some()
-        }
-        TypeExpr::Parenthesized(inner)
-        | TypeExpr::Array { element: inner, .. }
-        | TypeExpr::KeyOf(inner)
-        | TypeExpr::Rest(inner) => materialized_member_surface_structural_cacheable(inner),
-        TypeExpr::Tuple { elements, .. } => elements
-            .iter()
-            .all(|element| materialized_member_surface_structural_cacheable(&element.ty)),
-        TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-            .iter()
-            .all(materialized_member_surface_structural_cacheable),
-        TypeExpr::Object(object) => object.properties.iter().all(|member| match member {
-            ObjectMember::Property(property) => {
-                materialized_member_surface_structural_cacheable(&property.ty)
-            }
-            ObjectMember::IndexSignature(signature) => {
-                materialized_member_surface_structural_cacheable(&signature.key_type)
-                    && materialized_member_surface_structural_cacheable(&signature.value_type)
-            }
-            ObjectMember::CallSignature(function) | ObjectMember::ConstructSignature(function) => {
-                function.parameters.iter().all(|parameter| {
-                    materialized_member_surface_structural_cacheable(&parameter.ty)
-                }) && function.return_type.as_deref().is_none_or(|return_type| {
-                    materialized_member_surface_structural_cacheable(return_type)
-                })
-            }
-            ObjectMember::Method(method) => {
-                method.function.parameters.iter().all(|parameter| {
-                    materialized_member_surface_structural_cacheable(&parameter.ty)
-                }) && method
-                    .function
-                    .return_type
-                    .as_deref()
-                    .is_none_or(|return_type| {
-                        materialized_member_surface_structural_cacheable(return_type)
-                    })
-            }
-        }),
-        TypeExpr::Function(function) => {
-            function
-                .parameters
-                .iter()
-                .all(|parameter| materialized_member_surface_structural_cacheable(&parameter.ty))
-                && function.return_type.as_deref().is_none_or(|return_type| {
-                    materialized_member_surface_structural_cacheable(return_type)
-                })
-        }
-        TypeExpr::TemplateLiteral { expressions, .. } => expressions
-            .iter()
-            .all(materialized_member_surface_structural_cacheable),
-        TypeExpr::Conditional { .. }
-        | TypeExpr::Mapped { .. }
-        | TypeExpr::TypeOf(_)
-        | TypeExpr::TypeParameter(_)
-        | TypeExpr::Infer { .. } => false,
     }
 }
 

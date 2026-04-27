@@ -46,8 +46,8 @@ use crate::completion_fence::FenceValidator;
 use crate::cooperative_admission::{cooperative_get_or_insert, InflightTable};
 use crate::project_semantic_dispatch::raise::MaterializedTypeExpr;
 use crate::resolver_core::cache_keys::{
-    MaterializedMemberSurfaceKey, PreparedMemberCacheKey, PreparedSurfaceCacheKey,
-    PreparedTargetCacheKey, RoutedExprSurfaceCacheKey,
+    PreparedMemberCacheKey, PreparedSurfaceCacheKey, PreparedTargetCacheKey,
+    RoutedExprSurfaceCacheKey,
 };
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::ResolvedTypeDeclaration;
@@ -739,130 +739,6 @@ impl MaterializeMemoDb {
 }
 
 impl Default for MaterializeMemoDb {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ===========================================================================
-// 7. MaterializedMemberSurfaceDb — `MaterializedMemberSurfaceKey → TypeExpr`
-// ===========================================================================
-
-#[derive(Clone)]
-pub struct MaterializedMemberSurfaceEntry {
-    pub value: Arc<TypeExpr>,
-    pub dep_signature: DepSignature,
-}
-
-pub struct MaterializedMemberSurfaceDb {
-    entries: DashMap<MaterializedMemberSurfaceKey, Arc<MaterializedMemberSurfaceEntry>>,
-    inflight: InflightTable<MaterializedMemberSurfaceKey>,
-    live_counter: Arc<AtomicU64>,
-}
-
-impl MaterializedMemberSurfaceDb {
-    pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
-        Self {
-            entries: DashMap::new(),
-            inflight: InflightTable::new(),
-            live_counter,
-        }
-    }
-
-    /// Peek-only lookup for `cached_*` accessors that must not trigger
-    /// a cold compute. Returns the cached value only if the entry's
-    /// dep_signature is still valid against `host`; stale entries
-    /// return `None` (caller falls through to compute through the
-    /// regular `get_or_compute` path).
-    pub fn peek(
-        &self,
-        key: &MaterializedMemberSurfaceKey,
-        host: &VerterHost,
-    ) -> Option<Arc<TypeExpr>> {
-        let entry_arc = self.entries.get(key).map(|e| e.clone())?;
-        if dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
-            Some(entry_arc.value.clone())
-        } else {
-            None
-        }
-    }
-
-    pub fn get_or_compute<F>(
-        &self,
-        key: &MaterializedMemberSurfaceKey,
-        host: &VerterHost,
-        compute: F,
-    ) -> Option<Arc<TypeExpr>>
-    where
-        F: FnOnce() -> Option<(TypeExpr, DepSignature)>,
-    {
-        let live_counter = Arc::clone(&self.live_counter);
-        cooperative_get_or_insert(
-            &self.entries,
-            &self.inflight,
-            key.clone(),
-            |entry: &MaterializedMemberSurfaceEntry| {
-                if dep_signature_valid_for_host(&entry.dep_signature, host) {
-                    Some(entry.value.clone())
-                } else {
-                    None
-                }
-            },
-            move || {
-                compute().map(|(value, dep_signature)| {
-                    live_counter.fetch_add(1, Ordering::Relaxed);
-                    MaterializedMemberSurfaceEntry {
-                        value: Arc::new(value),
-                        dep_signature,
-                    }
-                })
-            },
-            |entry: &MaterializedMemberSurfaceEntry| entry.value.clone(),
-            |entry: &MaterializedMemberSurfaceEntry| {
-                dep_signature_valid_for_host(&entry.dep_signature, host)
-            },
-        )
-    }
-
-    pub fn invalidate_canonical(&self, canonical_id: &str) {
-        let keys: Vec<MaterializedMemberSurfaceKey> = self
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key();
-                if key.scope_canonical_id.as_ref() == canonical_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for key in keys {
-            if self.entries.remove(&key).is_some() {
-                self.live_counter.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn invalidate_all(&self) {
-        let n = self.entries.len() as u64;
-        self.entries.clear();
-        self.live_counter.fetch_sub(
-            n.min(self.live_counter.load(Ordering::Relaxed)),
-            Ordering::Relaxed,
-        );
-    }
-
-    pub fn live_count(&self) -> usize {
-        self.entries.len()
-    }
-}
-
-impl Default for MaterializedMemberSurfaceDb {
     fn default() -> Self {
         Self::new()
     }
