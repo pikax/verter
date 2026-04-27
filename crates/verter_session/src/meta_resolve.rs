@@ -10204,23 +10204,30 @@ fn collect_string_literal_union_keys_node(
 // `_node` allow_dead_code annotations and no remaining production
 // callers; deleted to keep the surface minimal.
 
+/// Plan §6.4 / C — primitive package-detection check on a canonical
+/// id. Returns `true` when the canonical resolves under
+/// `/node_modules/`. Shared by the graph-native predicate
+/// (`component_meta_ref_resolves_to_package_node`) and the
+/// node-based shape check (`is_package_backed_ref` in the
+/// materialiser).
+pub(crate) fn canonical_resolves_to_package(canonical_id: &str) -> bool {
+    canonical_id.contains("/node_modules/")
+}
+
 /// Plan §1.12 — graph-native variant of
-/// `component_meta_ref_resolves_to_package`. Pure check on the
-/// declaration identity's canonical id; no graph traversal needed.
+/// `component_meta_ref_resolves_to_package`. Delegates to the
+/// primitive [`canonical_resolves_to_package`] (commit C).
 pub(crate) fn component_meta_ref_resolves_to_package_node(
     identity: &crate::semantic_query::DeclIdentity,
 ) -> bool {
-    identity.canonical_id.contains("/node_modules/")
+    canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
 /// Plan §1.12 — graph-native variant of
 /// `declaration_body_prefers_inline_materialization`. Returns `true`
 /// when the body shape is suitable for inline materialisation through
-/// the registry-route entry.
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
+/// the registry-route entry. Wired in production by the materialiser's
+/// registry-route branch (B1) for inline-materializability decisions.
 pub(crate) fn declaration_body_prefers_inline_materialization_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     body_id: crate::semantic_query::SemanticNodeId,

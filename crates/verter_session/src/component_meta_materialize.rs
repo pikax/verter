@@ -841,25 +841,29 @@ fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
-/// Plan §1.6 / §1.12 — graph-native package-ref policy predicate.
+/// Plan §1.6 / §1.12 / §6.4 — graph-native package-ref policy predicate.
 /// Returns `true` when `node` is a `DeclRef` or `InstantiationRef`
 /// whose declaration's canonical id resolves under `/node_modules/`.
 /// The walker's pre-cutover policy kept these refs symbolic at every
 /// axis (TopLevel + Nested) — expanding them would publish package
 /// internals into the consumer's component-meta surface.
+///
+/// Delegates the canonical-string check to the shared primitive
+/// [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
+/// (commit C extracted this so the package check has one source of
+/// truth across graph-node and identity-based callers).
 pub(crate) fn is_package_backed_ref(host: &VerterHost, node: SemanticNodeId) -> bool {
     let graph = host.project_type_store().semantic_graph();
     let Some(data) = graph.node_data(node) else {
         return false;
     };
     use crate::semantic_query::SemanticNodeData;
-    match data.as_ref() {
-        SemanticNodeData::DeclRef { identity } => identity.canonical_id.contains("/node_modules/"),
-        SemanticNodeData::InstantiationRef { base, .. } => {
-            base.canonical_id.contains("/node_modules/")
-        }
-        _ => false,
-    }
+    let canonical = match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => identity.canonical_id.as_ref(),
+        SemanticNodeData::InstantiationRef { base, .. } => base.canonical_id.as_ref(),
+        _ => return false,
+    };
+    crate::meta_resolve::canonical_resolves_to_package(canonical)
 }
 
 /// Plan §1.8 — Object-shape materialisation. Walk the surface's
