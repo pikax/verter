@@ -7984,11 +7984,11 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
 // asserted `solve_count == 0 / 2` on the retired solver's rescue
 // pass. Without a solver the counter is always zero and the
 // predicates no longer discriminate. Projection routing is covered
-// end-to-end by `walk_component_meta_member_surface_expr_*`
-// and the generic_ref rescue preservation tests below.
+// end-to-end by `materialize_member_surface_expr_*` and the
+// generic_ref rescue preservation tests below.
 
 #[test]
-fn walk_component_meta_member_surface_expr_reuses_request_local_cache() {
+fn materialize_member_surface_expr_reuses_request_local_cache() {
     let project = make_project();
     project
         .upsert_base(
@@ -8021,12 +8021,10 @@ defineProps<{ first: Inner; second: Inner }>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr::TypeExpr::named("Inner");
 
-    let first =
-        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
+    let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second =
-        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
+    let second = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
 
     assert_eq!(
         first, second,
@@ -8044,7 +8042,7 @@ defineProps<{ first: Inner; second: Inner }>()
 }
 
 #[test]
-fn walk_component_meta_member_surface_expr_caches_indexed_member_routes() {
+fn materialize_member_surface_expr_caches_indexed_member_routes() {
     let project = make_project();
     project
         .upsert_base(
@@ -8096,20 +8094,10 @@ defineProps<{ ui?: Button['ui'] }>()
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
     let expr = verter_semantic::analysis::type_expr_lower::parse_type_annotation("Button['ui']");
 
-    let first = walk_component_meta_member_surface_expr(
-        &expr,
-        "/src/button-types.ts",
-        &mut query_engine,
-        true,
-    );
+    let first = query_engine.materialize_member_surface_expr("/src/button-types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second = walk_component_meta_member_surface_expr(
-        &expr,
-        "/src/button-types.ts",
-        &mut query_engine,
-        true,
-    );
+    let second = query_engine.materialize_member_surface_expr("/src/button-types.ts", &expr, true);
 
     assert_eq!(
         first, second,
@@ -8581,7 +8569,7 @@ defineProps<Props>()
 }
 
 #[test]
-fn walk_component_meta_member_surface_expr_caches_safe_structural_objects() {
+fn materialize_member_surface_expr_caches_safe_structural_objects() {
     let project = make_project();
     project
         .upsert_base(
@@ -8611,12 +8599,10 @@ defineProps<{ first: Inner; second: Inner }>()
         "{ first: Inner; second: Inner }",
     );
 
-    let first =
-        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
+    let first = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
     let cache_len_after_first = query_engine.materialized_member_surface_cache_len();
 
-    let second =
-        walk_component_meta_member_surface_expr(&expr, "/src/types.ts", &mut query_engine, true);
+    let second = query_engine.materialize_member_surface_expr("/src/types.ts", &expr, true);
 
     assert_eq!(
         first, second,
@@ -9026,8 +9012,8 @@ fn spike_classify_engine_cache_work_origin() {
         // `materialized_member_surfaces` removed post-Phase-9 cutover
         // (plan §11.2): the engine's per-request mirror that fronted
         // the legacy walker's `materialized_member_surface_db` is dead
-        // post-cutover — `walk_component_meta_member_surface_expr` now
-        // delegates to the new `materialize_component_meta_structure`
+        // post-cutover — `query_engine.materialize_member_surface_expr`
+        // now delegates to the `materialize_component_meta_structure`
         // entry which publishes through `MaterializeStructureDb`. The
         // dead cache is dual-guarded by `tests/no_legacy_walker.rs`'s
         // static-grep tombstone (the inner walker helpers that were
@@ -10766,6 +10752,65 @@ defineProps<{ value: GetItemKeys<unknown> }>()
             !drained.is_empty(),
             "BFS dep facts must be accumulated into the thread-local accumulator \
              so callers' completion fences capture cycle dep-signatures"
+        );
+    }
+
+    /// Plan §6.8 — G's TDD: `engine.materialize_member_surface_expr`
+    /// (the graph-native replacement for the deleted legacy walker
+    /// shim) must accumulate the materialiser's `dep_signature` into
+    /// the per-request thread-local accumulator, so callers'
+    /// completion fences observe the dep facts captured by the inner
+    /// `materialize_component_meta_structure` call.
+    #[test]
+    fn engine_materialize_member_surface_expr_accumulates_dep_signature() {
+        use crate::meta_resolve::{
+            drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
+        };
+        use crate::resolver_core::ComponentMetaQueryEngine;
+        use std::sync::Arc as StdArc;
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        let project = make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number }")
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { Foo } from './types'
+defineProps<{ value: Foo }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+        project.host().set_import_dependencies(
+            "/Owner.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+        let host = session.host();
+        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        reset_dispatch_dep_signature_accumulator();
+        let _ = engine.materialize_member_surface_expr(
+            "/Owner.vue",
+            &TypeExpr::Ref {
+                name: StdArc::from("Foo"),
+                type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+            },
+            false,
+        );
+        let drained = drain_dispatch_dep_signature_accumulator();
+        assert!(
+            !drained.is_empty(),
+            "engine method must accumulate the materialiser's dep_signature"
         );
     }
 }

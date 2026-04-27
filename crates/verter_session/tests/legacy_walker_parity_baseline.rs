@@ -1,8 +1,7 @@
 //! Phase 7 (component-meta cold-path long-tail plan §9 / §11.5) —
-//! 16 parity baselines against the legacy
-//! `walk_component_meta_member_surface_expr` family. Each fixture
-//! exercises one arm of the legacy walker's policy table; the
-//! assertions are the contract that the new session-layer
+//! 16 parity baselines against the legacy walker family. Each
+//! fixture exercises one arm of the legacy walker's policy table;
+//! the assertions are the contract that the new session-layer
 //! materialiser must reproduce in Phase 9.
 //!
 //! **Pre-Phase-9.** These baselines run against the LEGACY walker

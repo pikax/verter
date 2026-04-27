@@ -1027,7 +1027,7 @@ pub(crate) fn drain_dispatch_dep_signature_accumulator() -> Vec<crate::resolver_
 /// thread-local accumulator. Deduplicates against entries already in
 /// the accumulator on the way in (linear scan; the accumulator is
 /// short for a typical request).
-fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::DepSignature) {
+pub(crate) fn accumulate_dispatch_dep_signature(sig: &crate::semantic_query::DepSignature) {
     use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
 
@@ -2423,14 +2423,13 @@ fn materialize_component_meta_field_types(
             // handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
             // `Foo['a']['b']…` shapes through dispatch's canonical
             // projection. The direct
-            // `walk_component_meta_member_surface_expr` call now
+            // `query_engine.materialize_member_surface_expr` call now
             // applies the same projection in the materialiser's
             // policy-gated form.
             {
-                let routed_surface = walk_component_meta_member_surface_expr(
-                    &field.r#type,
+                let routed_surface = query_engine.materialize_member_surface_expr(
                     materialize_scope_canonical_id.as_str(),
-                    query_engine,
+                    &field.r#type,
                     true,
                 );
                 if compare_type_expr_improvement(&routed_surface, &field.r#type) {
@@ -2442,10 +2441,9 @@ fn materialize_component_meta_field_types(
                             .project_expr_surface_expr(materialize_scope_canonical_id.as_str(), raw)
                     })
                 {
-                    let raw_route_surface = walk_component_meta_member_surface_expr(
-                        &raw_route_surface,
+                    let raw_route_surface = query_engine.materialize_member_surface_expr(
                         materialize_scope_canonical_id.as_str(),
-                        query_engine,
+                        &raw_route_surface,
                         true,
                     );
                     if compare_type_expr_improvement(&raw_route_surface, &field.r#type)
@@ -2458,10 +2456,9 @@ fn materialize_component_meta_field_types(
                     materialize_scope_canonical_id.as_str(),
                     &field.r#type,
                 ) {
-                    let projected_route_surface = walk_component_meta_member_surface_expr(
-                        &projected_route_surface,
+                    let projected_route_surface = query_engine.materialize_member_surface_expr(
                         materialize_scope_canonical_id.as_str(),
-                        query_engine,
+                        &projected_route_surface,
                         false,
                     );
                     if compare_type_expr_improvement(&projected_route_surface, &field.r#type)
@@ -2716,12 +2713,8 @@ fn materialize_component_meta_field_types(
                 if compare_type_expr_improvement(&rescued, &field.r#type) {
                     field.r#type = rescued;
                 }
-                let surface = walk_component_meta_member_surface_expr(
-                    &candidate,
-                    scope_hint,
-                    query_engine,
-                    false,
-                );
+                let surface =
+                    query_engine.materialize_member_surface_expr(scope_hint, &candidate, false);
                 if compare_type_expr_improvement(&surface, &field.r#type) {
                     field.r#type = surface;
                 }
@@ -5650,10 +5643,9 @@ impl VerterHost {
                         .map(|member| match member {
                             ObjectMember::Property(property) => {
                                 let materialized =
-                                    walk_component_meta_member_surface_expr(
-                                        &property.ty,
+                                    query_engine.materialize_member_surface_expr(
                                         scope_canonical_id,
-                                        query_engine,
+                                        &property.ty,
                                         true,
                                     );
                                 let stabilized =
@@ -5692,10 +5684,9 @@ impl VerterHost {
                                                 &expanded,
                                             )
                                             .map(|solved| {
-                                                walk_component_meta_member_surface_expr(
-                                                    &solved,
+                                                query_engine.materialize_member_surface_expr(
                                                     materialize_scope.as_str(),
-                                                    query_engine,
+                                                    &solved,
                                                     true,
                                                 )
                                             })
@@ -5872,10 +5863,9 @@ impl VerterHost {
                     if let Some(projected) = raw_body.and_then(|expr| {
                         component_meta_registry_raw_member_path_surface(expr, path)
                     }) {
-                        return Some(walk_component_meta_member_surface_expr(
-                            &projected,
+                        return Some(query_engine.materialize_member_surface_expr(
                             scope_canonical_id,
-                            query_engine,
+                            &projected,
                             true,
                         ));
                     }
@@ -5896,10 +5886,9 @@ impl VerterHost {
                     {
                         return None;
                     }
-                    Some(walk_component_meta_member_surface_expr(
-                        &wrap_registry_member_path_surface(path, leaf),
+                    Some(query_engine.materialize_member_surface_expr(
                         scope_canonical_id,
-                        query_engine,
+                        &wrap_registry_member_path_surface(path, leaf),
                         false,
                     ))
                 }
@@ -5929,21 +5918,20 @@ impl VerterHost {
                                     .project_expr_surface_expr(scope_canonical_id, &route_expr)
                             })
                             .unwrap_or(route_expr);
-                        let member_surface = walk_component_meta_member_surface_expr(
-                            &projected,
+                        let member_surface = query_engine.materialize_member_surface_expr(
                             scope_canonical_id,
-                            query_engine,
+                            &projected,
                             true,
                         );
-                        let stabilized_surface = walk_component_meta_member_surface_expr(
-                            &materialize_component_meta_type_expr_until_stable(
-                                &member_surface,
-                                scope_canonical_id,
-                                crate::semantic_query::ProjectionMode::Expanded,
-                                query_engine,
-                            ),
+                        let stabilized_input = materialize_component_meta_type_expr_until_stable(
+                            &member_surface,
                             scope_canonical_id,
+                            crate::semantic_query::ProjectionMode::Expanded,
                             query_engine,
+                        );
+                        let stabilized_surface = query_engine.materialize_member_surface_expr(
+                            scope_canonical_id,
+                            &stabilized_input,
                             true,
                         );
                         let solved_surface = match &stabilized_surface {
@@ -5961,34 +5949,33 @@ impl VerterHost {
                                         &stabilized_surface,
                                     )
                                     .unwrap_or_else(|| stabilized_surface.clone());
-                                query_engine
+                                let solved_opt = query_engine
                                     .lower_and_project_to_expanded(
                                         materialize_scope_canonical_id.as_str(),
                                         &expanded,
                                     )
-                                    .or(Some(expanded))
-                                    .map(|solved| {
-                                        walk_component_meta_member_surface_expr(
-                                            &solved,
-                                            materialize_scope_canonical_id.as_str(),
-                                            query_engine,
-                                            true,
-                                        )
-                                    })
-                            }
-                            TypeExpr::Mapped { .. } => query_engine
-                                .lower_and_project_to_expanded(
-                                    scope_canonical_id,
-                                    &stabilized_surface,
-                                )
-                                .map(|solved| {
-                                    walk_component_meta_member_surface_expr(
+                                    .or(Some(expanded));
+                                solved_opt.map(|solved| {
+                                    query_engine.materialize_member_surface_expr(
+                                        materialize_scope_canonical_id.as_str(),
                                         &solved,
-                                        scope_canonical_id,
-                                        query_engine,
                                         true,
                                     )
-                                }),
+                                })
+                            }
+                            TypeExpr::Mapped { .. } => {
+                                let solved_opt = query_engine.lower_and_project_to_expanded(
+                                    scope_canonical_id,
+                                    &stabilized_surface,
+                                );
+                                solved_opt.map(|solved| {
+                                    query_engine.materialize_member_surface_expr(
+                                        scope_canonical_id,
+                                        &solved,
+                                        true,
+                                    )
+                                })
+                            }
                             _ => None,
                         };
                         let best_surface = if let Some(solved_surface) = solved_surface {
@@ -6017,10 +6004,9 @@ impl VerterHost {
                             query_engine
                                 .project_route_surface_expr(scope_canonical_id, symbol_name, route)
                                 .map(|projected| {
-                                    walk_component_meta_member_surface_expr(
-                                        &projected,
+                                    query_engine.materialize_member_surface_expr(
                                         scope_canonical_id,
-                                        query_engine,
+                                        &projected,
                                         true,
                                     )
                                 })
@@ -6848,10 +6834,9 @@ impl VerterHost {
                     entry.name.as_str()
                 },
             );
-            let materialized = walk_component_meta_member_surface_expr(
-                &entry.type_expr,
+            let materialized = query_engine.materialize_member_surface_expr(
                 scope_canonical,
-                query_engine,
+                &entry.type_expr,
                 false,
             );
             let preserved_nested_routes = raw_body
@@ -7366,59 +7351,9 @@ pub(crate) fn reset_mtl_call_count_for_tests() {
 pub(crate) static MEMBER_ROUTE_FAST_PATH_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn walk_component_meta_member_surface_expr(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    nested_surface: bool,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    // Phase 9 cutover (plan §11). Delegates to the new session-layer
-    // materialiser entry. The walker function name + signature are
-    // preserved as a thin shim so the 16 production call sites do
-    // not need to migrate; the legacy walker body and its supporting
-    // helpers were deleted in this commit.
-    use crate::component_meta_materialize::{
-        materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
-        MaterializeStructureCacheKey,
-    };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
-
-    let dispatch = ProjectSemanticDispatch::new(engine.host);
-    // Plan §1.11 — entry lowering MUST use Navigate so deferred
-    // carriers (DeclRef / InstantiationRef / deferred IndexedAccess)
-    // reach the policy table intact. Lowering with Expanded would
-    // eagerly resolve carriers at the lowering site, defeating the
-    // walker's symbolic-keep-on-package-ref policy.
-    let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
-        scope_canonical_id,
-        expr,
-        crate::semantic_query::ProjectionMode::Navigate,
-    ) else {
-        return expr.clone();
-    };
-    let key = MaterializeStructureCacheKey {
-        scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
-        base,
-        scope_axis: if nested_surface {
-            MaterializationScope::Nested
-        } else {
-            MaterializationScope::TopLevel
-        },
-        mode: ProjectionMode::Expanded,
-    };
-    let read = materialize_component_meta_structure(engine.host, key);
-    let materialised_id = match read.value {
-        MaterializeOutcome::Value(id)
-        | MaterializeOutcome::Miss(id)
-        | MaterializeOutcome::Recursive(id)
-        | MaterializeOutcome::Tainted(id) => id,
-        MaterializeOutcome::Error(_) => return expr.clone(),
-    };
-    dispatch
-        .raise_node_to_type_expr(materialised_id)
-        .unwrap_or_else(|| expr.clone())
-}
+// Plan §6.8 — legacy walker shim deleted; all production call sites
+// now use `ComponentMetaQueryEngine::materialize_member_surface_expr`
+// directly.
 
 fn walk_component_meta_macro_shape_member_types(
     scope_canonical_id: &str,

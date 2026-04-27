@@ -1,15 +1,14 @@
 //! LEGACY_GATE_SELF — Phase 9 static-grep gate (plan §11.4).
 //!
 //! Guards against re-introduction of the legacy walker family after
-//! the Phase-9 cutover. The walker's `walk_component_meta_member_surface_expr`
-//! shim is RETAINED (it now delegates to the new
-//! `materialize_component_meta_structure` entry); the entire inner
+//! the Phase-9 cutover. The walker's outer shim and entire inner
 //! body family (`walker_cycle_key_node`,
 //! `expand_generic_ref_via_scope_iteration`,
-//! `walk_component_meta_member_surface_expr_with_visited`) was
-//! deleted in the same commit, along with the
+//! and the visited-set helper variant) were deleted, along with the
 //! `component_meta_dispatch_iteration` module that hosted the
-//! walker's visited-set helper.
+//! walker's visited-set helper. Plan §6.8 (commit G) deletes the
+//! outer shim; commit I finalises the RETIRED_SYMBOLS list to
+//! include the outer shim's name.
 //!
 //! Self-exclusion: the first 5 lines of this file contain
 //! `LEGACY_GATE_SELF` so the recursive walk skips this file.
@@ -18,10 +17,9 @@ use std::path::PathBuf;
 
 const RETIRED_SYMBOLS: &[&str] = &[
     // Phase 9 cutover (plan §11.2): the inner walker helpers are
-    // DELETED. Re-introduction at any site is forbidden. The legacy
-    // `walk_component_meta_member_surface_expr` shim name is
-    // RETAINED (it delegates to the new materialiser entry) — the
-    // gate intentionally does NOT list its name.
+    // DELETED. Re-introduction at any site is forbidden. The outer
+    // shim is also deleted (commit G, plan §6.8); commit I will add
+    // its name to this list.
     "walker_cycle_key_node",
     "expand_generic_ref_via_scope_iteration",
     "walk_component_meta_member_surface_expr_with_visited",

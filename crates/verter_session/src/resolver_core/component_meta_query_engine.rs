@@ -1801,6 +1801,56 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         crate::meta_resolve::canonical_resolves_to_package(canonical)
     }
 
+    /// Plan §4.5 / §6.8 — graph-native replacement for the deleted
+    /// legacy walker shim. Lowers `expr` to a `SemanticNodeId` via
+    /// Navigate, runs the materialiser, accumulates the dep_signature
+    /// into the per-request thread-local accumulator, and raises the
+    /// materialised node back to TypeExpr.
+    pub(crate) fn materialize_member_surface_expr(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &verter_semantic::analysis::type_expr::TypeExpr,
+        nested_surface: bool,
+    ) -> verter_semantic::analysis::type_expr::TypeExpr {
+        use crate::component_meta_materialize::{
+            materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
+            MaterializeStructureCacheKey,
+        };
+        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+        use crate::semantic_query::ProjectionMode;
+
+        let dispatch = ProjectSemanticDispatch::new(self.host);
+        let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            expr,
+            ProjectionMode::Navigate,
+        ) else {
+            return expr.clone();
+        };
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: std::sync::Arc::from(scope_canonical_id),
+            base,
+            scope_axis: if nested_surface {
+                MaterializationScope::Nested
+            } else {
+                MaterializationScope::TopLevel
+            },
+            mode: ProjectionMode::Expanded,
+        };
+        let read = materialize_component_meta_structure(self.host, key);
+        crate::meta_resolve::accumulate_dispatch_dep_signature(&read.dep_signature);
+        let materialised_id = match read.value {
+            MaterializeOutcome::Value(id)
+            | MaterializeOutcome::Miss(id)
+            | MaterializeOutcome::Recursive(id)
+            | MaterializeOutcome::Tainted(id) => id,
+            MaterializeOutcome::Error(_) => return expr.clone(),
+        };
+        dispatch
+            .raise_node_to_type_expr(materialised_id)
+            .unwrap_or_else(|| expr.clone())
+    }
+
     /// Resolve a type declaration, cached per query.
     pub fn resolve_type_declaration(
         &mut self,
