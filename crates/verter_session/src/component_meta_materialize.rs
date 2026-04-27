@@ -210,6 +210,12 @@ thread_local! {
 /// with the input key + depth.
 pub const MAX_DEPTH: usize = 4096;
 
+/// Side-channel slot used by [`materialize_component_meta_structure`]
+/// to share the compute closure's non-cacheable outcome (Tainted /
+/// Error / Recursive) with the fallback path that runs when
+/// `cooperative_get_or_insert_with_post_publish` returns `None`.
+type NonCacheableSlot = RefCell<Option<(MaterializeOutcome, Vec<(Arc<str>, DepVersion)>)>>;
+
 /// Plan §1.4 — RAII guard for the per-thread `MATERIALIZE_IN_FLIGHT`
 /// stack and the `MATERIALIZE_DEPTH` counter. Push on construction,
 /// pop on `Drop`. Panic-safe.
@@ -346,7 +352,14 @@ pub fn materialize_component_meta_structure(
     }
 
     // Phase 4 — cooperative-admission cold build with post_publish.
+    // The compute closure shares its computed outcome via a side
+    // channel so the post-cooperative fallback (when the entry is
+    // non-cacheable and `cooperative_get_or_insert_with_post_publish`
+    // returns None) can return the correct outcome without
+    // re-dispatching.
+    let non_cacheable_outcome: NonCacheableSlot = RefCell::new(None);
     let key_for_compute = key.clone();
+    let non_cacheable_for_compute = &non_cacheable_outcome;
     let compute = move || {
         let dispatch = ProjectSemanticDispatch::new(host);
         let graph = host.project_type_store().semantic_graph();
@@ -482,7 +495,10 @@ pub fn materialize_component_meta_structure(
             }
         }
         if !outcome.is_cacheable() {
-            // Don't publish non-cacheable outcomes.
+            // Don't publish non-cacheable outcomes — but stash the
+            // computed outcome + fence for the post-cooperative
+            // fallback so it doesn't need to re-dispatch.
+            *non_cacheable_for_compute.borrow_mut() = Some((outcome, local_fence));
             return None;
         }
         Some(MaterializeStructureEntry {
@@ -534,29 +550,23 @@ pub fn materialize_component_meta_structure(
         Some(read) => read,
         None => {
             // Compute returned None (non-cacheable outcome) OR
-            // revalidation failed. Re-dispatch and return the
-            // outcome inline without caching.
-            let dispatch = ProjectSemanticDispatch::new(host);
-            let path: std::sync::Arc<[PathSegment]> =
-                std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
-            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                base: key.base,
-                path,
-                mode: key.mode,
-            });
-            let mut local_fence: Vec<(Arc<str>, DepVersion)> =
-                read.dep_signature.iter().cloned().collect();
-            let outcome = match read.value {
-                QueryResult::Value(id) => MaterializeOutcome::Value(id),
-                QueryResult::Recursive(_) => MaterializeOutcome::Tainted(key.base),
-                QueryResult::Error(err) => MaterializeOutcome::Error(err),
-            };
-            // Drop the seed canonical from fence for non-cacheable
-            // results — they don't propagate as cache deps.
-            local_fence.clear();
+            // revalidation failed. Use the outcome the compute
+            // closure stashed in the side channel — non-cacheable
+            // results don't propagate as cache deps so the fence
+            // is dropped.
+            if let Some((outcome, _fence)) = non_cacheable_outcome.into_inner() {
+                return crate::semantic_query::CacheRead {
+                    value: outcome,
+                    dep_signature: empty_signature(),
+                };
+            }
+            // Revalidation failed (no compute outcome stashed).
+            // Return Tainted on the input id — the next call will
+            // re-attempt cooperative admission with the fresh
+            // dep-signature.
             crate::semantic_query::CacheRead {
-                value: outcome,
-                dep_signature: dep_signature_from_fence(local_fence),
+                value: MaterializeOutcome::Tainted(key.base),
+                dep_signature: empty_signature(),
             }
         }
     }
