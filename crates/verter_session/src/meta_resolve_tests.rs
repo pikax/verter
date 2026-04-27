@@ -10577,4 +10577,76 @@ defineProps<{ picked: Pick<Foo, 'a' | 'b'> }>()
             "Pick<Foo, 'a' | 'b'> over a local Object interface must be inline-materialisable"
         );
     }
+
+    /// Plan §6.5 / D — `engine.is_package_backed_decl` adapter
+    /// produces the same result as the canonical primitive
+    /// `canonical_resolves_to_package` (commit C). Discriminates
+    /// local-file decls from `/node_modules/`-rooted decls.
+    #[test]
+    fn engine_is_package_backed_decl_matches_canonical_predicate() {
+        use crate::meta_resolve::canonical_resolves_to_package;
+        use crate::resolver_core::ComponentMetaQueryEngine;
+
+        let project = make_project();
+        project
+            .upsert_base("/local.ts", "export type Local = { x: number };")
+            .unwrap();
+        project
+            .upsert_base(
+                "/node_modules/foo/index.d.ts",
+                "export type FromPkg = { y: string };",
+            )
+            .unwrap();
+        // Seed a consumer that imports both — needed so the
+        // resolver's prepared-decl bundle picks up the imports.
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { Local } from './local'
+import type { FromPkg } from 'foo'
+defineProps<{ local: Local; pkg: FromPkg }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+        project.host().set_import_dependencies(
+            "/Owner.vue",
+            vec![
+                crate::types::DependencyResolution {
+                    specifier: "./local".to_string(),
+                    resolved_canonical_id: Some("/local.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+                crate::types::DependencyResolution {
+                    specifier: "foo".to_string(),
+                    resolved_canonical_id: Some("/node_modules/foo/index.d.ts".to_string()),
+                    possible_canonical_ids: Vec::new(),
+                },
+            ],
+        );
+
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+        let host = session.host();
+        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        // Local decl — engine adapter returns false.
+        assert!(
+            !engine.is_package_backed_decl("/Owner.vue", "Local"),
+            "Local decl resolves to /local.ts (NOT /node_modules/) — \
+             engine adapter must return false"
+        );
+        // Package decl — engine adapter returns true.
+        assert!(
+            engine.is_package_backed_decl("/Owner.vue", "FromPkg"),
+            "FromPkg resolves under /node_modules/ — engine adapter \
+             must return true"
+        );
+        // Primitive matches: false on /local.ts, true on /node_modules/.
+        assert!(!canonical_resolves_to_package("/local.ts"));
+        assert!(canonical_resolves_to_package(
+            "/node_modules/foo/index.d.ts"
+        ));
+    }
 }

@@ -1458,7 +1458,7 @@ fn type_expr_has_package_backed_root(
 
     match expr {
         TypeExpr::Ref { name, .. } => {
-            component_meta_ref_resolves_to_package(scope_canonical_id, name.as_ref(), query_engine)
+            query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref())
         }
         TypeExpr::IndexedAccess { object, .. }
         | TypeExpr::Array {
@@ -1550,11 +1550,7 @@ fn type_expr_needs_member_route_materialization(
             type_arguments,
         } => {
             type_arguments.is_empty()
-                && !component_meta_ref_resolves_to_package(
-                    scope_canonical_id,
-                    name.as_ref(),
-                    query_engine,
-                )
+                && !query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref())
         }
         TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeParameter(_) => {
             !ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, expr)
@@ -7852,11 +7848,7 @@ fn walk_component_meta_macro_shape_member_types(
                 name,
                 type_arguments,
             } if !type_arguments.is_empty()
-                && !component_meta_ref_resolves_to_package(
-                    scope_canonical_id,
-                    name.as_ref(),
-                    query_engine,
-                ) =>
+                && !query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref()) =>
             {
                 let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
                 let declaration_scope = if declaration.canonical_source.is_empty() {
@@ -8930,7 +8922,7 @@ fn materialize_component_meta_registry_structural_expr(
                     name,
                     type_arguments,
                 } if type_arguments.is_empty() => {
-                    if component_meta_ref_resolves_to_package(scope_canonical_id, name, engine) {
+                    if engine.is_package_backed_decl(scope_canonical_id, name) {
                         expr.clone()
                     } else {
                         engine
@@ -9176,11 +9168,7 @@ fn preserve_package_backed_symbolic_refs(
                     continue;
                 };
                 if let TypeExpr::Ref { name, .. } = &raw_property.ty {
-                    if component_meta_ref_resolves_to_package(
-                        scope_canonical_id,
-                        name.as_ref(),
-                        engine,
-                    ) {
+                    if engine.is_package_backed_decl(scope_canonical_id, name.as_ref()) {
                         property.ty = raw_property.ty.clone();
                         continue;
                     }
@@ -9797,14 +9785,11 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
     }
 }
 
-fn component_meta_ref_resolves_to_package(
-    scope_canonical_id: &str,
-    name: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    let declaration = engine.resolve_type_declaration(scope_canonical_id, name);
-    declaration.canonical_source.contains("/node_modules/")
-}
+// Plan §6.5 / D — `component_meta_ref_resolves_to_package` (TypeExpr-
+// keyed free function) was retired in commit D. The 5 callers
+// migrated to `engine.is_package_backed_decl` (a temporary adapter
+// in commit D, deleted in commit O after Phase 11 K3 migrates to
+// graph-native predicates).
 
 fn registry_member_route_inline_materializable(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
