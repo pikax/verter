@@ -10391,29 +10391,38 @@ mod node_predicates_tests {
         );
     }
 
-    /// Round-7 parity row 7: A → B → C → A cycle.
+    /// Round-7 parity row 7: A → B → C → A cycle through a complex
+    /// helper.
     ///
-    /// Build a real fixture where decl `A` aliases to `B`, `B` aliases
-    /// to `C`, and `C` aliases back to `A`. The graph-native cycle BFS
-    /// must rediscover `A` as a child reachable from `A`'s body within
-    /// at most three `Instantiate` dispatches; their `dep_signatures`
-    /// must accumulate into `local_fence`.
+    /// Plan §4.1 / R7-13 / R7-14 — the legacy parity BFS only flags a
+    /// self-cycle as "transitively cyclic" when the path carries a
+    /// **complex signal**: either the body has a complex top-level
+    /// shape (Conditional / Mapped / KeyOf / IndexedAccess / etc.) OR
+    /// any traversed reference carries type arguments. A purely
+    /// Object-aliased self-cycle (`A { next: B }`, `B { next: C }`,
+    /// `C { next: A }`) does NOT trigger — that's the legitimate
+    /// productive-recursion shape. The fixture below routes through
+    /// a `keyof` helper, which is a complex shape per legacy parity
+    /// and composes the complex signal so the self-rediscovery fires.
+    ///
+    /// The graph-native cycle BFS must rediscover `A` as a child
+    /// reachable from `A`'s body within at most three `Instantiate`
+    /// dispatches; their `dep_signatures` must accumulate into
+    /// `local_fence`.
     #[test]
     fn ref_root_cycle_bfs_detects_three_decl_cycle_and_accumulates_dep_facts() {
-        use crate::resolver_core::ComponentMetaQueryEngine;
-
         let project = make_project();
-        // Three-decl cycle expressed as Object aliases (so the cycle
-        // body itself is not "complex" — the BFS guard only short-
-        // circuits on Conditional / Mapped / KeyOf / Template etc.;
-        // Object aliasing through DeclRef stays in scope for the BFS).
+        // Three-decl cycle: A's body refers to B; B's body uses
+        // `keyof C` (complex shape per legacy parity); C's body refs
+        // back to A. The complex-signal composes through the keyof
+        // hop, and self-rediscovery of A fires.
         project
             .upsert_base(
                 "/cycle.ts",
                 r#"
-export interface A { next: B }
-export interface B { next: C }
-export interface C { next: A }
+export type A = { next: B }
+export type B = keyof C
+export type C = { back: A }
 "#,
             )
             .unwrap();
@@ -10435,7 +10444,6 @@ defineProps<{ value: A }>()
         let _ = session.evaluate_types("/Owner.vue").unwrap();
 
         let host = session.host();
-        let mut engine = ComponentMetaQueryEngine::new(host);
 
         // In MemoryWorkspace fixtures the upsert path is itself the
         // canonical id; resolve via `shallow_file_state` to obtain the
@@ -10451,16 +10459,12 @@ defineProps<{ value: A }>()
         };
 
         let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        let detected = ref_root_reaches_transitive_cycle_node(
-            &a_identity,
-            cycle_canonical,
-            &mut engine,
-            &mut local_fence,
-        );
+        let detected = ref_root_reaches_transitive_cycle_node(&a_identity, host, &mut local_fence);
 
         assert!(
             detected,
-            "A → B → C → A cycle must be detected by the graph-native BFS"
+            "A -> B (keyof C) -> C -> A must be detected by the graph-native BFS — \
+             the keyof hop composes complex_signal per legacy parity"
         );
         assert!(
             !local_fence.is_empty(),
@@ -10484,7 +10488,6 @@ defineProps<{ value: A }>()
     /// Object body).
     #[test]
     fn registry_route_composition_accepts_local_pick_over_object_interface() {
-        use crate::resolver_core::ComponentMetaQueryEngine;
         use crate::semantic_query::SemanticNodeData;
 
         let project = make_project();
@@ -10543,13 +10546,12 @@ defineProps<{ picked: Pick<Foo, 'a' | 'b'> }>()
             args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
         });
 
-        let mut engine = ComponentMetaQueryEngine::new(host);
         let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
         assert!(
             registry_member_route_inline_materializable_node(
                 pick_node,
                 types_canonical,
-                &mut engine,
+                host,
                 &mut local_fence,
             ),
             "Pick<Foo, 'a' | 'b'> over a local Object interface must be inline-materialisable"

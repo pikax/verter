@@ -896,4 +896,234 @@ mod tests {
         };
         let _ = HashValue::default();
     }
+
+    // =====================================================================
+    // Plan §6.2 / A0 — 7 RED-first tests for the legacy-parity cycle BFS
+    // (`ref_root_reaches_transitive_cycle_node`). All tests drive through
+    // a real `MetaProject` so the dispatch path matches production usage.
+    //
+    // Predicates remain `#[allow(dead_code)]`; commit B1 wires them into
+    // the materialiser registry-route + recursive-helper guards.
+    // =====================================================================
+
+    use crate::meta::MetaProject;
+    use crate::meta_resolve::{ref_root_reaches_transitive_cycle_node, with_visited_counter};
+    use crate::semantic_query::DeclIdentity;
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use std::sync::Arc as StdArc;
+
+    fn a0_make_project() -> StdArc<MetaProject> {
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        MetaProject::new(host)
+    }
+
+    fn a0_make_decl_identity(host: &VerterHost, canonical: &str, name: &str) -> DeclIdentity {
+        let whole_hash = host
+            .shallow_file_state(canonical)
+            .map(|s| s.whole_hash)
+            .unwrap_or([0u8; 16]);
+        DeclIdentity {
+            canonical_id: StdArc::from(canonical),
+            whole_hash,
+            decl_name: StdArc::from(name),
+        }
+    }
+
+    /// Productive object recursion: `type Tree = { children: Tree[] }`.
+    /// The body is plain Object (not complex) and the self-ref is bare
+    /// (no type args), so legacy parity says NO cycle. This is the
+    /// productive-recursion shape — keeping false here lets recursive
+    /// data structures expand normally.
+    #[test]
+    fn cycle_bfs_returns_false_on_productive_object_recursion() {
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Tree = { children: Tree[] }")
+            .unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/types.ts", "Tree");
+        let mut fence = Vec::new();
+        assert!(
+            !ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
+            "Productive Object self-recursion (Tree -> Tree[]) must NOT trigger \
+             — body is plain Object and self-ref is bare; legacy parity"
+        );
+    }
+
+    /// JSONValue legacy parity: `string | { [k: string]: JSONValue } | JSONValue[]`.
+    /// The body's union has non-Object arms (Primitive(String), Array of
+    /// JSONValue) — this triggers `has_complex_cycle_guard_surface_node`,
+    /// so the path carries complex_signal. Dispatch publishes the
+    /// recursive `JSONValue` back-edge as `Opaque(RecursiveRef)`, which
+    /// the BFS detects via `body_contains_recursive_ref_to_name`.
+    #[test]
+    fn cycle_bfs_returns_true_on_jsonvalue_recursion_via_complex_union() {
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                "export type JSONValue = string | { [k: string]: JSONValue } | JSONValue[]",
+            )
+            .unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/types.ts", "JSONValue");
+        let mut fence = Vec::new();
+        assert!(
+            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
+            "JSONValue's complex union (Primitive String + Array) triggers \
+             complex_signal; self-rediscovery must return true (legacy parity)"
+        );
+    }
+
+    /// Generic-helper self-cycle with type args: `GetItemKeys<T>` aliases
+    /// to `DotPathKeys<T>` which Conditional-recurses through
+    /// `GetItemKeys<T>` again. Both bodies have generic refs (type args)
+    /// AND complex shapes (Conditional), so the cycle fires.
+    #[test]
+    fn cycle_bfs_returns_true_on_generic_helper_self_cycle_with_type_args() {
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/u.ts",
+                r#"
+export type GetItemKeys<T> = DotPathKeys<T>
+export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/u.ts", "GetItemKeys");
+        let mut fence = Vec::new();
+        assert!(
+            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence),
+            "GetItemKeys<T> -> DotPathKeys<T> -> GetItemKeys<T> with type args must \
+             return true via complex_signal composition"
+        );
+    }
+
+    /// Intermediate-complex-hop carry: a path through a complex
+    /// intermediate body must carry complex_signal forward so the
+    /// eventual self-rediscovery fires even if other hops are plain.
+    /// Here `A` body is plain Object referencing `B`, but `B` is a
+    /// keyof-of-`A` (a complex shape per legacy parity), and `B` goes
+    /// back to `A`. The keyof on `B` is the complex hop that composes
+    /// the signal; the BFS sees `A → B → A` and reports cyclic.
+    #[test]
+    fn cycle_bfs_carries_complex_signal_through_intermediate_object_hop() {
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type A = { kids: B }
+export type B = keyof A
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
+        let mut fence = Vec::new();
+        assert!(
+            ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence),
+            "A -> B (KeyOf) -> A must trigger: B's body is complex (KeyOf), \
+             carrying the complex_signal through the intermediate hop \
+             until A is rediscovered"
+        );
+    }
+
+    /// Diamond path first-visit-wins: when the same decl is reachable
+    /// via multiple paths, the BFS visits it only once. The visited
+    /// counter must be bounded by the number of distinct decls in the
+    /// diamond.
+    #[test]
+    fn cycle_bfs_diamond_path_first_visit_wins() {
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type Root = { left: A, right: B }
+export type A = X
+export type B = X
+export type X = number
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id_root = a0_make_decl_identity(host, "/types.ts", "Root");
+        let mut fence = Vec::new();
+        let (visited_count, _) = with_visited_counter(|| {
+            ref_root_reaches_transitive_cycle_node(&id_root, host, &mut fence)
+        });
+        // Distinct decls reachable: Root, A, B, X. First-visit-wins
+        // bounds the BFS at 4 visits — diamond convergence dedupes.
+        assert!(
+            visited_count <= 5,
+            "first-visit-wins must bound visited count for the diamond Root/A/B/X; got {visited_count}"
+        );
+    }
+
+    /// Long non-cyclic chain through Object hops: each body is a plain
+    /// Object (not complex per legacy parity), and each ref is bare
+    /// (no type args). The BFS exhausts the hop budget without
+    /// accumulating any complex signal, so it must return false even
+    /// when the chain is longer than `MAX_HOPS`.
+    #[test]
+    fn cycle_bfs_returns_false_on_long_non_cyclic_chain() {
+        let mut fixture = String::new();
+        for i in 0..200 {
+            fixture.push_str(&format!("export type A_{i} = {{ x: A_{} }}\n", i + 1));
+        }
+        fixture.push_str("export type A_200 = { x: string }\n");
+        let project = a0_make_project();
+        project.upsert_base("/chain.ts", &fixture).unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/chain.ts", "A_0");
+        let mut fence = Vec::new();
+        let (count, result) =
+            with_visited_counter(|| ref_root_reaches_transitive_cycle_node(&id, host, &mut fence));
+        assert!(
+            !result,
+            "non-cyclic chain through Object hops must return false even when \
+             length exceeds the hop budget — bodies are plain Object, refs are \
+             bare; no complex signal accumulates"
+        );
+        assert!(
+            count <= 64,
+            "visited count must not exceed MAX_HOPS=64 (got {count})"
+        );
+    }
+
+    /// Long cyclic chain via Object hops: A_0 -> A_1 -> ... -> A_199
+    /// -> A_0 (200-decl ring). Each body is an Object referencing the
+    /// next via a bare DeclRef. The hop budget caps the BFS at 64
+    /// visits before it can rediscover A_0 by traversing the full
+    /// 200-decl ring; without complex_signal accumulation, the BFS
+    /// exhausts hops and returns false (legacy parity hop-cap
+    /// fallback).
+    #[test]
+    fn cycle_bfs_terminates_at_64_hops_on_long_cyclic_chain() {
+        let mut fixture = String::new();
+        for i in 0..200 {
+            fixture.push_str(&format!(
+                "export type A_{i} = {{ x: A_{} }}\n",
+                (i + 1) % 200
+            ));
+        }
+        let project = a0_make_project();
+        project.upsert_base("/chain.ts", &fixture).unwrap();
+        let host = project.host();
+        let id = a0_make_decl_identity(host, "/chain.ts", "A_0");
+        let mut fence = Vec::new();
+        let (count, _) =
+            with_visited_counter(|| ref_root_reaches_transitive_cycle_node(&id, host, &mut fence));
+        assert!(
+            count <= 64,
+            "BFS must terminate at MAX_HOPS=64 on a cyclic chain longer than the budget; got {count}"
+        );
+    }
 }

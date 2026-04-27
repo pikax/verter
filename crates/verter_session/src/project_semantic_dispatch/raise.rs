@@ -31,6 +31,61 @@ use crate::semantic_query::{
     SurfaceView, TupleElement,
 };
 
+// =====================================================================
+// Plan §6.2 / A0 — dispatch trace plumbing for cycle-BFS unit tests.
+//
+// `enable_dispatch_trace_for_test` returns a guard that clears the trace
+// on construction and on drop. `execute_read` pushes a static-string
+// discriminant for every key it processes. The discriminant index is
+// stable (depends only on the variant name), so tests can assert exact
+// counts of `Instantiate`, `ResolveDecl`, etc. dispatches.
+//
+// Plumbing is `#[cfg(test)]`-only: zero footprint outside test builds.
+// =====================================================================
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DISPATCH_TRACE: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "wired in B1 / I §10.8 dispatch-count assertions")]
+pub(crate) struct DispatchTraceGuard;
+
+#[cfg(test)]
+impl Drop for DispatchTraceGuard {
+    fn drop(&mut self) {
+        DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, reason = "wired in B1 / I §10.8 dispatch-count assertions")]
+pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
+    DISPATCH_TRACE.with(|t| t.borrow_mut().clear());
+    DispatchTraceGuard
+}
+
+#[cfg(test)]
+fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
+    match key {
+        SemanticQueryKey::ResolveDecl(_) => "ResolveDecl",
+        SemanticQueryKey::Instantiate { .. } => "Instantiate",
+        SemanticQueryKey::ProjectMember { .. } => "ProjectMember",
+        SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
+        SemanticQueryKey::KeyOf { .. } => "KeyOf",
+        SemanticQueryKey::MappedType { .. } => "MappedType",
+        SemanticQueryKey::Conditional { .. } => "Conditional",
+        SemanticQueryKey::TypeOf { .. } => "TypeOf",
+        SemanticQueryKey::NormalizeUnion { .. } => "NormalizeUnion",
+        SemanticQueryKey::NormalizeIntersection { .. } => "NormalizeIntersection",
+        SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
+        SemanticQueryKey::ResolvedNamedType { .. } => "ResolvedNamedType",
+        SemanticQueryKey::Relate { .. } => "Relate",
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Raise a [`SemanticNodeId`] back to a [`TypeExpr`].
     ///
@@ -395,6 +450,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
+        // Plan §6.2 / A0 — trace the variant for cycle-BFS unit tests.
+        // Records the variant before key canonicalisation so the
+        // observed call shape matches the caller's intent (sugar
+        // variants are recorded as the caller wrote them).
+        #[cfg(test)]
+        DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
+
         // Mirror the canonicalisation done by `execute` so the cache key
         // identity is stable across the sugar variants.
         let key = match key {
