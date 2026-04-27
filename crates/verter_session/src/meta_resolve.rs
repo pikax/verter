@@ -6053,9 +6053,34 @@ impl VerterHost {
             }) {
                 return raw_body.cloned();
             }
+            // Plan §6.14 / L — migrate the structural-materialisation
+            // preference to the graph-native predicate. Lower the raw
+            // TypeExpr to a Navigate-mode SemanticNodeId and consult
+            // `component_meta_registry_prefers_structural_materialization_node`.
+            // Falls back to the legacy TypeExpr predicate when lowering
+            // fails (matches conservative "not structural" semantics
+            // when no canonical node id exists).
             if let Some(raw) = raw_body.filter(|expr| {
-                component_meta_registry_has_non_object_top_level_surface(expr)
-                    && component_meta_registry_prefers_structural_materialization(expr)
+                if !component_meta_registry_has_non_object_top_level_surface(expr) {
+                    return false;
+                }
+                let host = query_engine.host;
+                let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+                if let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+                    scope_canonical_id,
+                    expr,
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ) {
+                    let graph = host.project_type_store().semantic_graph();
+                    component_meta_registry_prefers_structural_materialization_node(graph, node, 0)
+                } else {
+                    // Lowering failure — fall back to the TypeExpr
+                    // predicate's classification. Preserves existing
+                    // behaviour for shapes the dispatcher cannot lower
+                    // (e.g., parser-only TypeExpr arms with no graph
+                    // counterpart yet).
+                    component_meta_registry_prefers_structural_materialization(expr)
+                }
             }) {
                 return Some(materialize_component_meta_registry_structural_expr(
                     raw,
@@ -8764,6 +8789,74 @@ fn component_meta_registry_prefers_structural_materialization(
         | TypeExpr::TypeOf(_)
         | TypeExpr::TypeParameter(_)
         | TypeExpr::Infer { .. } => false,
+    }
+}
+
+/// Plan §6.14 / L — graph-native variant of
+/// [`component_meta_registry_prefers_structural_materialization`].
+///
+/// Returns `true` when `node`'s top-level shape is one the materializer
+/// should expand structurally rather than preserve as a reference.
+///
+/// Mirrors the TypeExpr predicate's classification:
+///
+/// - **Structural (returns `true`):** `Array`, `Tuple`, `Union`,
+///   `Intersection`, `Conditional`, `Mapped`, `TemplateLiteral`,
+///   `Function`, `KeyOf` — these shapes need structural expansion to
+///   render meaningful component-meta surface.
+/// - **Reference-shaped (returns `false`):** `DeclRef`,
+///   `InstantiationRef`, `Object`, `IndexedAccess`, `Primitive`,
+///   `Literal`, `Opaque`, `TypeOf`, `TypeParam` — these shapes are
+///   either already concrete (Object, Primitive) or are
+///   reference-carrying (DeclRef, IndexedAccess) and the materializer
+///   handles them via dedicated paths.
+/// - **Pass-through:** `Alias(inner)` — graph-native shape with no
+///   TypeExpr counterpart; matches the TypeExpr predicate's
+///   `Parenthesized(inner)` arm semantics (recurse through wrapper).
+///
+/// `depth` is fused at 256 per §4.11. Fuse returns `false`
+/// (conservative — runaway recursion does NOT route through the
+/// structural-materialisation fast path).
+pub(crate) fn component_meta_registry_prefers_structural_materialization_node(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    if depth > 256 {
+        return false;
+    }
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Array { .. }
+        | SemanticNodeData::Tuple { .. }
+        | SemanticNodeData::Union(_)
+        | SemanticNodeData::Intersection(_)
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::TemplateLiteral { .. }
+        | SemanticNodeData::Function { .. }
+        | SemanticNodeData::KeyOf { .. } => true,
+        SemanticNodeData::Alias(inner) => {
+            component_meta_registry_prefers_structural_materialization_node(
+                graph,
+                *inner,
+                depth + 1,
+            )
+        }
+        SemanticNodeData::DeclRef { .. }
+        | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::Object(_)
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::VueMacroElements(_) => false,
     }
 }
 

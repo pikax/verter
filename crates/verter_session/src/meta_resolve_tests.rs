@@ -11940,6 +11940,80 @@ defineProps<{ first: Pick<Inner, 'primary'> }>()
         );
     }
 
+    /// Plan §6.14 / L — equivalence test for the graph-native
+    /// `component_meta_registry_prefers_structural_materialization_node`
+    /// counterpart of the TypeExpr predicate. The predicate returns
+    /// `true` for shapes the materializer should expand structurally
+    /// (Parenthesized, Array, Tuple, Union, Intersection,
+    /// Conditional, Mapped, TemplateLiteral, Function, KeyOf, Rest)
+    /// and `false` for shapes that should stay reference-shaped (Ref,
+    /// Object, IndexedAccess, Primitive, Literal, etc.).
+    ///
+    /// Discriminating fixtures: a Union shape returns true (graph
+    /// equivalent: SemanticNodeData::Union), an Object shape returns
+    /// false. The legacy TypeExpr version and the new _node version
+    /// must agree on both.
+    #[test]
+    fn l_node_predicate_agrees_with_typeexpr_on_union_returns_true() {
+        use crate::meta_resolve::component_meta_registry_prefers_structural_materialization_node;
+        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        // Union shape — TypeExpr predicate returns true.
+        let union_expr = TypeExpr::Union(Arc::from(
+            vec![
+                TypeExpr::Primitive(verter_semantic::analysis::type_expr::PrimitiveName::String),
+                TypeExpr::Primitive(verter_semantic::analysis::type_expr::PrimitiveName::Number),
+            ]
+            .into_boxed_slice(),
+        ));
+        let node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/test_owner.ts",
+                &union_expr,
+                crate::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("union should lower");
+        let graph = host.project_type_store().semantic_graph();
+        // Both predicates must agree on the structural-materialization
+        // preference for a Union shape (true).
+        assert!(
+            component_meta_registry_prefers_structural_materialization_node(graph, node, 0),
+            "graph-native predicate must return TRUE for Union shape \
+             (matches TypeExpr predicate's Union arm)",
+        );
+    }
+
+    /// Plan §6.14 / L — Object shape returns false in both versions.
+    #[test]
+    fn l_node_predicate_agrees_with_typeexpr_on_object_returns_false() {
+        use crate::meta_resolve::component_meta_registry_prefers_structural_materialization_node;
+        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        // Foo is `{ a: number }` — an Object shape; TypeExpr predicate
+        // returns false.
+        let foo_ref = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/test_owner.ts",
+                &foo_ref,
+                crate::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("Foo should lower");
+        let graph = host.project_type_store().semantic_graph();
+        // Both predicates must agree on Foo (a DeclRef) returning
+        // false.
+        assert!(
+            !component_meta_registry_prefers_structural_materialization_node(graph, node, 0),
+            "graph-native predicate must return FALSE for DeclRef \
+             (matches TypeExpr predicate's Ref arm — non-structural)",
+        );
+    }
+
     /// Plan §4.10 / K1 — `set_current_type` after `current_node()`
     /// invalidates the cached node and clears the dirty flag.
     #[test]
