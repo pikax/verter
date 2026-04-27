@@ -40,6 +40,192 @@ use verter_semantic::analysis::types::AnalyzedMacro;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
+// =============================================================================
+// Plan §4.10 / K1 — `MacroFieldGraphState` lazy-lowering scaffold + lower
+// counter instrumentation.
+//
+// Per §4.10, the macro field-type rewrite path inside
+// `materialize_component_meta_field_types` is migrating from TypeExpr-walking
+// predicates to graph-native `_node` predicates. K1 introduces the field-state
+// scaffold; K2 migrates the predicate call sites; K3 ensures raise-once-at-
+// publish (lower count ≤ 2 per field).
+//
+// `DISPATCH_LOWER_COUNTER` is incremented every time a `MacroFieldGraphState`
+// performs a TypeExpr → SemanticNodeId lowering. K3's TDD test asserts this
+// stays ≤ 2 per field after the predicate-call migration.
+//
+// `node_rewrite_dirty` distinguishes lazy-lowering (for predicate inspection)
+// from graph-native rewrites that produce a NEW current_node. Per §4.10 /
+// Codex2 P1 #6, `publish()` raises ONLY when dirty=true.
+// =============================================================================
+
+#[cfg(test)]
+thread_local! {
+    /// Plan §4.10 / K3 — instrumentation counter for "this field-state
+    /// triggered a TypeExpr -> SemanticNodeId lowering". Incremented on every
+    /// `raw_node()` / `current_node()` call that actually performs a lower.
+    ///
+    /// Test-only; production builds elide the counter entirely (tracking
+    /// adds no overhead off the test path).
+    pub(crate) static DISPATCH_LOWER_COUNTER: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn dispatch_lower_counter_reset() {
+    DISPATCH_LOWER_COUNTER.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn dispatch_lower_counter_get() -> usize {
+    DISPATCH_LOWER_COUNTER.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn dispatch_lower_counter_increment() {
+    DISPATCH_LOWER_COUNTER.with(|c| c.set(c.get() + 1));
+}
+
+/// Plan §4.10 — lazy-lowering field state for the macro field-type rewrite
+/// path. Carries the canonical `published_type` (TypeExpr), a memoised
+/// `raw_node` for the field's original raw type, a memoised `current_node`
+/// for the post-mutation state, and a `node_rewrite_dirty` flag
+/// distinguishing lazy lowering from graph-native rewrites.
+///
+/// Lifecycle (per K1 / K2 / K3 / §4.10):
+///
+/// 1. Construct from `field.r#type`'s clone — `MacroFieldGraphState::new`.
+/// 2. `raw_node(&raw_expr)` lazy-lowers the field's raw TypeExpr (for
+///    predicates like `expr_needs_projection_rescue` that consult the raw).
+/// 3. `current_node()` lazy-lowers the current `published_type` for
+///    predicate inspection. Does NOT set `node_rewrite_dirty`.
+/// 4. `set_current_node_rewrite(node)` records a graph-native rewrite. Sets
+///    `node_rewrite_dirty = true` so `publish()` will raise on exit.
+/// 5. `set_current_type(ty)` records a TypeExpr-side mutation (legacy paths
+///    that haven't migrated). Invalidates the cached `current_node` and
+///    clears the dirty flag (the new TypeExpr is canonical).
+/// 6. `publish()` returns the final TypeExpr. When `node_rewrite_dirty`,
+///    raises `current_node` back to TypeExpr; otherwise returns
+///    `published_type` unchanged.
+pub(crate) struct MacroFieldGraphState<'a> {
+    /// Memoised lowering of the field's raw type (for predicates that
+    /// inspect the original raw TypeExpr). Lazy.
+    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    raw_node: Option<crate::semantic_query::SemanticNodeId>,
+    /// Memoised lowering of `published_type`. Lazy.
+    current_node: Option<crate::semantic_query::SemanticNodeId>,
+    /// Plan §4.10 / Codex2 P1 #6 — distinct from "current_node was lowered".
+    /// Set TRUE only when a graph-native rewrite (via
+    /// `set_current_node_rewrite`) produced a NEW `current_node`.
+    /// `publish()` raises ONLY when this flag is set; lazy lowering for
+    /// predicate inspection does not flip the flag.
+    node_rewrite_dirty: bool,
+    /// Canonical TypeExpr state. Updated by `set_current_type`; written
+    /// back to the field via `publish()` at scope exit.
+    published_type: verter_semantic::analysis::type_expr::TypeExpr,
+    /// Owner scope used when lowering through dispatch.
+    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    scope: &'a str,
+    /// Borrowed dispatch handle for lower / raise calls.
+    dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+}
+
+impl<'a> MacroFieldGraphState<'a> {
+    /// Construct a new field-state from a field's current `r#type` value.
+    pub(crate) fn new(
+        published_type: verter_semantic::analysis::type_expr::TypeExpr,
+        scope: &'a str,
+        dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+    ) -> Self {
+        Self {
+            raw_node: None,
+            current_node: None,
+            node_rewrite_dirty: false,
+            published_type,
+            scope,
+            dispatch,
+        }
+    }
+
+    /// Read-only view of the canonical TypeExpr state (for callers that
+    /// still consume TypeExpr via predicates not yet migrated to `_node`).
+    pub(crate) fn published_type(&self) -> &verter_semantic::analysis::type_expr::TypeExpr {
+        &self.published_type
+    }
+
+    /// Lazy-lower the field's raw TypeExpr to a `SemanticNodeId` in
+    /// `Navigate` mode. Memoised — lowering happens at most once per state.
+    /// Does NOT set `node_rewrite_dirty`.
+    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    pub(crate) fn raw_node(
+        &mut self,
+        raw_expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        if self.raw_node.is_none() {
+            #[cfg(test)]
+            dispatch_lower_counter_increment();
+            self.raw_node = self.dispatch.lower_type_expr_in_scope_with_mode(
+                self.scope,
+                raw_expr,
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        }
+        self.raw_node
+    }
+
+    /// Lazy-lower `published_type` to a `SemanticNodeId` in `Navigate`
+    /// mode. Memoised — lowering happens at most once per
+    /// `published_type` revision. Does NOT set `node_rewrite_dirty` — this
+    /// is purely "lower for predicate inspection" lowering.
+    #[cfg_attr(not(test), allow(dead_code, reason = "K1 scaffold; wired in K2"))]
+    pub(crate) fn current_node(&mut self) -> Option<crate::semantic_query::SemanticNodeId> {
+        if self.current_node.is_none() {
+            #[cfg(test)]
+            dispatch_lower_counter_increment();
+            self.current_node = self.dispatch.lower_type_expr_in_scope_with_mode(
+                self.scope,
+                &self.published_type,
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        }
+        self.current_node
+    }
+
+    /// Record a graph-native rewrite that produced a NEW `current_node`.
+    /// Sets `node_rewrite_dirty = true` so `publish()` will raise on
+    /// exit. Used by K2 callers after a graph-native operation produces
+    /// a fresh node id.
+    #[cfg_attr(not(test), allow(dead_code, reason = "Wired in K2"))]
+    pub(crate) fn set_current_node_rewrite(&mut self, node: crate::semantic_query::SemanticNodeId) {
+        self.current_node = Some(node);
+        self.node_rewrite_dirty = true;
+    }
+
+    /// Record a TypeExpr-side mutation. Invalidates the cached
+    /// `current_node` (the previously lowered node is now stale) and
+    /// clears the `node_rewrite_dirty` flag (the new TypeExpr is
+    /// canonical — `publish()` should NOT raise from a stale node).
+    pub(crate) fn set_current_type(&mut self, ty: verter_semantic::analysis::type_expr::TypeExpr) {
+        self.published_type = ty;
+        self.current_node = None;
+        self.node_rewrite_dirty = false;
+    }
+
+    /// Final exit. Returns the canonical TypeExpr. When
+    /// `node_rewrite_dirty`, raises `current_node` back to TypeExpr;
+    /// otherwise returns `published_type` unchanged.
+    pub(crate) fn publish(self) -> verter_semantic::analysis::type_expr::TypeExpr {
+        if self.node_rewrite_dirty {
+            if let Some(node) = self.current_node {
+                if let Some(raised) = self.dispatch.raise_node_to_type_expr(node) {
+                    return raised;
+                }
+            }
+        }
+        self.published_type
+    }
+}
+
 fn next_component_meta_audit_request_id() -> u64 {
     static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -1678,31 +1864,44 @@ fn materialize_component_meta_field_types(
     evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
+    /// Plan §4.10 / K1 — `rescue_field` mutates field type via
+    /// `MacroFieldGraphState::set_current_type` rather than direct
+    /// `field.r#type = X` assignment. The `field` reference is read-only
+    /// here (used only for raw_type access via `parsed_field_raw_type`);
+    /// type mutations route through `field_state`.
     fn rescue_field(
         scope_canonical_id: &str,
-        field: &mut verter_semantic::analysis::type_expand::ExpandedField,
+        field: &verter_semantic::analysis::type_expand::ExpandedField,
+        field_state: &mut MacroFieldGraphState<'_>,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
-        if !expr_needs_projection_rescue(query_engine, scope_canonical_id, &field.r#type) {
+        if !expr_needs_projection_rescue(
+            query_engine,
+            scope_canonical_id,
+            field_state.published_type(),
+        ) {
             return;
         }
 
-        let materialize_scope_canonical_id =
-            select_imported_materialization_scope(&field.r#type, scope_canonical_id, query_engine)
-                .or_else(|| {
-                    parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                        select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
-                    })
-                })
-                .unwrap_or_else(|| scope_canonical_id.to_string());
+        let materialize_scope_canonical_id = select_imported_materialization_scope(
+            field_state.published_type(),
+            scope_canonical_id,
+            query_engine,
+        )
+        .or_else(|| {
+            parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+            })
+        })
+        .unwrap_or_else(|| scope_canonical_id.to_string());
         let rescued = materialize_component_meta_type_expr_until_stable(
-            &field.r#type,
+            field_state.published_type(),
             materialize_scope_canonical_id.as_str(),
             crate::semantic_query::ProjectionMode::Expanded,
             query_engine,
         );
-        if rescued != field.r#type {
-            field.r#type = rescued;
+        if rescued != *field_state.published_type() {
+            field_state.set_current_type(rescued);
         }
     }
 
@@ -2368,6 +2567,16 @@ fn materialize_component_meta_field_types(
         if preserve_raw {
             continue;
         }
+        // Plan §4.10 / K1 — wrap `field.r#type` in a `MacroFieldGraphState`
+        // for the duration of this iteration. Direct `field.r#type = X`
+        // mutations are routed through `field_state.set_current_type(X)`;
+        // graph-native rewrites (K2) will route through
+        // `set_current_node_rewrite`. Final write-back via `publish()`
+        // at iteration exit.
+        let host = query_engine.host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut field_state =
+            MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
         if let Some(candidate) = evaluated_types
             .define_props
             .iter()
@@ -2375,13 +2584,13 @@ fn materialize_component_meta_field_types(
             .find(|property| property.name == field.name)
             .map(|property| property.ty.clone())
         {
-            if compare_type_expr_improvement(&candidate, &field.r#type)
+            if compare_type_expr_improvement(&candidate, field_state.published_type())
                 && !expr_needs_projection_rescue(query_engine, scope_canonical_id, &candidate)
             {
-                field.r#type = candidate;
+                field_state.set_current_type(candidate);
             }
         }
-        rescue_field(scope_canonical_id, field, query_engine);
+        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
         let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
             type_expr_needs_member_route_materialization(raw, scope_canonical_id, query_engine)
                 || component_meta_registry_public_utility_route(raw).is_some()
@@ -2399,11 +2608,11 @@ fn materialize_component_meta_field_types(
                 "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
                 scope_canonical_id,
                 field.name,
-                field.r#type,
+                field_state.published_type(),
                 raw_needs_member_route,
                 raw_is_unpreserved_top_level_ref,
                 type_expr_needs_member_route_materialization(
-                    &field.r#type,
+                    field_state.published_type(),
                     scope_canonical_id,
                     query_engine,
                 ),
@@ -2412,11 +2621,12 @@ fn materialize_component_meta_field_types(
         if !(raw_needs_member_route
             || raw_is_unpreserved_top_level_ref
             || type_expr_needs_member_route_materialization(
-                &field.r#type,
+                field_state.published_type(),
                 scope_canonical_id,
                 query_engine,
             ))
         {
+            field.r#type = field_state.publish();
             continue;
         }
 
@@ -2425,23 +2635,26 @@ fn materialize_component_meta_field_types(
                 let rescued = materialize_component_meta_macro_shape_member_type_expr(
                     &lowered,
                     field.name.as_str(),
-                    &field.r#type,
+                    field_state.published_type(),
                     scope_canonical_id,
                     query_engine,
                 );
-                if compare_type_expr_improvement(&rescued, &field.r#type) {
-                    field.r#type = rescued;
+                if compare_type_expr_improvement(&rescued, field_state.published_type()) {
+                    field_state.set_current_type(rescued);
                 }
             }
         }
-        let materialize_scope_canonical_id =
-            select_imported_materialization_scope(&field.r#type, scope_canonical_id, query_engine)
-                .or_else(|| {
-                    parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                        select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
-                    })
-                })
-                .unwrap_or_else(|| scope_canonical_id.to_string());
+        let materialize_scope_canonical_id = select_imported_materialization_scope(
+            field_state.published_type(),
+            scope_canonical_id,
+            query_engine,
+        )
+        .or_else(|| {
+            parsed_field_raw_type(field).as_ref().and_then(|raw| {
+                select_imported_materialization_scope(raw, scope_canonical_id, query_engine)
+            })
+        })
+        .unwrap_or_else(|| scope_canonical_id.to_string());
         let raw_route_root_is_package_backed =
             parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
                 type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
@@ -2458,11 +2671,11 @@ fn materialize_component_meta_field_types(
             {
                 let routed_surface = query_engine.materialize_member_surface_expr(
                     materialize_scope_canonical_id.as_str(),
-                    &field.r#type,
+                    field_state.published_type(),
                     true,
                 );
-                if compare_type_expr_improvement(&routed_surface, &field.r#type) {
-                    field.r#type = routed_surface;
+                if compare_type_expr_improvement(&routed_surface, field_state.published_type()) {
+                    field_state.set_current_type(routed_surface);
                 }
                 if let Some(raw_route_surface) =
                     parsed_field_raw_type(field).as_ref().and_then(|raw| {
@@ -2475,34 +2688,43 @@ fn materialize_component_meta_field_types(
                         &raw_route_surface,
                         true,
                     );
-                    if compare_type_expr_improvement(&raw_route_surface, &field.r#type)
-                        || route_leaf_beats_wrapper_object(&raw_route_surface, &field.r#type)
-                    {
-                        field.r#type = raw_route_surface;
+                    if compare_type_expr_improvement(
+                        &raw_route_surface,
+                        field_state.published_type(),
+                    ) || route_leaf_beats_wrapper_object(
+                        &raw_route_surface,
+                        field_state.published_type(),
+                    ) {
+                        field_state.set_current_type(raw_route_surface);
                     }
                 }
                 if let Some(projected_route_surface) = query_engine.project_expr_surface_expr(
                     materialize_scope_canonical_id.as_str(),
-                    &field.r#type,
+                    field_state.published_type(),
                 ) {
                     let projected_route_surface = query_engine.materialize_member_surface_expr(
                         materialize_scope_canonical_id.as_str(),
                         &projected_route_surface,
                         false,
                     );
-                    if compare_type_expr_improvement(&projected_route_surface, &field.r#type)
-                        || route_leaf_beats_wrapper_object(&projected_route_surface, &field.r#type)
-                    {
-                        field.r#type = projected_route_surface;
+                    if compare_type_expr_improvement(
+                        &projected_route_surface,
+                        field_state.published_type(),
+                    ) || route_leaf_beats_wrapper_object(
+                        &projected_route_surface,
+                        field_state.published_type(),
+                    ) {
+                        field_state.set_current_type(projected_route_surface);
                     }
                 }
             }
         }
-        let rescued = match &field.r#type {
+        let rescued = match field_state.published_type() {
             verter_semantic::analysis::type_expr::TypeExpr::Ref {
                 name,
                 type_arguments,
             } if type_arguments.is_empty() => {
+                let name = name.clone();
                 let declaration = query_engine.resolve_type_declaration(
                     materialize_scope_canonical_id.as_str(),
                     name.as_ref(),
@@ -2535,7 +2757,7 @@ fn materialize_component_meta_field_types(
                     })
                     .unwrap_or_else(|| {
                         materialize_component_meta_type_expr_until_stable(
-                            &field.r#type,
+                            field_state.published_type(),
                             materialize_scope_canonical_id.as_str(),
                             crate::semantic_query::ProjectionMode::Expanded,
                             query_engine,
@@ -2556,15 +2778,21 @@ fn materialize_component_meta_field_types(
                 rescued
             }
             _ => materialize_component_meta_type_expr_until_stable(
-                &field.r#type,
+                field_state.published_type(),
                 materialize_scope_canonical_id.as_str(),
                 crate::semantic_query::ProjectionMode::Expanded,
                 query_engine,
             ),
         };
-        if compare_type_expr_improvement(&rescued, &field.r#type) {
-            field.r#type = rescued;
+        if compare_type_expr_improvement(&rescued, field_state.published_type()) {
+            field_state.set_current_type(rescued);
         }
+        // Track whether the raw-ref branch handled the field (legacy
+        // `continue` semantics). Set TRUE when the legacy code would
+        // have `continue`d before the final indexed-access transport
+        // path. We still must `publish()` after `continue`; using a
+        // local bool lets us re-route through publish().
+        let mut raw_ref_branch_handled = false;
         if let Some(verter_semantic::analysis::type_expr::TypeExpr::Ref {
             name,
             type_arguments,
@@ -2608,34 +2836,36 @@ fn materialize_component_meta_field_types(
                         verter_semantic::analysis::type_expr::TypeExpr::Union(_)
                             | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
                     ) && !matches!(
-                        field.r#type,
+                        field_state.published_type(),
                         verter_semantic::analysis::type_expr::TypeExpr::Union(_)
                             | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
                     ) {
-                        field.r#type = replacement;
-                        continue;
-                    }
-                    // When the field type is a bare Ref to the target type,
-                    // apply the body replacement directly (initial expansion).
-                    if matches!(
-                        &field.r#type,
+                        field_state.set_current_type(replacement);
+                        raw_ref_branch_handled = true;
+                    } else if matches!(
+                        field_state.published_type(),
                         verter_semantic::analysis::type_expr::TypeExpr::Ref {
                             name: ref_name,
                             type_arguments,
                         } if type_arguments.is_empty()
                             && ref_name.as_ref() == target_name.as_str()
                     ) {
-                        field.r#type = replacement;
-                        continue;
-                    }
-                    if type_expr_contains_named_recursive_ref(&field.r#type, target_name.as_str()) {
+                        // When the field type is a bare Ref to the target
+                        // type, apply the body replacement directly
+                        // (initial expansion).
+                        field_state.set_current_type(replacement);
+                        raw_ref_branch_handled = true;
+                    } else if type_expr_contains_named_recursive_ref(
+                        field_state.published_type(),
+                        target_name.as_str(),
+                    ) {
                         let expanded = expand_named_recursive_refs_one_layer(
-                            &field.r#type,
+                            field_state.published_type(),
                             target_name.as_str(),
                             &replacement,
                         );
-                        if expanded != field.r#type {
-                            field.r#type = expanded;
+                        if expanded != *field_state.published_type() {
+                            field_state.set_current_type(expanded);
                         }
                     } else {
                         // The define_props macro shape projection may have
@@ -2647,36 +2877,40 @@ fn materialize_component_meta_field_types(
                         // same two-level shape the RecursiveRef path would
                         // produce.
                         let with_recursive_refs = rewrite_named_self_refs_to_recursive_ref(
-                            &field.r#type,
+                            field_state.published_type(),
                             target_name.as_str(),
                         );
-                        if with_recursive_refs != field.r#type {
+                        if with_recursive_refs != *field_state.published_type() {
                             let expanded = expand_named_recursive_refs_one_layer(
                                 &with_recursive_refs,
                                 target_name.as_str(),
                                 &replacement,
                             );
-                            if expanded != field.r#type {
-                                field.r#type = expanded;
+                            if expanded != *field_state.published_type() {
+                                field_state.set_current_type(expanded);
                             }
                         }
                     }
                 }
             }
         }
-        if let Some(raw) = parsed_field_raw_type(field).as_ref() {
-            if let Some(replacement) =
-                indexed_access_alias_body_transport(scope_canonical_id, raw, query_engine)
-            {
-                if !matches!(
-                    field.r#type,
-                    verter_semantic::analysis::type_expr::TypeExpr::Union(_)
-                        | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
-                ) {
-                    field.r#type = replacement;
+        if !raw_ref_branch_handled {
+            if let Some(raw) = parsed_field_raw_type(field).as_ref() {
+                if let Some(replacement) =
+                    indexed_access_alias_body_transport(scope_canonical_id, raw, query_engine)
+                {
+                    if !matches!(
+                        field_state.published_type(),
+                        verter_semantic::analysis::type_expr::TypeExpr::Union(_)
+                            | verter_semantic::analysis::type_expr::TypeExpr::Primitive(_),
+                    ) {
+                        field_state.set_current_type(replacement);
+                    }
                 }
             }
         }
+        // Plan §4.10 / K1 — final publish + write-back to the field.
+        field.r#type = field_state.publish();
         if crate::host_manage::component_meta_debug_enabled() {
             crate::host_manage::component_meta_debug(format!(
                 "FIELD_MATERIALIZE_FINAL owner={} field={} final={:?}",
@@ -2710,11 +2944,23 @@ fn materialize_component_meta_field_types(
         }
     }
     for field in &mut evaluated_types.emits {
-        rescue_field(scope_canonical_id, field, query_engine);
+        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        let host = query_engine.host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut field_state =
+            MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
+        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        field.r#type = field_state.publish();
     }
     for field in &mut evaluated_types.slot_bindings {
-        rescue_field(scope_canonical_id, field, query_engine);
+        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        let host = query_engine.host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut field_state =
+            MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
+        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
         let Some(scope_hints) = slot_binding_scope_hints.get(&field.name) else {
+            field.r#type = field_state.publish();
             continue;
         };
         for scope_hint in scope_hints {
@@ -2723,12 +2969,12 @@ fn materialize_component_meta_field_types(
                 .as_deref()
                 .map(verter_semantic::analysis::type_expr_lower::parse_type_annotation);
             for candidate in [
-                Some(field.r#type.clone()),
+                Some(field_state.published_type().clone()),
                 parsed_raw.clone(),
                 parsed_raw
                     .as_ref()
                     .and_then(|raw| query_engine.project_expr_surface_expr(scope_hint, raw)),
-                query_engine.project_expr_surface_expr(scope_hint, &field.r#type),
+                query_engine.project_expr_surface_expr(scope_hint, field_state.published_type()),
             ]
             .into_iter()
             .flatten()
@@ -2739,19 +2985,26 @@ fn materialize_component_meta_field_types(
                     crate::semantic_query::ProjectionMode::Expanded,
                     query_engine,
                 );
-                if compare_type_expr_improvement(&rescued, &field.r#type) {
-                    field.r#type = rescued;
+                if compare_type_expr_improvement(&rescued, field_state.published_type()) {
+                    field_state.set_current_type(rescued);
                 }
                 let surface =
                     query_engine.materialize_member_surface_expr(scope_hint, &candidate, false);
-                if compare_type_expr_improvement(&surface, &field.r#type) {
-                    field.r#type = surface;
+                if compare_type_expr_improvement(&surface, field_state.published_type()) {
+                    field_state.set_current_type(surface);
                 }
             }
         }
+        field.r#type = field_state.publish();
     }
     for field in &mut evaluated_types.bindings {
-        rescue_field(scope_canonical_id, field, query_engine);
+        // Plan §4.10 / K1 — wrap field.r#type in MacroFieldGraphState.
+        let host = query_engine.host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let mut field_state =
+            MacroFieldGraphState::new(field.r#type.clone(), scope_canonical_id, &dispatch);
+        rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        field.r#type = field_state.publish();
     }
 }
 

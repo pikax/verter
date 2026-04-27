@@ -11588,3 +11588,176 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
         );
     }
 }
+
+// ===========================================================================
+// Plan §4.10 / K1 — MacroFieldGraphState scaffold tests
+// ===========================================================================
+
+#[cfg(test)]
+mod macro_field_graph_state_tests {
+    use crate::meta_resolve::{
+        dispatch_lower_counter_get, dispatch_lower_counter_reset, MacroFieldGraphState,
+    };
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+    use std::sync::Arc;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    fn make_host_with_simple_alias() -> VerterHost {
+        use crate::types::{FileKind, UpsertRequest};
+        // Owner file with a simple type alias to drive lowering
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/test_owner.ts".to_string()),
+            input_id: "/test_owner.ts".to_string(),
+            source: Arc::from("export type Foo = { a: number };\nexport type Bar = Foo;\n"),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        });
+        host
+    }
+
+    /// Plan §4.10 / K1 — `MacroFieldGraphState::new` constructs with
+    /// `node_rewrite_dirty == false` and `published_type` returning the
+    /// initial value verbatim.
+    #[test]
+    fn macro_field_graph_state_new_starts_clean() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let state = MacroFieldGraphState::new(initial.clone(), "/test_owner.ts", &dispatch);
+        // published_type returns the initial value
+        assert_eq!(state.published_type(), &initial);
+    }
+
+    /// Plan §4.10 / K1 — clean publish (no rewrite, no set_current_type)
+    /// returns the initial value verbatim.
+    #[test]
+    fn macro_field_graph_state_publish_clean_returns_initial() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let state = MacroFieldGraphState::new(initial.clone(), "/test_owner.ts", &dispatch);
+        let result = state.publish();
+        assert_eq!(result, initial);
+    }
+
+    /// Plan §4.10 / K1 — `set_current_type` updates `published_type` and
+    /// `publish()` returns the new value.
+    #[test]
+    fn macro_field_graph_state_set_current_type_round_trips() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial, "/test_owner.ts", &dispatch);
+        let replacement = TypeExpr::Ref {
+            name: Arc::from("Bar"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        state.set_current_type(replacement.clone());
+        assert_eq!(state.published_type(), &replacement);
+        assert_eq!(state.publish(), replacement);
+    }
+
+    /// Plan §4.10 / K1 — `current_node()` lazy-lowers and DOES NOT set
+    /// `node_rewrite_dirty`. After `current_node()` only,
+    /// `publish()` returns the original `published_type` unchanged
+    /// (no raise-on-non-dirty).
+    #[test]
+    fn macro_field_graph_state_current_node_does_not_set_dirty() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        dispatch_lower_counter_reset();
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial.clone(), "/test_owner.ts", &dispatch);
+        let _ = state.current_node();
+        // Counter incremented (one lower happened)
+        let after_first = dispatch_lower_counter_get();
+        assert_eq!(after_first, 1, "current_node lowering should count as 1");
+        // Memoised — second call should not re-lower
+        let _ = state.current_node();
+        assert_eq!(
+            dispatch_lower_counter_get(),
+            1,
+            "current_node memoised; should not re-lower"
+        );
+        // Clean publish returns initial — dirty flag was NOT set by lower-only
+        let result = state.publish();
+        assert_eq!(
+            result, initial,
+            "publish() must return initial value when only current_node() was called \
+             (no graph-native rewrite happened; dirty flag stays FALSE)"
+        );
+    }
+
+    /// Plan §4.10 / K1 — `raw_node()` lazy-lowers the raw expression.
+    /// Independent from `current_node()` memoisation.
+    #[test]
+    fn macro_field_graph_state_raw_node_lazy_and_memoised() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        dispatch_lower_counter_reset();
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Bar"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let raw = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial, "/test_owner.ts", &dispatch);
+        let _ = state.raw_node(&raw);
+        let after_first = dispatch_lower_counter_get();
+        assert_eq!(after_first, 1, "raw_node lowering should count as 1");
+        // Memoised — second call should not re-lower
+        let _ = state.raw_node(&raw);
+        assert_eq!(
+            dispatch_lower_counter_get(),
+            1,
+            "raw_node memoised; should not re-lower"
+        );
+    }
+
+    /// Plan §4.10 / K1 — `set_current_type` after `current_node()`
+    /// invalidates the cached node and clears the dirty flag.
+    #[test]
+    fn macro_field_graph_state_set_current_type_invalidates_node() {
+        let host = make_host_with_simple_alias();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        dispatch_lower_counter_reset();
+        let initial = TypeExpr::Ref {
+            name: Arc::from("Foo"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let mut state = MacroFieldGraphState::new(initial, "/test_owner.ts", &dispatch);
+        let first = state.current_node();
+        assert!(first.is_some(), "first lowering should succeed");
+        // Mutate via TypeExpr path
+        let replacement = TypeExpr::Ref {
+            name: Arc::from("Bar"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        state.set_current_type(replacement);
+        // After invalidation, current_node() should re-lower
+        let _ = state.current_node();
+        let total = dispatch_lower_counter_get();
+        assert_eq!(
+            total, 2,
+            "set_current_type must invalidate the cache; second current_node \
+             call must re-lower (got {total} total lowers, expected 2)"
+        );
+    }
+}
