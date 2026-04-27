@@ -7773,7 +7773,37 @@ fn walk_component_meta_macro_shape_member_types(
         })
     }
 
+    /// Plan §6.14 / M — graph-native bridge for the slot rescue
+    /// chain's `slot_binding_param_can_stay_symbolic` predicate.
+    ///
+    /// Lowers the TypeExpr to a `Navigate`-mode `SemanticNodeId` and
+    /// dispatches to J2's `slot_binding_param_can_stay_symbolic_node`.
+    /// Falls back to the legacy TypeExpr predicate when lowering fails
+    /// (preserves existing behaviour for shapes that don't lower yet).
     fn slot_binding_param_can_stay_symbolic(
+        ty: &verter_semantic::analysis::type_expr::TypeExpr,
+        scope_canonical_id: &str,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    ) -> bool {
+        let host = query_engine.host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        if let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            ty,
+            crate::semantic_query::ProjectionMode::Navigate,
+        ) {
+            // Plan §6.14 / M — graph-native path via J2.
+            return slot_binding_param_can_stay_symbolic_node(host, node, 0);
+        }
+        // Lowering failure — fall back to the legacy TypeExpr predicate.
+        slot_binding_param_can_stay_symbolic_typeexpr(ty, scope_canonical_id, query_engine)
+    }
+
+    /// Plan §6.14 / M — legacy TypeExpr fallback for
+    /// `slot_binding_param_can_stay_symbolic`. Retained as the
+    /// lowering-failure fallback path; will be deleted in WT4 when all
+    /// shapes lower deterministically.
+    fn slot_binding_param_can_stay_symbolic_typeexpr(
         ty: &verter_semantic::analysis::type_expr::TypeExpr,
         scope_canonical_id: &str,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
@@ -7781,9 +7811,11 @@ fn walk_component_meta_macro_shape_member_types(
         use verter_semantic::analysis::type_expr::TypeExpr;
 
         match ty {
-            TypeExpr::Parenthesized(inner) => {
-                slot_binding_param_can_stay_symbolic(inner, scope_canonical_id, query_engine)
-            }
+            TypeExpr::Parenthesized(inner) => slot_binding_param_can_stay_symbolic_typeexpr(
+                inner,
+                scope_canonical_id,
+                query_engine,
+            ),
             TypeExpr::Conditional { .. }
             | TypeExpr::Mapped { .. }
             | TypeExpr::IndexedAccess { .. }
@@ -7791,7 +7823,7 @@ fn walk_component_meta_macro_shape_member_types(
             | TypeExpr::TypeParameter(_)
             | TypeExpr::TemplateLiteral { .. } => true,
             TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().all(|ty| {
-                slot_binding_param_can_stay_symbolic(ty, scope_canonical_id, query_engine)
+                slot_binding_param_can_stay_symbolic_typeexpr(ty, scope_canonical_id, query_engine)
             }),
             TypeExpr::Ref {
                 name,
