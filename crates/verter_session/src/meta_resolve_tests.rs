@@ -11099,6 +11099,180 @@ defineProps<{ value: Foo }>()
         );
     }
 
+    /// Plan §6.11 / J2 — `slot_binding_param_can_stay_symbolic_node`
+    /// mirrors the nested TypeExpr predicate
+    /// `slot_binding_param_can_stay_symbolic` (defined inside
+    /// `walk_component_meta_macro_shape_member_types`). Equivalence on
+    /// small fixtures across deferred shapes (Conditional/Mapped/etc.),
+    /// unions/intersections, and InstantiationRef-with-args.
+    #[test]
+    fn slot_binding_param_can_stay_symbolic_node_matches_type_expr_predicate() {
+        use crate::meta_resolve::slot_binding_param_can_stay_symbolic_node;
+        use crate::semantic_query::{IndexKey, SemanticNodeData, ValueRootKey};
+
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        // Conditional shell (deferred) — true. Build a synthetic
+        // Conditional carrier (the actual conditional check fields point
+        // at primitive nodes, but the predicate only matches the variant
+        // discriminant).
+        let prim_string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let cond_node = graph.intern_node(SemanticNodeData::Conditional {
+            check: prim_string,
+            extends: prim_string,
+            true_branch_ref: prim_string,
+            false_branch_ref: prim_string,
+            distributive: false,
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, cond_node, 0),
+            "Conditional shell must be allowed to stay symbolic"
+        );
+
+        // KeyOf — this is NOT in the TypeExpr predicate's deferred-list
+        // (Conditional/Mapped/IndexedAccess/TypeOf/TypeParameter/
+        // TemplateLiteral). KeyOf falls through to `_ => false`.
+        let keyof_node = graph.intern_node(SemanticNodeData::KeyOf { base: prim_string });
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, keyof_node, 0),
+            "KeyOf is NOT in the deferred-shape allow-list — must NOT stay symbolic"
+        );
+
+        // IndexedAccess shell — true.
+        let local = synthetic_decl_identity("Foo");
+        let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: local.clone(),
+        });
+        let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: foo_ref,
+            index: IndexKey::String(StdArc::from("a")),
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, indexed, 0),
+            "IndexedAccess shell must be allowed to stay symbolic"
+        );
+
+        // TypeOf shell — true.
+        let typeof_node = graph.intern_node(SemanticNodeData::TypeOf {
+            value_root: ValueRootKey {
+                scope: crate::semantic_query::ScopeId {
+                    canonical_id: StdArc::from("/test/local.ts"),
+                    local_scope: None,
+                },
+                name: StdArc::from("foo"),
+            },
+            path: StdArc::from(Vec::<StdArc<str>>::new().into_boxed_slice()),
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, typeof_node, 0),
+            "TypeOf shell must be allowed to stay symbolic"
+        );
+
+        // TypeParam — true (deferred).
+        let type_param = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: local.clone(),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: StdArc::from("T"),
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, type_param, 0),
+            "TypeParam shell must be allowed to stay symbolic"
+        );
+
+        // TemplateLiteral shell — true.
+        let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+            quasis: StdArc::from(vec![StdArc::<str>::from("prefix-")].into_boxed_slice()),
+            expressions: StdArc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, template, 0),
+            "TemplateLiteral shell must be allowed to stay symbolic"
+        );
+
+        // Mapped shell — true. Build a stub mapped node.
+        let mapped = graph.intern_node(SemanticNodeData::Mapped {
+            source: prim_string,
+            mapper: crate::semantic_query::MapperKey {
+                parameter_node: type_param,
+                key_space: prim_string,
+                value_expr: prim_string,
+                optionality: crate::semantic_query::OptionalityMod::Keep,
+                readonly: crate::semantic_query::ReadonlyMod::Keep,
+                name_remap: None,
+                kind: crate::semantic_query::MapperKind::Computed,
+            },
+        });
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, mapped, 0),
+            "Mapped shell must be allowed to stay symbolic"
+        );
+
+        // Union of all-deferred shapes — true.
+        let union_deferred = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+            vec![cond_node, indexed, typeof_node].into_boxed_slice(),
+        )));
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, union_deferred, 0),
+            "Union of all-deferred shapes must stay symbolic"
+        );
+
+        // Union with at least one non-deferred (DeclRef no-args) — false.
+        let union_mixed = graph.intern_node(SemanticNodeData::Union(StdArc::from(
+            vec![cond_node, foo_ref].into_boxed_slice(),
+        )));
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, union_mixed, 0),
+            "Union with bare DeclRef cannot stay symbolic"
+        );
+
+        // Intersection of all-deferred shapes — true.
+        let intersection_deferred = graph.intern_node(SemanticNodeData::Intersection(
+            StdArc::from(vec![cond_node, indexed, mapped].into_boxed_slice()),
+        ));
+        assert!(
+            slot_binding_param_can_stay_symbolic_node(host, intersection_deferred, 0),
+            "Intersection of all-deferred shapes must stay symbolic"
+        );
+
+        // Bare DeclRef (no args) — false.
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, foo_ref, 0),
+            "Bare DeclRef does not match the predicate's allow-list"
+        );
+
+        // InstantiationRef with package-backed base — false (mirrors the
+        // TypeExpr predicate's `!query_engine.is_package_backed_decl(...)` guard).
+        let pkg = package_decl_identity("FromPkg");
+        let pkg_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pkg.clone(),
+            args: StdArc::from(vec![prim_string].into_boxed_slice()),
+        });
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, pkg_inst, 0),
+            "InstantiationRef with package-backed base — fails the package-backed guard, \
+             returns false (the no-package branch never fires)"
+        );
+
+        // Object — falls through to `_ => false`.
+        let obj = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, obj, 0),
+            "Object shape cannot stay symbolic — fails the deferred-shape allow-list"
+        );
+
+        // Primitive — false.
+        assert!(
+            !slot_binding_param_can_stay_symbolic_node(host, prim_string, 0),
+            "Primitive cannot stay symbolic"
+        );
+    }
+
     /// Plan §6.11 / J0 — depth fuse: pathological synthetic graphs do
     /// not stack-overflow. The predicate fuses at depth=256 and returns
     /// `false` (matching the legacy walker's runaway-recursion behaviour

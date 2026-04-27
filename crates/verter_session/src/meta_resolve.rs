@@ -9776,6 +9776,213 @@ pub(crate) fn type_node_needs_member_route_materialization(
     }
 }
 
+/// Plan §6.11 / J2 — graph-native helper mirroring the TypeExpr
+/// predicate `type_expr_has_non_object_top_level_surface`. Returns
+/// `true` when `node`'s top-level shape is something OTHER than a
+/// concrete Object/Function/Array/Tuple/Primitive/Literal — i.e., the
+/// body has a "complex" top-level shape that cannot be projected as a
+/// flat Object surface.
+///
+/// Recurses through:
+/// - `Alias(inner)` — pass-through.
+/// - `DeclRef { identity }` / `InstantiationRef { base, .. }` — issue
+///   an `Instantiate { base, args: [], body_mode: Skeleton }` dispatch
+///   to retrieve the declaration body, then recurse.
+/// - `Union | Intersection` — TypeExpr semantics: any non-Object
+///   contributor returns `true`; otherwise (all Object) `false`.
+///
+/// Depth fused at 256.
+#[allow(
+    dead_code,
+    reason = "Plan §6.11 / J2 — wired via slot_binding_param_can_stay_symbolic_node in K2/K3"
+)]
+pub(crate) fn node_has_non_object_top_level_surface(
+    host: &VerterHost,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> bool {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey};
+
+    if depth > 256 {
+        return false;
+    }
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::TemplateLiteral { .. } => true,
+        SemanticNodeData::Alias(inner) => {
+            node_has_non_object_top_level_surface(host, *inner, depth + 1)
+        }
+        SemanticNodeData::DeclRef { identity } => {
+            // Resolve declaration body via dispatch. Skeleton mode
+            // preserves any open generic carriers in the body so the
+            // top-level shape is observable structurally.
+            let dispatch = ProjectSemanticDispatch::new(host);
+            let key = SemanticQueryKey::Instantiate {
+                base: identity.clone(),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
+                body_mode: ProjectionMode::Skeleton,
+            };
+            let read = dispatch.execute_read(key);
+            let body_id = match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
+            };
+            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+        }
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            let dispatch = ProjectSemanticDispatch::new(host);
+            let key = SemanticQueryKey::Instantiate {
+                base: base.clone(),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
+                body_mode: ProjectionMode::Skeleton,
+            };
+            let read = dispatch.execute_read(key);
+            let body_id = match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
+            };
+            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+        }
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            // Mirror the TypeExpr predicate's union/intersection rule:
+            // any non-Object contributor returns `true`; if all
+            // members are Object, returns `false`.
+            let mut saw_object = false;
+            for &m in members.iter() {
+                let Some(member_data) = graph.node_data(m) else {
+                    return true;
+                };
+                match member_data.as_ref() {
+                    SemanticNodeData::Object(_) => {
+                        saw_object = true;
+                    }
+                    SemanticNodeData::Alias(inner) => {
+                        if node_has_non_object_top_level_surface(host, *inner, depth + 1) {
+                            return true;
+                        }
+                        if matches!(
+                            graph.node_data(*inner).as_deref(),
+                            Some(SemanticNodeData::Object(_))
+                        ) {
+                            saw_object = true;
+                        }
+                    }
+                    _ => return true,
+                }
+            }
+            !saw_object
+        }
+        SemanticNodeData::Object(_)
+        | SemanticNodeData::Function { .. }
+        | SemanticNodeData::Array { .. }
+        | SemanticNodeData::Tuple { .. }
+        | SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::VueMacroElements(_) => false,
+    }
+}
+
+/// Plan §1.12 / J2 — graph-native variant of the TypeExpr predicate
+/// `slot_binding_param_can_stay_symbolic` (defined inline inside
+/// `walk_component_meta_macro_shape_member_types`). Returns `true`
+/// when `node`'s shape allows the slot binding parameter to remain
+/// symbolic without eager materialisation.
+///
+/// Mirrors the TypeExpr predicate's branch structure:
+///
+/// - `Conditional | Mapped | IndexedAccess | TypeOf | TypeParam |
+///   TemplateLiteral` → `true` (deferred / structural shells; safe
+///   to keep symbolic).
+/// - `Union | Intersection` → all members must satisfy the predicate
+///   (matches `types.iter().all(...)`).
+/// - `InstantiationRef { base, args }` (the with-args case) — when
+///   the base is NOT package-backed, retrieve the declaration body
+///   via dispatch and check whether it has a non-object top-level
+///   surface (matches `query_engine.named_decl_body(...).is_some_and(|body|
+///   type_expr_has_non_object_top_level_surface(...))`).
+/// - `Alias(inner)` → pass-through (graph-native shape; TypeExpr's
+///   `Parenthesized(inner)` arm).
+/// - All other shapes → `false`.
+///
+/// Depth-fused at 256 per §4.11. Fuse returns `false` (conservative —
+/// runaway recursion does not allow staying symbolic).
+#[allow(
+    dead_code,
+    reason = "Plan §6.11 / J2 — wired into materialiser callers in K2/K3"
+)]
+pub(crate) fn slot_binding_param_can_stay_symbolic_node(
+    host: &VerterHost,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 {
+        return false;
+    }
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::Alias(inner) => {
+            slot_binding_param_can_stay_symbolic_node(host, *inner, depth + 1)
+        }
+        SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::TemplateLiteral { .. } => true,
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => members
+            .iter()
+            .all(|&m| slot_binding_param_can_stay_symbolic_node(host, m, depth + 1)),
+        // Lowered `Ref { name, type_arguments: [non-empty] }` —
+        // mirrors the TypeExpr `Ref { name, type_arguments }` arm with
+        // `!type_arguments.is_empty() && !is_package_backed_decl(...)`.
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            if component_meta_ref_resolves_to_package_node(base) {
+                return false;
+            }
+            // Resolve declaration body via dispatch, then check
+            // top-level surface shape.
+            use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
+            let dispatch = ProjectSemanticDispatch::new(host);
+            let key = SemanticQueryKey::Instantiate {
+                base: base.clone(),
+                args: Arc::from(
+                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                ),
+                body_mode: ProjectionMode::Skeleton,
+            };
+            let read = dispatch.execute_read(key);
+            let body_id = match read.value {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
+            };
+            node_has_non_object_top_level_surface(host, body_id, depth + 1)
+        }
+        _ => false,
+    }
+}
+
 /// Plan §1.12 / J0 — graph-native variant of
 /// [`type_expr_has_package_backed_root`]. Returns `true` when `node`'s
 /// route root resolves to a `/node_modules/`-rooted decl identity.
