@@ -1190,6 +1190,11 @@ impl MaterializeStructureDb {
     /// Read-only peek with proactive stale-entry removal. Plan §1.5:
     /// when the entry's `dep_signature` is stale, remove it (orphan
     /// reaping) and return `None`.
+    ///
+    /// Plan R8-5 — successful stale removal must decrement the shared
+    /// `live_counter` so it tracks live entries (not lifetime inserts).
+    /// Without this, every stale peek inflates the shared counter
+    /// permanently.
     pub fn peek(
         &self,
         key: &MaterializeStructureCacheKey,
@@ -1197,8 +1202,12 @@ impl MaterializeStructureDb {
     ) -> Option<crate::semantic_query::CacheRead<MaterializeOutcome>> {
         let entry_arc = self.entries.get(key).map(|e| e.clone())?;
         if !dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
-            self.entries
+            let removed = self
+                .entries
                 .remove_if(key, |_, e| Arc::ptr_eq(e, &entry_arc));
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            }
             return None;
         }
         crate::host_manage::record_materialize_structure_cache_hit();
@@ -1246,10 +1255,23 @@ impl MaterializeStructureDb {
     }
 
     /// Drop every cache entry. Used on project-generation bumps.
+    ///
+    /// Plan R8-5 — saturating-subtract pattern (NOT `store(0)`) because
+    /// `live_counter` is shared via `Arc<AtomicU64>` across every typed DB
+    /// in `ProjectTypeStore` (`component_meta_cache_live`). A per-DB
+    /// `store(0)` would corrupt other DBs' contributions to the shared
+    /// sum. Mirrors the existing `ImportedRegistryDb::invalidate_all`
+    /// pattern — subtract only this DB's entry count, capped at the
+    /// counter's current value to prevent underflow under
+    /// concurrent invalidation.
     pub fn invalidate_all(&self) {
+        let n = self.entries.len() as u64;
         self.entries.clear();
         self.canonical_to_keys.clear();
-        self.live_counter.store(0, Ordering::Relaxed);
+        self.live_counter.fetch_sub(
+            n.min(self.live_counter.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
     }
 
     /// Number of warm entries.
@@ -1302,4 +1324,310 @@ impl Default for MaterializeStructureDb {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ===========================================================================
+// Plan §4.8 / Phase C / Commit R — RefCycleResultDb
+// ===========================================================================
+
+use crate::cooperative_admission::cooperative_get_or_insert_with_post_publish;
+use crate::semantic_query::DeclIdentity;
+
+/// Plan §4.8 / Phase C — entry stored in `RefCycleResultDb`. Carries the
+/// boolean BFS result, the dep-signature recorded during the cold BFS
+/// compute, and a `validated_at_generation` field used by `peek`'s
+/// generation-local fast path.
+///
+/// No `Clone` derive — `AtomicU64` is non-Clone. Entries are wrapped in
+/// `Arc<RefCycleEntry>`; cloning the `Arc` cheaply shares the entry
+/// across cache hits.
+pub struct RefCycleEntry {
+    /// `true` when the BFS root reaches a transitive cycle through a
+    /// complex helper surface.
+    pub result: bool,
+    /// `dep_signature` recorded during the cold BFS compute. Used by
+    /// `peek`'s slow path to revalidate against `HostFenceValidator`
+    /// when `validated_at_generation` is stale.
+    pub dep_signature: DepSignature,
+    /// Plan §4.9 — generation-local validity field. Updated to the
+    /// current `workspace().content_generation()` on:
+    ///   - cold publish (initial value = current generation);
+    ///   - successful slow-path revalidation in `peek`.
+    ///
+    /// `peek`'s fast path returns immediately when `cached ==
+    /// current_gen` without walking the dep_signature. Race contract:
+    /// `Relaxed` ordering — under heavy invalidation, a thread may see
+    /// a stale cached_gen and re-walk the slow path even when the
+    /// entry is still valid. This is correct (re-walking catches
+    /// genuine staleness) but may briefly reduce cache effectiveness.
+    pub validated_at_generation: AtomicU64,
+}
+
+/// Plan §4.8 / §4.9 / Commit R — host-owned cache for transitive
+/// cycle BFS results.
+///
+/// Mirrors [`MaterializeStructureDb`]'s reverse-index pattern:
+///   - Entries keyed by `DeclIdentity`.
+/// - `canonical_to_keys` reverse-index drains under `invalidate_for_canonical`.
+/// - `Arc::ptr_eq` discriminates "our entry" from concurrent fresh writes.
+///   - `live_counter` shared via `Arc<AtomicU64>` with all sibling DBs;
+///     uses the saturating-subtract pattern on `invalidate_all` to
+///     preserve other DBs' contributions.
+///
+/// Cooperative-admission integration: cold-path BFS runs inside
+/// [`cooperative_get_or_insert_with_post_publish`], whose `compute`
+/// closure runs synchronously on the caller's thread (see
+/// `cooperative_admission.rs:278` synchronous-compute contract).
+/// Borrow-capture of `&VerterHost` in the BFS compute closure is safe
+/// because no thread-hop occurs.
+pub struct RefCycleResultDb {
+    entries: DashMap<DeclIdentity, Arc<RefCycleEntry>>,
+    inflight: InflightTable<DeclIdentity>,
+    /// Per-canonical reverse index — maps each canonical id to the set
+    /// of cache keys whose dep_signature references it.
+    canonical_to_keys:
+        DashMap<Arc<str>, parking_lot::Mutex<rustc_hash::FxHashMap<DeclIdentity, DepSignature>>>,
+    live_counter: Arc<AtomicU64>,
+}
+
+impl RefCycleResultDb {
+    /// Construct with a fresh, unshared `live_counter`. Tests-only.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Construct with a shared `live_counter` borrowed from
+    /// `ProjectTypeStoreCounters::component_meta_cache_live`.
+    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+        Self {
+            entries: DashMap::new(),
+            inflight: InflightTable::new(),
+            canonical_to_keys: DashMap::new(),
+            live_counter,
+        }
+    }
+
+    /// Internal — get the entries map. Used by the BFS-cache compute
+    /// closure for `cooperative_get_or_insert_with_post_publish`.
+    pub(crate) fn entries(&self) -> &DashMap<DeclIdentity, Arc<RefCycleEntry>> {
+        &self.entries
+    }
+
+    /// Internal — get the inflight table. Used by the BFS-cache compute
+    /// closure for `cooperative_get_or_insert_with_post_publish`.
+    pub(crate) fn inflight(&self) -> &InflightTable<DeclIdentity> {
+        &self.inflight
+    }
+
+    /// Internal — bump the live counter. Called from the BFS-cache
+    /// compute closure's `post_publish` callback on successful publish.
+    pub(crate) fn bump_live_counter(&self) {
+        self.live_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Plan §6.10 sub-task 8 — read-only test accessor for the shared
+    /// `live_counter`. Used by R's invalidation tests to verify that
+    /// `invalidate_for_canonical` and `invalidate_all` correctly
+    /// decrement the counter without corrupting sibling DBs'
+    /// contributions to the shared sum.
+    #[cfg(test)]
+    pub(crate) fn live_counter_for_test(&self) -> u64 {
+        self.live_counter.load(Ordering::Relaxed)
+    }
+
+    /// Plan §4.8 / §10.1 — register the reverse-index after a successful
+    /// publish. Per-canonical mutex acquisition pattern matches
+    /// `MaterializeStructureDb`. Bounded by `dep_signature.len() ≤ 64`
+    /// (BFS hop cap from A0).
+    pub(crate) fn register_post_publish(&self, key: DeclIdentity, dep_signature: DepSignature) {
+        for (canonical, _) in dep_signature.iter() {
+            crate::host_manage::record_family_map_lock_acquisition();
+            let shard = self
+                .canonical_to_keys
+                .entry(Arc::clone(canonical))
+                .or_insert_with(|| parking_lot::Mutex::new(rustc_hash::FxHashMap::default()));
+            let mut map = shard.value().lock();
+            map.insert(key.clone(), Arc::clone(&dep_signature));
+        }
+    }
+
+    /// Plan §4.9 — generation-local validity peek.
+    ///
+    /// Fast path: if the entry's `validated_at_generation` matches the
+    /// host's current `content_generation`, return the cached value
+    /// without walking the dep_signature.
+    ///
+    /// Slow path: revalidate against `HostFenceValidator`; on success,
+    /// update `validated_at_generation` and return; on failure, remove
+    /// the stale entry (with `live_counter` decrement per R8-5) and
+    /// return `None`.
+    pub fn peek(
+        &self,
+        id: &DeclIdentity,
+        host: &VerterHost,
+    ) -> Option<crate::semantic_query::CacheRead<bool>> {
+        let entry_arc = self.entries.get(id).map(|e| Arc::clone(&*e))?;
+        let current_gen = host.workspace().content_generation();
+        let cached_gen = entry_arc.validated_at_generation.load(Ordering::Relaxed);
+        if cached_gen == current_gen {
+            return Some(crate::semantic_query::CacheRead {
+                value: entry_arc.result,
+                dep_signature: Arc::clone(&entry_arc.dep_signature),
+            });
+        }
+        if !dep_signature_valid_for_host(&entry_arc.dep_signature, host) {
+            // Plan R8-5 — decrement live_counter on stale removal so
+            // the shared counter tracks live entries, not stale ones.
+            let removed = self
+                .entries
+                .remove_if(id, |_, e| Arc::ptr_eq(e, &entry_arc));
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+            }
+            return None;
+        }
+        entry_arc
+            .validated_at_generation
+            .store(current_gen, Ordering::Relaxed);
+        Some(crate::semantic_query::CacheRead {
+            value: entry_arc.result,
+            dep_signature: Arc::clone(&entry_arc.dep_signature),
+        })
+    }
+
+    /// Plan §4.8 / R8-5 — drop every cache entry whose `dep_signature`
+    /// references `canonical_id`. Uses the `canonical_to_keys` reverse
+    /// index to find affected keys; `Arc::ptr_eq` discriminates "our
+    /// entry" from concurrent fresh writes.
+    pub fn invalidate_for_canonical(&self, canonical_id: &str) {
+        let drained: Vec<(DeclIdentity, DepSignature)> =
+            match self.canonical_to_keys.remove(canonical_id) {
+                Some((_, mutex)) => mutex.lock().drain().collect(),
+                None => return,
+            };
+        for (key, registered_sig) in &drained {
+            let registered = Arc::clone(registered_sig);
+            let removed = self.entries.remove_if(key, move |_, entry_arc| {
+                Arc::ptr_eq(&entry_arc.dep_signature, &registered)
+            });
+            if removed.is_some() {
+                self.live_counter.fetch_sub(1, Ordering::Relaxed);
+                // Cross-canonical cleanup with ptr_eq — drop the
+                // matching registration in every other canonical's
+                // shard so subsequent invalidations do not double-free.
+                for (other_canonical, _) in registered_sig.iter() {
+                    if other_canonical.as_ref() == canonical_id {
+                        continue;
+                    }
+                    if let Some(shard) = self.canonical_to_keys.get(other_canonical) {
+                        let mut map = shard.lock();
+                        if let Some(existing_sig) = map.get(key) {
+                            if Arc::ptr_eq(existing_sig, registered_sig) {
+                                map.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plan §4.8 / R8-5 — saturating-subtract pattern (NOT `store(0)`)
+    /// because `live_counter` is shared via `Arc<AtomicU64>` across all
+    /// typed DBs in `ProjectTypeStore`. A per-DB `store(0)` would
+    /// corrupt sibling DBs' contributions to the shared sum.
+    pub fn invalidate_all(&self) {
+        let n = self.entries.len() as u64;
+        self.entries.clear();
+        self.canonical_to_keys.clear();
+        self.live_counter.fetch_sub(
+            n.min(self.live_counter.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+impl Default for RefCycleResultDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Plan §4.8 — public hook to consult the BFS cache from
+/// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
+///
+/// Returns `Some(read)` on a generation-local fast hit OR a
+/// successful slow-path revalidation. Returns `None` on a true cache
+/// miss or a stale entry (the caller falls through to BFS compute).
+pub(crate) fn ref_cycle_db_peek(
+    db: &RefCycleResultDb,
+    id: &DeclIdentity,
+    host: &VerterHost,
+) -> Option<crate::semantic_query::CacheRead<bool>> {
+    db.peek(id, host)
+}
+
+/// Plan §4.8 / §4.20 — the cooperative-admission wrapper invoked by
+/// `meta_resolve::ref_root_reaches_transitive_cycle_node` on the cold
+/// path. The `compute` closure runs synchronously on the caller's
+/// thread (per cooperative_admission's synchronous-compute contract),
+/// so capturing `&VerterHost` and `&DeclIdentity` directly is safe.
+///
+/// On cooperative-admission success: bumps `live_counter`, registers
+/// the reverse-index, and returns `Some(CacheRead)`. On revalidation
+/// failure or compute returning `None`: returns `None` and the caller
+/// falls back to an uncached recompute.
+pub(crate) fn ref_cycle_db_get_or_compute<C>(
+    db: &RefCycleResultDb,
+    id: &DeclIdentity,
+    host: &VerterHost,
+    compute_bfs: C,
+) -> Option<crate::semantic_query::CacheRead<bool>>
+where
+    C: FnOnce(&mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>) -> bool,
+{
+    let key_for_register = id.clone();
+    let current_gen = host.workspace().content_generation();
+    cooperative_get_or_insert_with_post_publish(
+        db.entries(),
+        db.inflight(),
+        id.clone(),
+        // validate(&Entry) -> Option<V>
+        |entry: &RefCycleEntry| {
+            if dep_signature_valid_for_host(&entry.dep_signature, host) {
+                Some(crate::semantic_query::CacheRead {
+                    value: entry.result,
+                    dep_signature: Arc::clone(&entry.dep_signature),
+                })
+            } else {
+                None
+            }
+        },
+        // compute() -> Option<Entry>
+        || -> Option<RefCycleEntry> {
+            let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+            let result = compute_bfs(&mut compute_fence);
+            Some(RefCycleEntry {
+                result,
+                dep_signature: Arc::from(compute_fence.into_boxed_slice()),
+                validated_at_generation: AtomicU64::new(current_gen),
+            })
+        },
+        // project(&Entry) -> V
+        |entry: &RefCycleEntry| crate::semantic_query::CacheRead {
+            value: entry.result,
+            dep_signature: Arc::clone(&entry.dep_signature),
+        },
+        // revalidate_after_compute(&Entry) -> bool
+        |entry: &RefCycleEntry| dep_signature_valid_for_host(&entry.dep_signature, host),
+        // post_publish(&Arc<Entry>, &K)
+        move |entry_arc: &Arc<RefCycleEntry>, _k: &DeclIdentity| {
+            db.bump_live_counter();
+            db.register_post_publish(
+                key_for_register.clone(),
+                Arc::clone(&entry_arc.dep_signature),
+            );
+        },
+    )
 }

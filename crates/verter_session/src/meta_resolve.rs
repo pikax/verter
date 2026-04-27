@@ -1085,6 +1085,38 @@ where
 }
 
 // =====================================================================
+// Plan §6.13 / Commit R — BFS_COMPUTE_COUNTER per-thread counter.
+//
+// Counts the number of times the cold-path `bfs_compute_inner` body
+// runs on the current thread. Tests use this to verify that
+// warm-path generation-local fast hits skip dispatch entirely
+// (counter stays at 0 on second call within the same generation).
+//
+// Per-thread (RefCell-backed) so concurrent tests in the workspace
+// pool do not interfere with each other's counters. Tests that
+// exercise multi-thread cooperative-admission must observe the
+// winner via the host-owned cache's `live_counter_for_test()`
+// instead.
+//
+// `#[cfg(test)]`-only: zero footprint outside test builds.
+// =====================================================================
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BFS_COMPUTE_COUNTER: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_bfs_compute_counter_for_test() {
+    BFS_COMPUTE_COUNTER.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn bfs_compute_counter_for_test() -> usize {
+    BFS_COMPUTE_COUNTER.with(|c| c.get())
+}
+
+// =====================================================================
 // Plan §6.2 / §6.6.5 — F-prep canonical-fixture A0 test #3b helper.
 //
 // `with_bfs_child_refs_observer_for_test(target_name, f)` instruments
@@ -10273,19 +10305,31 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
     }
 }
 
-/// Plan §1.12 — graph-native BFS for transitive cycle detection.
+/// Plan §1.12 / §4.8 / Commit R — graph-native BFS for transitive cycle
+/// detection, with host-owned cache.
 ///
-/// Walks decl bodies via `dispatch.execute_read(SemanticQueryKey::Instantiate {
-/// body_mode: Skeleton })` to detect transitive cycles (plan §4.21 /
-/// R10-2). Returns `true` when the BFS rediscovers `root_identity` as a
-/// child reference within `MAX_HOPS` steps AND the path carries a
-/// "complex signal" (the canonical recursive-helper pattern: complex
-/// body shape OR a child reference with type arguments along the way).
+/// Architecture:
+///   1. **Fast path (§4.9)** — `RefCycleResultDb::peek` consults the
+///      generation-local cache. On `validated_at_generation == current`,
+///      returns the cached `bool` without re-walking.
+///   2. **Slow path** — cooperative-admission via
+///      `ref_cycle_db_get_or_compute`; the BFS body
+///      ([`bfs_compute_inner`]) runs synchronously in the
+///      `compute` closure (per cooperative_admission's synchronous-
+///      compute contract), capturing `&VerterHost` directly. On
+///      cooperative-admission failure (revalidation rejected the entry),
+///      falls back to an uncached recompute so the caller never sees
+///      a publishing miss.
 ///
-/// Each `Instantiate` dispatch's `dep_signature` is merged into
-/// `local_fence` so the caller's completion fence remains complete.
+/// The cache key is `DeclIdentity`; entries store `(result, dep_signature,
+/// validated_at_generation)`. `dep_signature` is built from every
+/// `Instantiate` dispatch's recorded fence accumulated during the BFS,
+/// so cache invalidation is precise per-canonical (via `RefCycleResultDb::
+/// invalidate_for_canonical`) and project-generation-wide (via
+/// `invalidate_all`).
 ///
-/// Plan §4.1 / R7-13 / R7-14 — legacy parity rules:
+/// Plan §4.1 / R7-13 / R7-14 — legacy parity rules carried into the
+/// inner BFS body unchanged:
 ///
 /// - Queue carries `(DeclIdentity, path_has_complex_signal: bool)`.
 /// - Visited set keyed on `DeclIdentity` (first-visit-wins).
@@ -10305,12 +10349,73 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
     host: &VerterHost,
     local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
 ) -> bool {
+    let db = host.project_type_store().ref_cycle_db();
+
+    // Fast path: peek with generation-local validity. On hit, extend
+    // the caller's local_fence and return without dispatching any
+    // Instantiate query.
+    if let Some(read) = crate::component_meta_caches::ref_cycle_db_peek(db, root_identity, host) {
+        local_fence.extend(read.dep_signature.iter().cloned());
+        return read.value;
+    }
+
+    // Slow path: cooperative-admission with synchronous compute. The
+    // closure captures `&VerterHost` by reference — Rust borrow safe
+    // because `cooperative_get_or_insert_with_post_publish` runs the
+    // compute closure on the calling thread (per its
+    // synchronous-compute contract documented at
+    // `cooperative_admission.rs:278`).
+    let read_opt = crate::component_meta_caches::ref_cycle_db_get_or_compute(
+        db,
+        root_identity,
+        host,
+        |compute_fence| bfs_compute_inner(root_identity, host, compute_fence),
+    );
+
+    match read_opt {
+        Some(read) => {
+            local_fence.extend(read.dep_signature.iter().cloned());
+            read.value
+        }
+        None => {
+            // Cooperative admission returned None (revalidation
+            // rejected the freshly-built entry). Recompute uncached as
+            // a fallback so the caller still sees a result. Do NOT
+            // cache: the same revalidation race that just rejected
+            // the entry would reject the next attempt too.
+            let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+            let result = bfs_compute_inner(root_identity, host, &mut fence);
+            local_fence.extend(fence);
+            result
+        }
+    }
+}
+
+/// Plan §6.13 / Commit R — extracted BFS body. Identical legacy-parity
+/// logic to `ref_root_reaches_transitive_cycle_node`'s pre-cache body
+/// (preserves recursive-ref back-edge detection, intermediate-self
+/// check, and `ProjectionMode::Skeleton` for open-generic preservation
+/// per §4.21 / R10-2).
+///
+/// The wrapper [`ref_root_reaches_transitive_cycle_node`] calls this
+/// from inside the cooperative-admission `compute` closure on the cold
+/// path. The wrapper additionally calls it directly on the
+/// uncached-fallback branch when the cooperative admission's
+/// revalidation rejects the freshly-built entry.
+fn bfs_compute_inner(
+    root_identity: &crate::semantic_query::DeclIdentity,
+    host: &VerterHost,
+    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+) -> bool {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
     use rustc_hash::FxHashSet;
     use std::collections::VecDeque;
 
     const MAX_HOPS: usize = 64;
+
+    #[cfg(test)]
+    BFS_COMPUTE_COUNTER.with(|c| c.set(c.get() + 1));
 
     let dispatch = ProjectSemanticDispatch::new(host);
     let graph = host.project_type_store().semantic_graph();

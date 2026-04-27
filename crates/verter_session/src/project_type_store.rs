@@ -568,6 +568,11 @@ pub struct ProjectTypeStore {
     /// plan §11.2; the canonical retired-symbol list lives in
     /// `tests/no_legacy_walker.rs::RETIRED_SYMBOLS`).
     materialize_structure_db: crate::component_meta_caches::MaterializeStructureDb,
+    /// Plan §4.8 / Phase C / Commit R — host-owned cache for
+    /// `meta_resolve::ref_root_reaches_transitive_cycle_node`. BFS
+    /// results stored as `(DeclIdentity → bool)` with reverse-index
+    /// invalidation matching `MaterializeStructureDb`.
+    ref_cycle_db: crate::component_meta_caches::RefCycleResultDb,
     prepared_surface_db: PreparedSurfaceDb,
     prepared_member_db: PreparedMemberDb,
     routed_expr_surface_db: RoutedExprSurfaceDb,
@@ -647,6 +652,9 @@ impl ProjectTypeStore {
             crate::component_meta_caches::MaterializeStructureDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
             ));
+        let ref_cycle_db = crate::component_meta_caches::RefCycleResultDb::with_counter(
+            Arc::clone(&counters.component_meta_cache_live),
+        );
         let prepared_surface_db =
             PreparedSurfaceDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
         let prepared_member_db =
@@ -670,6 +678,7 @@ impl ProjectTypeStore {
             prepared_target_db,
             materialize_memo_db,
             materialize_structure_db,
+            ref_cycle_db,
             prepared_surface_db,
             prepared_member_db,
             routed_expr_surface_db,
@@ -770,6 +779,13 @@ impl ProjectTypeStore {
         &self.materialize_structure_db
     }
 
+    /// Plan §4.8 / Phase C / Commit R — accessor for the host-owned
+    /// transitive-cycle BFS cache consulted by
+    /// `meta_resolve::ref_root_reaches_transitive_cycle_node`.
+    pub fn ref_cycle_db(&self) -> &crate::component_meta_caches::RefCycleResultDb {
+        &self.ref_cycle_db
+    }
+
     pub fn prepared_surface_db(&self) -> &PreparedSurfaceDb {
         &self.prepared_surface_db
     }
@@ -834,6 +850,9 @@ impl ProjectTypeStore {
         // was retired in plan §11.2).
         self.materialize_structure_db
             .invalidate_for_canonical(canonical_id);
+        // Plan §4.8 / Commit R — same per-canonical reverse-index drain
+        // for the BFS cycle-result cache.
+        self.ref_cycle_db.invalidate_for_canonical(canonical_id);
         self.prepared_surface_db.invalidate_canonical(canonical_id);
         self.prepared_member_db.invalidate_canonical(canonical_id);
         self.routed_expr_surface_db
@@ -875,6 +894,10 @@ impl ProjectTypeStore {
         self.prepared_target_db.invalidate_all();
         self.materialize_memo_db.invalidate_all();
         self.materialize_structure_db.invalidate_all();
+        // Plan §4.8 / Commit R — project-shape change invalidates the
+        // BFS cycle-result cache (entries depend on the same routes /
+        // intrinsics that change at the project-generation boundary).
+        self.ref_cycle_db.invalidate_all();
         self.prepared_surface_db.invalidate_all();
         self.prepared_member_db.invalidate_all();
         self.routed_expr_surface_db.invalidate_all();

@@ -274,6 +274,26 @@ where
 /// canonical with its old dep_signature; the host has the new
 /// state) and proactively removed. The orphan window is bounded
 /// per edit-cycle.
+///
+/// **Compute closure synchronicity contract (plan §4.20).** The
+/// `compute` closure runs SYNCHRONOUSLY on the caller's thread.
+/// Future maintainers MUST preserve this invariant; it underpins
+/// borrow-capture safety in callers (e.g.,
+/// `RefCycleResultDb::get_or_compute` borrows `&VerterHost`
+/// directly without `'static` bounds or thread-hop dispatch).
+///
+/// **Halt grep before each commit modifying this function**
+/// (production-only per R8-4 — strips `#[cfg(test)]` regions before
+/// grep so the existing test-only `thread::spawn` calls at lines
+/// 434/511/557 do not false-trigger):
+/// ```text
+/// awk '/^#\[cfg\(test\)\]\s*$/{intest=1} !intest{print} /^}\s*$/&&intest{intest=0}' \
+///     crates/verter_session/src/cooperative_admission.rs \
+///   | grep -n "thread::spawn\|rayon\|tokio::spawn" \
+///   || echo "OK: no production thread-spawn"
+/// ```
+/// Must produce "OK: no production thread-spawn" (or zero match
+/// lines from grep).
 #[allow(clippy::too_many_arguments)]
 pub fn cooperative_get_or_insert_with_post_publish<
     K,
