@@ -1174,6 +1174,19 @@ impl MaterializeStructureDb {
         }
     }
 
+    /// Plan §6.10 sub-task 8 — read-only test accessor for the shared
+    /// live_counter. Used by `materialize_publish_after_invalidation_*`
+    /// tests to verify that revalidation failures do NOT increment the
+    /// counter (entries are removed without inflating the live count).
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "B1's validated_at_generation field + the test that consumes this accessor land in WT5/R; this accessor is reserved for that wiring per plan §6.10 sub-task 8"
+    )]
+    pub(crate) fn live_counter_for_test(&self) -> u64 {
+        self.live_counter.load(Ordering::Relaxed)
+    }
+
     /// Read-only peek with proactive stale-entry removal. Plan §1.5:
     /// when the entry's `dep_signature` is stale, remove it (orphan
     /// reaping) and return `None`.

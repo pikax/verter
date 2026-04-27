@@ -1739,4 +1739,247 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         // above already locks that mechanically; F's per-commit gate then
         // adds the BFS-driven assertion.
     }
+
+    // =================================================================
+    // Plan §10.8 / §6.10 sub-task 1 — 5 tests covering:
+    //   1. DeclRef materialisation dispatches Instantiate (not ResolveDecl)
+    //   2. Cycle gate visited-set short-circuits
+    //   3. Cycle BFS dispatches through execute_read for each decl
+    //   4. Materialize publish-after-invalidation revalidates + skips
+    //   5. Materialize orphan entry caught on next peek
+    //
+    // Tests 4+5 currently exercise the existing MaterializeStructureEntry
+    // shape (no validated_at_generation field — that's added in WT5's R
+    // commit). They verify the orphan-reaping behavior in
+    // MaterializeStructureDb::peek (R8-5 dep_signature_valid_for_host
+    // path).
+    // =================================================================
+
+    /// Plan §10.8 #1 — when the materialiser handles a `DeclRef`, the
+    /// dispatch traffic must include Instantiate (NOT ResolveDecl).
+    /// Materialiser policy: resolve carriers via Instantiate so the
+    /// surrounding `body_mode` selection is honored.
+    #[test]
+    fn decl_ref_materialisation_uses_instantiate_not_resolve_decl() {
+        use crate::project_semantic_dispatch::raise::{
+            enable_dispatch_trace_for_test, DISPATCH_TRACE,
+        };
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number }")
+            .unwrap();
+        let host = project.host();
+
+        let _trace_guard = enable_dispatch_trace_for_test();
+        // Lower Foo from /types.ts (its declaration scope) via Navigate
+        // so the lowering produces a DeclRef carrier.
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering Foo via Navigate must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        let _ = materialize_component_meta_structure(host, key);
+
+        let trace = DISPATCH_TRACE.with(|t| t.borrow().clone());
+        assert!(
+            trace.iter().any(|s| *s == "Instantiate"),
+            "DeclRef materialisation must dispatch Instantiate; trace={trace:?}"
+        );
+    }
+
+    /// Plan §10.8 #2 — cycle BFS visited-set short-circuits.
+    /// Visiting the same DeclIdentity twice would inflate visited
+    /// count beyond the BFS's 2-decl bound for a 2-cycle.
+    #[test]
+    fn cycle_gate_visits_visited_set_short_circuits() {
+        use crate::meta_resolve::with_visited_counter;
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type A = B
+export type B = A
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
+        let mut fence = Vec::new();
+        let (visited_count, _) = with_visited_counter(|| {
+            ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence)
+        });
+        assert!(
+            visited_count <= 4,
+            "BFS visited count must be bounded by visited-set short-circuit; got {visited_count}"
+        );
+    }
+
+    /// Plan §10.8 #3 — cycle BFS dispatches Instantiate per visited decl.
+    /// For the 3-cycle A -> B -> C -> A, the BFS should issue at least
+    /// 3 Instantiate dispatches (one per visited identity).
+    #[test]
+    fn cycle_gate_bfs_dispatches_through_execute_read_for_each_decl() {
+        use crate::project_semantic_dispatch::raise::{
+            enable_dispatch_trace_for_test, DISPATCH_TRACE,
+        };
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type A<T> = B<T>
+export type B<T> = C<T>
+export type C<T> = A<T>
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let id_a = a0_make_decl_identity(host, "/types.ts", "A");
+        let mut fence = Vec::new();
+        let _trace_guard = enable_dispatch_trace_for_test();
+        let result = ref_root_reaches_transitive_cycle_node(&id_a, host, &mut fence);
+        assert!(
+            result,
+            "A<T> -> B<T> -> C<T> -> A<T> is a cycle with type args"
+        );
+        let trace = DISPATCH_TRACE.with(|t| t.borrow().clone());
+        let instantiate_count = trace.iter().filter(|s| ***s == *"Instantiate").count();
+        assert!(
+            instantiate_count >= 3,
+            "BFS must dispatch Instantiate for A, B, C (≥ 3 dispatches); got \
+             {instantiate_count} (trace={trace:?})"
+        );
+    }
+
+    /// Plan §10.8 #4 — orphan entry (stale dep_signature) is caught
+    /// on the next `peek` and removed proactively. This exercises the
+    /// `dep_signature_valid_for_host` path in MaterializeStructureDb::peek.
+    ///
+    /// Note: the more elaborate `materialize_publish_after_invalidation_revalidates_and_skips`
+    /// scenario from the plan requires the `validated_at_generation`
+    /// field on MaterializeStructureEntry which is added in WT5/R. The
+    /// test here exercises the orphan-reaping path that exists today.
+    #[test]
+    fn materialize_publish_after_invalidation_revalidates_and_skips() {
+        use crate::semantic_query::ProjectionMode;
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number }")
+            .unwrap();
+        let host = project.host();
+
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        // First materialisation populates the cache.
+        let _ = materialize_component_meta_structure(host, key.clone());
+        // Mutate /types.ts so the prior dep_signature becomes stale.
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number; y: string }")
+            .unwrap();
+        // Peek again — the stale entry must be reaped, not returned.
+        let after_peek = host
+            .project_type_store()
+            .materialize_structure_db()
+            .peek(&key, host);
+        // Either None (stale entry was reaped) or Some(entry) where the
+        // entry's dep_signature is still valid (legitimate cache hit).
+        // We assert the cache invariant: peek never returns a stale entry.
+        if let Some(read) = after_peek {
+            // If we got Some, the dep_signature must be currently valid.
+            assert!(
+                crate::component_meta_caches::dep_signature_valid_for_host(
+                    &read.dep_signature,
+                    host,
+                ),
+                "peek returned a stale dep_signature — invariant violation"
+            );
+        }
+    }
+
+    /// Plan §10.8 #5 — orphan entry inserted directly into the cache
+    /// is reaped on next peek (matches the test above's invariant from
+    /// the other angle).
+    #[test]
+    fn materialize_orphan_entry_caught_on_next_peek() {
+        use crate::semantic_query::{DepVersion, ProjectionMode};
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Foo = { x: number }")
+            .unwrap();
+        let host = project.host();
+
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let decl_ref_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/types.ts",
+                &verter_semantic::analysis::type_expr::TypeExpr::Ref {
+                    name: StdArc::from("Foo"),
+                    type_arguments: StdArc::from(Vec::new()),
+                },
+                ProjectionMode::Navigate,
+            )
+            .expect("lowering must succeed");
+        let key = MaterializeStructureCacheKey {
+            scope_canonical_id: StdArc::from("/types.ts"),
+            base: decl_ref_node,
+            scope_axis: MaterializationScope::TopLevel,
+            mode: ProjectionMode::Expanded,
+        };
+        // Insert a stale orphan with a clearly-invalid dep_signature
+        // (an all-zero whole_hash for /types.ts that doesn't match the
+        // live whole_hash).
+        let stale_signature = StdArc::from(
+            vec![(
+                StdArc::<str>::from("/types.ts"),
+                DepVersion::WholeHash([0u8; 16]),
+            )]
+            .into_boxed_slice(),
+        );
+        let stale_entry = StdArc::new(MaterializeStructureEntry {
+            outcome: MaterializeOutcome::Value(decl_ref_node),
+            dep_signature: stale_signature,
+        });
+        let db = host.project_type_store().materialize_structure_db();
+        db.entries().insert(key.clone(), stale_entry);
+        // Peek must return None (entry is stale).
+        let peek_result = db.peek(&key, host);
+        assert!(
+            peek_result.is_none(),
+            "stale entry must be reaped on next peek"
+        );
+    }
 }

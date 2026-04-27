@@ -959,13 +959,30 @@ pub(crate) fn component_meta_registry_raw_member_path_surface(
         ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
     };
 
+    /// Plan §4.19 / §6.10 sub-task 4 — inlined replacement for the
+    /// retired free helper. Navigates into a `TypeExpr::Object` by a
+    /// single property name, unwrapping `Parenthesized`. Returns
+    /// `None` if `expr` is not an Object or no member matches.
+    fn navigate_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
+        match expr {
+            TypeExpr::Parenthesized(inner) => navigate_object_member(inner, member_name),
+            TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == member_name => {
+                    Some(&property.ty)
+                }
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
     if path.is_empty() {
         return Some(expr.clone());
     }
 
     let mut leaf = expr;
     for member_name in path {
-        leaf = explicit_object_member(leaf, member_name)?;
+        leaf = navigate_object_member(leaf, member_name)?;
     }
 
     Some(path.iter().rfold(leaf.clone(), |child, member_name| {
@@ -2081,27 +2098,12 @@ pub(crate) fn collect_component_meta_registry_member_surface_refs(
     }
 }
 
-/// Navigate into a [`TypeExpr::Object`] by a single property name, unwrapping
-/// parenthesized wrappers.  Shared by [`raw_member_path_leaf`] and
-/// [`component_meta_registry_raw_member_path_surface`].
-fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&'a TypeExpr> {
-    match expr {
-        TypeExpr::Parenthesized(inner) => explicit_object_member(inner, member_name),
-        TypeExpr::Object(object) => object.properties.iter().find_map(|member| match member {
-            ObjectMember::Property(property) if property.name == member_name => Some(&property.ty),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
-// Plan §4.19 / §6.6 / E — `raw_member_path_leaf` was retired in
-// commit E (no remaining production callers after the
-// walk_member_route_via_alias_body chain was deleted). The single
-// surviving caller of `explicit_object_member` lives in the
-// `component_meta_registry_raw_member_path_surface` body above.
-// The retired symbol is listed in the `RETIRED_SYMBOLS` array of
-// the static-grep gate test (commit I).
+// Plan §4.19 / §6.6 / E + §6.10 sub-task 4 — both legacy
+// member-path helpers retired. The shared object-member navigation
+// logic is inlined into the body of
+// `component_meta_registry_raw_member_path_surface` (its only
+// surviving caller). The retired symbols are listed in the
+// `RETIRED_SYMBOLS` array of the static-grep gate test (commit I).
 
 #[cfg(test)]
 mod tests {

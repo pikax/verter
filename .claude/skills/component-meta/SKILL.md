@@ -14,8 +14,16 @@ captures timings, solver/store/memory counters, and a deterministic
 derivation subgraph. `RustSemanticFootprintAudit::loaded_files()`
 is the exact-read answer (plan §1.4); `declared_dependency_files()`
 is the broader dependency-closure answer (plan §3.B Commit 7.B).
-NAPI + WASM + LSP consumers route through the shared Rust walker
-(`why_loaded` / `why_instantiated`) — TS helpers only render JSON.
+NAPI + WASM + LSP consumers route through the shared session-layer materialiser at
+`crates/verter_session/src/component_meta_materialize.rs`
+(`materialize_component_meta_structure` entry), backed by graph-native
+policy predicates in `meta_resolve.rs`
+(`extract_route_root_identity_node`,
+`ref_root_reaches_transitive_cycle_node`,
+`component_meta_ref_resolves_to_package_node`,
+`canonical_resolves_to_package`). Audit endpoints
+(`why_loaded` / `why_instantiated`) read from the audit accumulator;
+TS helpers only render JSON.
 Benchmark correctness is validated by
 `packages/benchmark/src/audit-validator.ts` against
 `packages/benchmark/audit-specs/component-meta/*.json`; the legacy

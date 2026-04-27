@@ -10075,7 +10075,7 @@ mod node_predicates_tests {
     use crate::meta_resolve::{
         component_meta_ref_resolves_to_package_node,
         declaration_body_prefers_inline_materialization_node, extract_route_root_identity_node,
-        ref_root_reaches_transitive_cycle_node, registry_member_route_inline_materializable_node,
+        ref_root_reaches_transitive_cycle_node,
     };
     use crate::resolver_core::RouteDemand;
     use crate::semantic_query::{
@@ -10488,89 +10488,11 @@ defineProps<{ value: A }>()
         );
     }
 
-    /// `registry_member_route_inline_materializable_node` composition —
-    /// a `Pick<Foo, 'a' | 'b'>` over a local-file `Foo` interface must
-    /// pass the composition (extract OK + non-package + non-cyclic +
-    /// Object body).
-    #[test]
-    fn registry_route_composition_accepts_local_pick_over_object_interface() {
-        use crate::semantic_query::SemanticNodeData;
-
-        let project = make_project();
-        project
-            .upsert_base(
-                "/types.ts",
-                r#"export interface Foo { a: string; b: number; c: boolean }
-"#,
-            )
-            .unwrap();
-        project
-            .upsert_base(
-                "/Owner.vue",
-                r#"<script setup lang="ts">
-import type { Foo } from './types'
-defineProps<{ picked: Pick<Foo, 'a' | 'b'> }>()
-</script>
-<template><div /></template>"#,
-            )
-            .unwrap();
-
-        let session = project.open_session_batch().unwrap();
-        let _ = session.evaluate_types("/Owner.vue").unwrap();
-        let host = session.host();
-
-        let types_canonical = "/types.ts";
-        let shallow = host
-            .shallow_file_state(types_canonical)
-            .expect("/types.ts must be indexed");
-
-        // Build the Pick<Foo, 'a' | 'b'> graph node directly so the
-        // test exercises the composition predicate, not whatever the
-        // real macro flow produced.
-        let graph = host.project_type_store().semantic_graph();
-        let foo_ref = graph.intern_node_with_scope(
-            SemanticNodeData::DeclRef {
-                identity: DeclIdentity {
-                    canonical_id: StdArc::from(types_canonical),
-                    whole_hash: shallow.whole_hash,
-                    decl_name: StdArc::from("Foo"),
-                },
-            },
-            NodeScopeId::Global,
-        );
-        let key_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-            "a".to_string(),
-        )));
-        let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-            "b".to_string(),
-        )));
-        let union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
-            vec![key_a, key_b].into_boxed_slice(),
-        )));
-        let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
-            base: pick_or_omit_identity("Pick"),
-            args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
-        });
-
-        let mut local_fence: Vec<(StdArc<str>, crate::semantic_query::DepVersion)> = Vec::new();
-        assert!(
-            registry_member_route_inline_materializable_node(
-                pick_node,
-                types_canonical,
-                host,
-                &mut local_fence,
-            ),
-            "Pick<Foo, 'a' | 'b'> over a local Object interface must be inline-materialisable"
-        );
-    }
-
     /// Plan §6.6 / E — Pick / Omit shapes through `evaluate_types`
-    /// stay healthy after the alias-body rescue chain
-    /// (`walk_member_route_via_alias_body`) and the
-    /// `materialize_inline_registry_member_route_*` candidate chain
-    /// were deleted. B1's materialiser registry-route branch
-    /// dispatches Pick/Omit shapes through dispatch's canonical
-    /// projection.
+    /// stay healthy after the alias-body rescue chain and the
+    /// inline-registry-member-route candidate chain were deleted.
+    /// B1's materialiser registry-route branch dispatches Pick/Omit
+    /// shapes through dispatch's canonical projection.
     #[test]
     fn materialiser_member_route_unchanged_after_legacy_delete() {
         let project = make_project();

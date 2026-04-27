@@ -1440,14 +1440,12 @@ fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::
     }
 }
 
-// Plan §6.6 / E — `walk_member_route_via_alias_body` and its
-// `mod query_engine { fn project_route_surface }` helper were
-// retired in commit E. B1's materialiser registry-route branch
-// handles route shapes (`Pick<T, K>`, `Omit<T, K>`, `T['k']`)
-// through dispatch's canonical projection, so the alias-body
-// walk-through is no longer needed. The retired symbols are
-// listed in the `RETIRED_SYMBOLS` array of the static-grep gate
-// test (commit I).
+// Plan §6.6 / E — the alias-body rescue chain was retired in commit
+// E. B1's materialiser registry-route branch handles route shapes
+// (`Pick<T, K>`, `Omit<T, K>`, `T['k']`) through dispatch's canonical
+// projection, so the alias-body walk-through is no longer needed.
+// The retired symbols are listed in the `RETIRED_SYMBOLS` array of
+// the static-grep gate test (commit I).
 
 fn parsed_field_raw_type(
     field: &verter_semantic::analysis::type_expand::ExpandedField,
@@ -2417,10 +2415,9 @@ fn materialize_component_meta_field_types(
                 type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
             });
         if raw_needs_member_route && !raw_route_root_is_package_backed {
-            // Plan §6.6 / E — the alias-body rescue chain
-            // (walk_member_route_via_alias_body) was retired in commit
-            // E. B1's materialiser registry-route branch already
-            // handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
+            // Plan §6.6 / E — the alias-body rescue chain was retired
+            // in commit E. B1's materialiser registry-route branch
+            // already handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
             // `Foo['a']['b']…` shapes through dispatch's canonical
             // projection. The direct
             // `query_engine.materialize_member_surface_expr` call now
@@ -5901,9 +5898,9 @@ impl VerterHost {
                             symbol_name,
                             std::slice::from_ref(member),
                         );
-                        // Plan §6.6 / E — the alias-body fallback
-                        // (walk_member_route_via_alias_body) was
-                        // retired; B1's materialiser branch handles
+                        // Plan §6.6 / E — the alias-body fallback was
+                        // retired in commit E; B1's materialiser
+                        // branch handles
                         // route shapes natively. The remaining
                         // surface-expr fallback covers non-route
                         // shapes.
@@ -7931,11 +7928,9 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             verter_semantic::analysis::type_expr::TypeExpr::string_literal(member_name.to_string()),
         ),
     };
-    // Plan §6.6 / E — the inline-registry-route candidate chain
-    // (materialize_inline_registry_member_route_from_decl_body +
-    // materialize_inline_registry_member_route_if_materializable)
-    // was retired in commit E. B1's materialiser registry-route
-    // branch dispatches Pick/Omit + IndexedAccess shapes canonically
+    // Plan §6.6 / E — the inline-registry-route candidate chain was
+    // retired in commit E. B1's materialiser registry-route branch
+    // dispatches Pick/Omit + IndexedAccess shapes canonically
     // through dispatch; the empty `inline_route_candidate` lets the
     // surrounding materialize-and-improve loop drive the member
     // route through the materialiser entry.
@@ -8067,9 +8062,9 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     if candidate_is_good_enough(&best) {
         return best;
     }
-    // Plan §6.6 / E — the alias-body candidate path
-    // (walk_member_route_via_alias_body) was retired in commit E.
-    // B1's materialiser registry-route branch handles the equivalent
+    // Plan §6.6 / E — the alias-body candidate path was retired in
+    // commit E. B1's materialiser registry-route branch handles the
+    // equivalent
     // projection through dispatch. The slow-path materialize-and-
     // improve loop below remains as the catch-all for shapes that
     // don't match a registry-route shape.
@@ -9367,15 +9362,13 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
     }
 }
 
-// Plan §6.5 / D — `component_meta_ref_resolves_to_package` (TypeExpr-
-// keyed free function) was retired in commit D. The 5 callers
-// migrated to `engine.is_package_backed_decl` (a temporary adapter
+// Plan §6.5 / D — the TypeExpr-keyed free package-ref check was
+// retired in commit D. The 5 callers migrated to
+// `engine.is_package_backed_decl` (a temporary adapter
 // in commit D, deleted in commit O after Phase 11 K3 migrates to
 // graph-native predicates).
 
-// Plan §6.6 / E — `registry_member_route_inline_materializable`,
-// `materialize_inline_registry_member_route_from_decl_body`, and
-// `materialize_inline_registry_member_route_if_materializable` were
+// Plan §6.6 / E — the inline-registry-route candidate family was
 // retired in commit E. The inline-registry-route candidate path is
 // handled by B1's materialiser registry-route branch, which
 // dispatches Pick/Omit + IndexedAccess shapes through dispatch's
@@ -9391,8 +9384,8 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 // bare DeclRef root only, literal-string keys only; IndexedAccess uses
 // `IndexKey::String` only with a bare DeclRef root.
 //
-// The TypeExpr-based originals (`extract_route_root_identity`-equivalent,
-// `component_meta_ref_resolves_to_package`, ...) are retained — they still
+// The TypeExpr-based originals (extract_route_root_identity-equivalent,
+// the TypeExpr package-ref check, ...) are retained — they still
 // have non-walker call sites per plan §11.2. The materialiser entry will be
 // repointed at the `_node` predicates after non-walker callers migrate.
 // ===========================================================================
@@ -9671,20 +9664,28 @@ pub(crate) fn canonical_resolves_to_package(canonical_id: &str) -> bool {
     canonical_id.contains("/node_modules/")
 }
 
-/// Plan §1.12 — graph-native variant of
-/// `component_meta_ref_resolves_to_package`. Delegates to the
-/// primitive [`canonical_resolves_to_package`] (commit C).
+/// Plan §1.12 — graph-native variant of the TypeExpr package-ref
+/// check. Delegates to the primitive
+/// [`canonical_resolves_to_package`] (commit C).
 pub(crate) fn component_meta_ref_resolves_to_package_node(
     identity: &crate::semantic_query::DeclIdentity,
 ) -> bool {
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
-/// Plan §1.12 — graph-native variant of
-/// `declaration_body_prefers_inline_materialization`. Returns `true`
-/// when the body shape is suitable for inline materialisation through
-/// the registry-route entry. Wired in production by the materialiser's
-/// registry-route branch (B1) for inline-materializability decisions.
+/// Plan §1.12 — graph-native variant of the body inline-materialisation
+/// preference predicate. Returns `true` when the body shape is suitable
+/// for inline materialisation through the registry-route entry.
+///
+/// Reserved for re-wiring once Phase 11 migrates the inline-route
+/// composition site to graph-native (the predicate's only consumer
+/// before commit I sub-task 4 was the registry-route inline
+/// composition predicate, which was deleted in this commit). Tests in
+/// `meta_resolve_tests.rs` exercise this predicate directly.
+#[allow(
+    dead_code,
+    reason = "Re-wired in Phase 11; covered by unit tests in meta_resolve_tests.rs"
+)]
 pub(crate) fn declaration_body_prefers_inline_materialization_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     body_id: crate::semantic_query::SemanticNodeId,
@@ -10140,69 +10141,10 @@ pub(crate) fn collect_ref_identities_node(
     }
 }
 
-/// Plan §1.12 — graph-native composition predicate. Mirrors
-/// `registry_member_route_inline_materializable` over `SemanticNodeId`
-/// inputs.
-///
-/// Returns `true` only when ALL of the following hold:
-///
-/// 1. `extract_route_root_identity_node` succeeds (round-7 parity
-///    tightenings apply).
-/// 2. The root is NOT package-backed
-///    (`component_meta_ref_resolves_to_package_node`).
-/// 3. The root does NOT reach a transitive cycle within `MAX_HOPS`.
-/// 4. The decl body (resolved via `Instantiate(Navigate)`) shape
-///    prefers inline materialisation per
-///    `declaration_body_prefers_inline_materialization_node`.
-///
-/// Each `Instantiate` dispatch's `dep_signature` is merged into
-/// `local_fence` (combining contributions from the cycle BFS and the
-/// terminal body-shape probe).
-#[allow(
-    dead_code,
-    reason = "wired in by `_node` migration follow-up; covered by unit tests"
-)]
-pub(crate) fn registry_member_route_inline_materializable_node(
-    node: crate::semantic_query::SemanticNodeId,
-    _scope: &str,
-    host: &VerterHost,
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-) -> bool {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryKey};
-
-    let extraction = {
-        let graph = host.project_type_store().semantic_graph();
-        match extract_route_root_identity_node(graph, node, 0) {
-            Some(extraction) => extraction,
-            None => return false,
-        }
-    };
-
-    if component_meta_ref_resolves_to_package_node(&extraction.root_identity) {
-        return false;
-    }
-
-    if ref_root_reaches_transitive_cycle_node(&extraction.root_identity, host, local_fence) {
-        return false;
-    }
-
-    let dispatch = ProjectSemanticDispatch::new(host);
-    let key = SemanticQueryKey::Instantiate {
-        base: extraction.root_identity.clone(),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        body_mode: ProjectionMode::Navigate,
-    };
-    let read = dispatch.execute_read(key);
-    local_fence.extend(read.dep_signature.iter().cloned());
-    let body_id = match read.value {
-        QueryResult::Value(id) => id,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return false,
-    };
-
-    let graph = host.project_type_store().semantic_graph();
-    declaration_body_prefers_inline_materialization_node(graph, body_id)
-}
+// Plan §6.10 sub-task 4 / §4.19 — registry-route inline composition
+// predicate deleted (verified callerless in production; the only
+// consumer was a composition test that has also been deleted in this
+// commit).
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn build_origin_graph(

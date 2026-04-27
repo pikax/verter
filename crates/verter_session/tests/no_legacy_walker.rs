@@ -17,9 +17,7 @@ use std::path::PathBuf;
 
 const RETIRED_SYMBOLS: &[&str] = &[
     // Phase 9 cutover (plan §11.2): the inner walker helpers are
-    // DELETED. Re-introduction at any site is forbidden. The outer
-    // shim is also deleted (commit G, plan §6.8); commit I will add
-    // its name to this list.
+    // DELETED. Re-introduction at any site is forbidden.
     "walker_cycle_key_node",
     "expand_generic_ref_via_scope_iteration",
     "walk_component_meta_member_surface_expr_with_visited",
@@ -37,6 +35,29 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "MaterializedMemberSurfaceEntry",
     "MaterializedMemberSurfaceKey",
     "MaterializedMemberSurfaceTarget",
+    // Commit E (plan §6.6) — inline-registry-route legacy chain.
+    "walk_member_route_via_alias_body",
+    "materialize_inline_registry_member_route_from_decl_body",
+    "materialize_inline_registry_member_route_if_materializable",
+    // Commit D (plan §6.5) — TypeExpr legacy package-ref check (the
+    // `_node` graph-native variant is retained).
+    "component_meta_ref_resolves_to_package",
+    // Commit F (plan §6.7) — TypeExpr legacy cycle walker.
+    "decl_body_reaches_cycle_via_walker",
+    // Commit G (plan §6.8) — walker shim outer entry.
+    "walk_component_meta_member_surface_expr",
+    // Commit I (plan §6.10 sub-task 4 / §4.19) — unconditionally
+    // retired post-§4.19 deterministic deletion. The composition
+    // predicate had zero production callers post-Phase-9 cutover; its
+    // sole consumer was a unit test that has also been deleted.
+    "registry_member_route_inline_materializable_node",
+    // Commit I (plan §6.10 sub-task 4 / §4.19) — `raw_member_path_leaf`
+    // was retired in commit E. The shared object-member navigation
+    // logic that `explicit_object_member` provided is now inlined
+    // into `component_meta_registry_raw_member_path_surface`'s body
+    // as the private nested `navigate_object_member` helper.
+    "raw_member_path_leaf",
+    "explicit_object_member",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];
@@ -120,8 +141,38 @@ fn no_legacy_walker_inner_helpers_outside_their_definitions() {
     // Pre-cutover the inner helpers had ~10+ call sites; post-cutover
     // they have ZERO callers (their bodies are unused, gated by
     // `#[allow(dead_code)]`).
+    //
+    // Plan §6.10 sub-task 3 — identifier-boundary matcher: a retired
+    // symbol matches ONLY when its occurrence is bounded by characters
+    // that can NOT extend an identifier (i.e., not [A-Za-z0-9_]).
+    // This prevents false positives like
+    // `component_meta_ref_resolves_to_package` matching the kept
+    // `_node` variant `component_meta_ref_resolves_to_package_node`,
+    // and `walk_component_meta_member_surface_expr` matching the
+    // already-retired `_with_visited` variant.
+    fn line_contains_identifier(line: &str, ident: &str) -> bool {
+        let bytes = line.as_bytes();
+        let needle = ident.as_bytes();
+        let n = needle.len();
+        if n == 0 || bytes.len() < n {
+            return false;
+        }
+        let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0usize;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == needle {
+                let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
     for symbol in RETIRED_SYMBOLS {
-        let pattern = symbol.to_string();
         let mut hit_files: Vec<(PathBuf, Vec<usize>)> = Vec::new();
         for file in &files {
             let Ok(text) = std::fs::read_to_string(file) else {
@@ -131,7 +182,7 @@ fn no_legacy_walker_inner_helpers_outside_their_definitions() {
                 .lines()
                 .enumerate()
                 .filter_map(|(i, l)| {
-                    if l.contains(&pattern) {
+                    if line_contains_identifier(l, symbol) {
                         Some(i + 1)
                     } else {
                         None

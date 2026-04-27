@@ -1787,10 +1787,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// the shared [`canonical_resolves_to_package`](crate::meta_resolve::canonical_resolves_to_package)
     /// primitive (commit C).
     ///
-    /// Replaces the deleted `component_meta_ref_resolves_to_package`
-    /// free function. This adapter is itself deleted in commit O after
-    /// Phase 11 migrates the 5 remaining TypeExpr-walking callers to
-    /// graph-native `_node` predicates.
+    /// Replaces the deleted TypeExpr package-ref free function. This
+    /// adapter is itself deleted in commit O after Phase 11 migrates
+    /// the 5 remaining TypeExpr-walking callers to graph-native
+    /// `_node` predicates.
     pub(crate) fn is_package_backed_decl(&mut self, scope: &str, name: &str) -> bool {
         let declaration = self.resolve_type_declaration(scope, name);
         let canonical = if declaration.canonical_source.is_empty() {
