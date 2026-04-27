@@ -1129,14 +1129,17 @@ fn select_imported_materialization_scope(
     (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
 }
 
-/// Plan §4.5 / §4.6 — TEMPORARY adapter; deleted in commit P after Phase 11
-/// K1+L migrate the 2 callers to inline graph-native invocations.
+/// Plan §6.15 / P migration helper. Lowers `expr` via Navigate to a
+/// `SemanticNodeId`, extracts the root identity (DeclRef or
+/// InstantiationRef base), and delegates to the canonical graph-native
+/// [`ref_root_reaches_transitive_cycle_node`] predicate. The cycle-BFS
+/// dep-signature facts are accumulated into the per-request thread-
+/// local dispatch accumulator so completion fences stay complete.
 ///
-/// Lowers `expr` via Navigate, extracts the root identity (DeclRef or
-/// InstantiationRef base), and delegates to the canonical _node predicate.
-/// Threads the BFS dep-signature into the per-request thread-local accumulator
-/// so cycle dep-facts are captured.
-pub(crate) fn typeexpr_root_reaches_transitive_cycle(
+/// Returns `false` when (a) lowering fails or (b) the lowered node is
+/// neither a `DeclRef` nor an `InstantiationRef` — neither shape carries
+/// a route root identity and the legacy adapter behaved the same way.
+fn lowered_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -1736,7 +1739,8 @@ fn field_should_preserve_shallow_symbolic_raw_type(
 /// are accumulated into the per-request thread-local dispatch
 /// accumulator so the caller's completion fence remains complete
 /// (matches legacy behaviour: the deleted TypeExpr predicate routed
-/// through `typeexpr_root_reaches_transitive_cycle` which accumulated).
+/// through the deleted F-era TypeExpr cycle adapter which accumulated
+/// the same way).
 ///
 /// Returns `false` (conservative: not needed) when lowering fails —
 /// matches the deleted TypeExpr predicate's behaviour for shapes the
@@ -4420,7 +4424,7 @@ fn expr_needs_projection_rescue(
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
-    if typeexpr_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
+    if lowered_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
         return false;
     }
 
@@ -8239,7 +8243,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     let route_object_expr = match lowered {
         verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
             if !type_arguments.is_empty()
-                && !typeexpr_root_reaches_transitive_cycle(
+                && !lowered_root_reaches_transitive_cycle(
                     query_engine,
                     materialize_scope_canonical_id.as_str(),
                     lowered,
@@ -8344,7 +8348,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // observable contract the FAIL-FIRST test asserts — when a route
     // candidate succeeds, MTL_CALL_COUNT stays at 0.
     for candidate in &route_candidates {
-        if typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, candidate) {
+        if lowered_root_reaches_transitive_cycle(query_engine, scope_canonical_id, candidate) {
             continue;
         }
         if candidate_is_good_enough(candidate) {
@@ -8405,7 +8409,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // `materialize_component_meta_type_expr_until_stable(&candidate, …)`
     // recursion.
     for candidate in route_candidates {
-        if typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &candidate)
+        if lowered_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &candidate)
             && !compare_type_expr_improvement(&candidate, &best)
         {
             continue;

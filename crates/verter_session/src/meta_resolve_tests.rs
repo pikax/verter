@@ -10568,16 +10568,26 @@ defineProps<{ value: Pick<Foo, 'a'> }>()
         ));
     }
 
-    /// Plan §6.7 — F's TDD: the temporary TypeExpr adapter
-    /// `typeexpr_root_reaches_transitive_cycle` must lower the input
-    /// expression via Navigate, extract the root identity, delegate to
-    /// the canonical `_node` predicate, AND accumulate the BFS dep
-    /// signature into the per-request thread-local accumulator.
+    /// Plan §6.7 / §6.15 — characterisation: the canonical graph-native
+    /// cycle predicate `ref_root_reaches_transitive_cycle_node` detects
+    /// generic-helper cycles when reached from a TypeExpr root via the
+    /// `lowered_*` migration path (commits N + P), AND BFS dep-signature
+    /// facts must be accumulated into the per-request thread-local
+    /// accumulator so callers' completion fences capture the cycle dep
+    /// graph.
+    ///
+    /// Originally landed as F's TDD for the temporary TypeExpr cycle
+    /// adapter (deleted in P). The test fixture and assertions are
+    /// preserved verbatim — only the entry point has moved from the
+    /// adapter to `expr_needs_projection_rescue`'s migrated
+    /// implementation, which internally calls
+    /// `lowered_root_reaches_transitive_cycle` (the helper that lowers
+    /// + extracts identity + delegates to the graph-native predicate).
     #[test]
-    fn typeexpr_root_reaches_transitive_cycle_delegates_to_node_predicate() {
+    fn lowered_root_reaches_transitive_cycle_delegates_to_node_predicate() {
         use crate::meta_resolve::{
-            drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
-            typeexpr_root_reaches_transitive_cycle,
+            drain_dispatch_dep_signature_accumulator, expr_needs_projection_rescue,
+            reset_dispatch_dep_signature_accumulator,
         };
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
@@ -10617,8 +10627,14 @@ defineProps<{ value: GetItemKeys<unknown> }>()
         let host = session.host();
         let mut engine = ComponentMetaQueryEngine::new(host);
 
-        // GetItemKeys<unknown> — generic helper cycle. Adapter must
-        // delegate to _node which detects the cycle.
+        // GetItemKeys<unknown> — generic helper cycle. The migration
+        // helper (called from inside `expr_needs_projection_rescue`)
+        // delegates to the `_node` predicate which detects the cycle.
+        // `expr_needs_projection_rescue` returns `false` on a detected
+        // cycle (cycle short-circuits the rescue check, which is the
+        // discriminating signal: pre-P with the deleted adapter,
+        // and post-P via `lowered_root_reaches_transitive_cycle`,
+        // both produce `false`).
         let typeexpr = TypeExpr::Ref {
             name: StdArc::from("GetItemKeys"),
             type_arguments: StdArc::from(
@@ -10629,10 +10645,11 @@ defineProps<{ value: GetItemKeys<unknown> }>()
             ),
         };
         reset_dispatch_dep_signature_accumulator();
-        let result = typeexpr_root_reaches_transitive_cycle(&mut engine, "/Owner.vue", &typeexpr);
+        let result = expr_needs_projection_rescue(&mut engine, "/Owner.vue", &typeexpr);
         assert!(
-            result,
-            "GetItemKeys cycle must be detected via the canonical _node predicate"
+            !result,
+            "GetItemKeys cycle must short-circuit expr_needs_projection_rescue \
+             (detected via lowered_root_reaches_transitive_cycle → _node predicate)"
         );
         let drained = drain_dispatch_dep_signature_accumulator();
         assert!(

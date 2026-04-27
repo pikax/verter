@@ -98,6 +98,18 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // `component_meta_ref_resolves_to_package_node`, the adapter has
     // zero callers and is retired.
     "is_package_backed_decl",
+    // Commit P (plan §6.15) — the temporary
+    // `typeexpr_root_reaches_transitive_cycle` adapter (introduced in
+    // commit F as a TypeExpr→graph-native cycle bridge) is deleted.
+    // The 4 surviving callers (`expr_needs_projection_rescue` + 3
+    // sites inside `materialize_component_meta_macro_shape_member_type_expr`)
+    // are migrated to call `lowered_root_reaches_transitive_cycle` —
+    // the lowered_*-named migration helper introduced for these
+    // callers (consistent with the convention introduced in commit N
+    // for `lowered_needs_member_route_materialization` and friends).
+    // The graph-native primitive `ref_root_reaches_transitive_cycle_node`
+    // is the canonical cycle-detection authority.
+    "typeexpr_root_reaches_transitive_cycle",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

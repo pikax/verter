@@ -3491,11 +3491,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// remains in service of legacy member-route resolution and
     /// projection-rescue helpers (`expr_needs_projection_rescue`,
     /// `compare_type_expr_improvement`,
-    /// `select_imported_materialization_scope`,
-    /// `typeexpr_root_reaches_transitive_cycle`) that Step 2's
-    /// caller-class parity matrix is responsible for migrating. Once
-    /// those callers retire, this walker and its 13 internal call sites
-    /// can ALL be deleted in the same commit (per CLAUDE.md
+    /// `select_imported_materialization_scope`, and the cycle-detection
+    /// migration helper `lowered_root_reaches_transitive_cycle`) that
+    /// Step 2's caller-class parity matrix is responsible for migrating.
+    /// Once those callers retire, this walker and its 13 internal call
+    /// sites can ALL be deleted in the same commit (per CLAUDE.md
     /// "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn enumerate_member_surface_keys_via_route(
