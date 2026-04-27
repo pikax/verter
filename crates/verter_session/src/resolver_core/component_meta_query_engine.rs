@@ -3462,7 +3462,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// projection-rescue helpers (`expr_needs_projection_rescue`,
     /// `compare_type_expr_improvement`,
     /// `select_imported_materialization_scope`,
-    /// `ref_root_reaches_transitive_cycle`) that Step 2's
+    /// `typeexpr_root_reaches_transitive_cycle`) that Step 2's
     /// caller-class parity matrix is responsible for migrating. Once
     /// those callers retire, this walker and its 13 internal call sites
     /// can ALL be deleted in the same commit (per CLAUDE.md

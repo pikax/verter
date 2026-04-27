@@ -176,22 +176,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = graph.node_data(id) else {
             return IdentityCarrierUnwrap::Unresolvable;
         };
-        let identity = match &*data {
+        let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
             SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                 canonical_id,
                 name,
                 whole_hash,
-            }) => DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
-                whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
-            },
+            }) => (
+                DeclIdentity {
+                    canonical_id: Arc::clone(canonical_id),
+                    whole_hash: *whole_hash,
+                    decl_name: Arc::clone(name),
+                },
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            ),
+            // Plan §4.21 / R10-2 — unwrap DeclRef/InstantiationRef carriers
+            // (which is_deferred treats as deferred so build_conditional
+            // doesn't prematurely close branches). The relation engine
+            // here is allowed to materialise the concrete body to make a
+            // definitive decision; if Instantiate yields Opaque, the
+            // outer `is_deferred` treatment continues to apply.
+            SemanticNodeData::DeclRef { identity } => (
+                identity.clone(),
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            ),
+            SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
         let unwrapped = match self.execute(SemanticQueryKey::Instantiate {
             base: identity,
-            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            args,
             // Identity-carrier unwrap feeds `evaluate_deferred_semantic_node`
             // which walks through the body's structural layers (object
             // surfaces, conditionals, mapper applications). Expanded is
@@ -958,10 +972,14 @@ fn is_deferred(data: &SemanticNodeData) -> bool {
             | SemanticNodeData::TemplateLiteral { .. }
             // Plan §4.21 / R10-2 — DeclRef/InstantiationRef carriers are
             // unresolved references whose concrete content depends on
-            // instantiation. Without a forced unwrap (which we don't do
-            // in Skeleton territory), they cannot be definitively related
-            // to concrete types. Treat as deferred so callers (especially
-            // build_conditional) preserve both branches.
+            // instantiation. Treat as deferred at the recursive-pair
+            // level so callers (especially build_conditional) preserve
+            // both branches when the carrier appears in the check
+            // position. The OUTER `decide_relation_with_dispatch` call
+            // unwraps via `unwrap_identity_carrier_for_relation`, but
+            // that unwrap fires once at the top — recursive `expand_pair`
+            // calls see carriers verbatim. Treating them as deferred
+            // keeps the relation engine safely conservative there.
             | SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::InstantiationRef { .. }
     )

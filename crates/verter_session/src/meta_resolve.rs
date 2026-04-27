@@ -943,245 +943,43 @@ fn select_imported_materialization_scope(
     (!final_scope.is_empty() && final_scope != owner_canonical).then_some(final_scope)
 }
 
-/// Returns `true` when `expr` is (or routes through) a named declaration whose
-/// own body reaches itself through one or more sibling declarations — a
-/// transitively recursive generic helper (e.g. `DotPathKeys` reached via
-/// `GetItemKeys`, or `NestedItem` reached via `Extract<NestedItem<T>, U>`).
+/// Plan §4.5 / §4.6 — TEMPORARY adapter; deleted in commit P after Phase 11
+/// K1+L migrate the 2 callers to inline graph-native invocations.
 ///
-/// Rescuing such a Ref in the declaration's scope restarts the solver in a
-/// scope with full local visibility to every sibling helper, which can exhaust
-/// the structural-expansion budgets during a single projection call even
-/// though the owner-scope result is already a good surface.
-pub(crate) fn ref_root_reaches_transitive_cycle(
+/// Lowers `expr` via Navigate, extracts the root identity (DeclRef or
+/// InstantiationRef base), and delegates to the canonical _node predicate.
+/// Threads the BFS dep-signature into the per-request thread-local accumulator
+/// so cycle dep-facts are captured.
+pub(crate) fn typeexpr_root_reaches_transitive_cycle(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    owner_canonical: &str,
+    scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> bool {
-    let route_root_name = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
-        .map(|(root_name, _)| root_name);
-    let root_name = match expr {
-        verter_semantic::analysis::type_expr::TypeExpr::Ref {
-            name,
-            type_arguments,
-        } if !type_arguments.is_empty() => name.to_string(),
-        _ => match route_root_name {
-            Some(name) => name,
-            None => return false,
-        },
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+    let dispatch = ProjectSemanticDispatch::new(query_engine.host);
+    let Some(node_id) = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        ProjectionMode::Navigate,
+    ) else {
+        return false;
     };
-    let declaration = query_engine.resolve_type_declaration(owner_canonical, root_name.as_str());
-    let scope_canonical = if declaration.canonical_source.is_empty() {
-        owner_canonical.to_string()
-    } else {
-        declaration.canonical_source.clone()
+    let identity = match query_engine
+        .host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(node_id)
+        .as_deref()
+    {
+        Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+        Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+        _ => return false,
     };
-    let resolved_name = if declaration.resolved_name.is_empty() {
-        root_name.clone()
-    } else {
-        declaration.resolved_name.clone()
-    };
-
-    decl_body_reaches_cycle_via_walker(
-        query_engine,
-        scope_canonical.as_str(),
-        resolved_name.as_str(),
-    )
-}
-
-fn decl_body_reaches_cycle_via_walker(
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    scope_canonical: &str,
-    root_name: &str,
-) -> bool {
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-
-    fn has_complex_cycle_guard_surface(expr: &TypeExpr) -> bool {
-        match expr {
-            TypeExpr::Parenthesized(inner) => has_complex_cycle_guard_surface(inner),
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                types.iter().any(has_complex_cycle_guard_surface)
-                    || types.iter().any(|ty| !matches!(ty, TypeExpr::Object(_)))
-            }
-            TypeExpr::Ref { .. }
-            | TypeExpr::IndexedAccess { .. }
-            | TypeExpr::Conditional { .. }
-            | TypeExpr::Mapped { .. }
-            | TypeExpr::KeyOf(_)
-            | TypeExpr::Rest(_)
-            | TypeExpr::TemplateLiteral { .. }
-            | TypeExpr::TypeOf(_) => true,
-            TypeExpr::Object(_)
-            | TypeExpr::Function(_)
-            | TypeExpr::Array { .. }
-            | TypeExpr::Tuple { .. }
-            | TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
-            | TypeExpr::Unknown { .. }
-            | TypeExpr::RecursiveRef { .. }
-            | TypeExpr::TypeParameter(_)
-            | TypeExpr::Infer { .. } => false,
-        }
-    }
-
-    fn collect_ref_names(expr: &TypeExpr, out: &mut rustc_hash::FxHashMap<String, bool>) {
-        let mut stack = vec![expr];
-
-        while let Some(current) = stack.pop() {
-            match current {
-                TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } => {
-                    out.entry(name.to_string())
-                        .and_modify(|has_args| *has_args |= !type_arguments.is_empty())
-                        .or_insert(!type_arguments.is_empty());
-                    for argument in type_arguments.iter().rev() {
-                        stack.push(argument);
-                    }
-                }
-                TypeExpr::Parenthesized(inner)
-                | TypeExpr::Array { element: inner, .. }
-                | TypeExpr::KeyOf(inner)
-                | TypeExpr::Rest(inner) => stack.push(inner),
-                TypeExpr::Tuple { elements, .. } => {
-                    for element in elements.iter().rev() {
-                        stack.push(&element.ty);
-                    }
-                }
-                TypeExpr::Union(types) | TypeExpr::Intersection(types) => {
-                    for ty in types.iter().rev() {
-                        stack.push(ty);
-                    }
-                }
-                TypeExpr::Object(object) => {
-                    for member in object.properties.iter().rev() {
-                        match member {
-                            ObjectMember::Property(property) => stack.push(&property.ty),
-                            ObjectMember::IndexSignature(signature) => {
-                                stack.push(&signature.value_type);
-                                stack.push(&signature.key_type);
-                            }
-                            ObjectMember::CallSignature(function)
-                            | ObjectMember::ConstructSignature(function) => {
-                                if let Some(return_type) = function.return_type.as_ref() {
-                                    stack.push(return_type);
-                                }
-                                for param in function.parameters.iter().rev() {
-                                    stack.push(&param.ty);
-                                }
-                            }
-                            ObjectMember::Method(method) => {
-                                if let Some(return_type) = method.function.return_type.as_ref() {
-                                    stack.push(return_type);
-                                }
-                                for param in method.function.parameters.iter().rev() {
-                                    stack.push(&param.ty);
-                                }
-                            }
-                        }
-                    }
-                }
-                TypeExpr::Function(function) => {
-                    if let Some(return_type) = function.return_type.as_ref() {
-                        stack.push(return_type);
-                    }
-                    for param in function.parameters.iter().rev() {
-                        stack.push(&param.ty);
-                    }
-                }
-                TypeExpr::IndexedAccess { object, index } => {
-                    stack.push(index);
-                    stack.push(object);
-                }
-                TypeExpr::Conditional {
-                    check,
-                    extends,
-                    true_type,
-                    false_type,
-                } => {
-                    stack.push(false_type);
-                    stack.push(true_type);
-                    stack.push(extends);
-                    stack.push(check);
-                }
-                TypeExpr::Mapped {
-                    source,
-                    name_type,
-                    value,
-                    ..
-                } => {
-                    stack.push(value);
-                    if let Some(name_type) = name_type.as_ref() {
-                        stack.push(name_type);
-                    }
-                    stack.push(source);
-                }
-                TypeExpr::TemplateLiteral { expressions, .. } => {
-                    for expression in expressions.iter().rev() {
-                        stack.push(expression);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // BFS through declaration bodies reachable from `root_name`. Any
-    // declaration body that references itself (directly or transitively via a
-    // sibling helper) marks the whole reachable graph as cyclic from
-    // `root_name`'s point of view. This is the "expensive-to-solve" signal.
-    let mut visited: rustc_hash::FxHashSet<(String, String)> = rustc_hash::FxHashSet::default();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((scope_canonical.to_string(), root_name.to_string(), false));
-    visited.insert((scope_canonical.to_string(), root_name.to_string()));
-    // Bounded traversal: if the reachable decl graph is larger than this we
-    // treat it as "complex enough that imported-scope rescue is not worth the
-    // risk" rather than keep walking.
-    let mut remaining_steps: u32 = 64;
-
-    while let Some((scope, name, path_has_complex_signal)) = queue.pop_front() {
-        if remaining_steps == 0 {
-            return path_has_complex_signal;
-        }
-        remaining_steps -= 1;
-
-        let Some(body) = query_engine.named_decl_body(scope.as_str(), name.as_str()) else {
-            continue;
-        };
-        let mut refs = rustc_hash::FxHashMap::default();
-        collect_ref_names(&body, &mut refs);
-        let body_has_complex_signal =
-            path_has_complex_signal || has_complex_cycle_guard_surface(&body);
-        for (ref_name, ref_has_type_args) in refs {
-            let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
-            // Direct self-reference at this decl: the body talks about
-            // itself through a complex helper surface, which is the
-            // canonical recursive-helper pattern (DotPathKeys, NestedItem,
-            // IsPlainObject, ...). Plain object self-member routes like
-            // `Props['to']` are intentionally excluded.
-            if ref_name == name && cycle_has_complex_signal {
-                return true;
-            }
-            let declaration =
-                query_engine.resolve_type_declaration(scope.as_str(), ref_name.as_str());
-            let next_scope = if declaration.canonical_source.is_empty() {
-                scope.clone()
-            } else {
-                declaration.canonical_source.clone()
-            };
-            let next_name = if declaration.resolved_name.is_empty() {
-                ref_name
-            } else {
-                declaration.resolved_name
-            };
-            let key = (next_scope.clone(), next_name.clone());
-            if visited.insert(key) {
-                queue.push_back((next_scope, next_name, cycle_has_complex_signal));
-            }
-        }
-    }
-    false
+    let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let result = ref_root_reaches_transitive_cycle_node(&identity, query_engine.host, &mut fence);
+    accumulate_dispatch_dep_signature(&Arc::from(fence.into_boxed_slice()));
+    result
 }
 
 thread_local! {
@@ -1609,7 +1407,7 @@ fn type_expr_needs_member_route_materialization(
                 && !query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref())
         }
         TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeParameter(_) => {
-            !ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, expr)
+            !typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, expr)
                 && !type_expr_has_package_backed_root(expr, scope_canonical_id, query_engine)
         }
         TypeExpr::Array { element, .. }
@@ -4303,7 +4101,7 @@ fn expr_needs_projection_rescue(
 ) -> bool {
     use verter_semantic::analysis::type_expr::TypeExpr;
 
-    if ref_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
+    if typeexpr_root_reaches_transitive_cycle(query_engine, owner_canonical, expr) {
         return false;
     }
 
@@ -8180,7 +7978,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     let route_object_expr = match lowered {
         verter_semantic::analysis::type_expr::TypeExpr::Ref { type_arguments, .. }
             if !type_arguments.is_empty()
-                && !ref_root_reaches_transitive_cycle(
+                && !typeexpr_root_reaches_transitive_cycle(
                     query_engine,
                     materialize_scope_canonical_id.as_str(),
                     lowered,
@@ -8287,7 +8085,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // observable contract the FAIL-FIRST test asserts — when a route
     // candidate succeeds, MTL_CALL_COUNT stays at 0.
     for candidate in &route_candidates {
-        if ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, candidate) {
+        if typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, candidate) {
             continue;
         }
         if candidate_is_good_enough(candidate) {
@@ -8348,7 +8146,7 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     // `materialize_component_meta_type_expr_until_stable(&candidate, …)`
     // recursion.
     for candidate in route_candidates {
-        if ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &candidate)
+        if typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, &candidate)
             && !compare_type_expr_improvement(&candidate, &best)
         {
             continue;
@@ -9970,20 +9768,19 @@ pub(crate) fn declaration_body_prefers_inline_materialization_node(
     }
 }
 
-/// Plan §1.12 — graph-native BFS port of `decl_body_reaches_cycle_via_walker`.
+/// Plan §1.12 — graph-native BFS for transitive cycle detection.
 ///
 /// Walks decl bodies via `dispatch.execute_read(SemanticQueryKey::Instantiate {
-/// body_mode: Navigate })` to detect transitive cycles. Returns `true`
-/// when the BFS rediscovers `root_identity` as a child reference within
-/// `MAX_HOPS` steps AND the path carries a "complex signal" (the
-/// canonical recursive-helper pattern: complex body shape OR a child
-/// reference with type arguments along the way).
+/// body_mode: Skeleton })` to detect transitive cycles (plan §4.21 /
+/// R10-2). Returns `true` when the BFS rediscovers `root_identity` as a
+/// child reference within `MAX_HOPS` steps AND the path carries a
+/// "complex signal" (the canonical recursive-helper pattern: complex
+/// body shape OR a child reference with type arguments along the way).
 ///
 /// Each `Instantiate` dispatch's `dep_signature` is merged into
 /// `local_fence` so the caller's completion fence remains complete.
 ///
-/// Plan §4.1 / R7-13 / R7-14 — legacy parity with
-/// `decl_body_reaches_cycle_via_walker`:
+/// Plan §4.1 / R7-13 / R7-14 — legacy parity rules:
 ///
 /// - Queue carries `(DeclIdentity, path_has_complex_signal: bool)`.
 /// - Visited set keyed on `DeclIdentity` (first-visit-wins).
@@ -10030,16 +9827,23 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
         #[cfg(test)]
         BFS_VISITED_COUNTER.with(|c| c.set(c.get() + 1));
 
-        // Save decl_name for test instrumentation BEFORE `current` is
-        // moved into the SemanticQueryKey. cfg(test)-only — no production
-        // cost.
+        // Clone current's identity for instrumentation AND for the
+        // self-cycle / intermediate-self check below. `current` is
+        // moved into the SemanticQueryKey on the next line; we keep
+        // a clone here for the rest of this iteration.
+        let current_identity = current.clone();
         #[cfg(test)]
         let current_decl_name_for_test = Arc::clone(&current.decl_name);
 
         let key = SemanticQueryKey::Instantiate {
             base: current,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            body_mode: ProjectionMode::Navigate,
+            // Plan §4.21 / R10-2 — Skeleton mode preserves open generics so
+            // body lowering produces TypeParam graph nodes for T-refs (not
+            // Opaque(Miss)). Without this, nested-Conditional fixtures like
+            // canonical nuxt-ui DotPathKeys collapse the conditional and
+            // recursive refs are invisible to collect_ref_identities_node.
+            body_mode: ProjectionMode::Skeleton,
         };
         let read = dispatch.execute_read(key);
         local_fence.extend(read.dep_signature.iter().cloned());
@@ -10058,8 +9862,8 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
         // matches the BFS root's decl_name is a back-edge to root,
         // and the body already carries complex_signal (the body
         // contained a recursive carrier, which is exactly the
-        // pattern legacy `has_complex_cycle_guard_surface` calls
-        // out via DeclRef/InstantiationRef arms).
+        // canonical complex-cycle-guard pattern via DeclRef /
+        // InstantiationRef arms).
         if body_contains_recursive_ref_to_name(graph, body_id, &root_identity.decl_name, 0) {
             // The recursive-ref back-edge IS the cycle. Compose the
             // signal: body_has_complex_signal already carries the
@@ -10082,7 +9886,17 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 
         for (child_identity, ref_has_type_args) in child_refs {
             let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
-            if &child_identity == root_identity && cycle_has_complex_signal {
+            // Cycle is reported when:
+            //  (a) child == root (transitive cycle back to BFS root), OR
+            //  (b) child == current (intermediate self-reference at this
+            //      decl — legacy parity: the legacy walker checked
+            //      `ref_name == name` against the CURRENT decl, not the
+            //      root). This catches fixtures where DotPathKeys's body
+            //      recursively references DotPathKeys via a complex
+            //      helper surface (canonical nuxt-ui DotPathKeys).
+            if cycle_has_complex_signal
+                && (&child_identity == root_identity || child_identity == current_identity)
+            {
                 return true;
             }
             if visited.insert(child_identity.clone()) {
@@ -10212,8 +10026,7 @@ fn body_contains_recursive_ref_to_name(
 }
 
 /// Helper: walker-parity check for "complex" cycle-guard surfaces.
-/// Mirrors `has_complex_cycle_guard_surface` from the TypeExpr path
-/// (R7-13 legacy parity): a body whose top shape is something other
+/// R7-13 legacy parity: a body whose top shape is something other
 /// than a plain Object / Function / Array / Tuple / Primitive /
 /// Literal / TypeParameter / Infer counts as "complex".
 ///
@@ -10266,9 +10079,9 @@ fn has_complex_cycle_guard_surface_node(
 /// Conditional / Mapped / TemplateLiteral / Object members + index
 /// signatures + call/construct/method signatures / Function
 /// parameters + return / Tuple elements / IndexedAccess(index +
-/// object) / KeyOf / Array / Alias. This mirrors
-/// `collect_ref_names`'s aggressive collection inside
-/// `decl_body_reaches_cycle_via_walker`.
+/// object) / KeyOf / Array / Alias. Aggressive collection — never
+/// stops at "complex" body shapes (those are the cycle indicator,
+/// not the termination signal).
 ///
 /// `depth` fuses recursion at 256 (Plan §4.11). The fuse returns
 /// without recording new identities to bound runtime on

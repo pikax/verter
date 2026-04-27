@@ -10694,4 +10694,78 @@ defineProps<{ local: Local; pkg: FromPkg }>()
             "/node_modules/foo/index.d.ts"
         ));
     }
+
+    /// Plan §6.7 — F's TDD: the temporary TypeExpr adapter
+    /// `typeexpr_root_reaches_transitive_cycle` must lower the input
+    /// expression via Navigate, extract the root identity, delegate to
+    /// the canonical `_node` predicate, AND accumulate the BFS dep
+    /// signature into the per-request thread-local accumulator.
+    #[test]
+    fn typeexpr_root_reaches_transitive_cycle_delegates_to_node_predicate() {
+        use crate::meta_resolve::{
+            drain_dispatch_dep_signature_accumulator, reset_dispatch_dep_signature_accumulator,
+            typeexpr_root_reaches_transitive_cycle,
+        };
+        use crate::resolver_core::ComponentMetaQueryEngine;
+        use std::sync::Arc as StdArc;
+        use verter_semantic::analysis::type_expr::TypeExpr;
+
+        let project = make_project();
+        project
+            .upsert_base(
+                "/u.ts",
+                r#"
+export type GetItemKeys<T> = DotPathKeys<T>
+export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
+"#,
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/Owner.vue",
+                r#"<script setup lang="ts">
+import type { GetItemKeys } from './u'
+defineProps<{ value: GetItemKeys<unknown> }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+        project.host().set_import_dependencies(
+            "/Owner.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./u".to_string(),
+                resolved_canonical_id: Some("/u.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/Owner.vue").unwrap();
+        let host = session.host();
+        let mut engine = ComponentMetaQueryEngine::new(host);
+
+        // GetItemKeys<unknown> — generic helper cycle. Adapter must
+        // delegate to _node which detects the cycle.
+        let typeexpr = TypeExpr::Ref {
+            name: StdArc::from("GetItemKeys"),
+            type_arguments: StdArc::from(
+                vec![TypeExpr::Primitive(
+                    verter_semantic::analysis::type_expr::PrimitiveName::Unknown,
+                )]
+                .into_boxed_slice(),
+            ),
+        };
+        reset_dispatch_dep_signature_accumulator();
+        let result = typeexpr_root_reaches_transitive_cycle(&mut engine, "/Owner.vue", &typeexpr);
+        assert!(
+            result,
+            "GetItemKeys cycle must be detected via the canonical _node predicate"
+        );
+        let drained = drain_dispatch_dep_signature_accumulator();
+        assert!(
+            !drained.is_empty(),
+            "BFS dep facts must be accumulated into the thread-local accumulator \
+             so callers' completion fences capture cycle dep-signatures"
+        );
+    }
 }
