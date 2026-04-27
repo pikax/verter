@@ -1258,8 +1258,15 @@ impl Scheduler {
                 // for parse. This keeps disk reads off the CPU threads.
                 let node_for_panic = Arc::clone(&node);
                 self.io_pool.execute(move || {
-                    let _guard =
-                        winner_ctx.map(crate::request_context::OpaqueContextGuard::install);
+                    // Plan §4.7 — install_tls populates BOTH the scheduler-side
+                    // and session-side TLS slots in one go. Pre-Q this call
+                    // routed through `OpaqueContextGuard::install` directly,
+                    // populating only scheduler-side TLS — host-side audit
+                    // helpers that read `current_request_context()` on the
+                    // worker thread silently no-op'd, leaving counters such
+                    // as `dep_signature_merges` at 0.
+                    let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
+                        winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                     // Catch panics so the worker thread (and its TLS
                     // guard's RAII drop) stays intact for subsequent
                     // jobs on the same pool.
@@ -1289,8 +1296,12 @@ impl Scheduler {
                 // Analysis/Artifact jobs: pure CPU work.
                 let node_for_panic = Arc::clone(&node);
                 self.cpu_pool.spawn(move || {
-                    let _guard =
-                        winner_ctx.map(crate::request_context::OpaqueContextGuard::install);
+                    // Plan §4.7 — see pool.rs:79 + io_pool branch above for
+                    // the same install_tls bridging pattern; both TLS slots
+                    // populated in one go so host-side audit helpers fire
+                    // correctly on the CPU pool worker thread.
+                    let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
+                        winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         Self::execute_stage_on_worker(
                             &node,
