@@ -1905,6 +1905,37 @@ fn materialize_component_meta_field_types(
         }
     }
 
+    /// Plan §6.14 / K2 — call the J1 `_node` predicate via the
+    /// field-state's lazy-lowered current_node. Returns `false` when
+    /// lowering fails (matches the legacy TypeExpr predicate's
+    /// "conservative not-needed" fallback when no canonical node id
+    /// exists for the input).
+    fn current_needs_member_route_materialization(
+        host: &VerterHost,
+        field_state: &mut MacroFieldGraphState<'_>,
+    ) -> bool {
+        let Some(node) = field_state.current_node() else {
+            return false;
+        };
+        let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        type_node_needs_member_route_materialization(host, node, &mut local_fence, 0)
+    }
+
+    /// Plan §6.14 / K2 — call the J1 `_node` predicate via the
+    /// field-state's lazy-lowered raw_node. Returns `false` when
+    /// lowering fails.
+    fn raw_needs_member_route_materialization(
+        host: &VerterHost,
+        field_state: &mut MacroFieldGraphState<'_>,
+        raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    ) -> bool {
+        let Some(node) = field_state.raw_node(raw) else {
+            return false;
+        };
+        let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        type_node_needs_member_route_materialization(host, node, &mut local_fence, 0)
+    }
+
     fn route_leaf_beats_wrapper_object(
         candidate: &verter_semantic::analysis::type_expr::TypeExpr,
         current: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -2591,8 +2622,10 @@ fn materialize_component_meta_field_types(
             }
         }
         rescue_field(scope_canonical_id, field, &mut field_state, query_engine);
+        // Plan §6.14 / K2 — migrate predicate to graph-native J1 _node
+        // version via field_state.raw_node().
         let raw_needs_member_route = parsed_field_raw_type(field).as_ref().is_some_and(|raw| {
-            type_expr_needs_member_route_materialization(raw, scope_canonical_id, query_engine)
+            raw_needs_member_route_materialization(host, &mut field_state, raw)
                 || component_meta_registry_public_utility_route(raw).is_some()
         });
         let raw_is_unpreserved_top_level_ref =
@@ -2604,6 +2637,9 @@ fn materialize_component_meta_field_types(
                 )
             });
         if crate::host_manage::component_meta_debug_enabled() {
+            // Plan §6.14 / K2 — debug log uses the J1 _node predicate
+            // through field_state.current_node().
+            let current_needs = current_needs_member_route_materialization(host, &mut field_state);
             crate::host_manage::component_meta_debug(format!(
                 "FIELD_MATERIALIZE_POST_RESCUE owner={} field={} current={:?} raw_needs_member_route={} raw_is_unpreserved_top_level_ref={} current_needs_member_route={}",
                 scope_canonical_id,
@@ -2611,20 +2647,14 @@ fn materialize_component_meta_field_types(
                 field_state.published_type(),
                 raw_needs_member_route,
                 raw_is_unpreserved_top_level_ref,
-                type_expr_needs_member_route_materialization(
-                    field_state.published_type(),
-                    scope_canonical_id,
-                    query_engine,
-                ),
+                current_needs,
             ));
         }
+        // Plan §6.14 / K2 — migrate predicate to graph-native J1 _node
+        // version via field_state.current_node().
         if !(raw_needs_member_route
             || raw_is_unpreserved_top_level_ref
-            || type_expr_needs_member_route_materialization(
-                field_state.published_type(),
-                scope_canonical_id,
-                query_engine,
-            ))
+            || current_needs_member_route_materialization(host, &mut field_state))
         {
             field.r#type = field_state.publish();
             continue;

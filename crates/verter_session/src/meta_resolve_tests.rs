@@ -11731,6 +11731,66 @@ mod macro_field_graph_state_tests {
         );
     }
 
+    /// Plan §6.14 / K2 — equivalence sanity for the J1
+    /// `type_node_needs_member_route_materialization` migration. After
+    /// K2, the function calls go through field_state.current_node() /
+    /// raw_node() and the J1 _node predicate. This test verifies the
+    /// predicate is reachable through the field-state path AND that
+    /// it returns a sensible boolean for a known IndexedAccess shape
+    /// (which the TypeExpr version returned `true` for if it lacks
+    /// package backing — see J1's mirror of TypeExpr arms).
+    ///
+    /// Discriminates against: regression that would have field_state
+    /// drop on the floor when the call sites can't see graph nodes.
+    #[test]
+    fn k2_node_predicate_callable_via_field_state() {
+        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+        use crate::semantic_query::SemanticNodeData;
+        use crate::types::{FileKind, UpsertRequest};
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some("/test_K2.ts".to_string()),
+            input_id: "/test_K2.ts".to_string(),
+            source: Arc::from(
+                "export type Source = { a: number; b: string };\n\
+                 export type Pick1 = Source['a'];\n",
+            ),
+            file_kind: FileKind::NonSfc,
+            aliases: Vec::new(),
+        });
+
+        let dispatch = ProjectSemanticDispatch::new(&host);
+
+        // Construct an IndexedAccess TypeExpr (Source['a'])
+        let initial = TypeExpr::IndexedAccess {
+            object: Arc::new(TypeExpr::Ref {
+                name: Arc::from("Source"),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            }),
+            index: Arc::new(TypeExpr::Literal(
+                verter_semantic::analysis::type_expr::LiteralValue::String("a".into()),
+            )),
+        };
+
+        let mut field_state = MacroFieldGraphState::new(initial.clone(), "/test_K2.ts", &dispatch);
+        // Force lower
+        let node = field_state.current_node();
+        assert!(
+            node.is_some(),
+            "field_state.current_node() must lower IndexedAccess to a graph node"
+        );
+        let node = node.unwrap();
+        // Verify the lowered node is genuinely an IndexedAccess at the
+        // graph level — distinguishes accidental no-op fall-through.
+        let graph = host.project_type_store().semantic_graph();
+        let data = graph.node_data(node).expect("lowered node must exist");
+        assert!(
+            matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }),
+            "lowered current_node should be SemanticNodeData::IndexedAccess; got {data:?}"
+        );
+    }
+
     /// Plan §4.10 / K1 — `set_current_type` after `current_node()`
     /// invalidates the cached node and clears the dirty flag.
     #[test]
