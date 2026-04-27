@@ -10578,6 +10578,51 @@ defineProps<{ picked: Pick<Foo, 'a' | 'b'> }>()
         );
     }
 
+    /// Plan §6.6 / E — Pick / Omit shapes through `evaluate_types`
+    /// stay healthy after the alias-body rescue chain
+    /// (`walk_member_route_via_alias_body`) and the
+    /// `materialize_inline_registry_member_route_*` candidate chain
+    /// were deleted. B1's materialiser registry-route branch
+    /// dispatches Pick/Omit shapes through dispatch's canonical
+    /// projection.
+    #[test]
+    fn materialiser_member_route_unchanged_after_legacy_delete() {
+        let project = make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"export interface Foo { a: string; b: number; c: boolean }
+"#,
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/PickOk.vue",
+                r#"<script setup lang="ts">
+import type { Foo } from './types'
+defineProps<{ value: Pick<Foo, 'a'> }>()
+</script>
+<template><div /></template>"#,
+            )
+            .unwrap();
+        project.host().set_import_dependencies(
+            "/PickOk.vue",
+            vec![crate::types::DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        let session = project.open_session_batch().unwrap();
+        // Smoke: evaluate must succeed without panicking — the chain
+        // deletion must not break the registry-route resolution path.
+        let _ = session
+            .evaluate_types("/PickOk.vue")
+            .unwrap()
+            .expect("Pick<Foo, 'a'> eval must succeed after E's chain deletion");
+    }
+
     /// Plan §6.5 / D — `engine.is_package_backed_decl` adapter
     /// produces the same result as the canonical primitive
     /// `canonical_resolves_to_package` (commit C). Discriminates

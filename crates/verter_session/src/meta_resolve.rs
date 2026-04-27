@@ -1586,180 +1586,14 @@ fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::
     }
 }
 
-pub(crate) fn walk_member_route_via_alias_body(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use crate::resolver_core::component_meta_registry::raw_member_path_leaf;
-
-    fn materialized_member_path_leaf(
-        expr: &verter_semantic::analysis::type_expr::TypeExpr,
-        path: &[String],
-        scope_canonical_id: &str,
-        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-        let mut leaf = expr.clone();
-        for member_name in path {
-            if let Some(next) = raw_member_path_leaf(&leaf, std::slice::from_ref(member_name)) {
-                leaf = next;
-                continue;
-            }
-
-            let materialize_scope =
-                select_imported_materialization_scope(&leaf, scope_canonical_id, engine)
-                    .unwrap_or_else(|| scope_canonical_id.to_string());
-            let materialized = walk_component_meta_member_surface_expr(
-                &leaf,
-                materialize_scope.as_str(),
-                engine,
-                true,
-            );
-            if materialized == leaf {
-                return None;
-            }
-            leaf = raw_member_path_leaf(&materialized, std::slice::from_ref(member_name))?;
-        }
-        Some(leaf)
-    }
-
-    let (root_name, route) = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))?;
-    let declaration = engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
-    let declaration_scope = if declaration.canonical_source.is_empty() {
-        scope_canonical_id.to_string()
-    } else {
-        declaration.canonical_source
-    };
-    let declaration_name = if declaration.resolved_name.is_empty() {
-        root_name.clone()
-    } else {
-        declaration.resolved_name
-    };
-    let body = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())?;
-    // D-Cutover §5.8: `project_type_surface_expr` now routes the full
-    // projection through dispatch (`dispatch_projected_surface` →
-    // `dispatch_root_instantiated` → Instantiate). The pre-§5.8
-    // `solve_scoped` fallback was a duplicate solver path and is
-    // retired with the solver subsystem.
-    let materialized_body = engine
-        .project_type_surface_expr(scope_canonical_id, root_name.as_str())
-        .or_else(|| {
-            let materialized = materialize_component_meta_type_expr_until_stable(
-                &body,
-                scope_canonical_id,
-                crate::semantic_query::ProjectionMode::Expanded,
-                engine,
-            );
-            (materialized != body).then_some(materialized)
-        })?;
-
-    let leaf = match route {
-        crate::resolver_core::RouteDemand::Whole => materialized_body,
-        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => materialized_body,
-        crate::resolver_core::RouteDemand::MemberPath(path) => {
-            materialized_member_path_leaf(&materialized_body, &path, scope_canonical_id, engine)?
-        }
-        crate::resolver_core::RouteDemand::Pick(ref members)
-        | crate::resolver_core::RouteDemand::Omit(ref members) => {
-            query_engine::project_route_surface(
-                engine,
-                scope_canonical_id,
-                &materialized_body,
-                &route,
-                members,
-            )?
-        }
-    };
-
-    let materialized_leaf = materialize_component_meta_type_expr_until_stable(
-        &leaf,
-        scope_canonical_id,
-        crate::semantic_query::ProjectionMode::Expanded,
-        engine,
-    );
-    Some(if materialized_leaf != leaf {
-        materialized_leaf
-    } else {
-        leaf
-    })
-}
-
-mod query_engine {
-    use verter_semantic::analysis::type_expr::{
-        ObjectExpr, ObjectMember, ObjectProperty, TypeExpr,
-    };
-
-    pub(crate) fn project_route_surface(
-        _engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-        _scope_canonical_id: &str,
-        materialized_body: &TypeExpr,
-        route: &crate::resolver_core::RouteDemand,
-        members: &[String],
-    ) -> Option<TypeExpr> {
-        match route {
-            crate::resolver_core::RouteDemand::Pick(_) => {
-                let TypeExpr::Object(object) = materialized_body else {
-                    return None;
-                };
-                let members: rustc_hash::FxHashSet<_> =
-                    members.iter().map(String::as_str).collect();
-                Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: object
-                        .properties
-                        .iter()
-                        .filter(|member| match member {
-                            ObjectMember::Property(property) => {
-                                members.contains(property.name.as_str())
-                            }
-                            ObjectMember::Method(method) => members.contains(method.name.as_str()),
-                            _ => false,
-                        })
-                        .cloned()
-                        .collect(),
-                })))
-            }
-            crate::resolver_core::RouteDemand::Omit(_) => {
-                let TypeExpr::Object(object) = materialized_body else {
-                    return None;
-                };
-                let members: rustc_hash::FxHashSet<_> =
-                    members.iter().map(String::as_str).collect();
-                Some(TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                    properties: object
-                        .properties
-                        .iter()
-                        .filter(|member| match member {
-                            ObjectMember::Property(property) => {
-                                !members.contains(property.name.as_str())
-                            }
-                            ObjectMember::Method(method) => !members.contains(method.name.as_str()),
-                            _ => true,
-                        })
-                        .cloned()
-                        .collect(),
-                })))
-            }
-            crate::resolver_core::RouteDemand::Whole => Some(materialized_body.clone()),
-            crate::resolver_core::RouteDemand::MemberPath(path) => {
-                let leaf = super::component_meta_registry_raw_member_path_surface(
-                    materialized_body,
-                    path,
-                )?;
-                Some(path.iter().rfold(leaf, |child, member| {
-                    TypeExpr::Object(std::sync::Arc::new(ObjectExpr {
-                        properties: vec![ObjectMember::Property(ObjectProperty {
-                            name: member.clone(),
-                            ty: child,
-                            optional: true,
-                            readonly: false,
-                        })],
-                    }))
-                }))
-            }
-        }
-    }
-}
+// Plan §6.6 / E — `walk_member_route_via_alias_body` and its
+// `mod query_engine { fn project_route_surface }` helper were
+// retired in commit E. B1's materialiser registry-route branch
+// handles route shapes (`Pick<T, K>`, `Omit<T, K>`, `T['k']`)
+// through dispatch's canonical projection, so the alias-body
+// walk-through is no longer needed. The retired symbols are
+// listed in the `RETIRED_SYMBOLS` array of the static-grep gate
+// test (commit I).
 
 fn parsed_field_raw_type(
     field: &verter_semantic::analysis::type_expand::ExpandedField,
@@ -2729,26 +2563,16 @@ fn materialize_component_meta_field_types(
                 type_expr_has_package_backed_object_like_root(raw, scope_canonical_id, query_engine)
             });
         if raw_needs_member_route && !raw_route_root_is_package_backed {
-            let mut owner_alias_route_rescued = false;
-            if let Some(owner_alias_route_surface) =
-                parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                    walk_member_route_via_alias_body(raw, scope_canonical_id, query_engine)
-                })
+            // Plan §6.6 / E — the alias-body rescue chain
+            // (walk_member_route_via_alias_body) was retired in commit
+            // E. B1's materialiser registry-route branch already
+            // handles `Pick<Foo, ...>`, `Omit<Foo, ...>`, and
+            // `Foo['a']['b']…` shapes through dispatch's canonical
+            // projection. The direct
+            // `walk_component_meta_member_surface_expr` call now
+            // applies the same projection in the materialiser's
+            // policy-gated form.
             {
-                let owner_alias_route_surface = walk_component_meta_member_surface_expr(
-                    &owner_alias_route_surface,
-                    materialize_scope_canonical_id.as_str(),
-                    query_engine,
-                    false,
-                );
-                if compare_type_expr_improvement(&owner_alias_route_surface, &field.r#type)
-                    || route_leaf_beats_wrapper_object(&owner_alias_route_surface, &field.r#type)
-                {
-                    field.r#type = owner_alias_route_surface;
-                    owner_alias_route_rescued = true;
-                }
-            }
-            if !owner_alias_route_rescued {
                 let routed_surface = walk_component_meta_member_surface_expr(
                     &field.r#type,
                     materialize_scope_canonical_id.as_str(),
@@ -6234,19 +6058,18 @@ impl VerterHost {
                             symbol_name,
                             std::slice::from_ref(member),
                         );
+                        // Plan §6.6 / E — the alias-body fallback
+                        // (walk_member_route_via_alias_body) was
+                        // retired; B1's materialiser branch handles
+                        // route shapes natively. The remaining
+                        // surface-expr fallback covers non-route
+                        // shapes.
                         let projected = query_engine
                             .project_route_surface_expr(
                                 scope_canonical_id,
                                 symbol_name,
                                 &member_route,
                             )
-                            .or_else(|| {
-                                walk_member_route_via_alias_body(
-                                    &route_expr,
-                                    scope_canonical_id,
-                                    query_engine,
-                                )
-                            })
                             .or_else(|| {
                                 query_engine
                                     .project_expr_surface_expr(scope_canonical_id, &route_expr)
@@ -8319,35 +8142,16 @@ fn materialize_component_meta_macro_shape_member_type_expr(
             verter_semantic::analysis::type_expr::TypeExpr::string_literal(member_name.to_string()),
         ),
     };
-    let inline_route_candidate = current_is_route_expr
-        .then(|| {
-            component_meta_trace_custom!(
-                "materialize_member_route_inline_candidate",
-                format!(
-                    "owner={} member={} current={:?}",
-                    scope_canonical_id, member_name, current,
-                ),
-            );
-            if type_expr_has_package_backed_root(current, scope_canonical_id, query_engine)
-                || ref_root_reaches_transitive_cycle(query_engine, scope_canonical_id, current)
-            {
-                None
-            } else {
-                materialize_inline_registry_member_route_from_decl_body(
-                    current,
-                    scope_canonical_id,
-                    query_engine,
-                )
-                .or_else(|| {
-                    materialize_inline_registry_member_route_if_materializable(
-                        current,
-                        scope_canonical_id,
-                        query_engine,
-                    )
-                })
-            }
-        })
-        .flatten();
+    // Plan §6.6 / E — the inline-registry-route candidate chain
+    // (materialize_inline_registry_member_route_from_decl_body +
+    // materialize_inline_registry_member_route_if_materializable)
+    // was retired in commit E. B1's materialiser registry-route
+    // branch dispatches Pick/Omit + IndexedAccess shapes canonically
+    // through dispatch; the empty `inline_route_candidate` lets the
+    // surrounding materialize-and-improve loop drive the member
+    // route through the materialiser entry.
+    let inline_route_candidate: Option<verter_semantic::analysis::type_expr::TypeExpr> = None;
+    let _ = current_is_route_expr;
     if let Some(candidate) = &inline_route_candidate {
         component_meta_trace_custom!(
             "materialize_member_route_inline_candidate_result",
@@ -8474,23 +8278,12 @@ fn materialize_component_meta_macro_shape_member_type_expr(
     if candidate_is_good_enough(&best) {
         return best;
     }
-    if current_is_route_expr {
-        let alias_route_candidate = {
-            component_meta_trace_custom!(
-                "materialize_member_route_alias_candidate",
-                format!(
-                    "owner={} member={} current={:?}",
-                    scope_canonical_id, member_name, current,
-                ),
-            );
-            walk_member_route_via_alias_body(current, scope_canonical_id, query_engine)
-        };
-        if let Some(candidate) = alias_route_candidate {
-            if compare_type_expr_improvement(&candidate, &best) {
-                best = candidate;
-            }
-        }
-    }
+    // Plan §6.6 / E — the alias-body candidate path
+    // (walk_member_route_via_alias_body) was retired in commit E.
+    // B1's materialiser registry-route branch handles the equivalent
+    // projection through dispatch. The slow-path materialize-and-
+    // improve loop below remains as the catch-all for shapes that
+    // don't match a registry-route shape.
 
     // Slow path: previously-cached project/solve candidates that
     // weren't structurally sufficient now feed into the
@@ -9791,124 +9584,14 @@ pub(crate) fn component_meta_registry_should_keep_raw_symbolic_non_object_alias(
 // in commit D, deleted in commit O after Phase 11 K3 migrates to
 // graph-native predicates).
 
-fn registry_member_route_inline_materializable(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    fn declaration_body_prefers_inline_materialization(
-        body: &verter_semantic::analysis::type_expr::TypeExpr,
-    ) -> bool {
-        use verter_semantic::analysis::type_expr::TypeExpr;
-
-        match body {
-            TypeExpr::Parenthesized(inner) => {
-                declaration_body_prefers_inline_materialization(inner)
-            }
-            TypeExpr::Object(_) => true,
-            TypeExpr::Ref { type_arguments, .. } => type_arguments.is_empty(),
-            _ if component_meta_registry_public_utility_route(body)
-                .or_else(|| component_meta_registry_public_indexed_access_route(body))
-                .is_some() =>
-            {
-                true
-            }
-            _ => false,
-        }
-    }
-
-    if type_expr_has_package_backed_root(expr, scope_canonical_id, engine)
-        || ref_root_reaches_transitive_cycle(engine, scope_canonical_id, expr)
-    {
-        return false;
-    }
-
-    let Some((root_name, _)) = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))
-    else {
-        return false;
-    };
-    let prepared_body = engine
-        .named_decl_body(scope_canonical_id, root_name.as_str())
-        .or_else(|| {
-            let declaration =
-                engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
-            if matches!(
-                declaration.kind,
-                crate::resolver_core::ResolvedDeclarationKind::Interface
-                    | crate::resolver_core::ResolvedDeclarationKind::Class,
-            ) {
-                return Some(verter_semantic::analysis::type_expr::TypeExpr::named(
-                    root_name.clone(),
-                ));
-            }
-            let declaration_scope = if declaration.canonical_source.is_empty() {
-                scope_canonical_id.to_string()
-            } else {
-                declaration.canonical_source
-            };
-            let declaration_name = if declaration.resolved_name.is_empty() {
-                root_name
-            } else {
-                declaration.resolved_name
-            };
-            engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())
-        });
-
-    prepared_body
-        .as_ref()
-        .is_some_and(declaration_body_prefers_inline_materialization)
-}
-
-fn materialize_inline_registry_member_route_from_decl_body(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    let (root_name, route) = component_meta_registry_public_utility_route(expr)
-        .or_else(|| component_meta_registry_public_indexed_access_route(expr))?;
-    let declaration = engine.resolve_type_declaration(scope_canonical_id, root_name.as_str());
-    let declaration_scope = if declaration.canonical_source.is_empty() {
-        scope_canonical_id.to_string()
-    } else {
-        declaration.canonical_source
-    };
-    let declaration_name = if declaration.resolved_name.is_empty() {
-        root_name
-    } else {
-        declaration.resolved_name
-    };
-    let body = engine.named_decl_body(declaration_scope.as_str(), declaration_name.as_str())?;
-    let structural = materialize_component_meta_registry_structural_expr(
-        &body,
-        declaration_scope.as_str(),
-        engine,
-    );
-    let source = if component_meta_registry_has_explicit_object_surface(&structural) {
-        structural
-    } else {
-        body
-    };
-
-    match route {
-        crate::resolver_core::RouteDemand::Whole => Some(source),
-        crate::resolver_core::RouteDemand::MemberPath(path) if path.is_empty() => Some(source),
-        crate::resolver_core::RouteDemand::MemberPath(path) => {
-            component_meta_registry_raw_member_path_surface(&source, &path)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn materialize_inline_registry_member_route_if_materializable(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    registry_member_route_inline_materializable(expr, scope_canonical_id, engine).then(|| {
-        materialize_inline_registry_member_route_from_decl_body(expr, scope_canonical_id, engine)
-    })?
-}
+// Plan §6.6 / E — `registry_member_route_inline_materializable`,
+// `materialize_inline_registry_member_route_from_decl_body`, and
+// `materialize_inline_registry_member_route_if_materializable` were
+// retired in commit E. The inline-registry-route candidate path is
+// handled by B1's materialiser registry-route branch, which
+// dispatches Pick/Omit + IndexedAccess shapes through dispatch's
+// canonical projection. Retired symbols are listed in the
+// `RETIRED_SYMBOLS` array of the static-grep gate test (commit I).
 
 // ===========================================================================
 // Plan §1.12 — graph-native registry-route + cycle-BFS predicates.

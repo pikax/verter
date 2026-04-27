@@ -2095,15 +2095,13 @@ fn explicit_object_member<'a>(expr: &'a TypeExpr, member_name: &str) -> Option<&
     }
 }
 
-/// Walk a member path (sequence of property names) into a [`TypeExpr::Object`]
-/// and return the leaf type.  Returns `None` if any segment is missing.
-pub(crate) fn raw_member_path_leaf(expr: &TypeExpr, path: &[String]) -> Option<TypeExpr> {
-    let mut leaf = expr;
-    for member_name in path {
-        leaf = explicit_object_member(leaf, member_name)?;
-    }
-    Some(leaf.clone())
-}
+// Plan §4.19 / §6.6 / E — `raw_member_path_leaf` was retired in
+// commit E (no remaining production callers after the
+// walk_member_route_via_alias_body chain was deleted). The single
+// surviving caller of `explicit_object_member` lives in the
+// `component_meta_registry_raw_member_path_surface` body above.
+// The retired symbol is listed in the `RETIRED_SYMBOLS` array of
+// the static-grep gate test (commit I).
 
 #[cfg(test)]
 mod tests {
