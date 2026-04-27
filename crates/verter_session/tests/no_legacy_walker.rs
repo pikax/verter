@@ -58,6 +58,38 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // as the private nested `navigate_object_member` helper.
     "raw_member_path_leaf",
     "explicit_object_member",
+    // Commit N (plan §6.15) — 4 TypeExpr predicates retired after
+    // Phase 11 callers migrated to graph-native `_node` counterparts
+    // (J0/J1/J2/J4). The deletion targets (with identifier-boundary
+    // matching, suffixed names like `_node` / `_typeexpr` /
+    // `lowered_*` are NOT false-positives):
+    //   - `type_expr_has_package_backed_root` — replaced by J0
+    //     (`type_node_has_package_backed_root`).
+    //   - `type_expr_needs_member_route_materialization` — replaced
+    //     by J1 (`type_node_needs_member_route_materialization`).
+    //     Surviving callers (`field_should_preserve_shallow_symbolic_raw_type`,
+    //     `walk_component_meta_macro_shape_member_types`) lower their
+    //     TypeExpr inputs to a SemanticNodeId via Navigate and call
+    //     the J1 `_node` variant through the `lowered_*` helper.
+    //   - `slot_binding_param_can_stay_symbolic_typeexpr` (the M
+    //     lowering-failure fallback) — replaced by J2
+    //     (`slot_binding_param_can_stay_symbolic_node`).
+    //   - `preserve_package_backed_symbolic_refs` — replaced by J4
+    //     (`preserve_package_backed_symbolic_refs_node`). Caller in
+    //     `materialize_component_meta_registry_candidate` lowers
+    //     materialized + raw TypeExprs to nodes, dispatches to J4,
+    //     then raises the result back to TypeExpr.
+    // The bare `slot_binding_param_can_stay_symbolic` identifier is
+    // also retired: the post-M wrapper that retained that name is
+    // renamed to `lowered_slot_binding_param_can_stay_symbolic`,
+    // matching the lowered_* helper-naming convention introduced in
+    // commit N. Plan §6.15 / N's deletion target list cites the bare
+    // identifier; identifier-boundary matching keeps the surviving
+    // `_node` variant + the renamed wrapper from triggering the gate.
+    "type_expr_has_package_backed_root",
+    "type_expr_needs_member_route_materialization",
+    "slot_binding_param_can_stay_symbolic_typeexpr",
+    "preserve_package_backed_symbolic_refs",
 ];
 
 const SCAN_DIRS: &[&str] = &["crates", ".claude/skills", "docs"];

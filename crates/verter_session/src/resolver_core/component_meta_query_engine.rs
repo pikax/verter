@@ -1791,6 +1791,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// adapter is itself deleted in commit O after Phase 11 migrates
     /// the 5 remaining TypeExpr-walking callers to graph-native
     /// `_node` predicates.
+    #[allow(
+        dead_code,
+        reason = "Plan §6.15 / O — adapter retired post-N (last production caller migrated); definition deleted in O"
+    )]
     pub(crate) fn is_package_backed_decl(&mut self, scope: &str, name: &str) -> bool {
         let declaration = self.resolve_type_declaration(scope, name);
         let canonical = if declaration.canonical_source.is_empty() {

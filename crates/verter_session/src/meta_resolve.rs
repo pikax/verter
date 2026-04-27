@@ -1521,33 +1521,6 @@ pub(crate) fn materialize_component_meta_type_expr_until_stable_full(
     materialized
 }
 
-fn type_expr_has_package_backed_root(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Ref { name, .. } => {
-            query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref())
-        }
-        TypeExpr::IndexedAccess { object, .. }
-        | TypeExpr::Array {
-            element: object, ..
-        }
-        | TypeExpr::KeyOf(object)
-        | TypeExpr::Rest(object)
-        | TypeExpr::Parenthesized(object) => {
-            type_expr_has_package_backed_root(object, scope_canonical_id, query_engine)
-        }
-        TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-            type_expr_has_package_backed_root(&element.ty, scope_canonical_id, query_engine)
-        }),
-        _ => false,
-    }
-}
-
 fn type_expr_has_package_backed_object_like_root(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
     scope_canonical_id: &str,
@@ -1607,42 +1580,6 @@ fn type_expr_has_package_backed_object_like_root(
         .is_some_and(|body| {
             crate::resolver_core::component_meta_registry::component_meta_registry_has_explicit_object_surface(&body)
         })
-}
-
-fn type_expr_needs_member_route_materialization(
-    expr: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> bool {
-    use verter_semantic::analysis::type_expr::TypeExpr;
-
-    match expr {
-        TypeExpr::Ref {
-            name,
-            type_arguments,
-        } => {
-            type_arguments.is_empty()
-                && !query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref())
-        }
-        TypeExpr::TypeOf(_) | TypeExpr::IndexedAccess { .. } | TypeExpr::TypeParameter(_) => {
-            !typeexpr_root_reaches_transitive_cycle(query_engine, scope_canonical_id, expr)
-                && !type_expr_has_package_backed_root(expr, scope_canonical_id, query_engine)
-        }
-        TypeExpr::Array { element, .. }
-        | TypeExpr::KeyOf(element)
-        | TypeExpr::Rest(element)
-        | TypeExpr::Parenthesized(element) => {
-            type_expr_needs_member_route_materialization(element, scope_canonical_id, query_engine)
-        }
-        TypeExpr::Tuple { elements, .. } => elements.iter().any(|element| {
-            type_expr_needs_member_route_materialization(
-                &element.ty,
-                scope_canonical_id,
-                query_engine,
-            )
-        }),
-        _ => false,
-    }
 }
 
 fn type_expr_is_slots_member_route(expr: &verter_semantic::analysis::type_expr::TypeExpr) -> bool {
@@ -1783,13 +1720,90 @@ fn field_should_preserve_shallow_symbolic_raw_type(
         | verter_semantic::analysis::type_expr::TypeExpr::TypeParameter(_) => false,
         _ => {
             query_engine.should_preserve_shallow_field_expr(scope_canonical_id, &raw)
-                && !type_expr_needs_member_route_materialization(
+                && !lowered_needs_member_route_materialization(
                     &raw,
                     scope_canonical_id,
                     query_engine,
                 )
         }
     }
+}
+
+/// Plan §6.15 / N — migration helper. Lowers `expr` to a Navigate-mode
+/// `SemanticNodeId` and dispatches to J1's graph-native
+/// [`type_node_needs_member_route_materialization`] predicate. The
+/// cycle-BFS dep-signature facts collected during the predicate's walk
+/// are accumulated into the per-request thread-local dispatch
+/// accumulator so the caller's completion fence remains complete
+/// (matches legacy behaviour: the deleted TypeExpr predicate routed
+/// through `typeexpr_root_reaches_transitive_cycle` which accumulated).
+///
+/// Returns `false` (conservative: not needed) when lowering fails —
+/// matches the deleted TypeExpr predicate's behaviour for shapes the
+/// dispatcher cannot lower.
+fn lowered_needs_member_route_materialization(
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> bool {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = query_engine.host;
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        expr,
+        crate::semantic_query::ProjectionMode::Navigate,
+    ) else {
+        return false;
+    };
+    let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let result = type_node_needs_member_route_materialization(host, node, &mut local_fence, 0);
+    if !local_fence.is_empty() {
+        accumulate_dispatch_dep_signature(&Arc::from(local_fence.into_boxed_slice()));
+    }
+    result
+}
+
+/// Plan §6.15 / N — migration helper. Lowers `materialized` and `raw`
+/// TypeExpr inputs to Navigate-mode `SemanticNodeId`s, dispatches to
+/// J4's graph-native [`preserve_package_backed_symbolic_refs_node`],
+/// and raises the result back to TypeExpr.
+///
+/// Returns `materialized.clone()` (matches the deleted TypeExpr
+/// predicate's `_ => materialized.clone()` arm) when either lowering
+/// fails or the raise back to TypeExpr fails — preserves existing
+/// behaviour for shapes the dispatcher cannot lower deterministically.
+fn lowered_preserve_package_backed_symbolic_refs(
+    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
+    raw: &verter_semantic::analysis::type_expr::TypeExpr,
+    scope_canonical_id: &str,
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+) -> verter_semantic::analysis::type_expr::TypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = engine.host;
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let Some(materialized_node) = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        materialized,
+        crate::semantic_query::ProjectionMode::Navigate,
+    ) else {
+        return materialized.clone();
+    };
+    let Some(raw_node) = dispatch.lower_type_expr_in_scope_with_mode(
+        scope_canonical_id,
+        raw,
+        crate::semantic_query::ProjectionMode::Navigate,
+    ) else {
+        return materialized.clone();
+    };
+    let preserved_node =
+        preserve_package_backed_symbolic_refs_node(host, materialized_node, raw_node, 0);
+    if preserved_node == materialized_node {
+        return materialized.clone();
+    }
+    dispatch
+        .raise_node_to_type_expr(preserved_node)
+        .unwrap_or_else(|| materialized.clone())
 }
 
 fn define_props_member_can_stay_symbolic_without_rescue(
@@ -6094,12 +6108,13 @@ impl VerterHost {
                     raw_body.map_or_else(
                         || materialized.clone(),
                         |raw| {
-                            let preserved_package_refs = preserve_package_backed_symbolic_refs(
-                                &materialized,
-                                raw,
-                                scope_canonical_id,
-                                query_engine,
-                            );
+                            let preserved_package_refs =
+                                lowered_preserve_package_backed_symbolic_refs(
+                                    &materialized,
+                                    raw,
+                                    scope_canonical_id,
+                                    query_engine,
+                                );
                             preserve_registry_callable_param_member_routes(
                                 &preserved_package_refs,
                                 raw,
@@ -7773,87 +7788,29 @@ fn walk_component_meta_macro_shape_member_types(
         })
     }
 
-    /// Plan §6.14 / M — graph-native bridge for the slot rescue
-    /// chain's `slot_binding_param_can_stay_symbolic` predicate.
+    /// Plan §6.15 / N — migration helper. Lowers the TypeExpr input to
+    /// a `Navigate`-mode `SemanticNodeId` and dispatches to J2's
+    /// [`slot_binding_param_can_stay_symbolic_node`].
     ///
-    /// Lowers the TypeExpr to a `Navigate`-mode `SemanticNodeId` and
-    /// dispatches to J2's `slot_binding_param_can_stay_symbolic_node`.
-    /// Falls back to the legacy TypeExpr predicate when lowering fails
-    /// (preserves existing behaviour for shapes that don't lower yet).
-    fn slot_binding_param_can_stay_symbolic(
+    /// Returns `false` (conservative — "must materialize, not symbolic")
+    /// when lowering fails. Matches the deleted TypeExpr fallback's
+    /// `_ => false` arm semantically: when the dispatcher cannot lower
+    /// the input, prefer materialization over symbolic preservation.
+    fn lowered_slot_binding_param_can_stay_symbolic(
         ty: &verter_semantic::analysis::type_expr::TypeExpr,
         scope_canonical_id: &str,
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) -> bool {
         let host = query_engine.host;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-        if let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+        let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
             ty,
             crate::semantic_query::ProjectionMode::Navigate,
-        ) {
-            // Plan §6.14 / M — graph-native path via J2.
-            return slot_binding_param_can_stay_symbolic_node(host, node, 0);
-        }
-        // Lowering failure — fall back to the legacy TypeExpr predicate.
-        slot_binding_param_can_stay_symbolic_typeexpr(ty, scope_canonical_id, query_engine)
-    }
-
-    /// Plan §6.14 / M — legacy TypeExpr fallback for
-    /// `slot_binding_param_can_stay_symbolic`. Retained as the
-    /// lowering-failure fallback path; will be deleted in WT4 when all
-    /// shapes lower deterministically.
-    fn slot_binding_param_can_stay_symbolic_typeexpr(
-        ty: &verter_semantic::analysis::type_expr::TypeExpr,
-        scope_canonical_id: &str,
-        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    ) -> bool {
-        use verter_semantic::analysis::type_expr::TypeExpr;
-
-        match ty {
-            TypeExpr::Parenthesized(inner) => slot_binding_param_can_stay_symbolic_typeexpr(
-                inner,
-                scope_canonical_id,
-                query_engine,
-            ),
-            TypeExpr::Conditional { .. }
-            | TypeExpr::Mapped { .. }
-            | TypeExpr::IndexedAccess { .. }
-            | TypeExpr::TypeOf(_)
-            | TypeExpr::TypeParameter(_)
-            | TypeExpr::TemplateLiteral { .. } => true,
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types.iter().all(|ty| {
-                slot_binding_param_can_stay_symbolic_typeexpr(ty, scope_canonical_id, query_engine)
-            }),
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } if !type_arguments.is_empty()
-                && !query_engine.is_package_backed_decl(scope_canonical_id, name.as_ref()) =>
-            {
-                let declaration = query_engine.resolve_type_declaration(scope_canonical_id, name);
-                let declaration_scope = if declaration.canonical_source.is_empty() {
-                    scope_canonical_id
-                } else {
-                    declaration.canonical_source.as_str()
-                };
-                let declaration_name = if declaration.resolved_name.is_empty() {
-                    name.as_ref()
-                } else {
-                    declaration.resolved_name.as_str()
-                };
-                query_engine
-                    .named_decl_body(declaration_scope, declaration_name)
-                    .is_some_and(|body| {
-                        type_expr_has_non_object_top_level_surface(
-                            query_engine,
-                            declaration_scope,
-                            &body,
-                        )
-                    })
-            }
-            _ => false,
-        }
+        ) else {
+            return false;
+        };
+        slot_binding_param_can_stay_symbolic_node(host, node, 0)
     }
 
     fn slot_member_binding_rescue_can_stay_symbolic(
@@ -7875,7 +7832,7 @@ fn walk_component_meta_macro_shape_member_types(
             TypeExpr::Function(function) => {
                 !function.parameters.is_empty()
                     && function.parameters.iter().all(|parameter| {
-                        slot_binding_param_can_stay_symbolic(
+                        lowered_slot_binding_param_can_stay_symbolic(
                             &parameter.ty,
                             scope_canonical_id,
                             query_engine,
@@ -7890,7 +7847,7 @@ fn walk_component_meta_macro_shape_member_types(
                         saw_callable = true;
                         !function.parameters.is_empty()
                             && function.parameters.iter().all(|parameter| {
-                                slot_binding_param_can_stay_symbolic(
+                                lowered_slot_binding_param_can_stay_symbolic(
                                     &parameter.ty,
                                     scope_canonical_id,
                                     query_engine,
@@ -7901,7 +7858,7 @@ fn walk_component_meta_macro_shape_member_types(
                         saw_callable = true;
                         !method.function.parameters.is_empty()
                             && method.function.parameters.iter().all(|parameter| {
-                                slot_binding_param_can_stay_symbolic(
+                                lowered_slot_binding_param_can_stay_symbolic(
                                     &parameter.ty,
                                     scope_canonical_id,
                                     query_engine,
@@ -7993,7 +7950,7 @@ fn walk_component_meta_macro_shape_member_types(
                                     &property.ty,
                                 );
                                 if !property_needs_projection_rescue
-                                    && !type_expr_needs_member_route_materialization(
+                                    && !lowered_needs_member_route_materialization(
                                         &property.ty,
                                         scope_canonical_id,
                                         query_engine,
@@ -9214,56 +9171,8 @@ fn materialize_component_meta_registry_structural_expr(
     inner(expr, scope_canonical_id, engine, &mut active)
 }
 
-fn preserve_package_backed_symbolic_refs(
-    materialized: &verter_semantic::analysis::type_expr::TypeExpr,
-    raw: &verter_semantic::analysis::type_expr::TypeExpr,
-    scope_canonical_id: &str,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> verter_semantic::analysis::type_expr::TypeExpr {
-    use rustc_hash::FxHashMap;
-    use verter_semantic::analysis::type_expr::{ObjectMember, TypeExpr};
-
-    match (materialized, raw) {
-        (TypeExpr::Object(materialized_object), TypeExpr::Object(raw_object)) => {
-            let mut object = materialized_object.as_ref().clone();
-            let mut raw_properties = FxHashMap::with_capacity_and_hasher(
-                raw_object.properties.len(),
-                Default::default(),
-            );
-            for candidate in &raw_object.properties {
-                if let ObjectMember::Property(raw_property) = candidate {
-                    raw_properties.insert(raw_property.name.as_str(), raw_property);
-                }
-            }
-            for member in &mut object.properties {
-                let ObjectMember::Property(property) = member else {
-                    continue;
-                };
-                let raw_property = raw_properties.get(property.name.as_str()).copied();
-                let Some(raw_property) = raw_property else {
-                    continue;
-                };
-                if let TypeExpr::Ref { name, .. } = &raw_property.ty {
-                    if engine.is_package_backed_decl(scope_canonical_id, name.as_ref()) {
-                        property.ty = raw_property.ty.clone();
-                        continue;
-                    }
-                }
-                property.ty = preserve_package_backed_symbolic_refs(
-                    &property.ty,
-                    &raw_property.ty,
-                    scope_canonical_id,
-                    engine,
-                );
-            }
-            TypeExpr::Object(Arc::new(object))
-        }
-        _ => materialized.clone(),
-    }
-}
-
-/// Plan §1.12 / J4 — graph-native variant of
-/// [`preserve_package_backed_symbolic_refs`]. Walks two parallel
+/// Plan §1.12 / J4 — graph-native predicate (former TypeExpr
+/// counterpart deleted in Plan §6.15 / N). Walks two parallel
 /// `SemanticNodeId` trees (materialised + raw) and, when the raw
 /// surface exposes a package-backed `DeclRef` / `InstantiationRef` at
 /// a given member, overrides the materialised member's value with
@@ -9289,10 +9198,6 @@ fn preserve_package_backed_symbolic_refs(
 ///
 /// Depth fused at 256 per §4.11. Fuse returns `materialized`
 /// unchanged.
-#[allow(
-    dead_code,
-    reason = "Plan §6.11 / J4 — wired into materialiser callers in K2/K3"
-)]
 pub(crate) fn preserve_package_backed_symbolic_refs_node(
     host: &VerterHost,
     materialized: crate::semantic_query::SemanticNodeId,
@@ -10301,11 +10206,11 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
-/// Plan §1.12 / J1 — graph-native variant of
-/// [`type_expr_needs_member_route_materialization`]. Returns `true`
-/// when the input node's shape requires member-route materialisation
-/// (i.e., a non-package-backed reference target that has not been
-/// determined to participate in a transitive cycle).
+/// Plan §1.12 / J1 — graph-native predicate (former TypeExpr
+/// counterpart deleted in Plan §6.15 / N). Returns `true` when the
+/// input node's shape requires member-route materialisation (i.e., a
+/// non-package-backed reference target that has not been determined
+/// to participate in a transitive cycle).
 ///
 /// Mirrors the TypeExpr predicate's branch structure:
 ///
@@ -10333,10 +10238,6 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
 /// `depth` is fused at 256 to bound runtime on pathological chains
 /// (Plan §4.11). Fuse returns `false` to match the conservative legacy
 /// behaviour.
-#[allow(
-    dead_code,
-    reason = "Plan §6.11 / J1 — wired into materialiser callers in K2/K3"
-)]
 pub(crate) fn type_node_needs_member_route_materialization(
     host: &VerterHost,
     node: crate::semantic_query::SemanticNodeId,
@@ -10526,11 +10427,12 @@ pub(crate) fn node_has_non_object_top_level_surface(
     }
 }
 
-/// Plan §1.12 / J2 — graph-native variant of the TypeExpr predicate
-/// `slot_binding_param_can_stay_symbolic` (defined inline inside
-/// `walk_component_meta_macro_shape_member_types`). Returns `true`
-/// when `node`'s shape allows the slot binding parameter to remain
-/// symbolic without eager materialisation.
+/// Plan §1.12 / J2 — graph-native predicate (former TypeExpr
+/// counterpart, defined inline inside
+/// `walk_component_meta_macro_shape_member_types`, deleted in
+/// Plan §6.15 / N). Returns `true` when `node`'s shape allows the
+/// slot binding parameter to remain symbolic without eager
+/// materialisation.
 ///
 /// Mirrors the TypeExpr predicate's branch structure:
 ///
@@ -10550,10 +10452,6 @@ pub(crate) fn node_has_non_object_top_level_surface(
 ///
 /// Depth-fused at 256 per §4.11. Fuse returns `false` (conservative —
 /// runaway recursion does not allow staying symbolic).
-#[allow(
-    dead_code,
-    reason = "Plan §6.11 / J2 — wired into materialiser callers in K2/K3"
-)]
 pub(crate) fn slot_binding_param_can_stay_symbolic_node(
     host: &VerterHost,
     node: crate::semantic_query::SemanticNodeId,
@@ -10611,9 +10509,10 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
     }
 }
 
-/// Plan §1.12 / J0 — graph-native variant of
-/// [`type_expr_has_package_backed_root`]. Returns `true` when `node`'s
-/// route root resolves to a `/node_modules/`-rooted decl identity.
+/// Plan §1.12 / J0 — graph-native predicate (former TypeExpr
+/// counterpart deleted in Plan §6.15 / N). Returns `true` when
+/// `node`'s route root resolves to a `/node_modules/`-rooted decl
+/// identity.
 ///
 /// Mirrors the TypeExpr predicate's structural recursion:
 ///
@@ -10639,10 +10538,6 @@ pub(crate) fn slot_binding_param_can_stay_symbolic_node(
 /// behaviour: a runaway recursion is treated as "not package-backed"
 /// so the caller does NOT short-circuit through the package-backed
 /// branch.
-#[allow(
-    dead_code,
-    reason = "Plan §6.11 / J0 — wired into materialiser callers in K2/K3"
-)]
 pub(crate) fn type_node_has_package_backed_root(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,

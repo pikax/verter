@@ -10736,12 +10736,12 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// Plan §6.11 / J0 — `type_node_has_package_backed_root` mirrors
-    /// `type_expr_has_package_backed_root` operating on
-    /// `SemanticNodeId`. Equivalence test: for representative shapes
-    /// (DeclRef, InstantiationRef, IndexedAccess chain, Array, KeyOf,
-    /// Tuple), the `_node` predicate produces the same result as the
-    /// TypeExpr counterpart given matching inputs.
+    /// Plan §6.11 / J0 — `type_node_has_package_backed_root` is the
+    /// graph-native package-backed root predicate (former TypeExpr
+    /// counterpart deleted in Plan §6.15 / N). Operates on
+    /// `SemanticNodeId`. Equivalence baseline: for representative
+    /// shapes (DeclRef, InstantiationRef, IndexedAccess chain, Array,
+    /// KeyOf, Tuple), the predicate produces the legacy result.
     #[test]
     fn type_node_has_package_backed_root_matches_type_expr_predicate() {
         use crate::meta_resolve::type_node_has_package_backed_root;
@@ -10895,10 +10895,11 @@ defineProps<{ value: Foo }>()
     }
 
     /// Plan §6.11 / J1 — `type_node_needs_member_route_materialization`
-    /// mirrors `type_expr_needs_member_route_materialization` operating
-    /// on `SemanticNodeId`. Equivalence test on small fixtures across
-    /// DeclRef/InstantiationRef/IndexedAccess/TypeOf/TypeParam/Array/
-    /// KeyOf/Tuple shapes.
+    /// is the graph-native member-route-materialisation predicate
+    /// (former TypeExpr counterpart deleted in Plan §6.15 / N).
+    /// Operates on `SemanticNodeId`. Equivalence baseline on small
+    /// fixtures across DeclRef/InstantiationRef/IndexedAccess/TypeOf/
+    /// TypeParam/Array/KeyOf/Tuple shapes.
     #[test]
     fn type_node_needs_member_route_materialization_matches_type_expr_predicate() {
         use crate::meta_resolve::type_node_needs_member_route_materialization;
@@ -11100,11 +11101,12 @@ defineProps<{ value: Foo }>()
     }
 
     /// Plan §6.11 / J2 — `slot_binding_param_can_stay_symbolic_node`
-    /// mirrors the nested TypeExpr predicate
-    /// `slot_binding_param_can_stay_symbolic` (defined inside
-    /// `walk_component_meta_macro_shape_member_types`). Equivalence on
-    /// small fixtures across deferred shapes (Conditional/Mapped/etc.),
-    /// unions/intersections, and InstantiationRef-with-args.
+    /// is the graph-native slot-binding-param-can-stay-symbolic
+    /// predicate (former nested TypeExpr counterpart, defined inside
+    /// `walk_component_meta_macro_shape_member_types`, deleted in
+    /// Plan §6.15 / N). Equivalence baseline on small fixtures across
+    /// deferred shapes (Conditional/Mapped/etc.), unions/intersections,
+    /// and InstantiationRef-with-args.
     #[test]
     fn slot_binding_param_can_stay_symbolic_node_matches_type_expr_predicate() {
         use crate::meta_resolve::slot_binding_param_can_stay_symbolic_node;
@@ -11305,7 +11307,8 @@ defineProps<{ value: Foo }>()
     }
 
     /// Plan §6.11 / J4 — `preserve_package_backed_symbolic_refs_node`
-    /// mirrors `preserve_package_backed_symbolic_refs` operating on
+    /// is the graph-native parallel-pair walker (former TypeExpr
+    /// counterpart deleted in Plan §6.15 / N). Operates on
     /// `SemanticNodeId` parallel pairs. Walks materialized + raw
     /// surfaces; when a raw property's value is a package-backed
     /// `DeclRef`/`InstantiationRef`, the corresponding materialized
@@ -11762,10 +11765,10 @@ mod macro_field_graph_state_tests {
             )
             .unwrap();
         // Use Pick<Inner, 'primary'> so the field's raw type triggers
-        // `type_expr_needs_member_route_materialization` (which is the
-        // K2-migrated J1 _node predicate). Without member-route shapes
-        // the field would short-circuit via preserve_raw and the
-        // counter would stay at 0 (correct but not discriminating).
+        // the member-route-materialisation path (the K2-migrated J1
+        // `_node` predicate). Without member-route shapes the field
+        // would short-circuit via preserve_raw and the counter would
+        // stay at 0 (correct but not discriminating).
         project
             .upsert_base(
                 "/src/App.vue",
