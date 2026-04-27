@@ -296,6 +296,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             )
                         })
                         .collect();
+
+                    // Plan §4.12 / B0: in `Navigate` mode, Pick/Omit
+                    // preserve the carrier `InstantiationRef` shell so the
+                    // materialiser's registry-route guard can apply
+                    // cycle / package gates on the wrapped root identity
+                    // BEFORE dispatch's `build_builtin_utility` projects.
+                    // Other utilities (Extract, Exclude, NonNullable,
+                    // Partial, Required, Readonly, Mutable, …) keep the
+                    // existing eager-resolve path so they still reduce
+                    // through dispatch as before.
+                    if mode == ProjectionMode::Navigate && matches!(name.as_ref(), "Pick" | "Omit")
+                    {
+                        return graph.intern_node_with_scope(
+                            SemanticNodeData::InstantiationRef {
+                                base: builtin_identity,
+                                args: Arc::from(arg_ids.into_boxed_slice()),
+                            },
+                            scope.clone(),
+                        );
+                    }
                     return match self.execute(SemanticQueryKey::Instantiate {
                         base: builtin_identity,
                         args: Arc::from(arg_ids.into_boxed_slice()),

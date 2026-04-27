@@ -4738,3 +4738,149 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
          (TypeParam) is unresolvable",
     );
 }
+
+/// Plan §4.12 / B0: Pick/Omit lower as `InstantiationRef` carriers in
+/// `Navigate` mode so the materialiser registry-route guard can apply
+/// cycle / package gates BEFORE dispatch's `build_builtin_utility`
+/// projects. Other utilities (Extract, Exclude, NonNullable, Partial,
+/// Required, Readonly, Mutable) and other modes (Expanded, Identity,
+/// Shallow) keep the existing eager-resolve path.
+#[test]
+fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
+    use verter_semantic::analysis::type_expr::{LiteralValue, TypeExpr};
+
+    let host = host();
+    upsert_ts(&host, "/types.ts", "export type Foo = { a: string };");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    let pick = TypeExpr::Ref {
+        name: Arc::from("Pick"),
+        type_arguments: Arc::from(vec![
+            TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            },
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
+        ]),
+    };
+    let pick_navigate = dispatch
+        .lower_type_expr_in_scope_with_mode("/types.ts", &pick, ProjectionMode::Navigate)
+        .expect("Pick lowering succeeds in Navigate mode");
+    let pick_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(pick_navigate)
+        .expect("intern_node_with_scope returns a memoised node");
+    match pick_data.as_ref() {
+        SemanticNodeData::InstantiationRef { base, args } => {
+            assert_eq!(
+                base.decl_name.as_ref(),
+                "Pick",
+                "Navigate-mode Pick must preserve the Pick carrier (B0)"
+            );
+            assert_eq!(
+                base.canonical_id.as_ref(),
+                "__builtin__",
+                "Pick is a builtin utility shell"
+            );
+            assert_eq!(args.len(), 2, "Pick<Foo, 'a'> carries [Foo, 'a']");
+        }
+        other => panic!("expected InstantiationRef carrier; got {other:?}"),
+    }
+
+    // Same shape for Omit.
+    let omit = TypeExpr::Ref {
+        name: Arc::from("Omit"),
+        type_arguments: Arc::from(vec![
+            TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            },
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
+        ]),
+    };
+    let omit_navigate = dispatch
+        .lower_type_expr_in_scope_with_mode("/types.ts", &omit, ProjectionMode::Navigate)
+        .expect("Omit lowering succeeds in Navigate mode");
+    let omit_data = host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(omit_navigate)
+        .expect("intern_node_with_scope returns a memoised node");
+    match omit_data.as_ref() {
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            assert_eq!(
+                base.decl_name.as_ref(),
+                "Omit",
+                "Navigate-mode Omit must preserve the Omit carrier (B0)"
+            );
+        }
+        other => panic!("expected InstantiationRef carrier for Omit; got {other:?}"),
+    }
+
+    // Negative: Extract / Exclude / NonNullable / Partial / Required / Readonly / Mutable
+    // in Navigate mode must NOT preserve a builtin InstantiationRef carrier — they keep
+    // the existing eager-resolve path and either project or fall through to opaque.
+    for util_name in [
+        "Extract",
+        "Exclude",
+        "NonNullable",
+        "Partial",
+        "Required",
+        "Readonly",
+        "Mutable",
+    ] {
+        let expr = TypeExpr::Ref {
+            name: Arc::from(util_name),
+            type_arguments: Arc::from(vec![TypeExpr::Ref {
+                name: Arc::from("Foo"),
+                type_arguments: Arc::from(Vec::<TypeExpr>::new()),
+            }]),
+        };
+        let lowered = dispatch
+            .lower_type_expr_in_scope_with_mode("/types.ts", &expr, ProjectionMode::Navigate)
+            .expect("non-Pick/Omit utility lowering succeeds");
+        let data = host
+            .project_type_store()
+            .semantic_graph()
+            .node_data(lowered)
+            .expect("memoised node");
+        let is_builtin_carrier = matches!(
+            data.as_ref(),
+            SemanticNodeData::InstantiationRef { base, .. }
+                if base.canonical_id.as_ref() == "__builtin__"
+        );
+        assert!(
+            !is_builtin_carrier,
+            "{util_name} in Navigate must NOT preserve a builtin InstantiationRef carrier \
+             (B0 narrows the short-circuit to Pick/Omit only)"
+        );
+    }
+
+    // Negative: Pick<Foo, 'a'> in Expanded / Identity / Shallow modes must NOT
+    // preserve the carrier — those modes still go through dispatch's project.
+    for mode in [
+        ProjectionMode::Expanded,
+        ProjectionMode::Identity,
+        ProjectionMode::Shallow,
+    ] {
+        let lowered = dispatch
+            .lower_type_expr_in_scope_with_mode("/types.ts", &pick, mode)
+            .expect("Pick lowering in non-Navigate mode succeeds");
+        let data = host
+            .project_type_store()
+            .semantic_graph()
+            .node_data(lowered)
+            .expect("memoised node");
+        let is_builtin_carrier = matches!(
+            data.as_ref(),
+            SemanticNodeData::InstantiationRef { base, .. }
+                if base.canonical_id.as_ref() == "__builtin__"
+        );
+        assert!(
+            !is_builtin_carrier,
+            "Pick in {mode:?} must NOT preserve a builtin InstantiationRef carrier — \
+             the B0 short-circuit fires only in Navigate mode",
+        );
+    }
+}
