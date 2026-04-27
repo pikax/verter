@@ -8822,6 +8822,135 @@ fn preserve_package_backed_symbolic_refs(
     }
 }
 
+/// Plan §1.12 / J4 — graph-native variant of
+/// [`preserve_package_backed_symbolic_refs`]. Walks two parallel
+/// `SemanticNodeId` trees (materialised + raw) and, when the raw
+/// surface exposes a package-backed `DeclRef` / `InstantiationRef` at
+/// a given member, overrides the materialised member's value with
+/// the raw graph node so the symbolic Ref is preserved through
+/// materialisation.
+///
+/// Mirrors the TypeExpr predicate's branch structure:
+///
+/// - `(Object(materialized_surface), Object(raw_surface))` —
+///   walk parallel members keyed by name. For each materialised
+///   member with a matching raw member: when the raw member's
+///   value is a `DeclRef` / `InstantiationRef` whose root identity
+///   is package-backed (via
+///   [`component_meta_ref_resolves_to_package_node`]), replace
+///   the materialised member's value with the raw node; otherwise
+///   recurse into the parallel pair. Returns a freshly interned
+///   Object with the rebuilt member list.
+/// - All other shape pairs — return `materialized` unchanged
+///   (matches the TypeExpr `_ => materialized.clone()` arm).
+///
+/// Members of the materialised surface that do NOT have a matching
+/// raw member by name are preserved unchanged.
+///
+/// Depth fused at 256 per §4.11. Fuse returns `materialized`
+/// unchanged.
+#[allow(
+    dead_code,
+    reason = "Plan §6.11 / J4 — wired into materialiser callers in K2/K3"
+)]
+pub(crate) fn preserve_package_backed_symbolic_refs_node(
+    host: &VerterHost,
+    materialized: crate::semantic_query::SemanticNodeId,
+    raw: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::{SemanticNodeData, SurfaceMember, SurfaceView};
+    use rustc_hash::FxHashMap;
+
+    if depth > 256 {
+        return materialized;
+    }
+    let graph = host.project_type_store().semantic_graph();
+    let materialized_data = graph.node_data(materialized);
+    let raw_data = graph.node_data(raw);
+    let (Some(m_data), Some(r_data)) = (materialized_data, raw_data) else {
+        return materialized;
+    };
+    match (m_data.as_ref(), r_data.as_ref()) {
+        (SemanticNodeData::Object(materialized_surface), SemanticNodeData::Object(raw_surface)) => {
+            // Build a name -> raw member map for O(1) parallel lookup.
+            let mut raw_members: FxHashMap<&str, &SurfaceMember> =
+                FxHashMap::with_capacity_and_hasher(raw_surface.members.len(), Default::default());
+            for raw_member in raw_surface.members.iter() {
+                raw_members.insert(raw_member.name.as_ref(), raw_member);
+            }
+
+            let mut new_members: Vec<SurfaceMember> =
+                Vec::with_capacity(materialized_surface.members.len());
+            let mut any_changed = false;
+            for materialised_member in materialized_surface.members.iter() {
+                let Some(&raw_member) = raw_members.get(materialised_member.name.as_ref()) else {
+                    new_members.push(materialised_member.clone());
+                    continue;
+                };
+                // Check whether the raw member's value is a
+                // package-backed Ref. If so, override.
+                let raw_value_data = graph.node_data(raw_member.value);
+                let raw_is_package_backed = raw_value_data
+                    .as_deref()
+                    .map(|d| match d {
+                        SemanticNodeData::DeclRef { identity } => {
+                            component_meta_ref_resolves_to_package_node(identity)
+                        }
+                        SemanticNodeData::InstantiationRef { base, .. } => {
+                            component_meta_ref_resolves_to_package_node(base)
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if raw_is_package_backed {
+                    if materialised_member.value != raw_member.value {
+                        any_changed = true;
+                    }
+                    new_members.push(SurfaceMember {
+                        name: Arc::clone(&materialised_member.name),
+                        value: raw_member.value,
+                        optional: materialised_member.optional,
+                        readonly: materialised_member.readonly,
+                        is_method: materialised_member.is_method,
+                    });
+                    continue;
+                }
+                // Recurse into the parallel pair.
+                let recursed = preserve_package_backed_symbolic_refs_node(
+                    host,
+                    materialised_member.value,
+                    raw_member.value,
+                    depth + 1,
+                );
+                if recursed != materialised_member.value {
+                    any_changed = true;
+                }
+                new_members.push(SurfaceMember {
+                    name: Arc::clone(&materialised_member.name),
+                    value: recursed,
+                    optional: materialised_member.optional,
+                    readonly: materialised_member.readonly,
+                    is_method: materialised_member.is_method,
+                });
+            }
+            if !any_changed {
+                return materialized;
+            }
+            let new_surface = SurfaceView {
+                members: Arc::from(new_members.into_boxed_slice()),
+                call_signatures: Arc::clone(&materialized_surface.call_signatures),
+                construct_signatures: Arc::clone(&materialized_surface.construct_signatures),
+                index_signatures: Arc::clone(&materialized_surface.index_signatures),
+                keyspace: materialized_surface.keyspace,
+                has_index_signature: materialized_surface.has_index_signature,
+            };
+            graph.intern_node(SemanticNodeData::Object(new_surface))
+        }
+        _ => materialized,
+    }
+}
+
 fn preserve_registry_callable_param_member_routes(
     materialized: &verter_semantic::analysis::type_expr::TypeExpr,
     raw: &verter_semantic::analysis::type_expr::TypeExpr,

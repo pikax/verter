@@ -11304,6 +11304,181 @@ defineProps<{ value: Foo }>()
         let _ = type_node_has_package_backed_root(graph, current, 0);
     }
 
+    /// Plan §6.11 / J4 — `preserve_package_backed_symbolic_refs_node`
+    /// mirrors `preserve_package_backed_symbolic_refs` operating on
+    /// `SemanticNodeId` parallel pairs. Walks materialized + raw
+    /// surfaces; when a raw property's value is a package-backed
+    /// `DeclRef`/`InstantiationRef`, the corresponding materialized
+    /// member's value is overridden with the raw graph node (preserving
+    /// the symbolic Ref through materialisation).
+    #[test]
+    fn preserve_package_backed_symbolic_refs_node_overrides_pkg_member() {
+        use crate::meta_resolve::preserve_package_backed_symbolic_refs_node;
+        use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceMember, SurfaceView};
+
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let pkg_identity = package_decl_identity("PkgType");
+        let pkg_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: pkg_identity.clone(),
+        });
+        let local_identity = synthetic_decl_identity("LocalType");
+        let local_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: local_identity.clone(),
+        });
+        let prim_string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let prim_number = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+
+        // Build raw surface: { a: PkgType, b: LocalType, c: string }
+        let raw_surface = SurfaceView {
+            members: StdArc::from(
+                vec![
+                    SurfaceMember {
+                        name: StdArc::from("a"),
+                        value: pkg_ref,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                    SurfaceMember {
+                        name: StdArc::from("b"),
+                        value: local_ref,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                    SurfaceMember {
+                        name: StdArc::from("c"),
+                        value: prim_string,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let raw = graph.intern_node(SemanticNodeData::Object(raw_surface));
+
+        // Materialised version: { a: number, b: number, c: number } —
+        // every property has been collapsed to `number`. The expected
+        // result after preservation: a switches BACK to PkgType (the
+        // raw symbolic Ref is restored), b stays as `number` (raw was
+        // a local Ref, not package-backed), c stays as `number`.
+        let materialized_surface = SurfaceView {
+            members: StdArc::from(
+                vec![
+                    SurfaceMember {
+                        name: StdArc::from("a"),
+                        value: prim_number,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                    SurfaceMember {
+                        name: StdArc::from("b"),
+                        value: prim_number,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                    SurfaceMember {
+                        name: StdArc::from("c"),
+                        value: prim_number,
+                        optional: false,
+                        readonly: false,
+                        is_method: false,
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        };
+        let materialized = graph.intern_node(SemanticNodeData::Object(materialized_surface));
+
+        let result_id = preserve_package_backed_symbolic_refs_node(host, materialized, raw, 0);
+
+        // Inspect the result surface.
+        let Some(result_data) = graph.node_data(result_id) else {
+            panic!("result must have node data");
+        };
+        let SemanticNodeData::Object(result_surface) = result_data.as_ref() else {
+            panic!("result must be an Object surface");
+        };
+        // Member a — must be the raw pkg_ref (package preservation fired).
+        let member_a = &result_surface.members[0];
+        assert_eq!(member_a.name.as_ref(), "a");
+        assert_eq!(
+            member_a.value, pkg_ref,
+            "package-backed raw Ref must be preserved into the materialised member"
+        );
+        // Member b — must remain the materialised `number` (no override).
+        let member_b = &result_surface.members[1];
+        assert_eq!(member_b.name.as_ref(), "b");
+        assert_eq!(
+            member_b.value, prim_number,
+            "local raw Ref must NOT trigger preservation; member stays materialised"
+        );
+        // Member c — must remain materialised (no Ref in raw).
+        let member_c = &result_surface.members[2];
+        assert_eq!(member_c.name.as_ref(), "c");
+        assert_eq!(
+            member_c.value, prim_number,
+            "primitive raw value must NOT trigger preservation"
+        );
+    }
+
+    /// Plan §6.11 / J4 — non-Object pair: pass-through (returns
+    /// materialized unchanged). Mirrors the TypeExpr predicate's
+    /// `_ => materialized.clone()` arm.
+    #[test]
+    fn preserve_package_backed_symbolic_refs_node_passes_through_non_object() {
+        use crate::meta_resolve::preserve_package_backed_symbolic_refs_node;
+        use crate::semantic_query::SemanticNodeData;
+
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let prim_number = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Number,
+        ));
+        let prim_string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+
+        // Both primitives — non-Object. Returns materialized unchanged.
+        let result = preserve_package_backed_symbolic_refs_node(host, prim_number, prim_string, 0);
+        assert_eq!(
+            result, prim_number,
+            "non-Object pair must return materialized unchanged"
+        );
+
+        // Materialized = Object, raw = primitive. Returns materialized unchanged.
+        let obj_surface = empty_surface(vec![]);
+        let obj = graph.intern_node(SemanticNodeData::Object(obj_surface));
+        let result2 = preserve_package_backed_symbolic_refs_node(host, obj, prim_string, 0);
+        assert_eq!(
+            result2, obj,
+            "Object materialized + non-Object raw must pass through unchanged"
+        );
+    }
+
     /// Plan §6.11 / J3 — refactored
     /// `materialize_component_meta_registry_structural_expr` (inner
     /// closure migrated to graph-native cycle tracking). Equivalence
