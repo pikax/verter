@@ -9673,6 +9673,109 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
+/// Plan §1.12 / J1 — graph-native variant of
+/// [`type_expr_needs_member_route_materialization`]. Returns `true`
+/// when the input node's shape requires member-route materialisation
+/// (i.e., a non-package-backed reference target that has not been
+/// determined to participate in a transitive cycle).
+///
+/// Mirrors the TypeExpr predicate's branch structure:
+///
+/// - `DeclRef { identity }` (the no-args case — `Ref { name, [] }`):
+///   returns `!component_meta_ref_resolves_to_package_node(identity)`.
+/// - `InstantiationRef { .. }` (the with-args case): returns `false`,
+///   matching `type_arguments.is_empty() == false`.
+/// - `TypeOf { .. } | IndexedAccess { .. } | TypeParam { .. }`:
+///   `!cycle && !package_backed`. The cycle check uses
+///   [`extract_route_root_identity_node`] to find a root identity for
+///   the BFS — when no identity can be extracted (e.g., bare `TypeOf`
+///   or `TypeParam`), the cycle check is `false` (matching the legacy
+///   adapter behaviour at non-Ref tops). The package check delegates to
+///   [`type_node_has_package_backed_root`] (J0).
+/// - `Array { element, .. } | KeyOf { base }`: recurse into the carrier
+///   (matches `TypeExpr::Array { element }`, `TypeExpr::KeyOf(element)`).
+/// - `Tuple { elements }`: any element flips the predicate (matches
+///   `TypeExpr::Tuple { elements }`).
+/// - `Alias(inner)`: pass-through (graph-native shape).
+/// - All other shapes: `false`.
+///
+/// `local_fence` accumulates dep-signature facts produced by the cycle
+/// BFS so the caller's completion fence remains complete.
+///
+/// `depth` is fused at 256 to bound runtime on pathological chains
+/// (Plan §4.11). Fuse returns `false` to match the conservative legacy
+/// behaviour.
+#[allow(
+    dead_code,
+    reason = "Plan §6.11 / J1 — wired into materialiser callers in K2/K3"
+)]
+pub(crate) fn type_node_needs_member_route_materialization(
+    host: &VerterHost,
+    node: crate::semantic_query::SemanticNodeId,
+    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 {
+        return false;
+    }
+    let graph = host.project_type_store().semantic_graph();
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        // Lowered `Ref { name, type_arguments: [] }` — needs
+        // materialisation when not package-backed.
+        SemanticNodeData::DeclRef { identity } => {
+            !component_meta_ref_resolves_to_package_node(identity)
+        }
+        // Lowered `Ref { name, type_arguments: [non-empty] }` — never
+        // needs materialisation (`type_arguments.is_empty() == false`).
+        SemanticNodeData::InstantiationRef { .. } => false,
+        SemanticNodeData::TypeOf { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::TypeParam { .. } => {
+            // Cycle check — try to extract a route root identity from
+            // the node (legitimate for IndexedAccess chains; absent for
+            // bare TypeOf / TypeParam). When no identity is extractable,
+            // the legacy adapter returns `false` for these shapes, so
+            // the cycle predicate stays `false` here.
+            let cycle_reaches = extract_route_root_identity_node(graph, node, depth + 1)
+                .is_some_and(|extraction| {
+                    let mut sub_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> =
+                        Vec::new();
+                    let result = ref_root_reaches_transitive_cycle_node(
+                        &extraction.root_identity,
+                        host,
+                        &mut sub_fence,
+                    );
+                    local_fence.extend(sub_fence);
+                    result
+                });
+            !cycle_reaches && !type_node_has_package_backed_root(graph, node, depth + 1)
+        }
+        SemanticNodeData::Array { element, .. } => {
+            type_node_needs_member_route_materialization(host, *element, local_fence, depth + 1)
+        }
+        SemanticNodeData::KeyOf { base } => {
+            type_node_needs_member_route_materialization(host, *base, local_fence, depth + 1)
+        }
+        SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|element| {
+            type_node_needs_member_route_materialization(
+                host,
+                element.value,
+                local_fence,
+                depth + 1,
+            )
+        }),
+        SemanticNodeData::Alias(inner) => {
+            type_node_needs_member_route_materialization(host, *inner, local_fence, depth + 1)
+        }
+        _ => false,
+    }
+}
+
 /// Plan §1.12 / J0 — graph-native variant of
 /// [`type_expr_has_package_backed_root`]. Returns `true` when `node`'s
 /// route root resolves to a `/node_modules/`-rooted decl identity.
