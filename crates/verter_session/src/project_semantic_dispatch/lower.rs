@@ -404,7 +404,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     whole_hash,
                     decl_name: Arc::clone(&resolved_name_clone),
                 };
-                if matches!(mode, ProjectionMode::Navigate) {
+                if matches!(mode, ProjectionMode::Navigate | ProjectionMode::Skeleton) {
+                    // Plan §4.21 / R10-2 — Skeleton mode preserves carriers
+                    // (like Navigate) so the cycle-BFS can see recursive refs
+                    // as DeclRef/InstantiationRef in the lowered graph rather
+                    // than collapsed Opaque(RecursiveRef) sentinels. Without
+                    // this, body lowering of DotPathKeys's recursive
+                    // `DotPathKeys<NonNullable<T[K]>>` arm would go eager,
+                    // hit the instantiate_active guard, and emit
+                    // Opaque(RecursiveRef) — which collect_ref_identities_node
+                    // doesn't walk as a DeclRef/InstantiationRef. The
+                    // carrier-preservation makes the recursive identity
+                    // visible to the graph walk.
                     if type_arguments.is_empty() {
                         return graph.intern_node_with_scope(
                             SemanticNodeData::DeclRef {

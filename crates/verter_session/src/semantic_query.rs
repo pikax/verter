@@ -336,12 +336,19 @@ pub enum IndexKey {
 /// - `Shallow`: expose one level of surface members but do not recurse into
 ///   them.
 /// - `Expanded`: recursively materialize the requested projection.
+/// - `Skeleton`: open-generic body access for cycle detection. Plan §4.21
+///   / R10-2. `build_instantiate` synthesizes `TypeParam` shells for
+///   unbound type parameters when invoked in this mode, preserving
+///   project-rule "Navigate/Shallow over open generics preserves type
+///   parameters". Used by `ref_root_reaches_transitive_cycle_node`'s BFS
+///   step. Existing Navigate/Expanded callers see no change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionMode {
     Identity,
     Navigate,
     Shallow,
     Expanded,
+    Skeleton,
 }
 
 /// One hop in a navigation path. Used by [`TypeNavigator::choose_next_hop`]

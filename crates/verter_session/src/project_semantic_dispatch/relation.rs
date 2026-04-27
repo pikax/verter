@@ -956,6 +956,14 @@ fn is_deferred(data: &SemanticNodeData) -> bool {
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::TypeOf { .. }
             | SemanticNodeData::TemplateLiteral { .. }
+            // Plan §4.21 / R10-2 — DeclRef/InstantiationRef carriers are
+            // unresolved references whose concrete content depends on
+            // instantiation. Without a forced unwrap (which we don't do
+            // in Skeleton territory), they cannot be definitively related
+            // to concrete types. Treat as deferred so callers (especially
+            // build_conditional) preserve both branches.
+            | SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
     )
 }
 

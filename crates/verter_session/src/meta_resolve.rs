@@ -1286,6 +1286,62 @@ where
     (count, r)
 }
 
+// =====================================================================
+// Plan §6.2 / §6.6.5 — F-prep canonical-fixture A0 test #3b helper.
+//
+// `with_bfs_child_refs_observer_for_test(target_name, f)` instruments
+// `ref_root_reaches_transitive_cycle_node`'s child-ref collection step
+// to record `child_refs.len()` per visited identity name. Returns the
+// observed count for the target name (or `None` if the BFS did not
+// visit it).
+//
+// Used by F-prep test #3b to mechanically discriminate the rev-9 BFS
+// bug (Navigate → 0 refs at DotPathKeys hop) from the rev-10 fix
+// (Skeleton → ≥1 refs at DotPathKeys hop). Without this assertion the
+// canonical nuxt-ui fixture's pass/fail outcome could be misattributed
+// to other code paths.
+//
+// `#[cfg(test)]`-only: zero footprint outside test builds.
+// =====================================================================
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BFS_CHILD_REFS_OBSERVER: std::cell::RefCell<
+        Option<(String, std::collections::HashMap<String, usize>)>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_bfs_child_refs_observer_for_test<F, R>(target_name: &str, f: F) -> Option<usize>
+where
+    F: FnOnce() -> R,
+{
+    BFS_CHILD_REFS_OBSERVER.with(|c| {
+        *c.borrow_mut() = Some((target_name.to_string(), std::collections::HashMap::new()));
+    });
+    let _r = f();
+    let observed = BFS_CHILD_REFS_OBSERVER.with(|c| {
+        let borrowed = c.borrow();
+        borrowed
+            .as_ref()
+            .and_then(|(target, observations)| observations.get(target).copied())
+    });
+    BFS_CHILD_REFS_OBSERVER.with(|c| {
+        *c.borrow_mut() = None;
+    });
+    observed
+}
+
+/// Test instrumentation: record `count` child refs at the BFS hop for
+/// `decl_name`. No-op outside test builds. No-op if observer not active.
+#[cfg(test)]
+pub(crate) fn record_bfs_child_refs_count_for_test(decl_name: &str, count: usize) {
+    BFS_CHILD_REFS_OBSERVER.with(|c| {
+        if let Some((_, observations)) = c.borrow_mut().as_mut() {
+            observations.insert(decl_name.to_string(), count);
+        }
+    });
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn materialize_component_meta_type_expr_until_stable(
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
@@ -9974,6 +10030,12 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
         #[cfg(test)]
         BFS_VISITED_COUNTER.with(|c| c.set(c.get() + 1));
 
+        // Save decl_name for test instrumentation BEFORE `current` is
+        // moved into the SemanticQueryKey. cfg(test)-only — no production
+        // cost.
+        #[cfg(test)]
+        let current_decl_name_for_test = Arc::clone(&current.decl_name);
+
         let key = SemanticQueryKey::Instantiate {
             base: current,
             args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -10011,6 +10073,13 @@ pub(crate) fn ref_root_reaches_transitive_cycle_node(
 
         let mut child_refs: Vec<(crate::semantic_query::DeclIdentity, bool)> = Vec::new();
         collect_ref_identities_node(graph, body_id, &mut child_refs, 0);
+
+        // Plan §6.2 / §6.6.5 — F-prep test instrumentation. Records
+        // child_refs.len() per visited identity name into the per-thread
+        // observer (no-op when no observer installed).
+        #[cfg(test)]
+        record_bfs_child_refs_count_for_test(current_decl_name_for_test.as_ref(), child_refs.len());
+
         for (child_identity, ref_has_type_args) in child_refs {
             let cycle_has_complex_signal = body_has_complex_signal || ref_has_type_args;
             if &child_identity == root_identity && cycle_has_complex_signal {
@@ -10204,7 +10273,7 @@ fn has_complex_cycle_guard_surface_node(
 /// `depth` fuses recursion at 256 (Plan §4.11). The fuse returns
 /// without recording new identities to bound runtime on
 /// pathological graphs.
-fn collect_ref_identities_node(
+pub(crate) fn collect_ref_identities_node(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
     out: &mut Vec<(crate::semantic_query::DeclIdentity, bool)>,
@@ -10572,6 +10641,7 @@ fn resolved_meta_cache_key(
             ProjectionMode::Navigate => 2,
             ProjectionMode::Shallow => 3,
             ProjectionMode::Expanded => 4,
+            ProjectionMode::Skeleton => 5,
         },
     }
 }

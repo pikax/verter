@@ -417,7 +417,7 @@ key: string, } } | "KeyOf";
  * rationale as [`MaterializationScopeAudit`] — keeps audit consumers
  * independent of the dispatch types. Plan §3.4.
  */
-export type ProjectionModeAudit = "Identity" | "Navigate" | "Shallow" | "Expanded";
+export type ProjectionModeAudit = "Identity" | "Navigate" | "Shallow" | "Expanded" | "Skeleton";
 
 /**
  * One projection step (indexed-access / member-access / keyof / …).

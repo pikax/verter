@@ -899,6 +899,9 @@ pub enum ProjectionModeAudit {
     Shallow,
     /// Expanded — recursively materialize.
     Expanded,
+    /// Skeleton — open-generic body access for cycle detection. Plan §4.21
+    /// / R10-2.
+    Skeleton,
 }
 
 impl From<crate::semantic_query::ProjectionMode> for ProjectionModeAudit {
@@ -908,6 +911,7 @@ impl From<crate::semantic_query::ProjectionMode> for ProjectionModeAudit {
             crate::semantic_query::ProjectionMode::Navigate => Self::Navigate,
             crate::semantic_query::ProjectionMode::Shallow => Self::Shallow,
             crate::semantic_query::ProjectionMode::Expanded => Self::Expanded,
+            crate::semantic_query::ProjectionMode::Skeleton => Self::Skeleton,
         }
     }
 }

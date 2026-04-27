@@ -343,7 +343,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &mut substitutions,
                     body_mode,
                 )
+            } else if body_mode == crate::semantic_query::ProjectionMode::Skeleton {
+                // Plan §4.21 / R10-2 — Skeleton mode preserves open generics.
+                // Bind unbound param to a TypeParam shell so body lowering
+                // produces TypeParam graph nodes (instead of resolving
+                // T-refs to Opaque(Miss)). The relation engine treats
+                // TypeParam as deferred → Conditional branches stay live
+                // → collect_ref_identities_node walks both → recursive refs
+                // through nested mapped/template-literal/conditional
+                // bodies become visible to the cycle BFS.
+                let display_name: Arc<str> = Arc::from(param.name.as_str());
+                let decl_identity = crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::clone(decl_canonical),
+                    whole_hash: decl_whole_hash,
+                    decl_name: Arc::clone(decl_name),
+                };
+                self.graph().intern_node_with_scope(
+                    SemanticNodeData::TypeParam {
+                        decl: decl_identity,
+                        param_index: index as u16,
+                        constraint: None,
+                        default: None,
+                        display_name,
+                    },
+                    scope.clone(),
+                )
             } else {
+                // Existing Navigate/Expanded behavior preserved: unbound
+                // param means `Opaque(Miss)` propagates through the body.
+                // Callers that genuinely need open-generic access must
+                // explicitly request Skeleton mode.
                 continue;
             };
             env.insert(param.name.clone(), arg_id);

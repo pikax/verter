@@ -628,6 +628,11 @@ enum ModeSlot {
     Navigate,
     Shallow,
     Expanded,
+    /// Plan §4.21 / R10-2 — Skeleton mode. Distinct semantics from
+    /// Identity/Navigate/Shallow/Expanded (preserves open generics as
+    /// TypeParam shells); does NOT backfill or get backfilled by other
+    /// modes.
+    Skeleton,
 }
 
 /// Per-family per-slot warm storage. Each slot independently holds an
@@ -640,6 +645,9 @@ struct FamilySlots {
     navigate: Option<MemoEntry>,
     shallow: Option<MemoEntry>,
     expanded: Option<MemoEntry>,
+    /// Plan §4.21 / R10-2 — Skeleton mode slot. Independent from
+    /// Navigate/Expanded; does NOT participate in backfill.
+    skeleton: Option<MemoEntry>,
 }
 
 impl FamilySlots {
@@ -650,6 +658,7 @@ impl FamilySlots {
             ModeSlot::Navigate => self.navigate.as_ref(),
             ModeSlot::Shallow => self.shallow.as_ref(),
             ModeSlot::Expanded => self.expanded.as_ref(),
+            ModeSlot::Skeleton => self.skeleton.as_ref(),
         }
     }
 
@@ -660,6 +669,7 @@ impl FamilySlots {
             ModeSlot::Navigate => &mut self.navigate,
             ModeSlot::Shallow => &mut self.shallow,
             ModeSlot::Expanded => &mut self.expanded,
+            ModeSlot::Skeleton => &mut self.skeleton,
         }
     }
 
@@ -674,11 +684,11 @@ impl FamilySlots {
     /// (the primary slot + any previously-empty narrower slots that were
     /// backfilled). Plan §6 / §13.2 — the caller registers a
     /// reverse-index entry per populated slot in the per-canonical
-    /// `canonical_to_entries` index. Capped at 5 (single + identity +
-    /// navigate + shallow + expanded), so a stack `SmallVec` keeps
-    /// allocation off the hot path.
-    fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) -> smallvec::SmallVec<[ModeSlot; 5]> {
-        let mut populated = smallvec::SmallVec::<[ModeSlot; 5]>::new();
+    /// `canonical_to_entries` index. Capped at 6 (single + identity +
+    /// navigate + shallow + expanded + skeleton), so a stack `SmallVec`
+    /// keeps allocation off the hot path.
+    fn publish(&mut self, slot: ModeSlot, entry: MemoEntry) -> smallvec::SmallVec<[ModeSlot; 6]> {
+        let mut populated = smallvec::SmallVec::<[ModeSlot; 6]>::new();
         *self.slot_mut(slot) = Some(entry.clone());
         populated.push(slot);
         for narrower in backfill_targets(slot) {
@@ -698,6 +708,7 @@ impl FamilySlots {
             &self.navigate,
             &self.shallow,
             &self.expanded,
+            &self.skeleton,
         ];
         slots.iter().filter(|s| s.is_some()).count()
     }
@@ -946,6 +957,9 @@ impl Drop for InFlightStatsGuard<'_> {
 /// Slot fan-out for backfill. `Expanded` satisfies `Shallow` / `Navigate` /
 /// `Identity`; `Shallow` satisfies `Navigate` / `Identity`; `Navigate`
 /// satisfies `Identity`. `Identity` and `Single` backfill nothing.
+/// `Skeleton` is independent of the Identity/Navigate/Shallow/Expanded
+/// hierarchy (different semantics: preserves open generics) — it backfills
+/// nothing AND nothing backfills it (plan §4.21 / R10-2).
 fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
@@ -953,6 +967,7 @@ fn backfill_targets(slot: ModeSlot) -> &'static [ModeSlot] {
         ModeSlot::Navigate => &[ModeSlot::Identity],
         ModeSlot::Shallow => &[ModeSlot::Navigate, ModeSlot::Identity],
         ModeSlot::Expanded => &[ModeSlot::Shallow, ModeSlot::Navigate, ModeSlot::Identity],
+        ModeSlot::Skeleton => &[],
     }
 }
 
@@ -962,6 +977,7 @@ fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
         ProjectionMode::Navigate => ModeSlot::Navigate,
         ProjectionMode::Shallow => ModeSlot::Shallow,
         ProjectionMode::Expanded => ModeSlot::Expanded,
+        ProjectionMode::Skeleton => ModeSlot::Skeleton,
     }
 }
 

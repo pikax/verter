@@ -1050,6 +1050,7 @@ fn projection_mode_to_string(mode: host::ProjectionMode) -> String {
         host::ProjectionMode::Navigate => "navigate".to_string(),
         host::ProjectionMode::Shallow => "shallow".to_string(),
         host::ProjectionMode::Expanded => "expanded".to_string(),
+        host::ProjectionMode::Skeleton => "skeleton".to_string(),
     }
 }
 

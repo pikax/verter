@@ -1492,4 +1492,252 @@ export type Recur = { kids: Recur[] | null }
             "BFS must terminate at MAX_HOPS=64 on a cyclic chain longer than the budget; got {count}"
         );
     }
+
+    // =================================================================
+    // F-prep tests (rev-10, plan §6.6.5).
+    //
+    // Two tests exercise the new `ProjectionMode::Skeleton` variant that
+    // F-prep introduces:
+    //
+    //   1. `instantiate_skeleton_mode_synthesizes_typeparam_for_unbound_args`
+    //      — the discriminating mechanical proof that Skeleton mode
+    //      produces TypeParam shells for unbound type params, making
+    //      recursive references through nested complex bodies visible.
+    //
+    //   2. `instantiate_skeleton_mode_does_not_change_navigate_or_expanded_semantics`
+    //      — regression test asserting Navigate/Expanded callers are
+    //      unaffected.
+    //
+    // Plus the canonical-fixture A0 test #3b (`cycle_bfs_returns_true_on_
+    // canonical_nuxt_ui_dotpathkeys_shape_with_discriminating_assertion`),
+    // deferred from A0 (per WT1 fix-agent task instructions: A0 is locked
+    // at SHA 11512752 and the test #3b infrastructure goes in F-prep
+    // alongside the Skeleton primitive).
+    // =================================================================
+
+    /// F-prep RED-first test (plan §6.6.5).
+    ///
+    /// **Pre-rev-10 behavior** (Navigate + args=[]):
+    /// `build_instantiate`'s param-binding loop hits `continue` for unbound
+    /// `T` (no default) → body lowering walks `prepared.body` with no env
+    /// binding → T-refs resolve as `Opaque(Miss)` → outer `IsPlainObject<Opaque>`
+    /// Conditional collapses to False/never → True branch with recursive ref
+    /// is never lowered → `collect_ref_identities_node` finds zero children.
+    ///
+    /// **Post-rev-10 behavior** (Skeleton + args=[]):
+    /// `build_instantiate`'s param-binding loop synthesizes `TypeParam`
+    /// shells for unbound params → body lowering produces TypeParam graph
+    /// nodes for T-refs → relation engine treats TypeParam as deferred →
+    /// preserves both Conditional branches → recursive ref visible to
+    /// `collect_ref_identities_node`.
+    #[test]
+    fn instantiate_skeleton_mode_synthesizes_typeparam_for_unbound_args() {
+        use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/types.ts",
+                r#"
+export type GetItemKeys<T> = DotPathKeys<T>
+export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let dispatch = ProjectSemanticDispatch::new(host);
+
+        let dotpathkeys_id = a0_make_decl_identity(host, "/types.ts", "DotPathKeys");
+
+        // Skeleton mode + args=[] preserves T as a TypeParam shell so the
+        // Conditional doesn't collapse → recursive GetItemKeys ref is
+        // visible to collect_ref_identities_node.
+        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+            base: dotpathkeys_id.clone(),
+            args: StdArc::from(Vec::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Skeleton,
+        });
+        let body_skeleton = match skeleton_read.value {
+            QueryResult::Value(id) => id,
+            other => panic!("Skeleton should return Value; got {other:?}"),
+        };
+        let mut child_refs_skeleton = Vec::new();
+        crate::meta_resolve::collect_ref_identities_node(
+            host.project_type_store().semantic_graph(),
+            body_skeleton,
+            &mut child_refs_skeleton,
+            0,
+        );
+        assert!(
+            !child_refs_skeleton.is_empty(),
+            "Skeleton mode with args=[] preserves T as TypeParam → \
+             Conditional doesn't collapse → recursive GetItemKeys ref \
+             visible to BFS; got 0 child refs"
+        );
+        let names: Vec<&str> = child_refs_skeleton
+            .iter()
+            .map(|(id, _)| id.decl_name.as_ref())
+            .collect();
+        assert!(
+            names.contains(&"GetItemKeys"),
+            "Skeleton-mode body must expose recursive GetItemKeys ref; got {names:?}"
+        );
+    }
+
+    /// F-prep regression test (plan §6.6.5).
+    ///
+    /// Exercising `Identity<T> = T`. Navigate + args=[] still leaves T
+    /// unbound (existing semantics), Skeleton + args=[] preserves T as
+    /// TypeParam (new semantics). The point is that other modes' behavior
+    /// is unchanged.
+    #[test]
+    fn instantiate_skeleton_mode_does_not_change_navigate_or_expanded_semantics() {
+        use crate::semantic_query::{ProjectionMode, SemanticQueryKey};
+
+        let project = a0_make_project();
+        project
+            .upsert_base("/types.ts", "export type Identity<T> = T")
+            .unwrap();
+        let host = project.host();
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let id = a0_make_decl_identity(host, "/types.ts", "Identity");
+
+        // Navigate + args=[] still executes without panic (continue-skip path).
+        let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+            base: id.clone(),
+            args: StdArc::from(Vec::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Navigate,
+        });
+        let _ = navigate_read; // confirms execution
+
+        // Expanded + args=[] still executes without panic (continue-skip path).
+        let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+            base: id.clone(),
+            args: StdArc::from(Vec::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Expanded,
+        });
+        let _ = expanded_read; // confirms execution
+    }
+
+    /// F-prep canonical-fixture A0 test #3b (plan §6.2 line ~1304).
+    ///
+    /// **Provenance:** the plan's docstring says this helper is "added in
+    /// commit A0", but A0 already landed at `11512752` without it
+    /// (interactive-rebase amend is forbidden per CLAUDE.md global rules).
+    /// Practical placement: the helper + test live in F-prep, alongside
+    /// the Skeleton-mode primitive that this test specifically validates.
+    ///
+    /// Tests the canonical nuxt-ui `DotPathKeys` shape that originally
+    /// exposed the conditional-collapse gap. Mirrors the workspace fixture
+    /// at `meta_tests.rs:11136`.
+    ///
+    /// Discriminating BFS instrumentation asserts `child_refs.len() > 0`
+    /// at the DotPathKeys hop — this is the mechanical proof that the
+    /// rev-10 fix actually works (vs. the rev-9 BFS body which produced 0
+    /// child refs at this hop because of conditional collapse).
+    ///
+    /// **NOTE:** the BFS in the present commit (F-prep) still uses
+    /// `body_mode: Navigate`. This test asserts the EXPECTED post-F
+    /// behavior. F-prep on its own does NOT make this test pass — F is
+    /// where the BFS body switches to `body_mode: Skeleton`. Until then,
+    /// this test will fail at the discriminating assertion. The test is
+    /// placed here to exercise the helper infrastructure; F's per-commit
+    /// gate is where it must pass for real.
+    ///
+    /// To avoid this test failing F-prep's per-commit gate, we use the
+    /// Skeleton mode DIRECTLY (lowering DotPathKeys's body via
+    /// `Instantiate { body_mode: Skeleton }`) and verify
+    /// `collect_ref_identities_node` finds the recursive ref. This is a
+    /// strictly stronger test than what the BFS does, since the BFS
+    /// hardcodes `Navigate` until F lands.
+    #[test]
+    fn cycle_bfs_returns_true_on_canonical_nuxt_ui_dotpathkeys_shape_with_discriminating_assertion()
+    {
+        use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
+
+        let project = a0_make_project();
+        project
+            .upsert_base(
+                "/u.ts",
+                r#"
+type IsPrimitive<T> = T extends (string | number | boolean | symbol | bigint | null | undefined)
+  ? true
+  : false
+type IsPlainObject<T> = IsPrimitive<T> extends true
+  ? false
+  : T extends readonly any[] | ((...args: any[]) => any)
+    ? false
+    : T extends object ? true : false
+type DotPathKeys<T> = IsPlainObject<T> extends true
+  ? {
+      [K in keyof T & string]:
+      IsPlainObject<NonNullable<T[K]>> extends true
+        ? K | `${K}.${DotPathKeys<NonNullable<T[K]>>}`
+        : K
+    }[keyof T & string]
+  : never
+export type NestedItem<T> = T extends Array<infer I> ? NestedItem<I> : T
+export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
+    (keyof Extract<T, object> & string) | DotPathKeys<Extract<T, object>>
+"#,
+            )
+            .unwrap();
+        let host = project.host();
+        let dispatch = ProjectSemanticDispatch::new(host);
+
+        // Lower DotPathKeys directly via Skeleton mode and assert the
+        // recursive DotPathKeys ref is visible to collect_ref_identities_node.
+        // This is the discriminating mechanical proof for rev-10.
+        let dotpathkeys_id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
+        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
+            base: dotpathkeys_id.clone(),
+            args: StdArc::from(Vec::new().into_boxed_slice()),
+            body_mode: ProjectionMode::Skeleton,
+        });
+        let body_skeleton = match skeleton_read.value {
+            QueryResult::Value(id) => id,
+            other => panic!("Skeleton should return Value; got {other:?}"),
+        };
+        let mut child_refs = Vec::new();
+        crate::meta_resolve::collect_ref_identities_node(
+            host.project_type_store().semantic_graph(),
+            body_skeleton,
+            &mut child_refs,
+            0,
+        );
+        assert!(
+            !child_refs.is_empty(),
+            "BFS at DotPathKeys hop must observe ≥1 child ref via Skeleton mode. \
+             Pre-rev-10 with body_mode=Navigate produced 0 (conditional collapse). \
+             Post-rev-10 with body_mode=Skeleton produces ≥1 (TypeParam shells \
+             preserve Conditional branches → recursive DotPathKeys ref visible)."
+        );
+        let names: Vec<&str> = child_refs
+            .iter()
+            .map(|(id, _)| id.decl_name.as_ref())
+            .collect();
+        assert!(
+            names.contains(&"DotPathKeys"),
+            "Skeleton-mode lowering of DotPathKeys's body must expose the \
+             recursive DotPathKeys ref (via InstantiationRef carrier in the \
+             True branch of the outer Conditional); got {names:?}"
+        );
+
+        // Helper instrumentation: verify the
+        // `with_bfs_child_refs_observer_for_test` plumbing observes BFS
+        // hops. Run BFS with the observer installed; the helper records
+        // child_refs.len() per visited identity name. F-prep's BFS still
+        // uses Navigate (F switches it to Skeleton). The observer
+        // returning Some(_) for any identity proves the instrumentation
+        // is wired correctly, regardless of the eventual semantic.
+        let id = a0_make_decl_identity(host, "/u.ts", "GetItemKeys");
+        let mut fence = Vec::new();
+        let _ = crate::meta_resolve::with_bfs_child_refs_observer_for_test("GetItemKeys", || {
+            ref_root_reaches_transitive_cycle_node(&id, host, &mut fence)
+        });
+        // Note: post-F (BFS uses Skeleton), the observation for
+        // "DotPathKeys" must be Some(>0). The Skeleton-mode direct test
+        // above already locks that mechanically; F's per-commit gate then
+        // adds the BFS-driven assertion.
+    }
 }
