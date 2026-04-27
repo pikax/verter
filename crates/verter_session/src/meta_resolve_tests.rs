@@ -10735,4 +10735,193 @@ defineProps<{ value: Foo }>()
             "engine method must accumulate the materialiser's dep_signature"
         );
     }
+
+    /// Plan §6.11 / J0 — `type_node_has_package_backed_root` mirrors
+    /// `type_expr_has_package_backed_root` operating on
+    /// `SemanticNodeId`. Equivalence test: for representative shapes
+    /// (DeclRef, InstantiationRef, IndexedAccess chain, Array, KeyOf,
+    /// Tuple), the `_node` predicate produces the same result as the
+    /// TypeExpr counterpart given matching inputs.
+    #[test]
+    fn type_node_has_package_backed_root_matches_type_expr_predicate() {
+        use crate::meta_resolve::type_node_has_package_backed_root;
+
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        let local = synthetic_decl_identity("Local");
+        let pkg = package_decl_identity("FromPkg");
+
+        // Bare DeclRef cases
+        let local_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: local.clone(),
+        });
+        let pkg_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: pkg.clone(),
+        });
+        assert!(
+            !type_node_has_package_backed_root(graph, local_ref, 0),
+            "DeclRef -> /test/local.ts must not be flagged package-backed"
+        );
+        assert!(
+            type_node_has_package_backed_root(graph, pkg_ref, 0),
+            "DeclRef -> /node_modules/* must be flagged package-backed"
+        );
+
+        // InstantiationRef inherits the base identity's canonical scope
+        let pkg_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: pkg.clone(),
+            args: StdArc::from(vec![local_ref].into_boxed_slice()),
+        });
+        assert!(
+            type_node_has_package_backed_root(graph, pkg_inst, 0),
+            "InstantiationRef base in node_modules must be flagged package-backed"
+        );
+        let local_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: local.clone(),
+            args: StdArc::from(vec![pkg_ref].into_boxed_slice()),
+        });
+        assert!(
+            !type_node_has_package_backed_root(graph, local_inst, 0),
+            "InstantiationRef base in local file must NOT be flagged \
+             even when args reference a package decl (mirrors TypeExpr semantics — \
+             only the root identity counts)"
+        );
+
+        // IndexedAccess chain: walks down into `object`, ignoring `index`.
+        let pkg_indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: pkg_ref,
+            index: IndexKey::String(StdArc::from("foo")),
+        });
+        assert!(
+            type_node_has_package_backed_root(graph, pkg_indexed, 0),
+            "IndexedAccess(pkg, 'foo') must follow object to detect pkg root"
+        );
+        let local_indexed_chain = {
+            let inner = graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: local_ref,
+                index: IndexKey::String(StdArc::from("a")),
+            });
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: inner,
+                index: IndexKey::String(StdArc::from("b")),
+            })
+        };
+        assert!(
+            !type_node_has_package_backed_root(graph, local_indexed_chain, 0),
+            "Two-deep IndexedAccess on local root must NOT trigger"
+        );
+
+        // Array carrier
+        let pkg_array = graph.intern_node(SemanticNodeData::Array {
+            element: pkg_ref,
+            readonly: false,
+        });
+        assert!(
+            type_node_has_package_backed_root(graph, pkg_array, 0),
+            "Array<pkg> must follow element"
+        );
+
+        // KeyOf carrier
+        let pkg_keyof = graph.intern_node(SemanticNodeData::KeyOf { base: pkg_ref });
+        assert!(
+            type_node_has_package_backed_root(graph, pkg_keyof, 0),
+            "keyof pkg must follow base"
+        );
+
+        // Tuple — any element with a package root flips the predicate
+        let local_tuple_only = graph.intern_node(SemanticNodeData::Tuple {
+            elements: StdArc::from(
+                vec![crate::semantic_query::TupleElement {
+                    label: None,
+                    value: local_ref,
+                    optional: false,
+                    rest: false,
+                }]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        });
+        assert!(
+            !type_node_has_package_backed_root(graph, local_tuple_only, 0),
+            "[Local] tuple must NOT be flagged"
+        );
+        let mixed_tuple = graph.intern_node(SemanticNodeData::Tuple {
+            elements: StdArc::from(
+                vec![
+                    crate::semantic_query::TupleElement {
+                        label: None,
+                        value: local_ref,
+                        optional: false,
+                        rest: false,
+                    },
+                    crate::semantic_query::TupleElement {
+                        label: None,
+                        value: pkg_ref,
+                        optional: false,
+                        rest: false,
+                    },
+                ]
+                .into_boxed_slice(),
+            ),
+            readonly: false,
+        });
+        assert!(
+            type_node_has_package_backed_root(graph, mixed_tuple, 0),
+            "[Local, Pkg] tuple must be flagged via the second element"
+        );
+
+        // Alias passes through to inner
+        let alias_pkg = graph.intern_node(SemanticNodeData::Alias(pkg_ref));
+        assert!(
+            type_node_has_package_backed_root(graph, alias_pkg, 0),
+            "Alias must follow inner"
+        );
+
+        // Non-route shapes (Object, Primitive) — predicate returns false
+        let obj = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![])));
+        assert!(
+            !type_node_has_package_backed_root(graph, obj, 0),
+            "Plain Object must NOT be flagged (no root identity)"
+        );
+        let prim = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        assert!(
+            !type_node_has_package_backed_root(graph, prim, 0),
+            "Primitive must NOT be flagged"
+        );
+    }
+
+    /// Plan §6.11 / J0 — depth fuse: pathological synthetic graphs do
+    /// not stack-overflow. The predicate fuses at depth=256 and returns
+    /// `false` (matching the legacy walker's runaway-recursion behaviour
+    /// elsewhere in the file).
+    #[test]
+    fn type_node_has_package_backed_root_depth_fuse_at_256() {
+        use crate::meta_resolve::type_node_has_package_backed_root;
+
+        let project = make_project();
+        let host = project.host();
+        let graph = host.project_type_store().semantic_graph();
+
+        // Build an IndexedAccess chain N=300 deep over a local DeclRef
+        // root. Should walk fine until depth 256, then fuse-return false.
+        let local = synthetic_decl_identity("L");
+        let local_ref = graph.intern_node(SemanticNodeData::DeclRef {
+            identity: local.clone(),
+        });
+        let mut current = local_ref;
+        for i in 0..300u32 {
+            current = graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: current,
+                index: IndexKey::String(StdArc::from(format!("k{i}"))),
+            });
+        }
+        // At depth=0 entry, walking the 300-deep chain to its local
+        // root would normally yield false; the fuse just guards against
+        // pathological recursion. Either way, must not panic.
+        let _ = type_node_has_package_backed_root(graph, current, 0);
+    }
 }

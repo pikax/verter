@@ -9673,6 +9673,77 @@ pub(crate) fn component_meta_ref_resolves_to_package_node(
     canonical_resolves_to_package(identity.canonical_id.as_ref())
 }
 
+/// Plan §1.12 / J0 — graph-native variant of
+/// [`type_expr_has_package_backed_root`]. Returns `true` when `node`'s
+/// route root resolves to a `/node_modules/`-rooted decl identity.
+///
+/// Mirrors the TypeExpr predicate's structural recursion:
+///
+/// - `DeclRef` / `InstantiationRef` — terminal; checks root identity
+///   via [`component_meta_ref_resolves_to_package_node`] (commit C +
+///   §1.12).
+/// - `IndexedAccess { object, .. }` — recurses into `object` (matches
+///   `TypeExpr::IndexedAccess { object, .. }`).
+/// - `Array { element, .. }` — recurses into `element` (matches
+///   `TypeExpr::Array { element, .. }`).
+/// - `KeyOf { base }` — recurses into `base` (matches
+///   `TypeExpr::KeyOf(object)`).
+/// - `Tuple { elements }` — short-circuits to `true` on any element
+///   whose `value` flips the predicate (matches `TypeExpr::Tuple`).
+/// - `Alias(inner)` — pass-through (graph-native shape; TypeExpr has
+///   no equivalent because it is not interned).
+/// - All other shapes — `false` (matches the TypeExpr `_` arm).
+///
+/// `depth` is fused at 256 to bound runtime on pathological chains
+/// (Plan §4.11 convention; matches
+/// [`has_complex_cycle_guard_surface_node`] etc.). On fuse the
+/// predicate returns `false`, matching the conservative legacy
+/// behaviour: a runaway recursion is treated as "not package-backed"
+/// so the caller does NOT short-circuit through the package-backed
+/// branch.
+#[allow(
+    dead_code,
+    reason = "Plan §6.11 / J0 — wired into materialiser callers in K2/K3"
+)]
+pub(crate) fn type_node_has_package_backed_root(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: crate::semantic_query::SemanticNodeId,
+    depth: u32,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    if depth > 256 {
+        return false;
+    }
+    let Some(data) = graph.node_data(node) else {
+        return false;
+    };
+    match data.as_ref() {
+        SemanticNodeData::DeclRef { identity } => {
+            component_meta_ref_resolves_to_package_node(identity)
+        }
+        SemanticNodeData::InstantiationRef { base, .. } => {
+            component_meta_ref_resolves_to_package_node(base)
+        }
+        SemanticNodeData::IndexedAccess { object, .. } => {
+            type_node_has_package_backed_root(graph, *object, depth + 1)
+        }
+        SemanticNodeData::Array { element, .. } => {
+            type_node_has_package_backed_root(graph, *element, depth + 1)
+        }
+        SemanticNodeData::KeyOf { base } => {
+            type_node_has_package_backed_root(graph, *base, depth + 1)
+        }
+        SemanticNodeData::Tuple { elements, .. } => elements
+            .iter()
+            .any(|element| type_node_has_package_backed_root(graph, element.value, depth + 1)),
+        SemanticNodeData::Alias(inner) => {
+            type_node_has_package_backed_root(graph, *inner, depth + 1)
+        }
+        _ => false,
+    }
+}
+
 /// Plan §1.12 — graph-native variant of the body inline-materialisation
 /// preference predicate. Returns `true` when the body shape is suitable
 /// for inline materialisation through the registry-route entry.
