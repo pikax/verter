@@ -203,18 +203,16 @@ pub fn resolved_macro_to_expansion_via_solver(
     } else {
         macro_meta.declaration.canonical_source.as_str()
     };
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-
-    let solve_via_dispatch =
-        |engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>, text: &str| -> TypeExpr {
-            let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
-            if scope.is_empty() {
-                return parsed;
-            }
-            engine
-                .project_expr_surface_expr(scope, &parsed)
-                .unwrap_or(parsed)
-        };
+    // Phase 5d (sub-plan §4.1 type_expansion_verter.rs row): both
+    // Class A sites here are migrated to the shared dispatch helper.
+    let solve_via_dispatch = |text: &str| -> TypeExpr {
+        let parsed = crate::resolver_core::type_text_parser::parse_type_text(text);
+        if scope.is_empty() {
+            return parsed;
+        }
+        crate::meta_resolve::project_expr_class_a_via_dispatch(host, scope, &parsed)
+            .unwrap_or(parsed)
+    };
 
     let mut members = Vec::new();
 
@@ -222,7 +220,7 @@ pub fn resolved_macro_to_expansion_via_solver(
         let type_expr = prop
             .type_annotation
             .as_deref()
-            .map(|text| solve_via_dispatch(&mut engine, text))
+            .map(solve_via_dispatch)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
         members.push(ExpandedMember {
@@ -238,7 +236,7 @@ pub fn resolved_macro_to_expansion_via_solver(
         let type_expr = emit
             .payload_type
             .as_deref()
-            .map(|text| solve_via_dispatch(&mut engine, text))
+            .map(solve_via_dispatch)
             .unwrap_or_else(|| TypeExpr::primitive(PrimitiveName::Unknown));
 
         members.push(ExpandedMember {
@@ -268,8 +266,7 @@ pub fn resolved_macro_to_expansion_via_solver(
 
     let type_expr = if !macro_meta.type_name.is_empty() && !scope.is_empty() {
         let parsed = TypeExpr::named(&macro_meta.type_name);
-        engine
-            .project_expr_surface_expr(scope, &parsed)
+        crate::meta_resolve::project_expr_class_a_via_dispatch(host, scope, &parsed)
             .unwrap_or(parsed)
     } else if !macro_meta.type_name.is_empty() {
         TypeExpr::named(&macro_meta.type_name)

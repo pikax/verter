@@ -2290,18 +2290,17 @@ impl VerterHost {
         canonical_id: &str,
         type_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        // D-Cutover §5.8: route through CMQE (dispatch-backed) instead
-        // of SessionSolverHost + TypeQueryEngine. `project_type_surface_expr`
-        // expands the named type through the shared semantic-graph memo
-        // (empty-path Expanded ProjectPath now unwraps DeclAnchors per
-        // commit 8f964727), matching the retired solver's fixed-point
-        // expansion.
+        // Phase 5d (sub-plan §4.1 host_manage row): the Class B
+        // `project_type_surface_expr` site here remains on the engine
+        // helper for 4a; it migrates with the rest of Class B in
+        // commit 4c. The Class A `project_expr_surface_expr` fallback
+        // routes through the shared dispatch helper.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
         let expanded = engine
             .project_type_surface_expr(canonical_id, type_name)
             .or_else(|| {
                 let expr = verter_semantic::analysis::type_expr::TypeExpr::named(type_name);
-                engine.project_expr_surface_expr(canonical_id, &expr)
+                crate::meta_resolve::project_expr_class_a_via_dispatch(self, canonical_id, &expr)
             })?;
         let mut shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
@@ -2328,12 +2327,14 @@ impl VerterHost {
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
         let _ = self.ensure_indexed_ready(scope);
-        // D-Cutover §5.8: CMQE-backed expansion (see the sibling
-        // `expand_project_intrinsic_shape_for_canonical` note).
+        // Phase 5d (sub-plan §4.1 host_manage row): Class A path via
+        // the shared dispatch helper. The intrinsic-member
+        // materialiser still uses the engine for its own bundle-level
+        // scope cache.
+        let expanded =
+            crate::meta_resolve::project_expr_class_a_via_dispatch(self, scope, &tag_type)
+                .unwrap_or_else(|| tag_type.clone());
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
-        let expanded = engine
-            .project_expr_surface_expr(scope, &tag_type)
-            .unwrap_or_else(|| tag_type.clone());
         let mut tag_shape =
             verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
         Self::materialize_project_intrinsic_shape_members(&mut tag_shape, &mut engine, scope);
@@ -2345,9 +2346,15 @@ impl VerterHost {
         scope_canonical_id: &str,
         expr: &verter_semantic::analysis::type_expr::TypeExpr,
     ) -> verter_semantic::analysis::type_expr::TypeExpr {
-        engine
-            .project_expr_surface_expr(scope_canonical_id, expr)
-            .unwrap_or_else(|| expr.clone())
+        // Phase 5d (sub-plan §4.1 host_manage row): Class A via shared
+        // dispatch helper. The engine here is still kept on the
+        // calling intrinsic member-surface materialiser path.
+        crate::meta_resolve::project_expr_class_a_via_dispatch(
+            engine.host(),
+            scope_canonical_id,
+            expr,
+        )
+        .unwrap_or_else(|| expr.clone())
     }
 
     fn materialize_project_intrinsic_member_surface_expr(

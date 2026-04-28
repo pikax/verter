@@ -6122,14 +6122,14 @@ fn dispatch_route_expr_is_materialized(expr: &TypeExpr) -> bool {
 /// when dispatch cannot materialise a node. Dispatch-first paths fall
 /// back to `owner_engine` when the sentinel is present — transitional
 /// until §5.8 retires the owner_engine bridge.
-fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
+pub(crate) fn type_expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     !dispatch_route_expr_is_materialized(expr)
 }
 
 /// Returns `true` when `expr` still carries open deferred shell shapes
 /// (`KeyOf`, `IndexedAccess`, `Mapped`, `TypeOf`, `Conditional`) that
 /// indicate dispatch could not structurally expand the surface further.
-fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
+pub(crate) fn type_expr_is_expanded_surface(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::KeyOf(_)
         | TypeExpr::IndexedAccess { .. }

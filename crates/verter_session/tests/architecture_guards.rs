@@ -163,3 +163,133 @@ fn god_module_size_budget() {
         );
     }
 }
+
+// ----------------------------------------------------------------------
+// Phase 5d — Class A + Class B callsite migration guards.
+//
+// The engine trampoline methods (`project_expr_surface_expr`,
+// `project_expr_surface_shape`,
+// `project_expr_surface_expr_with_compound_objects`,
+// `project_type_surface_expr`, `project_type_surface_shape`,
+// `project_prepared_type_surface_expr`,
+// `project_prepared_type_surface_shape`) are scheduled for retirement
+// in Phase 5g. Phase 5d migrates Class A (Props + Slots surfaces) and
+// Class B (type-decl projection) consumers off the engine helpers and
+// onto `dispatch.execute_to_type_expr(SemanticQueryKey::ProjectPath {
+// .., mode: Expanded })` (Class A) / `Instantiate { .. } -> ProjectPath`
+// (Class B) per sub-plan §4.1.
+//
+// Per the brief, route-loop sites (sub-plan §4.1 row
+// `lower_and_project_to_expanded`: 6012/6309/6323/8329) and route-target
+// sites (`project_route_surface_expr`: 6267/6361/8934/8940) are
+// DEFERRED to Phase 5e (5e/5f scope). Line `4942`
+// (`project_expr_surface_expr_with_compound_objects` inside
+// `produce_one_macro_object_shape_for_slots`) is ALSO deferred per the
+// brief note. So these tests count only Class A/B callsites covered by
+// 5d; remaining sites are out of scope until 5e/5f.
+
+/// Count occurrences of any of the supplied needles in `src`.
+/// Returns the total number of byte-substring hits across all needles.
+fn count_callsites(src: &str, needles: &[&str]) -> usize {
+    needles.iter().map(|n| src.matches(n).count()).sum()
+}
+
+#[test]
+fn phase_05d_4a_class_a_props_callers_migrated_in_meta_resolve() {
+    // After commit 4a, the Props-surface Class A callsites in
+    // meta_resolve.rs MUST no longer call the engine trampoline
+    // methods. The slot-cluster sites (4b) and the deferred 4942 site
+    // (5e/5f) are accounted for as the only allowed remaining
+    // engine-trampoline calls in this file at the end of 4a.
+    //
+    // Discriminating: pre-4a, 11 Props sites all call
+    // `query_engine.project_expr_surface_expr` / `_shape`. Post-4a,
+    // those 11 sites have been rewritten to dispatch and only the
+    // slot-cluster sites (4b, 5 sites) + deferred 4942 site remain.
+    //
+    // Allowed remainder POST-4a:
+    //   - 4b slots (5): 4631, 4646, 4881, 4940, 4955
+    //   - deferred (1): 4942
+    // = 6.
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
+    let total_class_a = count_callsites(
+        &src,
+        &[
+            ".project_expr_surface_expr(",
+            ".project_expr_surface_shape(",
+            ".project_expr_surface_expr_with_compound_objects(",
+        ],
+    );
+    assert!(
+        total_class_a <= 6,
+        "Phase 5d 4a: meta_resolve.rs must have <= 6 Class A engine refs \
+         after 4a (4b slot-cluster + deferred 4942); found {total_class_a}"
+    );
+}
+
+#[test]
+fn phase_05d_4a_class_a_props_callers_migrated_in_host_manage() {
+    // host_manage.rs has 4 engine-method invocations pre-5d:
+    //   - 1 Class B `project_type_surface_expr` at
+    //     `expand_project_intrinsic_shape_for_canonical` (the §4.1
+    //     row labels this site as B; it migrates in commit 4c with
+    //     the rest of Class B sites).
+    //   - 3 Class A `project_expr_surface_expr` (4a scope per §4.1
+    //     "all A" annotation on rows 2266/2297/2311).
+    //
+    // Per sub-plan §4.1 strictly, only the 3 A sites migrate in 4a;
+    // the lone B site migrates with Class B in 4c. The Class A engine
+    // refs in this file MUST be 0 after 4a.
+    let src = read_workspace_file("crates/verter_session/src/host_manage.rs");
+    let class_a = count_callsites(
+        &src,
+        &[
+            ".project_expr_surface_expr(",
+            ".project_expr_surface_shape(",
+            ".project_expr_surface_expr_with_compound_objects(",
+        ],
+    );
+    assert_eq!(
+        class_a, 0,
+        "Phase 5d 4a: host_manage.rs must have 0 Class A engine \
+         invocations after 4a; found {class_a}"
+    );
+    // The remaining Class B `project_type_surface_expr` site (1) is
+    // intentionally retained for commit 4c. Verify only 1 B invocation
+    // remains so we don't accidentally regress new B references.
+    let class_b = count_callsites(
+        &src,
+        &[
+            ".project_type_surface_expr(",
+            ".project_type_surface_shape(",
+            ".project_prepared_type_surface_expr(",
+            ".project_prepared_type_surface_shape(",
+        ],
+    );
+    assert_eq!(
+        class_b, 1,
+        "Phase 5d 4a: host_manage.rs Class B engine refs must be \
+         exactly 1 (the deferred-to-4c B site); found {class_b}"
+    );
+}
+
+#[test]
+fn phase_05d_4a_class_a_props_callers_migrated_in_type_expansion_verter() {
+    // type_expansion_verter.rs has 2 Class A `.project_expr_surface_expr`
+    // sites pre-5d (lines 215, 272). Both migrate to dispatch in 4a.
+    let src =
+        read_workspace_file("crates/verter_session/src/resolver_core/type_expansion_verter.rs");
+    let invocations = count_callsites(
+        &src,
+        &[
+            ".project_expr_surface_expr(",
+            ".project_expr_surface_shape(",
+            ".project_expr_surface_expr_with_compound_objects(",
+        ],
+    );
+    assert_eq!(
+        invocations, 0,
+        "Phase 5d 4a: type_expansion_verter.rs must have 0 Class A engine \
+         method invocations after 4a; found {invocations}"
+    );
+}

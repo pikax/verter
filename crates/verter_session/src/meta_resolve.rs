@@ -41,6 +41,195 @@ use verter_semantic::analysis::types::AnalyzedMacro;
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 // =============================================================================
+// Phase 5d (sub-plan §4.1 Class A/B) — dispatch-direct surface helpers.
+//
+// The Phase 5c trampolines on `ComponentMetaQueryEngine` are slated for
+// retirement in 5g. Phase 5d migrates Class A and Class B callers off
+// the engine helpers. The two helpers below are the dispatch-direct
+// equivalents of the trampoline bodies, placed next to the meta_resolve
+// callers so each migrated callsite stays a one-liner.
+//
+// Class A migrates to `dispatch.execute_to_type_expr(ProjectPath{
+// lowered, [], mode })` after caller-side lowering, with the same
+// expanded-surface filter the trampoline applied (drops results that
+// still carry deferred shells or semantic-miss markers).
+//
+// Class B migrates to `dispatch.execute_to_type_expr(Instantiate{
+// base: bare_name_decl_identity, args: [], body_mode: Expanded })` —
+// the trampoline went through `project_type_surface` which itself
+// lowered to `Instantiate { args: [], body_mode: Expanded }` per
+// `build.rs`'s utility router; the Class B helper inlines that path.
+// =============================================================================
+
+/// Class A surface projection (Phase 5d §4.1) — dispatch-equivalent
+/// of `ComponentMetaQueryEngine::project_expr_surface_expr`.
+///
+/// The trampoline's body has TWO paths:
+///   1. Registry-route fast path for indexed-access / utility shapes
+///      (`Button['ui']`, `Pick<Foo, K>`). This routes through the
+///      Class D route helpers (`project_route_surface_expr` /
+///      `lower_and_project_to_expanded`), which are themselves
+///      trampolines through dispatch in Phase 5c. The Class D
+///      trampoline retirement happens in commit 6 (5e); for now we
+///      keep calling them via a transient engine instance so route
+///      projection stays correct after callsite migration.
+///   2. Generic ProjectPath dispatch for arbitrary expressions —
+///      direct `Instantiate { args: [], body_mode: Expanded }`-shaped
+///      `ProjectPath` query, raised to a `TypeExpr` and filtered for
+///      a fully-expanded surface.
+///
+/// Returns `Some(projected)` only when the projection produced a
+/// fully-expanded surface (no deferred `KeyOf` / `IndexedAccess` /
+/// `Mapped` / `TypeOf` / `Conditional` shells). This matches the
+/// trampoline's post-filter so Class A parity is preserved.
+pub(crate) fn project_expr_class_a_via_dispatch(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::{
+        component_meta_registry::{
+            component_meta_registry_public_indexed_access_route,
+            component_meta_registry_public_utility_route,
+        },
+        type_expr_contains_semantic_miss, type_expr_is_expanded_surface, ComponentMetaQueryEngine,
+    };
+    use crate::semantic_query::{PathSegment, QueryResult, SemanticQueryKey};
+
+    // Path 1: registry-route fast path. Class D route helpers stay on
+    // the engine for now (they retire in 5e/5f); we route through a
+    // transient engine instance so indexed-access / utility shapes
+    // still resolve via the route memo.
+    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+    {
+        let mut engine = ComponentMetaQueryEngine::new(host);
+        if let Some(projected) =
+            engine.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
+        {
+            return Some(projected);
+        }
+        if let Some(solved) = engine.lower_and_project_to_expanded(scope_canonical_id, expr) {
+            return Some(solved);
+        }
+    }
+
+    // Path 2: generic ProjectPath dispatch.
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    });
+    let projected = match read.value {
+        QueryResult::Value(expr) => expr,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
+        .then_some(projected)
+}
+
+/// Class A shape variant (Phase 5d §4.1) — dispatch-direct equivalent
+/// of `ComponentMetaQueryEngine::project_expr_surface_shape`.
+///
+/// Returns the projection's `ExpandedObjectShape` when it has at least
+/// one property or call signature (matching the trampoline's
+/// shape-has-surface filter).
+pub(crate) fn project_expr_class_a_shape_via_dispatch(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    let projected = project_expr_class_a_via_dispatch(host, scope_canonical_id, expr)?;
+    let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
+    (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
+}
+
+/// Class B type-decl projection (Phase 5d §4.1) — dispatch-direct
+/// equivalent of
+/// `ComponentMetaQueryEngine::project_type_surface_expr`.
+///
+/// Resolves `symbol_name` in `scope_canonical_id` via the bare-name
+/// resolver, then runs `Instantiate { base: <decl identity>, args: [],
+/// body_mode: Expanded }` followed by an empty-path `ProjectPath`
+/// raise to a `TypeExpr`. Mirrors
+/// `dispatch_root_instantiated` + `raise_node_to_type_expr` from the
+/// Phase 5c trampoline body without inheriting the engine's
+/// `dispatch_projected_surface` re-entry / fuse state.
+///
+/// Returns `None` when the symbol cannot be resolved or when the
+/// dispatch result is `Recursive` / `Error`.
+pub(crate) fn project_type_class_b_via_dispatch(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+    use crate::resolver_core::bare_name_resolve;
+    use crate::semantic_query::{
+        DeclIdentity, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    // Match `dispatch_root_instantiated`: bare-name resolve in scope,
+    // then build a `DeclIdentity` keyed by the resolved canonical_id +
+    // its `whole_hash`. When the bare-name resolver misses (e.g.,
+    // local-to-scope identifier), fall back to the input pair. The
+    // engine-cached scope payload is not reachable from a host-direct
+    // helper; the bare-name resolver hits IndexedReady directly when
+    // `scope_payload` is `None`, which is correct for top-level
+    // declared symbols (and the scope-payload fast-path is a perf hop
+    // for already-bound script-setup names that the engine sees).
+    let resolved_root =
+        bare_name_resolve::resolve_bare_name_in_scope(host, scope_canonical_id, None, symbol_name)
+            .map(|root| (root.canonical_id, root.symbol_name))
+            .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
+
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let anchor = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
+        resolved_root.0.as_str(),
+        resolved_root.1.as_str(),
+    ))) {
+        QueryResult::Value(id) => id,
+        _ => return None,
+    };
+    let whole_hash = host
+        .shallow_file_state(resolved_root.0.as_str())
+        .map(|s| s.whole_hash)
+        .unwrap_or_default();
+    let identity = DeclIdentity {
+        canonical_id: Arc::from(resolved_root.0.as_str()),
+        whole_hash,
+        decl_name: Arc::from(resolved_root.1.as_str()),
+    };
+    let empty_args: Arc<[SemanticNodeId]> =
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice());
+    let root_node = match dispatch.execute(SemanticQueryKey::Instantiate {
+        base: identity,
+        args: empty_args,
+        body_mode: ProjectionMode::Expanded,
+    }) {
+        QueryResult::Value(id) => id,
+        _ => anchor,
+    };
+    dispatch.raise_node_to_type_expr(root_node)
+}
+
+/// Class B shape variant (Phase 5d §4.1) — dispatch-direct equivalent
+/// of `ComponentMetaQueryEngine::project_type_surface_shape`. Used by
+/// commit 4c (Class B type-decl projection migrations).
+#[allow(dead_code)]
+pub(crate) fn project_type_class_b_shape_via_dispatch(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    let expanded = project_type_class_b_via_dispatch(host, scope_canonical_id, symbol_name)?;
+    Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded))
+}
+
+// =============================================================================
 // Plan §4.10 / K1 — `MacroFieldGraphState` lazy-lowering scaffold + lower
 // counter instrumentation.
 //
@@ -2727,8 +2916,11 @@ fn materialize_component_meta_field_types(
                 }
                 if let Some(raw_route_surface) =
                     parsed_field_raw_type(field).as_ref().and_then(|raw| {
-                        query_engine
-                            .project_expr_surface_expr(materialize_scope_canonical_id.as_str(), raw)
+                        project_expr_class_a_via_dispatch(
+                            query_engine.host,
+                            materialize_scope_canonical_id.as_str(),
+                            raw,
+                        )
                     })
                 {
                     let raw_route_surface = query_engine.materialize_member_surface_expr(
@@ -2746,7 +2938,8 @@ fn materialize_component_meta_field_types(
                         field_state.set_current_type(raw_route_surface);
                     }
                 }
-                if let Some(projected_route_surface) = query_engine.project_expr_surface_expr(
+                if let Some(projected_route_surface) = project_expr_class_a_via_dispatch(
+                    query_engine.host,
                     materialize_scope_canonical_id.as_str(),
                     field_state.published_type(),
                 ) {
@@ -3019,10 +3212,14 @@ fn materialize_component_meta_field_types(
             for candidate in [
                 Some(field_state.published_type().clone()),
                 parsed_raw.clone(),
-                parsed_raw
-                    .as_ref()
-                    .and_then(|raw| query_engine.project_expr_surface_expr(scope_hint, raw)),
-                query_engine.project_expr_surface_expr(scope_hint, field_state.published_type()),
+                parsed_raw.as_ref().and_then(|raw| {
+                    project_expr_class_a_via_dispatch(query_engine.host, scope_hint, raw)
+                }),
+                project_expr_class_a_via_dispatch(
+                    query_engine.host,
+                    scope_hint,
+                    field_state.published_type(),
+                ),
             ]
             .into_iter()
             .flatten()
@@ -6226,9 +6423,12 @@ impl VerterHost {
                         ));
                     }
                     let route_expr = build_registry_indexed_access_expr(symbol_name, path);
-                    let leaf = query_engine
-                        .project_expr_surface_expr(scope_canonical_id, &route_expr)
-                        .unwrap_or(route_expr);
+                    let leaf = project_expr_class_a_via_dispatch(
+                        query_engine.host,
+                        scope_canonical_id,
+                        &route_expr,
+                    )
+                    .unwrap_or(route_expr);
                     if path.len() > 1
                         && !component_meta_registry_has_explicit_object_surface(&leaf)
                         && component_meta_registry_has_non_object_top_level_surface(&leaf)
@@ -6270,8 +6470,11 @@ impl VerterHost {
                                 &member_route,
                             )
                             .or_else(|| {
-                                query_engine
-                                    .project_expr_surface_expr(scope_canonical_id, &route_expr)
+                                project_expr_class_a_via_dispatch(
+                                    query_engine.host,
+                                    scope_canonical_id,
+                                    &route_expr,
+                                )
                             })
                             .unwrap_or(route_expr);
                         let member_surface = query_engine.materialize_member_surface_expr(
@@ -7907,8 +8110,12 @@ fn walk_component_meta_macro_shape_member_types(
                             if lowered_needs_projection_rescue
                                 && define_props.result.value.properties.is_empty()
                             {
-                                if let Some(projected_shape) = query_engine
-                                    .project_expr_surface_shape(scope_canonical_id, lowered)
+                                if let Some(projected_shape) =
+                                    project_expr_class_a_shape_via_dispatch(
+                                        query_engine.host,
+                                        scope_canonical_id,
+                                        lowered,
+                                    )
                                     .filter(has_prop_shape_surface)
                                 {
                                     let projected_result =
@@ -8002,11 +8209,14 @@ fn walk_component_meta_macro_shape_member_types(
                             if lowered_needs_projection_rescue
                                 && define_emits.result.value.properties.is_empty()
                             {
-                                if let Some(projected_shape) = query_engine
-                                    .project_expr_surface_shape(scope_canonical_id, lowered)
-                                    .filter(
-                                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
-                                    )
+                                if let Some(projected_shape) = project_expr_class_a_shape_via_dispatch(
+                                    query_engine.host,
+                                    scope_canonical_id,
+                                    lowered,
+                                )
+                                .filter(
+                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                )
                                 {
                                     let projected_result =
                                         verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
@@ -8074,11 +8284,14 @@ fn walk_component_meta_macro_shape_member_types(
                             if lowered_needs_projection_rescue
                                 && define_slots.result.value.properties.is_empty()
                             {
-                                if let Some(projected_shape) = query_engine
-                                    .project_expr_surface_shape(scope_canonical_id, lowered)
-                                    .filter(
-                                        verter_semantic::analysis::type_eval_build::has_named_shape_surface,
-                                    )
+                                if let Some(projected_shape) = project_expr_class_a_shape_via_dispatch(
+                                    query_engine.host,
+                                    scope_canonical_id,
+                                    lowered,
+                                )
+                                .filter(
+                                    verter_semantic::analysis::type_eval_build::has_named_shape_surface,
+                                )
                                 {
                                     if needs_projection_rescue {
                                         let projected_result =
@@ -8316,7 +8529,11 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                         scope_canonical_id, member_name, candidate_scope, route_expr,
                     ),
                 );
-                query_engine.project_expr_surface_expr(candidate_scope.as_str(), &route_expr)
+                project_expr_class_a_via_dispatch(
+                    query_engine.host,
+                    candidate_scope.as_str(),
+                    &route_expr,
+                )
             };
             let solved = {
                 component_meta_trace_custom!(
@@ -11911,16 +12128,11 @@ fn resolve_jsdoc_tag_type(
             .into_iter()
             .map(|dependency| dependency.canonical_id),
     );
-    // D-Cutover §5.8: route through CMQE (dispatch-backed) instead of
-    // the retired SessionSolverHost + TypeQueryEngine. Falls back to
-    // the raw parsed annotation when projection misses so the caller
-    // still receives the unresolved TypeExpr rather than `None`.
-    let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(host);
-    Some(
-        engine
-            .project_expr_surface_expr(canonical_source, &parsed)
-            .unwrap_or(parsed),
-    )
+    // Phase 5d (sub-plan §4.1): route directly through the shared
+    // dispatch ProjectPath helper. Falls back to the raw parsed
+    // annotation when projection misses so the caller still receives
+    // the unresolved TypeExpr rather than `None`.
+    Some(project_expr_class_a_via_dispatch(host, canonical_source, &parsed).unwrap_or(parsed))
 }
 
 #[cfg(test)]

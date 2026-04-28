@@ -47,6 +47,9 @@ pub use component_meta::{
     ResolvedMacroMeta, ResolvedTypeRegistryMeta,
 };
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
+pub(crate) use component_meta_query_engine::{
+    type_expr_contains_semantic_miss, type_expr_is_expanded_surface,
+};
 pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,
