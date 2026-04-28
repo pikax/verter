@@ -73,8 +73,7 @@ fn build_published_workspace(
         verter_workspace::workspace_snapshot::SnapshotGeneration(generation),
         vite_opts,
     );
-    let trust_required: Vec<verter_workspace::ViteConfigTrustInfo> =
-        build.trust_required.clone();
+    let trust_required: Vec<verter_workspace::ViteConfigTrustInfo> = build.trust_required.clone();
     let snapshot = Arc::new(build.snapshot);
     let mut views = crate::workspace_state::build_lsp_views(&snapshot, trust_required.clone());
 

@@ -529,13 +529,11 @@ impl ProjectRegistry {
                         if is_trusted {
                             if let Some(np) = &vite_opts.node_path {
                                 let config_path_buf = PathBuf::from(&config_path);
-                                if let Some(result) =
-                                    verter_workspace::execute_trusted_vite_config(
-                                        &config_path_buf,
-                                        &root_path,
-                                        np,
-                                    )
-                                {
+                                if let Some(result) = verter_workspace::execute_trusted_vite_config(
+                                    &config_path_buf,
+                                    &root_path,
+                                    np,
+                                ) {
                                     if !result.aliases.is_empty() {
                                         tracing::debug!(
                                             "trusted execution: {} vite aliases for {}",

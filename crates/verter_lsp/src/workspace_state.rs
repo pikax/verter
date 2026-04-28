@@ -225,10 +225,10 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
+    use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::{CanonicalPath, FallbackMembership, NormalizedGlob, ProjectResolver};
 
     fn fallback_project(id: u32, root: &str) -> OwnershipProject {
