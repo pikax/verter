@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "phase": "phase-00b",
+  "status": "partial-deferred",
+  "base_commit": "0f31dabd94deb9bb9f45dd5c4dbdc9c03233d827",
+  "work_head_before_marker": "611259f517758469c35dc6b42ba466c2fe07e21d",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10116,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [
+    "fixture_slots_typed — slot binding type literals (`props: { item: string }`) lower to Unknown { raw: \"semanticMiss\" } instead of Primitive(String); rule-correct expected preserved in phase-00b-tier1-mismatches.md.",
+    "fixture_models — defineModel<T>() type T captured as text but model.type_expr lowers to Unknown { raw: \"semanticMiss\" }; rule-correct expected preserved in phase-00b-tier1-mismatches.md."
+  ],
+  "report_path": "phase-00b-report.md",
+  "derivation_notes_verified": true
+}
