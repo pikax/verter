@@ -45,3 +45,21 @@ mod open_conditional;
 mod path_precise_projection;
 #[path = "component_meta_audit/single_file_generic.rs"]
 mod single_file_generic;
+
+// Phase 5b §5.A — TDD seed characterisation tests for the 5 resolver
+// coverage gaps the variant + dispatch helpers close. 1 of 5
+// (`slot_shapes`) flips green inside Phase 5b after commits 2+3 land
+// the `ResolveMacroPayload` variant body. The other 4 remain RED
+// until callsite migrations land in 5d/5e/5f. Each seed must FAIL on
+// the pre-Phase-5b tree — if any passes, STOP (gap is not real or
+// closed elsewhere).
+#[path = "component_meta_audit/resolver_coverage_indexed_paths.rs"]
+mod resolver_coverage_indexed_paths;
+#[path = "component_meta_audit/resolver_coverage_inherited_emits.rs"]
+mod resolver_coverage_inherited_emits;
+#[path = "component_meta_audit/resolver_coverage_mapped_types.rs"]
+mod resolver_coverage_mapped_types;
+#[path = "component_meta_audit/resolver_coverage_package_backed.rs"]
+mod resolver_coverage_package_backed;
+#[path = "component_meta_audit/resolver_coverage_slot_shapes.rs"]
+mod resolver_coverage_slot_shapes;
