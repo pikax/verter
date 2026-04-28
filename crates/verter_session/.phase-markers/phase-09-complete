@@ -3,11 +3,11 @@
   "phase": "phase-09",
   "status": "partial-deferred",
   "base_commit": "6b1cd1e967bca2d0993c67bae220608e4429fecd",
-  "work_head_before_marker": "50dcb82d04898d1db3c361b1bab064d5ea1484af",
+  "work_head_before_marker": "971a487b",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests --verbose",
-      "passed": 10116,
+      "passed": 10090,
       "failed": 0
     },
     "correctness": {
