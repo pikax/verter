@@ -131,30 +131,6 @@ pub fn mapped_record() -> SnapshotView {
     ])
 }
 
-// ── Exclude<T,U> — distributive: T - U on union members ─────────────────────
-//   `Exclude<'a' | 'b' | 'c', 'b'>` SHOULD yield `'a' | 'c'` (TS spec
-//   §4.4 — distributive conditional `T extends U ? never : T`).
-//
-//   KNOWN DEFECT (Phase 0a baseline 2026-04-28): Verter's component-
-//   meta resolver renders this prop as `/*unknown*/ semanticMiss` —
-//   the `Exclude` utility is not evaluated through the macro
-//   resolution path. Captured as regression baseline.
-//   Tracking: phase-00-tier1-mismatches.md → "mapped_exclude".
-pub fn mapped_exclude() -> SnapshotView {
-    shell(vec![required_prop("kind", "/*unknown*/ semanticMiss")])
-}
-
-// ── Extract<T,U> — distributive: T ∩ U on union members ─────────────────────
-//   `Extract<'a' | 'b' | 'c', 'a' | 'b'>` SHOULD yield `'a' | 'b'`
-//   (TS spec §4.4 — distributive conditional `T extends U ? T : never`).
-//
-//   KNOWN DEFECT (Phase 0a baseline 2026-04-28): same root cause as
-//   `mapped_exclude` — `Extract` not evaluated through macro path.
-//   Tracking: phase-00-tier1-mismatches.md → "mapped_extract".
-pub fn mapped_extract() -> SnapshotView {
-    shell(vec![required_prop("kind", "/*unknown*/ semanticMiss")])
-}
-
 // ── T['variants']['size'] — two-level indexed access ────────────────────────
 //   The size prop's type is the indexed access into ButtonStyles
 //   yielding `'sm' | 'md' | 'lg'`. TS spec §4.5.
@@ -204,56 +180,6 @@ pub fn recursive_alias_via_typeof() -> SnapshotView {
     )])
 }
 
-// ── { [P in `prefix${K}`]: number } where K = 'A' | 'B' ─────────────────────
-//   Mapped + template-literal key SHOULD produce
-//   `{ prefixA: number; prefixB: number }` (TS spec §4.5 — template
-//   literal type interpolation in mapped key positions).
-//
-//   KNOWN DEFECT (Phase 0a baseline 2026-04-28): Verter's resolver
-//   produces ZERO props for this fixture — the template-literal-key
-//   branch of the mapped-type evaluator is not implemented. Captured
-//   as regression baseline (empty props).
-//   Tracking: phase-00-tier1-mismatches.md → "template_literal_as_key".
-pub fn template_literal_as_key() -> SnapshotView {
-    shell(vec![])
-}
-
-// ── F<typeof v> — F is `IdShape<T> = { id: T }`, sample = { id: 'a', ... } ──
-//   Without `as const`, `typeof sample.id` widens to `string` (TS
-//   inference rule). `IdShape<typeof sample.id>` SHOULD therefore
-//   yield `{ id: string }` after substituting T → string. TS spec §3.6.
-//
-//   KNOWN DEFECT (Phase 0a baseline 2026-04-28): Verter's macro
-//   resolver does not perform the `typeof`-to-instance substitution
-//   in this position; the prop surfaces as `id: T` (free type
-//   parameter). Captured as regression baseline.
-//   Tracking: phase-00-tier1-mismatches.md → "generic_substitution_via_typeof".
-pub fn generic_substitution_via_typeof() -> SnapshotView {
-    shell(vec![required_prop("id", "T")])
-}
-
-// ── Userland Pick<T,_K>=T shadowing lib — Verter ts-first rule ──────────────
-//   The userland `type Pick<T,_K> = T` ignores the second parameter
-//   and yields the entire `Source` type. A correct ts-first /
-//   userland-shadow resolver SHOULD pick the user's declaration over
-//   `lib.es5.d.ts` and surface ALL three Source members
-//   (alpha, beta, gamma).
-//   Citation: Verter rule (`./.claude/skills/type-resolution`,
-//   "TS-first resolution priority" + userland-shadow precedence).
-//
-//   KNOWN DEFECT (Phase 0a baseline 2026-04-28): Verter's macro
-//   resolver dispatches to `lib.es5.d.ts`'s `Pick` despite the
-//   in-scope userland declaration. Result: only `alpha` + `beta`
-//   surface — the userland's "ignore _K, return T" semantics is
-//   lost. Captured as regression baseline.
-//   Tracking: phase-00-tier1-mismatches.md → "userland_shadowing_pick".
-pub fn userland_shadowing_pick() -> SnapshotView {
-    shell(vec![
-        required_prop("alpha", "string"),
-        required_prop("beta", "number"),
-    ])
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Class A dispatch: lookup_class_a_expected
 // ═══════════════════════════════════════════════════════════════════════════
@@ -266,16 +192,11 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "mapped_required" => Some(mapped_required()),
         "mapped_readonly" => Some(mapped_readonly()),
         "mapped_record" => Some(mapped_record()),
-        "mapped_exclude" => Some(mapped_exclude()),
-        "mapped_extract" => Some(mapped_extract()),
         "indexed_access_two_levels" => Some(indexed_access_two_levels()),
         "keyof_intersection" => Some(keyof_intersection()),
         "conditional_distributive" => Some(conditional_distributive()),
         "intersection_of_objects" => Some(intersection_of_objects()),
         "recursive_alias_via_typeof" => Some(recursive_alias_via_typeof()),
-        "template_literal_as_key" => Some(template_literal_as_key()),
-        "generic_substitution_via_typeof" => Some(generic_substitution_via_typeof()),
-        "userland_shadowing_pick" => Some(userland_shadowing_pick()),
         _ => None,
     }
 }

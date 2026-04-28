@@ -3,10 +3,19 @@
 //! correctness ground-truth tier (Class A) from the regression
 //! baselines (Class B + C).
 //!
-//! Phase 0a authors the 16 Class A fixtures listed below (11
-//! mapped-type + 5 structural). Phase 0b will append the 7 Class A
-//! component-meta property fixtures plus the Class B + C regression
-//! baselines.
+//! Phase 0a authors the 11 Class A fixtures listed below (6
+//! mapped-type + 5 structural). Per §0p.A.2 r9 reviewer consensus,
+//! 5 utility-type fixtures (`mapped_exclude`, `mapped_extract`,
+//! `template_literal_as_key`, `generic_substitution_via_typeof`,
+//! `userland_shadowing_pick`) are deferred to Phase 5 §5.B.5 — those
+//! fixtures' rule-correct expected outputs Verter does not currently
+//! produce, so they are NOT acceptable as Class A regression
+//! baselines NOR as Class B (Class B is for fixtures whose Verter
+//! output IS the intended behaviour). Phase 5 will author them with
+//! rule-correct expected once the resolver variants close the gaps.
+//!
+//! Phase 0b will append the 7 Class A component-meta property
+//! fixtures plus the Class B + C regression baselines.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixtureClass {
@@ -118,22 +127,6 @@ defineProps<Record<'x' | 'y', number>>();
 <template><div /></template>
 "#;
 
-// ── Exclude<T,U> — TS spec §4.4 (utility type from lib.es5.d.ts) ────────────
-const MAPPED_EXCLUDE_VUE: &str = r#"<script setup lang="ts">
-type Filtered = Exclude<'a' | 'b' | 'c', 'b'>;
-defineProps<{ kind: Filtered }>();
-</script>
-<template><div /></template>
-"#;
-
-// ── Extract<T,U> — TS spec §4.4 ─────────────────────────────────────────────
-const MAPPED_EXTRACT_VUE: &str = r#"<script setup lang="ts">
-type Kept = Extract<'a' | 'b' | 'c', 'a' | 'b'>;
-defineProps<{ kind: Kept }>();
-</script>
-<template><div /></template>
-"#;
-
 // ── T['variants']['size'] — TS spec §4.5 (indexed access) ───────────────────
 const INDEXED_ACCESS_TWO_LEVELS_VUE: &str = r#"<script setup lang="ts">
 interface ButtonStyles {
@@ -182,41 +175,6 @@ defineProps<{ root: Tree }>();
 <template><div /></template>
 "#;
 
-// ── Template literal as key — TS spec §4.5 ──────────────────────────────────
-const TEMPLATE_LITERAL_AS_KEY_VUE: &str = r#"<script setup lang="ts">
-type PrefixedKeys<K extends string> = { [P in `prefix${K}`]: number };
-defineProps<PrefixedKeys<'A' | 'B'>>();
-</script>
-<template><div /></template>
-"#;
-
-// ── Generic substitution via typeof — TS spec §3.6 ──────────────────────────
-const GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE: &str = r#"<script setup lang="ts">
-const sample = { id: 'a', count: 42 };
-type IdShape<T> = { id: T };
-defineProps<IdShape<typeof sample.id>>();
-</script>
-<template><div /></template>
-"#;
-
-// ── Userland Pick<T,K>=T shadowing lib — Verter ts-first rule ───────────────
-const USERLAND_SHADOWING_PICK_VUE: &str = r#"<script setup lang="ts">
-// Userland `Pick<T,K>` here ignores the second parameter and yields
-// the entire source `T`. A correct ts-first resolver MUST treat this
-// userland declaration as taking precedence over `lib.es5.d.ts`'s
-// `Pick`. If the resolver dispatches to the lib definition, the
-// snapshot will show only `alpha` and `beta`.
-type Pick<T, _K> = T;
-interface Source {
-  alpha: string;
-  beta: number;
-  gamma: boolean;
-}
-defineProps<Pick<Source, 'alpha' | 'beta'>>();
-</script>
-<template><div /></template>
-"#;
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Per-fixture file sets.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -232,17 +190,11 @@ const F_MAPPED_PARTIAL: &[(&str, &str)] = &[("/c.vue", MAPPED_PARTIAL_VUE)];
 const F_MAPPED_REQUIRED: &[(&str, &str)] = &[("/c.vue", MAPPED_REQUIRED_VUE)];
 const F_MAPPED_READONLY: &[(&str, &str)] = &[("/c.vue", MAPPED_READONLY_VUE)];
 const F_MAPPED_RECORD: &[(&str, &str)] = &[("/c.vue", MAPPED_RECORD_VUE)];
-const F_MAPPED_EXCLUDE: &[(&str, &str)] = &[("/c.vue", MAPPED_EXCLUDE_VUE)];
-const F_MAPPED_EXTRACT: &[(&str, &str)] = &[("/c.vue", MAPPED_EXTRACT_VUE)];
 const F_INDEXED_ACCESS_TWO_LEVELS: &[(&str, &str)] = &[("/c.vue", INDEXED_ACCESS_TWO_LEVELS_VUE)];
 const F_KEYOF_INTERSECTION: &[(&str, &str)] = &[("/c.vue", KEYOF_INTERSECTION_VUE)];
 const F_CONDITIONAL_DISTRIBUTIVE: &[(&str, &str)] = &[("/c.vue", CONDITIONAL_DISTRIBUTIVE_VUE)];
 const F_INTERSECTION_OF_OBJECTS: &[(&str, &str)] = &[("/c.vue", INTERSECTION_OF_OBJECTS_VUE)];
 const F_RECURSIVE_ALIAS_VIA_TYPEOF: &[(&str, &str)] = &[("/c.vue", RECURSIVE_ALIAS_VIA_TYPEOF_VUE)];
-const F_TEMPLATE_LITERAL_AS_KEY: &[(&str, &str)] = &[("/c.vue", TEMPLATE_LITERAL_AS_KEY_VUE)];
-const F_GENERIC_SUBSTITUTION_VIA_TYPEOF: &[(&str, &str)] =
-    &[("/c.vue", GENERIC_SUBSTITUTION_VIA_TYPEOF_VUE)];
-const F_USERLAND_SHADOWING_PICK: &[(&str, &str)] = &[("/c.vue", USERLAND_SHADOWING_PICK_VUE)];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 0a Class A registry.
@@ -285,18 +237,6 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         class: FixtureClass::ClassA,
     },
     CorrectnessFixture {
-        id: "mapped_exclude",
-        files: F_MAPPED_EXCLUDE,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
-        id: "mapped_extract",
-        files: F_MAPPED_EXTRACT,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
         id: "indexed_access_two_levels",
         files: F_INDEXED_ACCESS_TWO_LEVELS,
         target: "/c.vue",
@@ -323,24 +263,6 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
     CorrectnessFixture {
         id: "recursive_alias_via_typeof",
         files: F_RECURSIVE_ALIAS_VIA_TYPEOF,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
-        id: "template_literal_as_key",
-        files: F_TEMPLATE_LITERAL_AS_KEY,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
-        id: "generic_substitution_via_typeof",
-        files: F_GENERIC_SUBSTITUTION_VIA_TYPEOF,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
-        id: "userland_shadowing_pick",
-        files: F_USERLAND_SHADOWING_PICK,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
