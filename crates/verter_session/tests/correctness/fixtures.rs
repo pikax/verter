@@ -296,8 +296,7 @@ defineEmits<{ dismiss: [] }>();
   </div>
 </template>
 "#;
-const ALERT_TYPES_TS: &str =
-    r#"export type AlertVariant = 'info' | 'success' | 'warning' | 'error';
+const ALERT_TYPES_TS: &str = r#"export type AlertVariant = 'info' | 'success' | 'warning' | 'error';
 "#;
 
 const APP_VUE: &str = r#"<script setup lang="ts">
@@ -371,8 +370,7 @@ const AVATAR_GROUP_TYPES_TS: &str = r#"export interface AvatarGroupItem {
   alt?: string;
 }
 "#;
-const AVATAR_GROUP_AVATAR_TYPES_TS: &str =
-    r#"export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
+const AVATAR_GROUP_AVATAR_TYPES_TS: &str = r#"export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
 "#;
 
 // ═══════════════════════════════════════════════════════════════════════════
