@@ -1102,8 +1102,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (QueryResult<SemanticNodeId>, DepSignature) {
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
+        // Phase 1B: longest-prefix-first peek. Skip when path.len() < 2.
+        // Codex-2 r3 fix: prefix entries are cached as Navigate regardless
+        // of the caller's mode (path-precise rule — intermediate hops are
+        // Navigate, terminal hop is the caller's mode).
+        let (start_base, start_index) = if path.len() < 2 {
+            (base, 0usize)
+        } else {
+            find_longest_warm_prefix(self.graph(), base, path).unwrap_or((base, 0))
+        };
+        let walker_path: Arc<[PathSegment]> = if start_index == 0 {
+            Arc::clone(path)
+        } else {
+            Arc::from(path[start_index..].to_vec().into_boxed_slice())
+        };
         let mut walker = PathWalker::new(self, mode, &fence);
-        let result = walker.walk(base, path.as_ref());
+        let result = walker.walk(start_base, walker_path.as_ref());
         // Emit a whole-path `ProjectPath` edge on the result so consumers
         // can recover the entry path without rebuilding it from per-hop
         // edges (plan §3 C3).
@@ -1871,4 +1885,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .intern_node(SemanticNodeData::Intersection(boxed))
         }
     }
+}
+
+/// Phase 1B path-prefix peek (plan §1.B). Walks `path` from longest to
+/// shortest non-empty prefix, returning the warm `(base, path[..k],
+/// Navigate)` entry's resolved node and `k` if any such prefix is
+/// memoized. Returns `None` when no prefix is warm — caller falls back
+/// to walking the full path from `base`.
+///
+/// **Codex-2 r3 fix.** The lookup forces `mode: Navigate` regardless of
+/// the caller's mode because intermediate path hops MUST be cached as
+/// Navigate per the path-precise rule (CLAUDE.md "Macro Type Traversal
+/// Rule"). The terminal hop keeps the caller's mode and is published by
+/// `execute_cooperative` directly; the prefix peek only inspects
+/// intermediate hops.
+///
+/// Increments the test-only `PREFIX_PEEK_HITS` thread-local on success
+/// so `project_path_prefix_peek_short_circuits_sibling_walk` can
+/// discriminate pre-fix (no helper / always None) vs post-fix (peek hits
+/// the warm prefix).
+fn find_longest_warm_prefix(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    base: SemanticNodeId,
+    path: &Arc<[PathSegment]>,
+) -> Option<(SemanticNodeId, usize)> {
+    for k in (1..path.len()).rev() {
+        let prefix_path: Arc<[PathSegment]> =
+            Arc::from(path[..k].to_vec().into_boxed_slice());
+        let prefix_key = SemanticQueryKey::ProjectPath {
+            base,
+            path: prefix_path,
+            mode: ProjectionMode::Navigate,
+        };
+        if let Some(hit) = graph.get(&prefix_key) {
+            if let QueryResult::Value(prefix_node) = hit.value {
+                #[cfg(test)]
+                PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() += 1);
+                return Some((prefix_node, k));
+            }
+        }
+    }
+    None
 }
