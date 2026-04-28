@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "phase": "phase-05d",
+  "status": "success",
+  "base_commit": "cb2718f7a8604b82c4a245c0095ac13e75685d52",
+  "work_head_before_marker": "13231476",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10166,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [
+    "phase_05d_4a_class_a_props_callers_migrated_in_meta_resolve",
+    "phase_05d_4a_class_a_props_callers_migrated_in_host_manage",
+    "phase_05d_4a_class_a_props_callers_migrated_in_type_expansion_verter",
+    "phase_05d_4b_class_a_slots_callers_migrated",
+    "phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement"
+  ],
+  "deferred": [
+    "seed-resolver_coverage_mapped_types-closes-in-5e-commit-6",
+    "seed-resolver_coverage_inherited_emits-closes-in-5f-commit-7",
+    "seed-resolver_coverage_indexed_paths-closes-in-5f-commit-8",
+    "seed-resolver_coverage_package_backed-closes-in-5f-commit-9",
+    "seed-resolver_coverage_slot_shapes-closes-in-callsite-migration-5e-or-5f-via-meta_resolve.rs-define_slots-arm",
+    "phase-5d-class-b-callsite-migrations-deferred-to-5g-due-to-prepared-decl-fallback-engine-coupling",
+    "phase-5d-multi-macro-kind-shape-helpers-deferred-to-5g-due-to-engine-fuse-and-scope-payload-state-coupling",
+    "phase-5d-line-4942-project_expr_surface_expr_with_compound_objects-deferred-to-5e-or-5f-per-brief-note"
+  ],
+  "report_path": "phase-05d-report.md"
+}
