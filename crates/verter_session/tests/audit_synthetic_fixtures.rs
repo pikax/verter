@@ -1,68 +1,215 @@
 //! Plan §4.18 / §6.10 sub-task 7 — synthetic audit fixtures.
 //!
-//! Two end-to-end tests exercise the materialiser's recursive-helper
-//! cycle guard via the public `AuditedRequest` resolution surface,
-//! using fixtures that match canonical recursive-helper shapes
-//! (`Pick<Self, 'a'>` registry-route cycle and `DotPathKeys<T>`
-//! recursive-helper cycle).
+//! End-to-end tests that drive each fixture through the public
+//! `AuditedRequest` resolution surface and assert the resolved
+//! component-meta props match the cycle-guard observable: a
+//! TERMINAL shape (Unknown for purely recursive carriers, or a
+//! structural expansion bottomed out at the recursive position via
+//! Unknown markers). Without these guards, the materialiser would
+//! attempt unbounded expansion → either hang, stack-overflow, or
+//! depth-fuse trip with a `Tainted` shape that surfaces differently.
 //!
-//! Each test asserts the materialiser's BFS-level observable: the
-//! cycle guard fires (`ref_root_reaches_transitive_cycle_node`
-//! returns true on the fixture's complex helper). The guards
-//! themselves are exercised at unit-test level in
-//! `component_meta_materialize::tests::*_cycle_guard_*` — these
-//! synthetic fixtures lock the end-to-end resolution path.
+//! Direct assertion of the raw `MaterializeStructurePolicySkip`
+//! events is intentionally NOT done here:
+//!
+//! 1. The hermetic `AuditedRequest` flow drains its accumulator into
+//!    a `RustAuditRecord` whose footprint records do not surface
+//!    `MaterializeSkipReason` variants individually (the audit
+//!    pipeline mines `structured_events` into shape-aware records).
+//! 2. The cycle-guard predicates themselves are unit-tested directly:
+//!    - `component_meta_materialize::tests::recursive_helper_cycle_guard_predicate_fires_on_dot_path_keys_helper`
+//!      verifies `ref_root_reaches_transitive_cycle_node` returns
+//!      `true` on the canonical nuxt-ui DotPathKeys shape.
+//!    - `component_meta_materialize::tests::registry_route_extracts_actual_root_for_builtin_pick_over_recursive_helper`
+//!      verifies `extract_route_root_identity_node` recurses into
+//!      `args[0]` so the cycle guard sees the actual root identity
+//!      (Codex2 P0 #3).
+//!
+//! These integration tests guarantee the END-TO-END flow on real
+//! `.vue` fixtures (parsing → lowering → materialiser → type-expand
+//! → resolution) terminates with the expected guard observable,
+//! catching any regression where the materialiser fails to fire
+//! the guard and falls through to depth-fuse / re-entry detection
+//! (which would either hang or yield a different terminal shape).
 
+use verter_semantic::analysis::type_expr::TypeExpr;
 use verter_session::audited_request::AuditedRequest;
 
 const REGISTRY_ROUTE_FIXTURE_VUE: &str = include_str!("fixtures/audit/registry_route_cycle.vue");
 const RECURSIVE_HELPER_FIXTURE_VUE: &str =
     include_str!("fixtures/audit/recursive_helper_cycle.vue");
 
-/// Plan §4.18 / §6.10 sub-task 7 — registry-route cycle guard event
-/// reachable from the synthetic fixture.
+/// Plan §4.18 / §6.10 sub-task 7 — registry-route cycle guard.
 ///
-/// Fixture: `Pick<Self, 'a'>` where `Self = Pick<Self, 'a'>` —
-/// canonical recursive registry-route. The materialiser's cycle
-/// guard must fire (the resolution surface produces a result without
-/// hanging).
+/// Fixture: `Self = Pick<Self, 'a'>` with `defineProps<{ value: Self }>`.
+/// `Self` is purely recursive — `Pick<Self, 'a'>` has no concrete
+/// content arm. When the materialiser sees the lowered carrier:
+///
+/// 1. B1 step 1 calls `extract_route_root_identity_node`, which
+///    returns `Some(RouteExtraction { root_identity = Self, ... })`
+///    (recursing into args\[0\] for builtin `Pick`).
+/// 2. The cycle guard `ref_root_reaches_transitive_cycle_node` runs
+///    on `Self.identity` and returns `true` (Self is recursive).
+/// 3. The materialiser emits `MaterializeStructurePolicySkip {
+///    reason: RegistryRouteCycleGuard }` and returns
+///    `MaterializeOutcome::Value(key.base)`.
+/// 4. Type-expansion surfaces the carrier — but because the carrier
+///    has no non-recursive content, it bottoms out as
+///    `Opaque(QueryError::Miss)` which raises to
+///    `TypeExpr::Unknown { raw: "semanticMiss" }`.
+///
+/// Discriminator: the resolved `value` field's `r#type` is
+/// `TypeExpr::Unknown { raw: "semanticMiss" }`. Without the cycle
+/// guard, the materialiser would attempt unbounded expansion —
+/// either hang (test timeout) or trip the cooperative-admission
+/// re-entry detection (yielding `MaterializeOutcome::Recursive`,
+/// which surfaces as a different Unknown raw marker, or a
+/// `Tainted` shape).
 #[test]
-fn registry_route_cycle_guard_event_reachable() {
+fn registry_route_cycle_guard_keeps_self_pick_terminal() {
     let result = AuditedRequest::builder()
         .files(vec![(
             "/c.vue".to_string(),
             REGISTRY_ROUTE_FIXTURE_VUE.to_string(),
         )])
         .resolve("/c.vue");
-    // The audit harness must execute without hanging or panicking;
-    // the cycle guard ensures resolution terminates promptly.
-    match result {
-        Ok((_analysis, _resolution, _record)) => {}
-        Err(verter_session::audited_request::AuditedRequestError::ResolutionFailed) => {
-            // Acceptable — the cycle prevented normal expansion. The
-            // guard emitted the policy-skip event before halting.
+    let (_analysis, resolution, _record) =
+        result.expect("audited request must succeed without panicking on the cycle fixture");
+    let evaluated = resolution
+        .evaluated_types
+        .as_ref()
+        .expect("Expanded mode must populate evaluated_types");
+    let value_field = evaluated
+        .props
+        .iter()
+        .find(|f| f.name == "value")
+        .expect("evaluated_types.props missing field `value`");
+
+    // Discriminating assertion: the resolved type MUST be the
+    // `semanticMiss` Unknown marker — that's the cycle-guard's
+    // signal that materialisation deterministically returned
+    // Miss for a purely-recursive carrier.
+    match &value_field.r#type {
+        TypeExpr::Unknown { raw } => {
+            assert_eq!(
+                raw.as_str(),
+                "semanticMiss",
+                "registry-route cycle guard observable: the resolved `value` \
+                 field MUST be `Unknown {{ raw: \"semanticMiss\" }}` (the \
+                 cycle guard fired, materialiser returned Miss, type-expand \
+                 surfaced as `semanticMiss`); got `Unknown {{ raw: \"{raw}\" }}`. \
+                 A different raw marker indicates a different fallback path \
+                 (re-entry detection, depth fuse) caught the recursion — the \
+                 cycle guard at the materialiser entry did not gate the route.",
+            );
         }
-        Err(other) => panic!("unexpected audited-request error: {other:?}"),
+        other => panic!(
+            "registry-route cycle guard FAILED to fire (or fired through a \
+             non-Miss path): expected `TypeExpr::Unknown {{ raw: \"semanticMiss\" }}`; \
+             got {other:?}. Without the cycle guard, the materialiser would \
+             have attempted unbounded expansion of `Pick<Self, 'a'>` and the \
+             resolution would have either hung (test timeout) or produced a \
+             non-Unknown shape via depth-fuse `Tainted` fallback.",
+        ),
     }
 }
 
-/// Plan §4.18 / §6.10 sub-task 7 — recursive-helper cycle guard event
-/// reachable from the synthetic fixture.
+/// Plan §4.18 / §6.10 sub-task 7 — recursive-helper cycle guard.
 ///
-/// Fixture: `GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>`
-/// where `DotPathKeys<T>` recursively references itself through a
-/// nested mapped + template literal — canonical nuxt-ui shape.
+/// Fixture: `GetItemKeys<T> = (keyof T & string) | DotPathKeys<T>` with
+/// recursive `DotPathKeys<T>`, used in `defineProps<{ key: GetItemKeys<T> }>`.
+/// Unlike the purely-recursive `Self` carrier, `GetItemKeys<T>` has
+/// concrete content (the `keyof T & string` arm and the conditional's
+/// outer structure) — only the `DotPathKeys<NonNullable<T[K]>>`
+/// recursive position needs guarding.
+///
+/// The recursive-helper guard fires DEEPER (at the `DotPathKeys`
+/// hop), letting type-expand produce the full structural expansion
+/// of `GetItemKeys<T>` with the recursive position bottoming out as
+/// an `Unknown` marker for the unresolved template-literal segment.
+///
+/// Discriminator: the resolved `key` field's `r#type` is a `Union`
+/// (matching the type alias body's outer Union). Inside, the
+/// conditional's `true_type` (Mapped) reaches the recursive position
+/// where the template-literal segment surfaces as
+/// `Unknown { raw: "<unresolved template literal type>" }`. Without
+/// the cycle guards, the recursive expansion would have continued
+/// indefinitely.
 #[test]
-fn recursive_helper_cycle_guard_event_reachable() {
+fn recursive_helper_cycle_guard_terminates_get_item_keys_expansion() {
     let result = AuditedRequest::builder()
         .files(vec![(
             "/c.vue".to_string(),
             RECURSIVE_HELPER_FIXTURE_VUE.to_string(),
         )])
         .resolve("/c.vue");
-    match result {
-        Ok((_analysis, _resolution, _record)) => {}
-        Err(verter_session::audited_request::AuditedRequestError::ResolutionFailed) => {}
-        Err(other) => panic!("unexpected audited-request error: {other:?}"),
+    let (_analysis, resolution, _record) =
+        result.expect("audited request must succeed without panicking on the helper-cycle fixture");
+    let evaluated = resolution
+        .evaluated_types
+        .as_ref()
+        .expect("Expanded mode must populate evaluated_types");
+    let key_field = evaluated
+        .props
+        .iter()
+        .find(|f| f.name == "key")
+        .expect("evaluated_types.props missing field `key`");
+
+    // The expanded GetItemKeys<T> body is a Union — the alias body
+    // `(keyof T & string) | DotPathKeys<T>` projects through to the
+    // top-level. The recursive arm reaches the cycle guard which
+    // bottoms it out at the template-literal segment.
+    let arms = match &key_field.r#type {
+        TypeExpr::Union(arms) => arms,
+        other => panic!(
+            "recursive-helper cycle expansion shape unexpected: expected \
+             `TypeExpr::Union(...)` matching the GetItemKeys<T> alias body \
+             `(keyof T & string) | DotPathKeys<T>`; got {other:?}. A \
+             different top-level shape suggests type-expand bypassed the \
+             alias body OR the recursive-helper guard fired at a different \
+             level than expected.",
+        ),
+    };
+
+    // Discriminating: the recursive position must surface an
+    // Unknown-marked terminal somewhere in the expanded tree. We
+    // recursively walk the TypeExpr looking for any
+    // `TypeExpr::Unknown` node — its presence signals the cycle
+    // guard bottomed out the recursion. Without the guard, the
+    // expansion would not terminate at this layer.
+    fn contains_unresolved_unknown(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Unknown { .. } => true,
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                arms.iter().any(contains_unresolved_unknown)
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                contains_unresolved_unknown(check)
+                    || contains_unresolved_unknown(extends)
+                    || contains_unresolved_unknown(true_type)
+                    || contains_unresolved_unknown(false_type)
+            }
+            TypeExpr::Mapped { source, value, .. } => {
+                contains_unresolved_unknown(source) || contains_unresolved_unknown(value)
+            }
+            TypeExpr::KeyOf(inner) => contains_unresolved_unknown(inner),
+            _ => false,
+        }
     }
+
+    assert!(
+        arms.iter().any(contains_unresolved_unknown),
+        "recursive-helper cycle guard FAILED to bottom out the recursion: \
+         expected an `Unknown` marker somewhere in the expanded GetItemKeys<T> \
+         tree (signalling the cycle guard caught the recursive DotPathKeys \
+         reference); got a fully-resolved expansion `{:?}`. Without the \
+         guard, the resolution would either hang or produce a recursive \
+         shape that cannot terminate.",
+        key_field.r#type,
+    );
 }
