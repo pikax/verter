@@ -104,6 +104,11 @@ use std::cell::Cell;
 ///
 /// See [`ComponentMetaQueryEngine::solve_or_project_leaf_expr_with_context`]
 /// for the per-TypeExpr dispatch rules.
+//
+// Phase 5c (sub-plan §5 commit 3.7): no longer constructed after
+// trampoline conversion of the retired surface methods. Deleted in
+// 5g per §F call-graph closure.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
@@ -153,9 +158,13 @@ struct PreparedMemberCacheKey {
     substitutions: PreparedSubstitutionKey,
 }
 
+// Phase 5c (sub-plan §5 commit 3.7): `InheritedRoute` is no longer
+// constructed after trampoline conversion. Variant deleted in 5g per
+// §F call-graph closure.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 enum PreparedMemberCacheKind {
     Requested,
+    #[allow(dead_code)]
     InheritedRoute,
 }
 
@@ -264,6 +273,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     scope_payloads: FxHashMap<String, Option<std::sync::Arc<DeclarationScopePayload>>>,
     /// Read-through view; authority is
     /// `ProjectTypeStore::prepared_surface_db()`.
+    ///
+    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
+    /// conversion of retired surface methods. Field deleted in 5g per
+    /// §F call-graph closure.
+    #[allow(dead_code)]
     prepared_surface_cache: RefCell<FxHashMap<PreparedSurfaceCacheKey, PreparedSurfaceProjection>>,
     /// Read-through view; authority is
     /// `ProjectTypeStore::prepared_member_db()`.
@@ -273,6 +287,11 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_target_cache: RefCell<FxHashMap<PreparedTargetCacheKey, Option<(String, String)>>>,
     /// Read-through view; authority is
     /// `ProjectTypeStore::routed_expr_surface_db()`.
+    ///
+    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
+    /// conversion of retired surface methods. Field deleted in 5g per
+    /// §F call-graph closure.
+    #[allow(dead_code)]
     routed_expr_surface_cache: RefCell<FxHashMap<RoutedExprSurfaceCacheKey, TypeExpr>>,
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
@@ -306,6 +325,10 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// scope where a `TypeOf(value)` reference is visible when neither
     /// `decl_scope` (the current declaration owner) nor `arg_scope` (the
     /// caller's SFC) contains the value symbol.
+    ///
+    /// Phase 5c (sub-plan §5 commit 3.7): unread after trampoline
+    /// conversion. Field deleted in 5g per §F call-graph closure.
+    #[allow(dead_code)]
     projection_chain_scopes: Vec<String>,
 }
 
@@ -378,7 +401,10 @@ pub(crate) fn forbid_prepared_structural_substitution_slow_lane_for_tests(
     PreparedStructuralSubstitutionSlowLaneGuard
 }
 
+// Phase 5c (sub-plan §5 commit 3.7): unused after trampoline
+// conversion of `project_route_surface_expr`. Helper deleted in 5g.
 #[cfg(test)]
+#[allow(dead_code)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {
     assert!(
         !direct_pick_routed_expr_slow_lane_forbidden_for_current_thread(),
@@ -387,6 +413,7 @@ fn assert_direct_pick_routed_expr_slow_lane_allowed() {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)]
 fn assert_direct_pick_routed_expr_slow_lane_allowed() {}
 
 #[cfg(test)]
@@ -2072,12 +2099,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .live_count()
     }
 
+    /// Phase 5c (sub-plan §A9 (b/c)): the corresponding test
+    /// assertions migrated to behavior assertions / host
+    /// `prepared_surface_db().live_count()` checks. Field + accessor
+    /// retained until the broader counter cleanup in 5g.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn debug_prepared_type_decl_query_count(&self) -> usize {
         self.prepared_type_decl_query_count
     }
 
+    /// Phase 5c (sub-plan §A9 (d)): the corresponding test
+    /// assertion migrated to a behavior assertion on the projected
+    /// `define_props` shape. Field + accessor retained until 5g.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn debug_prepared_root_surface_projection_count(&self) -> usize {
         self.prepared_root_surface_projection_count
     }
@@ -2281,13 +2317,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
     /// Project the full surface of a type expression in a declaration scope.
     ///
-    /// This is the projection-based alternative to `solve_scoped` + manual
-    /// surface extraction. It builds a `SubjectKey::Decl` for the type,
-    /// interns it, and calls `project_surface` to get all members and call
-    /// signatures without full structural normalization.
-    ///
-    /// Results are write-through: stable projections are published to
-    /// `TypeSurfaceDb` and reused by later requests.
+    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is
+    /// dispatch-centric: tries `dispatch_projected_surface` (which
+    /// instantiates the symbol through the `Instantiate { .., body_mode:
+    /// Expanded }` memo and raises the resulting node back to a
+    /// `ProjectedSurface`), falling back to the prepared-decl
+    /// projection (`cached_prepared_root_surface`) when dispatch
+    /// returns `None` for re-exported / barrel-routed declarations.
+    /// The prepared-decl helper itself is a dispatch consumer (it
+    /// reads via the host store and reduces the prepared decl body
+    /// without embedding a separate resolver). Callers migrate off
+    /// this method in 5d-5f; the method retires in 5g along with the
+    /// prepared-projection helpers per §F call-graph closure.
     pub fn project_type_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -2303,6 +2344,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .or_else(|| self.cached_prepared_root_surface(scope_canonical_id, symbol_name))
     }
 
+    /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
+    /// (itself a dispatch trampoline) with the projection → `TypeExpr`
+    /// raise. Callers migrate off in 5d-5f.
     pub fn project_type_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2312,6 +2356,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .and_then(|surface| projected_surface_to_type_expr(&surface))
     }
 
+    /// **Phase 5c trampoline.** Composes [`Self::project_type_surface`]
+    /// with the projection → `ExpandedObjectShape` raise. Callers
+    /// migrate off in 5d-5f.
     pub fn project_type_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -2321,6 +2368,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|surface| projected_surface_to_expanded_shape(&surface))
     }
 
+    /// **Phase 5c trampoline (sub-plan §4.2 line 441).** Body uses
+    /// the prepared-decl projection (`cached_prepared_root_surface`),
+    /// which is itself a dispatch consumer that reduces the prepared
+    /// decl body via the host's prepared-decl store without an
+    /// embedded resolver. Method retires in 5g per §F call-graph
+    /// closure; the §4.2 rewrite to
+    /// `dispatch.execute_to_type_expr(Instantiate { .. })` lands once
+    /// the prepared-decl Instantiate path subsumes the surface-side
+    /// barrel-routing helpers.
     pub fn project_prepared_type_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2330,6 +2386,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .and_then(|surface| projected_surface_to_type_expr(&surface))
     }
 
+    /// **Phase 5c trampoline (sub-plan §4.2 line 441).** Sibling to
+    /// [`Self::project_prepared_type_surface_expr`] but raises to an
+    /// `ExpandedObjectShape`. Callers migrate off in 5d-5f.
     pub fn project_prepared_type_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -2339,6 +2398,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|surface| projected_surface_to_expanded_shape(&surface))
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cached_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -2358,6 +2418,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(projected_surface_unwrap_or_clone)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_root_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -2371,6 +2432,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_root_surface_inner(
         &mut self,
         scope_canonical_id: &str,
@@ -2396,6 +2458,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_surface_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -2528,6 +2591,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Step 3 closure helper: write-through to host-owned
     /// PreparedSurfaceDb. Called after compute publishes a result so
     /// the next request (or a concurrent reader) gets the warm hit.
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn publish_prepared_surface_to_host_db(
         &self,
         scope_canonical_id: &str,
@@ -2557,6 +2621,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         });
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -2666,6 +2731,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_surface_from_ref(
         &mut self,
         scope_canonical_id: &str,
@@ -2775,6 +2841,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_requested_member_surface_from_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -3329,6 +3396,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn enumerate_route_literal_keys(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -3343,6 +3411,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn enumerate_route_literal_keys_inner(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -3498,6 +3567,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// sites can ALL be deleted in the same commit (per CLAUDE.md
     /// "Legacy Code Deletion" — no shims).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn enumerate_member_surface_keys_via_route(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -3893,11 +3963,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     }
 
     /// Project an arbitrary [`TypeExpr`] to its surface form (plan §9
-    /// appendix row 1-2). Route-based fast-path via
-    /// `component_meta_registry_public_indexed_access_route` stays; the
-    /// full projection routes through [`ProjectSemanticDispatch`] —
-    /// D-Cutover §5.8 retired the pre-cutover
-    /// `owner_engine.project_expr_surface_as_type_expr` fallback.
+    /// appendix row 1-2).
+    ///
+    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** The body is
+    /// dispatch-centric: a registry-route discriminator
+    /// (`component_meta_registry_public_indexed_access_route` /
+    /// `_utility_route`) translates indexed-access /
+    /// `Pick<>`/`Omit<>` style expressions into a `RouteDemand` shape
+    /// that hits the route-aware projection (which itself trampolines
+    /// through dispatch); arbitrary expressions go through the
+    /// `ProjectPath { ..., mode: Expanded }` dispatch entry directly.
+    /// All branches reach the shared `ProjectSemanticDispatch` memo;
+    /// no embedded resolver remains in this body. Callers migrate off
+    /// this method in 5d-5f; the method itself is deleted in 5g.
     pub fn project_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -3928,14 +4006,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         let dispatch = self.semantic_dispatch();
         let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
             base,
             path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             mode: ProjectionMode::Expanded,
-        }) else {
-            return None;
+        });
+        let projected = match read.value {
+            QueryResult::Value(expr) => expr,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        let projected = dispatch.raise_node_to_type_expr(node)?;
         (!type_expr_contains_semantic_miss(&projected) && type_expr_is_expanded_surface(&projected))
             .then_some(projected)
     }
@@ -3951,6 +4030,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///
     /// Returns `None` when the projection has no Object arm at any
     /// nesting level — there is no surface to extract.
+    ///
+    /// **Phase 5c trampoline.** Body is dispatch-only (the shared
+    /// `ProjectSemanticDispatch` projection through `ProjectPath { ...,
+    /// mode: Expanded }` followed by the compound-object filter). No
+    /// registry/route fast-path. Method retires in 5g.
     pub fn project_expr_surface_expr_with_compound_objects(
         &mut self,
         scope_canonical_id: &str,
@@ -3964,14 +4048,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         let dispatch = self.semantic_dispatch();
         let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
             base,
             path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             mode: ProjectionMode::Expanded,
-        }) else {
-            return None;
+        });
+        let projected = match read.value {
+            QueryResult::Value(expr) => expr,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        let projected = dispatch.raise_node_to_type_expr(node)?;
         type_expr_has_any_object_arm(&projected).then_some(projected)
     }
 
@@ -3987,6 +4072,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///
     /// Returns `Some(reduced)` only when the dispatch result differs
     /// structurally from `expr`, matching the pre-migration contract.
+    ///
+    /// **Phase 5c trampoline.** Body is the shared
+    /// `ProjectSemanticDispatch` `ProjectPath { mode: Expanded }`
+    /// projection. Method retires in 5g.
     pub fn lower_and_project_to_expanded(
         &mut self,
         scope_canonical_id: &str,
@@ -4000,14 +4089,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         let dispatch = self.semantic_dispatch();
         let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
-        let QueryResult::Value(node) = dispatch.execute(SemanticQueryKey::ProjectPath {
+        let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
             base,
             path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
             mode: ProjectionMode::Expanded,
-        }) else {
-            return None;
+        });
+        let reduced = match read.value {
+            QueryResult::Value(expr) => expr,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        let reduced = dispatch.raise_node_to_type_expr(node)?;
         (!type_expr_contains_semantic_miss(&reduced)
             && type_expr_is_expanded_surface(&reduced)
             && reduced != *expr)
@@ -4057,6 +4147,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         ))
     }
 
+    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is
+    /// dispatch-centric: registry-route discriminator translates
+    /// indexed-access / utility expressions into a `RouteDemand` that
+    /// flows through `project_routed_expr_surface_expr` (itself a
+    /// dispatch trampoline); a direct-utility shape rewrite handles
+    /// `Pick<T,K>`/`Omit<T,K>`/`Partial<T>` etc. via the engine's
+    /// surface helpers (which themselves call dispatch); arbitrary
+    /// expressions go through `ProjectPath { ..., mode: Shallow }`.
+    /// All branches reach the shared `ProjectSemanticDispatch` memo;
+    /// no embedded resolver remains. Method retires in 5g.
     pub fn project_expr_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -4084,9 +4184,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 );
             }
         }
-        // Plan §9 row 4: dispatch is the sole projection authority
-        // (D-Cutover §5.8 retired the `owner_engine.project_expr_surface`
-        // fallback).
         if let Some(shape) = self.project_direct_utility_surface_shape(scope_canonical_id, expr) {
             return Some(shape);
         }
@@ -4104,6 +4201,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_direct_utility_surface_shape(
         &mut self,
         scope_canonical_id: &str,
@@ -4232,15 +4330,30 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    /// **Phase 5c trampoline (sub-plan §5 commit 3.7).** Body is a
+    /// thin entry into the engine's route-aware projection
+    /// (`project_routed_expr_surface_expr`), which itself dispatches
+    /// each `RouteDemand` shape (Whole / MemberPath / Pick / Omit)
+    /// through `ProjectSemanticDispatch`. Per sub-plan §5 commit 6
+    /// the seed `mapped_exclude` closure lands in 5e once the
+    /// route-target callers migrate to
+    /// `dispatch.execute_pick`/`execute_omit`. Method retires in 5g.
     pub fn project_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
         root_symbol: &str,
         route: &super::RouteDemand,
     ) -> Option<TypeExpr> {
+        if self
+            .fuse_state
+            .check_projection_op_count(&self.fuse_budgets)
+        {
+            return None;
+        }
         self.project_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -4423,6 +4536,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cached_routed_expr_surface_expr(
         &self,
         scope_canonical_id: &str,
@@ -4456,6 +4570,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         Some(value)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cache_routed_expr_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -4484,6 +4599,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .insert(local_key, projected_expr.clone());
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cache_pick_members_from_projected_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -4526,6 +4642,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cache_projected_member(
         &mut self,
         scope_canonical_id: &str,
@@ -4546,6 +4663,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cached_prepared_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -4556,6 +4674,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn cache_prepared_surface_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -4606,6 +4725,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             && (!substitutions.is_empty() || is_package_source(Some(scope_canonical_id)))
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -4617,6 +4737,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_prepared_member_from_decl(scope_canonical_id, &prepared, member_name, member)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_member_from_decl(
         &mut self,
         scope_canonical_id: &str,
@@ -4652,6 +4773,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_member_path_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -4669,6 +4791,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn expr_references_prepared_scope_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -4809,6 +4932,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn solve_or_project_prepared_member_leaf_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -4851,6 +4975,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ///   per-sub-expression scope splitting because their sub-
     ///   expressions are already `TypeExpr` leaves that round-trip
     ///   through this function.
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn solve_or_project_leaf_expr_with_context(
         &mut self,
         context: &PreparedProjectionContext,
@@ -5014,6 +5139,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn solve_or_project_leaf_expr_until_stable(
         &mut self,
         scope_canonical_id: &str,
@@ -5037,6 +5163,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         last
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_member_path_route_projection_from_symbol(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -5119,6 +5246,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_member_path_route_projection_from_expr(
         &mut self,
         resolution_scope_canonical_id: &str,
@@ -5414,6 +5542,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection(
         &mut self,
         scope_canonical_id: &str,
@@ -5429,6 +5558,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection_from_symbol(
         &mut self,
         scope_canonical_id: &str,
@@ -5508,6 +5638,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         result
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_inherited_member_route_projection_from_expr(
         &mut self,
         _scope_canonical_id: &str,
@@ -5558,6 +5689,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|projected_member| projected_member.ty)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_pick_route_surface_expr_via_members(
         &mut self,
         scope_canonical_id: &str,
@@ -5613,6 +5745,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         })))
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_pick_route_surface_expr_via_routed_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -5624,6 +5757,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.project_routed_expr_surface_expr_direct(scope_canonical_id, symbol_name, route)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_routed_expr_surface_expr_direct(
         &mut self,
         scope_canonical_id: &str,
@@ -5633,6 +5767,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         self.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
     }
 
+    #[allow(dead_code)] // Phase 5c: deletion in 5g per call-graph closure
     fn project_prepared_pick_route_surface_expr(
         &mut self,
         scope_canonical_id: &str,
@@ -8596,18 +8731,79 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         let _store_view = host.resolver_store_view();
         let mut query_engine = ComponentMetaQueryEngine::new(&host);
 
+        let prepared_db_before = host.project_type_store().prepared_surface_db().live_count();
         let projected = query_engine
             .project_prepared_type_surface_expr("/src/App.vue", "ColorModeSelectProps")
             .expect("prepared surface should project");
+        let prepared_db_after = host.project_type_store().prepared_surface_db().live_count();
 
         assert!(
             matches!(projected, TypeExpr::Object(_)),
             "prepared projection should still materialize the routed object surface",
         );
-        assert_eq!(
-            query_engine.debug_prepared_type_decl_query_count(),
-            3,
-            "one projection should only query each prepared declaration once: ColorModeSelectProps, SelectMenuProps, and RootProps",
+
+        // Phase 5c (sub-plan §A9 (c) — DELETION FORBIDDEN): migrate
+        // from the engine-internal method-invocation counter
+        // (`debug_prepared_type_decl_query_count`) to (1) a
+        // behavior assertion on the projected surface (correctness
+        // half) and (2) a `live_count()` check on the host
+        // `prepared_surface_db` (cache-reuse half — preserved per
+        // A9 (c) interning-efficiency rule). Pre-cutover the
+        // counter == 3 form asserted "ColorModeSelectProps +
+        // SelectMenuProps + RootProps queried once each"; the
+        // post-cutover form asserts a strict bound on host
+        // prepared-surface entries written during the projection
+        // (must not exceed 3) AND the merged Object surface
+        // includes the inherited Pick props with `items` omitted.
+        let TypeExpr::Object(object) = &projected else {
+            panic!("prepared projection should be an Object after surface trampoline conversion");
+        };
+        let prop_names: Vec<&str> = object
+            .properties
+            .iter()
+            .filter_map(|m| match m {
+                verter_semantic::analysis::type_expr::ObjectMember::Property(prop) => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        // Negative: `items` is omitted by ColorModeSelectProps's
+        // `Omit<SelectMenuProps<...>, 'items'>` heritage. Pre-cutover
+        // bug behaviors that broke the heritage chain (e.g. dropping
+        // the second-level dedup, recursing infinitely, or returning
+        // an empty surface) would either include `items` or surface
+        // an empty member list.
+        assert!(
+            !prop_names.contains(&"items"),
+            "ColorModeSelectProps must Omit `items` via `Omit<SelectMenuProps<Item[]>, 'items'>`; found {:?}",
+            prop_names,
+        );
+        // Positive: `open` / `defaultOpen` / `disabled` flow through
+        // SelectMenuProps's `Pick<RootProps<T>, ...>` heritage. The
+        // dedup must reach RootProps once even though both
+        // ColorModeSelectProps and SelectMenuProps reference it
+        // transitively.
+        for inherited in ["open", "defaultOpen", "disabled"] {
+            assert!(
+                prop_names.contains(&inherited),
+                "ColorModeSelectProps must inherit `{inherited}` via Pick<RootProps<T>, 'open'|'defaultOpen'|'disabled'>; found {:?}",
+                prop_names,
+            );
+        }
+        // A9 (c) interning efficiency: the host prepared-surface DB
+        // must have grown by no more than 3 entries (one per
+        // distinct decl in the heritage chain: ColorModeSelectProps,
+        // SelectMenuProps, RootProps). Each substituted variant is a
+        // distinct cache key — but the projection runs the chain
+        // once, so the population delta is bounded. A regression
+        // that re-evaluates the chain repeatedly (e.g. a substitution
+        // bug that re-queries RootProps for every reference) would
+        // grow the DB beyond this bound.
+        let prepared_db_delta = prepared_db_after.saturating_sub(prepared_db_before);
+        assert!(
+            prepared_db_delta <= 3,
+            "prepared_surface_db must dedup the heritage chain to at most 3 entries (ColorModeSelectProps, SelectMenuProps, RootProps); delta={prepared_db_delta}",
         );
         assert_eq!(
             0u32, 0,

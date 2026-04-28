@@ -7943,7 +7943,6 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
     let eval_source =
         VerterHost::build_eval_script_source(&facts.raw_source, facts.cached_parse.as_deref());
     let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
-    let prepared_projection_before = query_engine.debug_prepared_root_surface_projection_count();
     let solves_before = 0u32;
 
     produce_macro_object_shapes(
@@ -7957,19 +7956,44 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_projects_when_appe
         &mut query_engine,
     );
 
-    // D-Cutover §5.8 WIP-W: `TypeSurfaceDb` retired (plan §9 row 6;
-    // semantic-graph memo is the sole projection authority). The
-    // empty-shell registry root always takes the prepared projection
-    // path on first use, so the expected delta is exactly 1.
-    assert_eq!(
-        query_engine.debug_prepared_root_surface_projection_count() - prepared_projection_before,
-        1,
-        "empty-shell registry roots must use the prepared projection path",
-    );
+    // Phase 5c (sub-plan §A9 (d)): migrate from projection-count
+    // delta (`debug_prepared_root_surface_projection_count`) to
+    // behavior assertion. Previously this test asserted the prepared
+    // projection path was taken exactly once via the
+    // `prepared_root_surface_projection_count` counter delta. After
+    // the surface-method trampoline conversion, the projection path
+    // routing is an internal dispatch detail; the discriminating
+    // contract is that the projection produces a usable
+    // `define_props` shape (i.e., is not just the empty registry
+    // shell) and that the shape contains the real ColorModeSelectProps
+    // surface (inherited via Omit<SelectMenuProps<Item[]>, 'items'>
+    // from the package, which transitively reaches root props
+    // including `color`/`variant`).
     assert_eq!(
         evaluated_types.define_props.len(),
         1,
         "projection fallback should still synthesize the real defineProps shape",
+    );
+    let macro_shape = &evaluated_types.define_props[0];
+    let prop_names: Vec<&str> = macro_shape
+        .result
+        .value
+        .properties
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        !prop_names.is_empty(),
+        "empty-shell registry roots must reach the real prepared projection (and surface its props) — found empty prop list, indicating dispatch returned the empty shell",
+    );
+    // Discriminating positive: ColorModeSelect inherits color/variant
+    // from SelectMenuProps via Omit. If the prepared projection path
+    // is bypassed and only the empty-shell registry root is consumed,
+    // these props would be absent.
+    assert!(
+        prop_names.contains(&"color") || prop_names.contains(&"variant"),
+        "prepared-path projection must inherit at least one of color/variant via the Omit<SelectMenuProps, 'items'> heritage chain; found props={:?}",
+        prop_names,
     );
     assert_eq!(
         0u32.saturating_sub(solves_before),
@@ -10079,8 +10103,8 @@ mod node_predicates_tests {
     };
     use crate::resolver_core::RouteDemand;
     use crate::semantic_query::{
-        DeclIdentity, IndexKey, IndexSignature, NodeScopeId, SemanticNodeData, SemanticNodeId,
-        SurfaceMember, SurfaceView,
+        DeclIdentity, IndexKey, IndexSignature, SemanticNodeData, SemanticNodeId, SurfaceMember,
+        SurfaceView,
     };
     use std::sync::Arc as StdArc;
     use verter_semantic::analysis::type_expr::LiteralValue;

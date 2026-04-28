@@ -2512,6 +2512,113 @@ fn migrate_engine_instantiate_local_generic_ref_preserves_env_and_args() {
     );
 }
 
+/// Phase 5c (sub-plan §5 commit 3.7) — atomic body swap: the retired
+/// engine surface methods (`project_expr_surface_expr`,
+/// `project_expr_surface_expr_with_compound_objects`,
+/// `project_expr_surface_shape`, `lower_and_project_to_expanded`,
+/// `project_route_surface_expr`, `project_type_surface{,_expr,_shape}`,
+/// `project_prepared_type_surface_{expr,shape}`) become trampolines
+/// that route ALL projection work through the shared
+/// `ProjectSemanticDispatch` memo. The bodies are dispatch-centric —
+/// no embedded `TypeQueryEngine` / `TypeSolverHost` resolver — but
+/// can keep thin pre-translation steps (registry-route discriminator
+/// that turns `Foo['bar']` indexed-access into a `RouteDemand` shape
+/// the route-aware projection consumes; direct-utility shape helper
+/// for `Pick<T,K>`/`Omit<T,K>`/`Partial<T>` etc.). Each pre-translation
+/// step itself ends in a dispatch call.
+///
+/// Discriminator markers:
+///
+/// - POSITIVE: `dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath`
+///   is the canonical trampoline tail (`raise.rs`'s
+///   `execute_to_type_expr` helper, sub-plan §3.3). Pre-cutover
+///   bodies used `dispatch.execute(SemanticQueryKey::ProjectPath {..})`
+///   followed by `dispatch.raise_node_to_type_expr(node)` (two-step
+///   form). Post-cutover, the `_expr`-returning trampolines collapse
+///   to the one-step `execute_to_type_expr` form. We require this
+///   marker in the file to discriminate "trampoline body present"
+///   from "body deleted / replaced with `None` stub".
+/// - NEGATIVE: `lower_and_project_to_expanded` and
+///   `project_expr_surface_expr_with_compound_objects` must NOT use
+///   the two-step `dispatch.raise_node_to_type_expr(node)` call form
+///   anymore (the `execute_to_type_expr` helper subsumes it for
+///   these methods).
+///
+/// Discriminating in both directions: pre-cutover the pattern
+/// `dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath` was
+/// not present (those callers used the two-step form); post-cutover
+/// the marker is present (in at least 3 trampolines:
+/// `project_expr_surface_expr`,
+/// `project_expr_surface_expr_with_compound_objects`,
+/// `lower_and_project_to_expanded`).
+#[test]
+fn phase_05c_engine_surface_trampolines_route_through_dispatch() {
+    let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
+
+    // Positive: the canonical one-step trampoline tail must appear at
+    // least 3 times (one per `_expr`-returning trampoline that swapped
+    // its body to the new helper). Pre-cutover this pattern was zero;
+    // a regression that reverts to the two-step `raise_node_to_type_expr`
+    // form anywhere in the surface trampolines re-fails this gate.
+    let one_step_dispatch_marker = cmqe_src
+        .matches("dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath")
+        .count();
+    assert!(
+        one_step_dispatch_marker >= 3,
+        "Phase 5c: surface trampolines must route through dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {{..}}); found only {} call site(s)",
+        one_step_dispatch_marker,
+    );
+
+    // Positive: each surface method body must reach dispatch. We pin
+    // `dispatch.lower_type_expr_in_scope` (standard expression
+    // lowering entry) as the canonical evidence and require it to
+    // appear at least 3 times (one per `_expr`-returning trampoline).
+    let lower_calls = cmqe_src
+        .matches("dispatch.lower_type_expr_in_scope")
+        .count();
+    assert!(
+        lower_calls >= 3,
+        "Phase 5c: surface trampolines must call dispatch.lower_type_expr_in_scope; found {} call site(s)",
+        lower_calls,
+    );
+
+    // Positive: `ProjectionMode::Shallow` is preserved on
+    // `project_expr_surface_shape` (per the existing migration row 4
+    // characterization; sub-plan §4.2). A regression that drops
+    // Shallow from the shape trampoline re-fails this assertion.
+    assert!(
+        cmqe_src.contains("ProjectionMode::Shallow"),
+        "Phase 5c: project_expr_surface_shape trampoline must emit ProjectionMode::Shallow",
+    );
+
+    // Negative: pre-cutover, `project_expr_surface_expr` and
+    // `lower_and_project_to_expanded` used the two-step form
+    // `dispatch.execute(SemanticQueryKey::ProjectPath { ... })` paired
+    // with `dispatch.raise_node_to_type_expr(node)`. After the
+    // trampoline conversion their bodies collapse to the one-step
+    // `execute_to_type_expr` form, dropping the `raise_node_to_type_expr`
+    // call. We allow the shape trampoline (Shallow mode) to keep its
+    // own raise pattern, but pin: the total `raise_node_to_type_expr`
+    // call sites must shrink at least 2 (from the pre-cutover count
+    // of 4).
+    //
+    // Pre-cutover count: 4
+    //   project_expr_surface_expr,
+    //   project_expr_surface_expr_with_compound_objects,
+    //   lower_and_project_to_expanded,
+    //   project_direct_utility_surface_shape's helper).
+    // Post-cutover count: <= 2
+    //   project_direct_utility_surface_shape's helper survives;
+    //   the three surface trampolines route through
+    //   execute_to_type_expr instead.
+    let raise_node_calls = cmqe_src.matches("dispatch.raise_node_to_type_expr").count();
+    assert!(
+        raise_node_calls <= 2,
+        "Phase 5c: surface trampolines must collapse the two-step (execute + raise_node_to_type_expr) form into execute_to_type_expr; found {} dispatch.raise_node_to_type_expr call site(s) (pre-cutover: 4, target: <=2)",
+        raise_node_calls,
+    );
+}
+
 /// Plan §9 row 6: `TypeSurfaceDb::{get, publish, evict_*}` identity
 /// moved to `SemanticGraphStore::relation_memo`. Verifies the
 /// post-cutover memo API exists and behaves as a write-read-warm
