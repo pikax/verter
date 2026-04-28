@@ -38,6 +38,7 @@
 //! 2. Snapshot (cached content)
 //! 3. Disk via `NativeFs`
 
+pub mod ambient_lib;
 pub mod audit_sink;
 pub mod canonical_path;
 pub mod changes;
@@ -81,6 +82,11 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 
 // ── Public re-exports ──
 
+pub use ambient_lib::{
+    ambient_virtual_canonical_id, compute_ambient_hash16,
+    normalize_canonical_id as normalize_ambient_canonical_id, AmbientLibEntry, AmbientLibError,
+    AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit, ProjectAmbientLibs,
+};
 pub use canonical_path::{canonicalize_path, CanonicalPath};
 pub use changes::{ChangeResult, OwnedFileInfo, OwnershipDiff, WorkspaceChange};
 #[cfg(not(target_arch = "wasm32"))]

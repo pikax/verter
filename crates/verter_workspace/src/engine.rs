@@ -1,10 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
+use crate::ambient_lib::AmbientLibsByProject;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
 use crate::exact_resolution::EdgeStore;
@@ -86,6 +87,17 @@ pub(crate) struct Engine {
     /// `background_init` builds the full project graph, a real snapshot with
     /// `ownership_ready: true` is published.
     pub(crate) published_state: ArcSwapOption<PublishedRoot>,
+
+    /// Per-project ambient TypeScript lib registry (Phase 5 §6.3 / A1).
+    ///
+    /// Lock-free `ArcSwap` so reads (file shadowing checks, symbol lookup,
+    /// dep-fact validation) never block on concurrent registrations. Concrete
+    /// workspaces mutate via CAS in `register_ambient_lib`.
+    // Initialized in `Engine::new()`. Concrete workspace impls land in the
+    // next commit (Phase 5 §6.5 — `MemoryWorkspace::register_ambient_lib`,
+    // `FilesystemWorkspace::register_ambient_lib`).
+    #[allow(dead_code)]
+    pub(crate) ambient_libs: ArcSwap<AmbientLibsByProject>,
 }
 
 impl Engine {
@@ -101,6 +113,7 @@ impl Engine {
             dir_index: RwLock::new(DirIndex::new()),
             vfs_provenance: VfsProvenance::default(),
             published_state: ArcSwapOption::new(None),
+            ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
         };
         // Publish an initial snapshot from the empty project graph so that
         // `published_state` is always `Some`. This ensures basic relative

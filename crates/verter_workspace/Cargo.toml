@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 glob = "0.3"
 parking_lot = "0.12"
 smallvec = "1.13"
+thiserror = "2"
 verter_scheduler = { path = "../verter_scheduler" }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

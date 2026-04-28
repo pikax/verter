@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
+use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit};
+use crate::project_key::ProjectStableKey;
 use crate::types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
     ProjectOwnership, ResolutionContext, ResolveResult,
 };
+use crate::workspace_snapshot::ProjectId;
 
 /// Lightweight resource snapshot for first-class Rust audit.
 #[derive(Debug, Clone, Default)]
@@ -290,6 +293,93 @@ pub trait WorkspaceAccess: Send + Sync {
     ) -> Result<(), crate::audit_sink::AuditSinkError> {
         Err(crate::audit_sink::AuditSinkError::NotSupported)
     }
+
+    // ── Ambient TypeScript lib registry (Phase 5 §6 — A1) ──
+    //
+    // All methods live on the base trait so `VerterHost::workspace()` can reach
+    // them through `Arc<dyn WorkspaceAccess>`. Default impls return
+    // `NotBootstrapped` / `None` for backends without ambient lib support.
+
+    /// Register an ambient TypeScript lib (e.g. `lib.es5.d.ts`) for a project.
+    ///
+    /// Idempotent on `(project, canonical_id, content_hash)`. New content for
+    /// the same canonical_id replaces the existing entry and bumps the content
+    /// generation so dep-fact validators re-execute.
+    ///
+    /// Default: `Err(NotBootstrapped)`.
+    fn register_ambient_lib(&self, _spec: AmbientLibSpec) -> Result<(), AmbientLibError> {
+        Err(AmbientLibError::NotBootstrapped)
+    }
+
+    /// Unregister an ambient lib by `(stable_key, canonical_id)`.
+    /// Default: `Err(NotBootstrapped)`.
+    fn unregister_ambient_lib(
+        &self,
+        _stable_key: ProjectStableKey,
+        _canonical_id: &str,
+    ) -> Result<(), AmbientLibError> {
+        Err(AmbientLibError::NotBootstrapped)
+    }
+
+    /// Read an ambient lib's source by `(stable_key, canonical_id)`.
+    ///
+    /// Returns `None` when the canonical_id is shadowed by a non-ambient user
+    /// file (overlay or snapshot) — see A5 user-wins shadowing.
+    ///
+    /// Default: `None`.
+    fn read_ambient_lib(
+        &self,
+        _stable_key: ProjectStableKey,
+        _canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        None
+    }
+
+    /// Compute the project-scoped ambient virtual canonical id for a
+    /// `(stable_key, canonical_id)` pair (`ambient:/<tag>/<canonical>`).
+    ///
+    /// Default falls through to the helper in [`crate::ambient_lib`] so all
+    /// backends produce the same id for the same inputs.
+    fn ambient_virtual_canonical_id(
+        &self,
+        stable_key: ProjectStableKey,
+        canonical_id: &str,
+    ) -> Arc<str> {
+        crate::ambient_lib::ambient_virtual_canonical_id(stable_key, canonical_id)
+    }
+
+    /// Record a session-side reverse-dep edge from a consumer file to the
+    /// ambient virtual id. Re-registration of the lib bumps the content
+    /// generation so `HostFenceValidator` invalidates downstream caches.
+    /// Default: no-op.
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
+
+    /// Resolve a `ProjectId` (snapshot index) to its stable key for ambient
+    /// lookups. Returns `None` when the workspace is not yet published or the
+    /// id is unknown. Default: `None`.
+    fn project_stable_key(&self, _project_id: ProjectId) -> Option<ProjectStableKey> {
+        None
+    }
+
+    /// O(1) symbol-name lookup against the registered ambient libs for a
+    /// given consumer project. Used by the bare-name resolver as a fallback
+    /// when a symbol is not present in scope or in the import graph.
+    ///
+    /// Default: `None`.
+    fn lookup_ambient_symbol(
+        &self,
+        _consumer_project: ProjectStableKey,
+        _symbol: &str,
+    ) -> Option<AmbientSymbolHit> {
+        None
+    }
+
+    /// Lock-free read of the engine's ambient lib registry, used by host-side
+    /// validators (e.g., `HostFenceValidator`'s ambient `WholeHash` arm).
+    /// Backends that don't support ambient libs return an empty registry.
+    fn ambient_libs_view(&self) -> Arc<AmbientLibsByProject> {
+        Arc::new(AmbientLibsByProject::default())
+    }
 }
 
 // ── Scheduler-oriented traits ──
@@ -367,5 +457,93 @@ impl ResolverSnapshot for EmptyResolverSnapshot {
 
     fn generation(&self) -> u64 {
         0
+    }
+}
+
+#[cfg(test)]
+mod ambient_default_tests {
+    //! Phase 5 §6.1 / A1 default-trait surface tests.
+    //!
+    //! These confirm that `WorkspaceAccess` has the ambient lib registration
+    //! API and that backends without ambient support return
+    //! `Err(NotBootstrapped)` / `None` from the defaults. These are
+    //! discriminating: pre-change tree (no ambient methods on the trait) does
+    //! not even compile.
+    use std::sync::Arc;
+
+    use super::WorkspaceAccess;
+    use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
+    use crate::project_key::ProjectStableKey;
+
+    /// Minimal backend that opts out of ambient lib support — exercises the
+    /// trait defaults.
+    struct StubWs;
+
+    impl WorkspaceAccess for StubWs {
+        fn read_file(&self, _id: &str) -> Option<Arc<str>> {
+            None
+        }
+        fn file_exists(&self, _id: &str) -> bool {
+            false
+        }
+        fn realpath(&self, _id: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn default_register_ambient_lib_returns_not_bootstrapped() {
+        let ws = StubWs;
+        let spec = AmbientLibSpec {
+            project_id: None,
+            canonical_id: Arc::from("lib.es5.d.ts"),
+            source: Arc::from("export {};"),
+        };
+        let err = ws.register_ambient_lib(spec).unwrap_err();
+        assert_eq!(
+            err,
+            AmbientLibError::NotBootstrapped,
+            "default impl MUST surface NotBootstrapped"
+        );
+    }
+
+    #[test]
+    fn default_read_ambient_lib_returns_none() {
+        let ws = StubWs;
+        let key = ProjectStableKey::Configured([0u8; 16]);
+        assert!(
+            ws.read_ambient_lib(key, "lib.es5.d.ts").is_none(),
+            "default impl MUST return None"
+        );
+    }
+
+    #[test]
+    fn default_lookup_ambient_symbol_returns_none() {
+        let ws = StubWs;
+        let key = ProjectStableKey::Configured([0u8; 16]);
+        assert!(
+            ws.lookup_ambient_symbol(key, "Pick").is_none(),
+            "default impl MUST return None"
+        );
+    }
+
+    #[test]
+    fn default_ambient_libs_view_is_empty() {
+        let ws = StubWs;
+        let view = ws.ambient_libs_view();
+        assert!(
+            view.by_project.is_empty(),
+            "default impl MUST return empty registry"
+        );
+    }
+
+    #[test]
+    fn default_ambient_virtual_canonical_id_uses_helper() {
+        let ws = StubWs;
+        let key = ProjectStableKey::Configured([0xAB; 16]);
+        let virt = ws.ambient_virtual_canonical_id(key, "lib.es5.d.ts");
+        let s: &str = &virt;
+        assert!(s.starts_with("ambient:/C"), "got {s}");
+        assert!(s.ends_with("/lib.es5.d.ts"), "got {s}");
     }
 }
