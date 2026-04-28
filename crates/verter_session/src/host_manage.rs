@@ -2290,11 +2290,14 @@ impl VerterHost {
         canonical_id: &str,
         type_name: &str,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        // Phase 5d (sub-plan §4.1 host_manage row): the Class B
-        // `project_type_surface_expr` site here remains on the engine
-        // helper for 4a; it migrates with the rest of Class B in
-        // commit 4c. The Class A `project_expr_surface_expr` fallback
-        // routes through the shared dispatch helper.
+        // Phase 5d (sub-plan §4.1 host_manage row): the Class A
+        // `project_expr_surface_expr` fallback routes through the
+        // shared dispatch helper. The Class B
+        // `project_type_surface_expr` site stays on the engine —
+        // TODO(phase-5g): the prepared-decl fallback inside
+        // `project_type_surface` is essential for re-exported /
+        // namespace-qualified globals (e.g. `JSX.IntrinsicElements`)
+        // and migrates atomically with the engine retirement.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(self);
         let expanded = engine
             .project_type_surface_expr(canonical_id, type_name)

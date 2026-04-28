@@ -7694,6 +7694,10 @@ fn produce_macro_object_shapes_real_nuxt_ui_color_mode_select_reuses_authoritati
     }
 
     let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+    // TODO(phase-5g): the §4.1 row marks this test for migration to
+    // `dispatch.execute_to_type_expr(Instantiate{..})` — but the
+    // prepared-decl fallback that handles overlay-backed types is
+    // engine-internal. Migrate atomically with the engine retirement.
     let prepared_overlay_surface =
         query_engine.project_prepared_type_surface_expr(&component, "ColorModeSelectProps");
     assert!(

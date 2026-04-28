@@ -185,87 +185,14 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'host>(
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
 
-/// Class B type-decl projection (Phase 5d §4.1) — dispatch-direct
-/// equivalent of
-/// `ComponentMetaQueryEngine::project_type_surface_expr`.
-///
-/// Resolves `symbol_name` in `scope_canonical_id` via the bare-name
-/// resolver, then runs `Instantiate { base: <decl identity>, args: [],
-/// body_mode: Expanded }` followed by an empty-path `ProjectPath`
-/// raise to a `TypeExpr`. Mirrors
-/// `dispatch_root_instantiated` + `raise_node_to_type_expr` from the
-/// Phase 5c trampoline body without inheriting the engine's
-/// `dispatch_projected_surface` re-entry / fuse state.
-///
-/// Returns `None` when the symbol cannot be resolved or when the
-/// dispatch result is `Recursive` / `Error`.
-pub(crate) fn project_type_class_b_via_dispatch(
-    host: &VerterHost,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::resolver_core::bare_name_resolve;
-    use crate::semantic_query::{
-        DeclIdentity, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    };
-
-    // Match `dispatch_root_instantiated`: bare-name resolve in scope,
-    // then build a `DeclIdentity` keyed by the resolved canonical_id +
-    // its `whole_hash`. When the bare-name resolver misses (e.g.,
-    // local-to-scope identifier), fall back to the input pair. The
-    // engine-cached scope payload is not reachable from a host-direct
-    // helper; the bare-name resolver hits IndexedReady directly when
-    // `scope_payload` is `None`, which is correct for top-level
-    // declared symbols (and the scope-payload fast-path is a perf hop
-    // for already-bound script-setup names that the engine sees).
-    let resolved_root =
-        bare_name_resolve::resolve_bare_name_in_scope(host, scope_canonical_id, None, symbol_name)
-            .map(|root| (root.canonical_id, root.symbol_name))
-            .unwrap_or_else(|| (scope_canonical_id.to_string(), symbol_name.to_string()));
-
-    let dispatch = ProjectSemanticDispatch::new(host);
-    let anchor = match dispatch.execute(SemanticQueryKey::ResolveDecl(resolve_decl_key(
-        resolved_root.0.as_str(),
-        resolved_root.1.as_str(),
-    ))) {
-        QueryResult::Value(id) => id,
-        _ => return None,
-    };
-    let whole_hash = host
-        .shallow_file_state(resolved_root.0.as_str())
-        .map(|s| s.whole_hash)
-        .unwrap_or_default();
-    let identity = DeclIdentity {
-        canonical_id: Arc::from(resolved_root.0.as_str()),
-        whole_hash,
-        decl_name: Arc::from(resolved_root.1.as_str()),
-    };
-    let empty_args: Arc<[SemanticNodeId]> =
-        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice());
-    let root_node = match dispatch.execute(SemanticQueryKey::Instantiate {
-        base: identity,
-        args: empty_args,
-        body_mode: ProjectionMode::Expanded,
-    }) {
-        QueryResult::Value(id) => id,
-        _ => anchor,
-    };
-    dispatch.raise_node_to_type_expr(root_node)
-}
-
-/// Class B shape variant (Phase 5d §4.1) — dispatch-direct equivalent
-/// of `ComponentMetaQueryEngine::project_type_surface_shape`. Used by
-/// commit 4c (Class B type-decl projection migrations).
-#[allow(dead_code)]
-pub(crate) fn project_type_class_b_shape_via_dispatch(
-    host: &VerterHost,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    let expanded = project_type_class_b_via_dispatch(host, scope_canonical_id, symbol_name)?;
-    Some(verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded))
-}
+// Class B helpers were prototyped during 5d but caused regressions
+// in transitive heritage chains and barrel-routed declarations
+// because their dispatch-only path bypasses the engine's
+// prepared-decl fallback (`cached_prepared_root_surface`). The
+// trampoline's `project_type_surface` body is dispatch-first then
+// prepared-decl-second; threading the prepared-decl path through
+// dispatch atomically is a Phase 5g change. Class B callsite
+// migration deferred to 5g per CLAUDE.md fix-quality discipline.
 
 // =============================================================================
 // Plan §4.10 / K1 — `MacroFieldGraphState` lazy-lowering scaffold + lower
@@ -3028,9 +2955,17 @@ fn materialize_component_meta_field_types(
                         rewrite_named_self_refs_to_recursive_ref(&body, target_name.as_str())
                     })
                     .or_else(|| {
-                        // D-Cutover §5.8: route through dispatch's
-                        // surface projection; the pre-§5.8
-                        // `solve_scoped` solver fallback is retired.
+                        // TODO(phase-5g): the Class B migration target
+                        // is `dispatch.execute(Instantiate { args: [],
+                        // body_mode: Expanded })` per sub-plan §4.1.
+                        // The trampoline's `project_type_surface` body
+                        // includes a prepared-decl fallback for
+                        // re-exported / barrel declarations
+                        // (transitive heritage chains, namespace-qualified
+                        // imports). The prepared-decl fallback is
+                        // engine-internal; threading it through
+                        // dispatch atomically is a 5g change. Stays
+                        // on the engine for 5d.
                         query_engine
                             .project_type_surface_expr(target_scope.as_str(), target_name.as_str())
                     })
@@ -4799,6 +4734,10 @@ fn produce_one_macro_object_shape(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
+                // TODO(phase-5g): same Class B engine-retention
+                // rationale as `materialize_component_meta_field_types`
+                // — the prepared-decl fallback is required for
+                // re-exported / barrel-routed declarations.
                 if let Some(shape) =
                     query_engine.project_type_surface_shape(&def_canonical, &def_name)
                 {
@@ -4832,9 +4771,7 @@ fn produce_one_macro_object_shape(
             } else {
                 declaration.resolved_name.clone()
             };
-            // D-Cutover §5.8: route through dispatch's surface
-            // projection — the pre-§5.8 `solve_scoped` solver path
-            // is retired.
+            // TODO(phase-5g): same Class B engine-retention rationale.
             query_engine
                 .project_type_surface_expr(defining_canonical.as_str(), defining_name.as_str())
                 .and_then(|solved_expr| {
@@ -4970,6 +4907,9 @@ fn project_named_ref_prepared_surface_shape(
     let (scope_canonical, resolved_name) =
         resolve_named_ref_prepared_projection_target(query_engine, owner_canonical, name.as_ref())?;
 
+    // TODO(phase-5g): same Class B engine-retention rationale —
+    // prepared-decl fallback for re-exported declarations is engine-
+    // internal until 5g atomic engine retirement.
     query_engine
         .project_prepared_type_surface_shape(scope_canonical.as_str(), resolved_name.as_str())
         .and_then(|shape| {
@@ -5093,6 +5033,7 @@ fn project_named_ref_surface_shape(
         declaration.resolved_name.as_str()
     };
 
+    // TODO(phase-5g): Class B engine-retention rationale.
     query_engine
         .project_type_surface_shape(defining_canonical, defining_name)
         .and_then(|shape| {
@@ -5152,6 +5093,7 @@ fn produce_one_macro_object_shape_for_slots(
             if let Some((def_canonical, def_name)) =
                 classify_named_ref_for_db_projection(query_engine, owner_canonical, name)
             {
+                // TODO(phase-5g): Class B engine-retention rationale.
                 if let Some(shape) =
                     query_engine.project_type_surface_shape(&def_canonical, &def_name)
                 {
@@ -6362,6 +6304,7 @@ impl VerterHost {
                     query_engine,
                 ));
             }
+            // TODO(phase-5g): Class B engine-retention rationale.
             query_engine
                 .project_type_surface_expr(scope_canonical_id, symbol_name)
                 .map(|materialized| {
@@ -9236,6 +9179,7 @@ fn materialize_component_meta_registry_structural_expr(
                     if ref_is_package_backed_node(engine.host, scope_canonical_id, name) {
                         expr.clone()
                     } else {
+                        // TODO(phase-5g): Class B engine-retention.
                         engine
                             .project_type_surface_expr(scope_canonical_id, name)
                             .or_else(|| {
@@ -11867,6 +11811,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
             return Vec::new();
         }
 
+        // TODO(phase-5g): Class B engine-retention rationale.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
 
         candidate_roots
@@ -11896,6 +11841,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         root_name: &str,
         macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
     ) -> Option<crate::resolver_core::surface_projector::ProjectedMacroSurfaces> {
+        // TODO(phase-5g): Class B engine-retention rationale.
         let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.host);
         let shape = query_engine.project_prepared_type_surface_shape(owner_canonical, root_name)?;
         Some(
