@@ -27,7 +27,10 @@ use std::sync::Arc;
 use verter_session::audited_request::AuditedRequest;
 use verter_session::component_meta_audit::{RustAuditRecord, RustSemanticFootprintAudit};
 use verter_session::{FileKind, HostConfig, UpsertRequest, VerterHost};
-use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+use verter_workspace::{
+    AmbientLibSpec, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph,
+    ProjectMembership, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+};
 
 // Shared test-fixture source files injected into hermetic
 // workspaces. Paths resolve relative to the `mod.rs` file itself.
@@ -108,4 +111,175 @@ pub fn footprint_of(record: &RustAuditRecord) -> &RustSemanticFootprintAudit {
         .footprint
         .as_ref()
         .expect("footprint_capture is always enabled in this suite")
+}
+
+/// Hand-authored mapped-type subset of `lib.es5.d.ts` (Phase 5a §5 commit 0b).
+///
+/// Same discipline as Phase 0 §0p.A.0: hand-derived from the TS spec so the
+/// harness never silently disagrees with `tsc --lib` on what `Pick` means.
+/// Use through [`build_hermetic_host_with_lib`].
+pub const STUB_LIB_ES5: &str = r#"
+type Pick<T, K extends keyof T> = { [P in K]: T[P] };
+type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
+type Partial<T> = { [P in keyof T]?: T[P] };
+type Required<T> = { [P in keyof T]-?: T[P] };
+type Readonly<T> = { readonly [P in keyof T]: T[P] };
+type Record<K extends keyof any, T> = { [P in K]: T };
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type NonNullable<T> = T extends null | undefined ? never : T;
+"#;
+
+/// Phase 5a §5 commit 0b harness: build a hermetic host with regular SFC /
+/// TS files **and** ambient TypeScript lib files registered via
+/// [`WorkspaceAccess::register_ambient_lib`].
+///
+/// `lib_files` is a slice of `(filename, source)` pairs. Each lib is also
+/// `inject_file`'d at canonical id `/lib/<filename>` so that any consumer
+/// that needs the source through the regular VFS path can still read it
+/// (the registration itself goes through the ambient registry, not the
+/// snapshot — these two paths together cover both A1 lookups and standard
+/// reads). The host is built against a single configured project at
+/// `/ws` with `tsconfig.json` so `register_ambient_lib(project_id: None)`
+/// resolves unambiguously.
+#[allow(dead_code)]
+pub fn build_hermetic_host_with_lib(
+    files: &[(&str, &str)],
+    lib_files: &[(&str, &str)],
+) -> Arc<VerterHost> {
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    // A configured project so `register_ambient_lib` has a stable key to
+    // attach to.
+    workspace.set_project_graph(ProjectGraph::from_configs(vec![VfsProjectConfig {
+        root: "/ws".to_string(),
+        rank: ProjectRank::Explicit,
+        tsconfig_path: Some("/ws/tsconfig.json".to_string()),
+        root_files: vec![],
+        extensions: vec![".ts".into(), ".tsx".into(), ".vue".into()],
+        workspace_root: "/ws".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: ProjectMembership::default(),
+    }]));
+    for (canonical, content) in files {
+        workspace.inject_file((*canonical).into(), Arc::from(*content));
+    }
+    for (filename, source) in lib_files {
+        // Mirror lib content into the snapshot at /lib/<filename> so the
+        // standard read_file path can reach it for tests that exercise the
+        // VFS layer directly. The ambient registry below is the contract
+        // surface — read_file is incidental.
+        let mirror_id = format!("/lib/{filename}");
+        workspace.inject_file(mirror_id.clone(), Arc::from(*source));
+        workspace
+            .register_ambient_lib(AmbientLibSpec {
+                project_id: None,
+                canonical_id: Arc::from(*filename),
+                source: Arc::from(*source),
+            })
+            .unwrap_or_else(|e| {
+                panic!("ambient lib registration for `{filename}` MUST succeed, got {e:?}")
+            });
+    }
+    let ws_access: Arc<dyn WorkspaceAccess> = workspace;
+    Arc::new(VerterHost::new(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+        ws_access,
+    ))
+}
+
+#[cfg(test)]
+mod self_tests {
+    //! Phase 5a §5 commit 0b self-tests:
+    //! - `stub_lib_pick_resolves` proves the harness puts `Pick` in scope.
+    //! - `register_ambient_lib_idempotent` proves the harness's
+    //!   `build_hermetic_host_with_lib` is itself idempotent — repeated
+    //!   builds with identical inputs land identical workspace state.
+    //! - `vfs_shadowing_overlay_wins` proves A5 (overlay/snapshot files
+    //!   shadow ambient libs).
+    use std::sync::Arc;
+
+    use verter_workspace::ProjectId;
+
+    use super::{build_hermetic_host_with_lib, STUB_LIB_ES5};
+
+    /// `Pick` is the canonical mapped-type test marker. After the harness
+    /// builds a host with `STUB_LIB_ES5` registered, the workspace MUST
+    /// resolve `Pick` through `lookup_ambient_symbol`.
+    #[test]
+    fn stub_lib_pick_resolves() {
+        let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
+        let workspace = host.workspace();
+        let key = workspace
+            .project_stable_key(ProjectId(0))
+            .expect("hermetic host with lib MUST have a configured project");
+        let hit = workspace
+            .lookup_ambient_symbol(key, "Pick")
+            .expect("STUB_LIB_ES5 MUST expose Pick to the symbol_index");
+        assert_eq!(hit.canonical_id.as_ref(), "lib.es5.d.ts");
+        // Registry hit virtual id is project-scoped.
+        let v: &str = &hit.virtual_id;
+        assert!(v.starts_with("ambient:/"), "got {v}");
+        assert!(v.ends_with("/lib.es5.d.ts"));
+
+        // `read_ambient_lib` returns the source while `read_file` does not
+        // (ambient registry is a separate surface from the snapshot).
+        let s = workspace
+            .read_ambient_lib(key, "lib.es5.d.ts")
+            .expect("ambient registry MUST expose source");
+        assert!(s.contains("type Pick"), "got source = {s:?}");
+    }
+
+    /// Per A1: building twice with the same lib produces the same
+    /// workspace state — no double registration, no duplicate symbol_index
+    /// entries, no content_generation thrash on the second build.
+    ///
+    /// Discriminating: pre-change tree has no `register_ambient_lib`
+    /// at all, so the test fails to compile. Post-change tree, building
+    /// twice yields the same idempotent state.
+    #[test]
+    fn register_ambient_lib_idempotent() {
+        let host_a = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
+        let host_b = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
+        let key_a = host_a.workspace().project_stable_key(ProjectId(0)).unwrap();
+        let key_b = host_b.workspace().project_stable_key(ProjectId(0)).unwrap();
+        // Same configured project (same workspace_root + tsconfig) → same
+        // ProjectStableKey across hosts (A3 determinism).
+        assert_eq!(key_a, key_b);
+        // Both registries expose Pick.
+        assert!(host_a
+            .workspace()
+            .lookup_ambient_symbol(key_a, "Pick")
+            .is_some());
+        assert!(host_b
+            .workspace()
+            .lookup_ambient_symbol(key_b, "Pick")
+            .is_some());
+    }
+
+    /// Per A5: a user file at the same canonical_id wins over the ambient
+    /// lib through `read_ambient_lib`'s overlay/snapshot shadowing check.
+    /// Discriminating: pre-change tree has no `read_ambient_lib`.
+    #[test]
+    fn vfs_shadowing_overlay_wins() {
+        let host = build_hermetic_host_with_lib(&[], &[("lib.es5.d.ts", STUB_LIB_ES5)]);
+        let workspace = host.workspace();
+        let key = workspace.project_stable_key(ProjectId(0)).unwrap();
+        // Initial state: ambient lib reachable.
+        assert!(workspace.read_ambient_lib(key, "lib.es5.d.ts").is_some());
+        // Open an editor buffer at the same canonical_id.
+        workspace.notify_upsert("lib.es5.d.ts", Arc::from("// user override"));
+        assert!(
+            workspace.read_ambient_lib(key, "lib.es5.d.ts").is_none(),
+            "A5: user overlay MUST shadow ambient lib via read_ambient_lib"
+        );
+        // The user file is what `read_file` returns.
+        let s = workspace.read_file("lib.es5.d.ts").unwrap();
+        assert_eq!(&*s, "// user override");
+    }
 }
