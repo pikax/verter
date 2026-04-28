@@ -5450,7 +5450,7 @@ fn resolve_macro_payload_dedups_via_interning() {
     // the second query would re-build (misses incremented again, hits
     // not incremented). Post-fix: hits >= stats_mid.hits + 1.
     assert!(
-        stats_after.hits >= stats_mid.hits + 1,
+        stats_after.hits > stats_mid.hits,
         "ResolveMacroPayload second query must be a warm hit (hits delta >= 1); \
          before={} mid={} after={}",
         stats_before.hits,

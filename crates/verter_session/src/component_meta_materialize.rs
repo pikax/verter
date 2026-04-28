@@ -1796,7 +1796,7 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
 
         let trace = DISPATCH_TRACE.with(|t| t.borrow().clone());
         assert!(
-            trace.iter().any(|s| *s == "Instantiate"),
+            trace.contains(&"Instantiate"),
             "DeclRef materialisation must dispatch Instantiate; trace={trace:?}"
         );
     }
