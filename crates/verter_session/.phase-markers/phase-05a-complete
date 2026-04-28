@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "phase": "phase-05a",
+  "status": "success",
+  "base_commit": "d9b3f90939ed45387b8d219c01ad971875b27f4c",
+  "work_head_before_marker": "50404312",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10138,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [
+    "sub-plan-§6.7-full-scheduler-submission",
+    "sub-plan-§6.8-test-9-lazy-parse",
+    "sub-plan-§6.8-test-10-per-project-no-collision",
+    "sub-plan-§6.8-test-5-e2e-cache-invalidation"
+  ],
+  "report_path": "phase-05a-report.md"
+}
