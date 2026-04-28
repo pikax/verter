@@ -172,24 +172,11 @@ pub fn resolve_external(owner: &str, specifier: &str) -> String {
     if specifier.starts_with('/') {
         return canonicalize_id(specifier).into_owned();
     }
-    if specifier.starts_with(".") {
-        let mut parts: Vec<&str> = owner.split('/').collect();
-        parts.pop(); // remove filename
-                     // Track whether the owner had a root prefix (leading empty segment from "/...")
-        let had_root = parts.first() == Some(&"");
-        for segment in specifier.split('/') {
-            match segment {
-                "." | "" => {}
-                ".." => {
-                    // Guard: don't pop past the root segment (empty string from leading /)
-                    if parts.len() > 1 || (parts.len() == 1 && !had_root) {
-                        let _ = parts.pop();
-                    }
-                }
-                other => parts.push(other),
-            }
-        }
-        return parts.join("/");
+    if specifier.starts_with('.') {
+        // Sub-plan §2.1: relative branch delegates to the workspace's single
+        // source of truth for path-join semantics. Algorithm preserved
+        // byte-for-byte (parent-pop guard, root-segment guard, "//"/"./" elision).
+        return verter_workspace::relative_path::join_relative(owner, specifier);
     }
     canonicalize_id(specifier).into_owned()
 }

@@ -7450,29 +7450,22 @@ impl VerterHost {
         }
     }
 
-    /// Provide caller-resolved import dependency resolution records.
+    /// Convert `cc.import_routes` (caller-provided `DependencyResolution` map)
+    /// into workspace `ExactResolution` `Vec`, fanning each resolution out
+    /// across the (phase, kind) matrix per existing `set_import_dependencies`
+    /// semantics.
     ///
-    /// Called after `upsert()` when the caller resolves import specifiers
-    /// (tsconfig paths, vite aliases, etc.) using bundler/LSP resolution.
-    /// Each record maps a raw import specifier to its resolved canonical ID
-    /// (or a list of candidate canonical IDs).
-    ///
-    /// Records are merged into the file's `import_routes` map (keyed by
-    /// specifier). The flat `dependencies` set is updated in parallel for
-    /// reverse-dependency tracking.
-    pub fn set_import_dependencies(
+    /// Sub-plan §2.12 (R7): used by both [`Self::set_import_dependencies`]
+    /// (existing flow) AND [`Self::integrate_scheduler_snapshot`]'s post-
+    /// `record_parsed_edges` re-apply path (preserves bundler pre-load route
+    /// state across ensure_loaded reloads).
+    pub(crate) fn build_exact_resolutions_from_routes(
         &self,
-        canonical_or_alias: &str,
-        resolutions: Vec<DependencyResolution>,
-    ) {
-        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let parse_deps = self.parse_dependency_set_for_file(&canonical);
-
-        // Runtime codegen honors caller-provided targets directly. Type-preferring
-        // contexts must either get a declaration-safe target or fall back to the
-        // resolver instead of being pinned to runtime JS/CJS package entrypoints.
+        canonical_id: &str,
+        import_routes: &rustc_hash::FxHashMap<String, DependencyResolution>,
+    ) -> Vec<verter_workspace::ExactResolution> {
         let mut vfs_resolutions = Vec::new();
-        for resolution in &resolutions {
+        for resolution in import_routes.values() {
             let resolved = resolution.resolved_canonical_id.as_ref().map(|id| {
                 let norm = canonicalize_id(id);
                 norm.into_owned()
@@ -7532,8 +7525,8 @@ impl VerterHost {
             }
             if component_meta_debug_enabled() {
                 component_meta_debug(format!(
-                    "set_import_dependencies owner={} specifier={} resolved={:?} possible=[{}] exacts=[{}]",
-                    canonical,
+                    "build_exact_resolutions owner={} specifier={} resolved={:?} possible=[{}] exacts=[{}]",
+                    canonical_id,
                     resolution.specifier,
                     normalized_resolution.resolved_canonical_id,
                     normalized_resolution.possible_canonical_ids.join(", "),
@@ -7541,6 +7534,26 @@ impl VerterHost {
                 ));
             }
         }
+        vfs_resolutions
+    }
+
+    /// Provide caller-resolved import dependency resolution records.
+    ///
+    /// Called after `upsert()` when the caller resolves import specifiers
+    /// (tsconfig paths, vite aliases, etc.) using bundler/LSP resolution.
+    /// Each record maps a raw import specifier to its resolved canonical ID
+    /// (or a list of candidate canonical IDs).
+    ///
+    /// Records are merged into the file's `import_routes` map (keyed by
+    /// specifier). The flat `dependencies` set is updated in parallel for
+    /// reverse-dependency tracking.
+    pub fn set_import_dependencies(
+        &self,
+        canonical_or_alias: &str,
+        resolutions: Vec<DependencyResolution>,
+    ) {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let parse_deps = self.parse_dependency_set_for_file(&canonical);
 
         // Normalize resolutions and persist direct import resolutions.
         let mut import_routes = rustc_hash::FxHashMap::default();
@@ -7559,6 +7572,9 @@ impl VerterHost {
             }
             import_routes.insert(res.specifier.clone(), res);
         }
+
+        // Compute exact resolutions via the shared helper (§2.12).
+        let vfs_resolutions = self.build_exact_resolutions_from_routes(&canonical, &import_routes);
 
         // Preserve already-discovered transitive macro-type deps; compilation
         // refreshes them, but direct import updates should not discard them.

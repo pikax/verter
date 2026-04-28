@@ -175,6 +175,22 @@ impl VerterHost {
             };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
             self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
+
+            // Sub-plan §2.13: byte-identical fast-path workspace-edge write
+            // (closes F7 — fast path used to be a separate writer that
+            // skipped record_parsed_edges, leaving the workspace stale on
+            // re-upsert with a fresh workspace). Per R4 lifecycle this
+            // CLEARS workspace exact_resolved/exact_resolutions/lazy_resolved/
+            // semantic_transitive — matching cc.import_routes.clear() at line
+            // 170. ambient_resolved survives.
+            let parsed_edges = Self::build_parsed_edges_from_analysis(
+                &canonical_id,
+                &parse.external_requests,
+                &parse.script_analysis.imports,
+                &parse.script_analysis.module_references,
+            );
+            self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
+
             self.resolver.runtime.evict_canonical(&canonical_id);
             self.project_type_store.evict_canonical(&canonical_id);
             self.resolved_type_cache.lock().clear();
@@ -314,52 +330,83 @@ impl VerterHost {
         result
     }
 
-    /// Sync parsed edges to VFS (extracted from upsert for reuse).
+    /// Sync parsed edges to VFS (thin wrapper around the shared edge builder).
     fn record_parsed_edges_to_vfs(&self, canonical_id: &str, result_data: &UpsertResultData) {
+        let parsed_edges = Self::build_parsed_edges_from_analysis(
+            canonical_id,
+            &result_data.external_requests,
+            &result_data.imports,
+            &result_data.module_references,
+        );
+        self.ws().record_parsed_edges(canonical_id, &parsed_edges);
+    }
+
+    /// Build the set of `ParsedEdge` records from a file's parse analysis.
+    ///
+    /// Sub-plan §2.11 (R5 dedupe contract): dedupe by
+    /// `(specifier, ResolveRequestKind)`, NOT by specifier alone. This
+    /// closes Codex P2 / F14: a file with `import { foo } from './x'` AND
+    /// `import type { Bar } from './x'` must produce TWO `ParsedEdge::Relative`
+    /// entries — one per kind — because the workspace's
+    /// `parsed_unresolved_relatives` is keyed by `(specifier, kind)` and
+    /// silently dropping the second kind would leak a stale stem.
+    ///
+    /// Called from BOTH [`Self::record_parsed_edges_to_vfs`] (the upsert
+    /// full-path / fast-path flow) AND `integrate_scheduler_snapshot` (the
+    /// ensure_loaded scheduler-snapshot integration path) — single edge-
+    /// extraction implementation, no drift.
+    pub(crate) fn build_parsed_edges_from_analysis(
+        _canonical_id: &str,
+        external_requests: &[crate::ExternalSourceRequest],
+        imports: &[verter_semantic::analysis::AnalyzedImport],
+        module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
+    ) -> Vec<verter_workspace::ParsedEdge> {
         let mut parsed_edges = Vec::new();
 
-        for req in &result_data.external_requests {
+        for req in external_requests {
             parsed_edges.push(verter_workspace::ParsedEdge::ExternalSrc {
                 specifier: req.specifier.clone(),
                 resolved_path: Some(req.resolved_canonical_id.clone()),
             });
         }
 
-        let mut seen_specifiers: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-        for imp in &result_data.imports {
-            seen_specifiers.insert(imp.source.clone());
-            if imp.source.starts_with('.') || imp.source.starts_with("../") {
+        // R5 dedupe by (specifier, kind) — NOT by specifier alone.
+        let mut seen: rustc_hash::FxHashSet<(String, verter_workspace::ResolveRequestKind)> =
+            rustc_hash::FxHashSet::default();
+
+        for imp in imports {
+            let kind = if imp.is_type_only {
+                verter_workspace::ResolveRequestKind::TypeImport
+            } else {
+                verter_workspace::ResolveRequestKind::EsmImport
+            };
+            if !seen.insert((imp.source.clone(), kind)) {
+                continue;
+            }
+            if imp.source.starts_with('.') {
                 parsed_edges.push(verter_workspace::ParsedEdge::Relative {
                     specifier: imp.source.clone(),
-                    kind: if imp.is_type_only {
-                        verter_workspace::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_workspace::ResolveRequestKind::EsmImport
-                    },
+                    kind,
                 });
             } else {
                 parsed_edges.push(verter_workspace::ParsedEdge::Bare {
                     specifier: imp.source.clone(),
-                    kind: if imp.is_type_only {
-                        verter_workspace::ResolveRequestKind::TypeImport
-                    } else {
-                        verter_workspace::ResolveRequestKind::EsmImport
-                    },
+                    kind,
                 });
             }
         }
 
-        for modref in &result_data.module_references {
+        for modref in module_references {
             let kind = if modref.is_type_only {
                 verter_workspace::ResolveRequestKind::TypeImport
             } else {
                 verter_workspace::ResolveRequestKind::EsmImport
             };
 
-            if let Some(ref specifier) = modref.literal_specifier {
-                if !specifier.is_empty() && !seen_specifiers.contains(specifier.as_str()) {
-                    seen_specifiers.insert(specifier.clone());
-                    if specifier.starts_with('.') || specifier.starts_with("../") {
+            if let Some(specifier) = modref.literal_specifier.as_ref() {
+                let s: &str = specifier;
+                if !s.is_empty() && seen.insert((specifier.clone(), kind)) {
+                    if s.starts_with('.') {
                         parsed_edges.push(verter_workspace::ParsedEdge::Relative {
                             specifier: specifier.clone(),
                             kind,
@@ -374,9 +421,9 @@ impl VerterHost {
             }
 
             for specifier in &modref.finite_specifiers {
-                if !specifier.is_empty() && !seen_specifiers.contains(specifier.as_str()) {
-                    seen_specifiers.insert(specifier.clone());
-                    if specifier.starts_with('.') || specifier.starts_with("../") {
+                let s: &str = specifier;
+                if !s.is_empty() && seen.insert((specifier.clone(), kind)) {
+                    if s.starts_with('.') {
                         parsed_edges.push(verter_workspace::ParsedEdge::Relative {
                             specifier: specifier.clone(),
                             kind,
@@ -391,8 +438,7 @@ impl VerterHost {
             }
         }
 
-        let ws = self.ws();
-        ws.record_parsed_edges(canonical_id, &parsed_edges);
+        parsed_edges
     }
 
     /// Apply preprocessor-compiled style overrides for a file+profile.

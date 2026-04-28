@@ -358,6 +358,11 @@ impl VerterHost {
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Self {
+        // Sub-plan §2.9: thread the host's configured `resolve_extensions`
+        // into the workspace at construction so reverse-dep stem stripping
+        // honours the host policy from the start.
+        workspace.set_default_resolve_extensions(config.resolve_extensions.clone());
+
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
         let scheduler = {
@@ -737,7 +742,13 @@ impl VerterHost {
     ///
     /// The scheduler's SourceLoader shares the same `Arc<RwLock>`, so it
     /// automatically reads through the new workspace after this call.
+    ///
+    /// Sub-plan §2.9 (F13 fix): re-applies `HostConfig::resolve_extensions`
+    /// to the new workspace so reverse-dep stem stripping continues to
+    /// honour the host's configured extension list across LSP/test
+    /// workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
+        workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         *self.workspace.write() = workspace;
         self.bump_store_view_epoch();
     }
@@ -870,6 +881,22 @@ impl VerterHost {
     /// This is the scheduler-backed replacement for the old `files`-map ingress:
     /// it updates `compile_cache` identity/dependency state without re-submitting
     /// source back into the scheduler.
+    ///
+    /// Sub-plan §2.12 / R7: writes parsed edges into the workspace alongside
+    /// the legacy mirror (`update_reverse_deps`). Per the lib.rs:1284-1287
+    /// pre-load route flow contract, `cc.import_routes` are PRESERVED across
+    /// integrate (bundlers may have populated them via `set_import_dependencies`
+    /// before the source was loaded). After `record_parsed_edges` clears the
+    /// workspace's exact_resolved set, exacts are re-applied via
+    /// `set_exact_resolutions` from preserved `cc.import_routes` so the
+    /// workspace mirrors host bundler state (closes Codex 2 round 7 #1).
+    ///
+    /// **Caller invariant** (closes Claude L2): `integrate_scheduler_snapshot`
+    /// is called from exactly one site today: `lib.rs` `ensure_loaded`
+    /// (post-Analysis-commit). Any future caller MUST satisfy the same
+    /// lifecycle invariant: incoming `cc.import_routes` are preserved as
+    /// bundler source-of-truth; workspace exacts are re-applied
+    /// post-`record_parsed_edges`.
     pub(crate) fn integrate_scheduler_snapshot(&self, canonical_id: &str) -> bool {
         use crate::host_executor::HostSourceData;
 
@@ -880,6 +907,14 @@ impl VerterHost {
         let Some(hd) = snap.downcast_data::<HostSourceData>() else {
             return false;
         };
+
+        // Build parsed edges via the shared helper (§2.11).
+        let parsed_edges = Self::build_parsed_edges_from_analysis(
+            canonical_id,
+            &hd.parse.external_requests,
+            &hd.parse.script_analysis.imports,
+            &hd.parse.script_analysis.module_references,
+        );
 
         let aliases = std::iter::once(canonical_id.to_string()).collect::<BTreeSet<_>>();
         let deps: BTreeSet<String> = hd
@@ -897,7 +932,7 @@ impl VerterHost {
             )
             .collect();
 
-        let (old_aliases, old_deps) = {
+        let (old_aliases, old_deps, preserved_routes) = {
             let mut cc_ref = self
                 .compile_cache
                 .entry(canonical_id.to_string())
@@ -905,14 +940,40 @@ impl VerterHost {
             let cc = cc_ref.value_mut();
             let old_aliases = cc.aliases.clone();
             let old_deps = cc.dependencies.clone();
+            // R7 (Codex 2 round 7 #1): PRESERVE cc.import_routes. Bundler may
+            // have set them via set_import_dependencies before source was
+            // loaded. Cloning here so we can re-apply to workspace below
+            // without holding the cc lock.
+            let preserved_routes = cc.import_routes.clone();
             cc.aliases = aliases.clone();
             cc.dependencies = deps.clone();
             cc.generation = snap.generation;
             cc.evicted = false;
-            (old_aliases, old_deps)
+            // R7: cc.import_routes is NOT cleared (preserves bundler pre-load
+            // route flow per lib.rs:1284-1287 contract).
+            (old_aliases, old_deps, preserved_routes)
         };
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
+
+        // Sub-plan §2.12 Commit-2: ADDITIVE workspace edge write alongside
+        // legacy mirror. record_parsed_edges CLEARS workspace
+        // exact_resolved/exact_resolutions/lazy_resolved/semantic_transitive
+        // (per R4 lifecycle). ambient_resolved survives (F1.5).
+        self.ws().record_parsed_edges(canonical_id, &parsed_edges);
+
+        // R7: re-apply workspace exacts from preserved cc.import_routes so
+        // the workspace mirrors host bundler state. No-op when
+        // cc.import_routes is empty (typical first-load case where bundler
+        // hasn't touched the file).
+        if !preserved_routes.is_empty() {
+            let exact_resolutions =
+                self.build_exact_resolutions_from_routes(canonical_id, &preserved_routes);
+            self.ws()
+                .set_exact_resolutions(canonical_id, exact_resolutions);
+        }
+
+        // Sub-plan §2.12 Commit-2: legacy mirror RETAINED. Deleted in Commit 3.
         self.update_reverse_deps(canonical_id, &old_deps, &deps);
         true
     }

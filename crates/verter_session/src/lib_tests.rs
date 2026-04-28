@@ -4263,4 +4263,240 @@ mod phase2a_upsert_tests {
             "profile B must NOT contain override content from profile A"
         );
     }
+
+    // ── §4.3 Commit-2 host-level tests (sub-plan §6.2.1a) ──
+
+    /// §4.3 #1 (F1.2): After Comp.vue upsert importing `./types`, the
+    /// workspace's reverse-dep graph reports Comp.vue for the unresolved
+    /// stem `/src/types.ts` (via .ts strip).
+    #[test]
+    fn host_workspace_records_stem_for_unresolved_relative_import() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>",
+        );
+        let owners = host.workspace().reverse_deps_for("/src/types.ts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "workspace reverse-dep graph must include Comp.vue for /src/types.ts (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #3 (F6): Trigger a load through `ensure_loaded`. Workspace
+    /// reflects deps after integrate_scheduler_snapshot.
+    #[test]
+    fn host_ensure_loaded_records_workspace_reverse_dep_via_scheduler_snapshot() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        // Prime an ambient ScriptModuleReference style upsert so the file
+        // actually has an unresolved relative.
+        let _ = upsert_vue(
+            &host,
+            "/src/A.vue",
+            "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>",
+        );
+        // ensure_loaded shouldn't change the result; it's the same file.
+        let _ = host.ensure_loaded("/src/A.vue");
+        let owners = host.workspace().reverse_deps_for("/src/types.ts");
+        assert!(
+            owners.contains(&"/src/A.vue".to_string()),
+            "ensure_loaded path must populate workspace reverse-dep graph (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #4 (F7): Discriminating per Codex 1 P1b / Claude N5.
+    /// Upsert Comp.vue with `./types`. Then `set_workspace(fresh)`. Then
+    /// byte-identical re-upsert. Assert workspace reverse-deps reports
+    /// Comp.vue for the new workspace.
+    /// **Pre-§2.13 fails** — the byte-identical fast path skipped edge
+    /// writes; a fresh workspace had no edges to merge.
+    #[test]
+    fn host_byte_identical_reupload_via_fresh_workspace_repopulates_edges() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let src = "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>";
+        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        // Confirm initial workspace has the edge.
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Swap to a FRESH workspace (clears workspace edges; compile cache
+        // and scheduler state preserved). The fresh workspace has no record
+        // of any edges — so a byte-identical re-upsert must re-fire the
+        // workspace edge write to re-populate.
+        let fresh = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        host.set_workspace(fresh.clone());
+        assert!(
+            fresh.reverse_deps_for("/src/types.ts").is_empty(),
+            "fresh workspace must start with no edges"
+        );
+        // Byte-identical re-upsert.
+        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+        assert!(
+            fresh
+                .reverse_deps_for("/src/types.ts")
+                .contains(&"/src/Comp.vue".to_string()),
+            "fast-path edge-write must fire on byte-identical re-upsert (F7 fix)"
+        );
+    }
+
+    /// §4.3 #13 (F13): Use a truly-unknown extension `.custom` that is
+    /// NOT in `probe_extensions()`. Construct host with `.custom` in
+    /// `resolve_extensions`. Upsert; swap workspace; re-upsert. Assert
+    /// `.custom` is stripped to `/src/x` and finds Comp.vue.
+    /// **Discriminating contract**: if `set_workspace` doesn't re-apply
+    /// HostConfig::resolve_extensions, ws_b uses default probe_extensions
+    /// only; `.custom` is not stripped; `reverse_deps_for("/src/x.custom")`
+    /// returns empty.
+    #[test]
+    fn host_set_workspace_swap_preserves_configured_extensions() {
+        let mut config = HostConfig::default();
+        // Add `.custom` to the host's extension list.
+        config.resolve_extensions.push(".custom".to_string());
+
+        let ws_a = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(config, ws_a);
+
+        let src =
+            "<script setup lang=\"ts\">import { Foo } from './x'</script>\n<template /></template>";
+        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+
+        // Swap to a fresh workspace (no host config applied yet at swap).
+        let ws_b = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        host.set_workspace(ws_b.clone());
+
+        // Re-upsert — forces edges to flow into ws_b.
+        let _ = upsert_vue(&host, "/src/Comp.vue", src);
+
+        // `.custom` extension stripping requires set_workspace to re-apply
+        // HostConfig::resolve_extensions to ws_b.
+        let owners = ws_b.reverse_deps_for("/src/x.custom");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "set_workspace must re-apply HostConfig::resolve_extensions so .custom strips to stem (F13 fix); got {owners:?}",
+        );
+    }
+
+    /// §4.3 #15a (R5 / F14): SFC with both `import { foo } from './x'`
+    /// AND `import type { Bar } from './x'`. Calling
+    /// `build_parsed_edges_from_analysis` directly produces TWO
+    /// `ParsedEdge::Relative` entries with the same specifier `./x` but
+    /// different kinds (EsmImport, TypeImport).
+    /// **Pre-R5 producer dedupe (specifier-only) fails** because the
+    /// second occurrence is silently dropped.
+    #[test]
+    fn build_parsed_edges_emits_distinct_kinds_for_same_specifier() {
+        use verter_workspace::{ParsedEdge, ResolveRequestKind};
+
+        let imports = vec![
+            verter_semantic::analysis::AnalyzedImport {
+                source: "./x".to_string(),
+                is_type_only: false,
+                bindings: Vec::new(),
+                span: verter_span::Span::default(),
+                resolved_canonical_id: None,
+            },
+            verter_semantic::analysis::AnalyzedImport {
+                source: "./x".to_string(),
+                is_type_only: true,
+                bindings: Vec::new(),
+                span: verter_span::Span::default(),
+                resolved_canonical_id: None,
+            },
+        ];
+        let edges =
+            VerterHost::build_parsed_edges_from_analysis("/src/Comp.vue", &[], &imports, &[]);
+        // Filter to relative edges only.
+        let relatives: Vec<&ParsedEdge> = edges
+            .iter()
+            .filter(|e| matches!(e, ParsedEdge::Relative { .. }))
+            .collect();
+        assert_eq!(
+            relatives.len(),
+            2,
+            "must emit TWO ParsedEdge::Relative for ./x with distinct kinds; got {relatives:?}"
+        );
+        let mut kinds: Vec<ResolveRequestKind> = relatives
+            .iter()
+            .map(|e| match e {
+                ParsedEdge::Relative { kind, .. } => *kind,
+                _ => unreachable!(),
+            })
+            .collect();
+        kinds.sort_by_key(|k| format!("{:?}", k));
+        assert!(kinds.contains(&ResolveRequestKind::EsmImport));
+        assert!(kinds.contains(&ResolveRequestKind::TypeImport));
+    }
+
+    /// §4.3 #15b (R7 / F18 / Codex 2 round 7 #1): Pre-load route flow.
+    /// (a) `set_import_dependencies` populates `cc.import_routes` BEFORE
+    /// the file is upserted (creates cc stub).
+    /// (b) Trigger `ensure_loaded` via type resolution — this loads the
+    /// source through the scheduler and calls `integrate_scheduler_snapshot`.
+    /// (c) Workspace reverse-dep graph reports the bundler-resolved target.
+    /// (d) `cc.import_routes` is preserved (host source-of-truth).
+    /// **Pre-R7 fix this fails** — R6 cleared `cc.import_routes` in
+    /// `integrate_scheduler_snapshot`, destroying bundler pre-load state.
+    #[test]
+    fn ensure_loaded_preserves_preloaded_import_routes_and_workspace_exact_edges() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // Inject the source into the workspace BEFORE the bundler "pre-loads"
+        // the route. The bundler's flow is: (a) bundler resolves the import,
+        // (b) bundler calls set_import_dependencies *before* the source is
+        // loaded into the host, (c) host loads source and integrates.
+        //
+        // For a bundler hand-off to work, the source has to actually be
+        // accessible to the scheduler when ensure_loaded runs. We register a
+        // MemoryWorkspace overlay so the WorkspaceSourceLoader can read the
+        // file content during the load.
+        host.workspace().notify_upsert(
+            "/lib/types.ts",
+            std::sync::Arc::from("export interface Foo {}"),
+        );
+        // Also inject the resolved target.
+        host.workspace()
+            .notify_upsert("/lib/aliased.ts", std::sync::Arc::from("export {}"));
+
+        // (a) Pre-load: bundler informs the host about a route resolution
+        // BEFORE the source has been seen.
+        host.set_import_dependencies(
+            "/lib/types.ts",
+            vec![DependencyResolution {
+                specifier: "./alias".to_string(),
+                resolved_canonical_id: Some("/lib/aliased.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        // (b) ensure_loaded triggers integrate_scheduler_snapshot.
+        let loaded = host.ensure_loaded("/lib/types.ts");
+        assert!(loaded, "ensure_loaded must succeed");
+
+        // (c) Workspace reflects bundler-injected exact resolution.
+        let owners = host.workspace().reverse_deps_for("/lib/aliased.ts");
+        assert!(
+            owners.contains(&"/lib/types.ts".to_string()),
+            "workspace exact-resolution edge must survive integrate (R7 fix); got {owners:?}"
+        );
+
+        // (d) cc.import_routes is preserved (host source-of-truth).
+        let cc = host
+            .compile_cache
+            .get("/lib/types.ts")
+            .expect("compile_cache entry");
+        assert!(
+            cc.import_routes.contains_key("./alias"),
+            "cc.import_routes must be preserved across integrate (Codex 2 round 7 #1 fix); got: {:?}",
+            cc.import_routes.keys().collect::<Vec<_>>()
+        );
+    }
 }
