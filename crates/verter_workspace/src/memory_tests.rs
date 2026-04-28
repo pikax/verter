@@ -1250,3 +1250,197 @@ fn notify_close_case_mismatch_clears_overlay() {
         "overlay should be cleared after close with different case"
     );
 }
+
+// ── §4.2 — MemoryWorkspace integration tests for the new dep model ──
+
+/// §4.2 #1 — Workspace-only oracle for §4.6 regressors. No project graph;
+/// `record_parsed_edges` with `Relative { "./types" }`; assert
+/// `reverse_deps_for("/src/types.ts")` returns the importer.
+#[test]
+fn memory_unresolved_relative_records_stem_without_published_root() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.record_parsed_edges(
+        "/src/Comp.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./types".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    // /src/types.ts strips `.ts` → /src/types — finds the stem bucket.
+    assert_eq!(
+        ws.reverse_deps_for("/src/types.ts"),
+        vec!["/src/Comp.vue"],
+        "unresolved relative must record stem visible by extension-stripping query"
+    );
+}
+
+/// §4.2 #2 — Successful resolve populates canonical only; stem axis empty.
+#[test]
+fn memory_resolved_relative_does_not_leak_stem() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    // Inject the file content + project graph so resolver succeeds.
+    ws.inject_file("/src/types.ts".to_string(), Arc::from("export {}"));
+    ws.set_project_graph(crate::project_graph::ProjectGraph::from_configs(vec![
+        crate::project_graph::VfsProjectConfig {
+            root: "/src".to_string(),
+            rank: crate::project_graph::ProjectRank::Explicit,
+            tsconfig_path: None,
+            root_files: vec![],
+            extensions: vec![".ts".into()],
+            workspace_root: "/src".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: crate::resolver::IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: crate::resolver::ProjectMembership::default(),
+        },
+    ]));
+    ws.record_parsed_edges(
+        "/src/Comp.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./types".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    // Canonical hit — direct query.
+    let got = ws.reverse_deps_for("/src/types.ts");
+    assert_eq!(got, vec!["/src/Comp.vue"]);
+    // Stem-only query — empty (canonical hit doesn't leak into stem axis).
+    let snap = ws
+        .dependency_snapshot("/src/Comp.vue")
+        .expect("snapshot present");
+    assert!(
+        snap.parsed_unresolved_relatives.is_empty(),
+        "successfully-resolved relatives must NOT populate parsed_unresolved_relatives",
+    );
+}
+
+/// §4.2 #3 — F1.5: ambient deps survive parse re-record.
+/// Pre-fix this fails because record_ambient_dependency routed to
+/// lazy_resolved which is cleared on every parse re-record.
+#[test]
+fn memory_record_ambient_dependency_uses_ambient_class() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.record_ambient_dependency("/src/Comp.vue", "ambient:/Cabc/lib.es5.d.ts");
+    // Parse-edge re-record with no edges (empty array).
+    ws.record_parsed_edges("/src/Comp.vue", &[]);
+    assert_eq!(
+        ws.reverse_deps_for("ambient:/Cabc/lib.es5.d.ts"),
+        vec!["/src/Comp.vue"],
+        "F1.5: ambient deps must SURVIVE parse re-record"
+    );
+}
+
+/// §4.2 #4 — R4 expanded merge contract:
+/// (a) `.vue` strips (from probe — pins F3 fix);
+/// (b) `.tsx` strips (from probe — workspace owns this, host config CANNOT narrow);
+/// (c) `.ts` strips (host configured AND probe — natural intersection);
+/// (d) `.svelte` does NOT strip (truly unknown extension).
+/// The workspace's merge policy is additive — host config ADDS to probe.
+#[test]
+fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
+    let ws = MemoryWorkspace::new(MemoryOptions {
+        default_resolve_extensions: Some(vec![".ts".to_string()]),
+        ..MemoryOptions::default()
+    });
+
+    // (a) `.vue` strips (from probe).
+    ws.record_parsed_edges(
+        "/src/A.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./Child".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    assert_eq!(
+        ws.reverse_deps_for("/src/Child.vue"),
+        vec!["/src/A.vue"],
+        "(a) .vue must strip (from probe — F3 fix)"
+    );
+
+    // (b) `.tsx` strips (from probe).
+    ws.record_parsed_edges(
+        "/src/B.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./Helper".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    assert_eq!(
+        ws.reverse_deps_for("/src/Helper.tsx"),
+        vec!["/src/B.vue"],
+        "(b) .tsx must strip (from probe — workspace owns this)"
+    );
+
+    // (c) `.ts` strips (host configured + probe).
+    ws.record_parsed_edges(
+        "/src/C.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./util".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    assert_eq!(
+        ws.reverse_deps_for("/src/util.ts"),
+        vec!["/src/C.vue"],
+        "(c) .ts must strip (host + probe)"
+    );
+
+    // (d) `.svelte` does NOT strip.
+    ws.record_parsed_edges(
+        "/src/D.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./Mystery".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    assert!(
+        ws.reverse_deps_for("/src/Mystery.svelte").is_empty(),
+        "(d) .svelte must NOT strip (unknown extension)"
+    );
+}
+
+/// §4.2 #6 — `replace_semantic_transitive` populates canonical reverse axis.
+#[test]
+fn memory_replace_semantic_transitive_creates_canonical_reverse_bucket() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    let deps: std::collections::BTreeSet<String> =
+        std::iter::once("/src/shared.ts".to_string()).collect();
+    ws.replace_semantic_transitive("/src/Comp.vue", deps);
+    assert_eq!(ws.reverse_deps_for("/src/shared.ts"), vec!["/src/Comp.vue"],);
+}
+
+/// §4.2 #7 — Combined: record stem for `./types`, then `set_exact_resolutions`
+/// with `./types → /lib/types.ts`. Stem axis empty; canonical axis populated.
+#[test]
+fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
+    let ws = MemoryWorkspace::new(MemoryOptions::default());
+    ws.record_parsed_edges(
+        "/src/Comp.vue",
+        &[crate::types::ParsedEdge::Relative {
+            specifier: "./types".to_string(),
+            kind: crate::types::ResolveRequestKind::EsmImport,
+        }],
+    );
+    assert_eq!(
+        ws.reverse_deps_for("/src/types.ts"),
+        vec!["/src/Comp.vue"],
+        "stem present (matches via .ts strip)"
+    );
+    ws.set_exact_resolutions(
+        "/src/Comp.vue",
+        vec![crate::types::ExactResolution {
+            specifier: "./types".to_string(),
+            phase: crate::types::ResolvePhase::CodegenBlocker,
+            kind: crate::types::ResolveRequestKind::EsmImport,
+            resolved_canonical_id: Some("/lib/types.ts".to_string()),
+            possible_canonical_ids: vec![],
+        }],
+    );
+    // Stem dampened.
+    assert!(
+        ws.reverse_deps_for("/src/types.ts").is_empty(),
+        "stem must be dampened after bundler resolves",
+    );
+    // Canonical populated.
+    assert_eq!(ws.reverse_deps_for("/lib/types.ts"), vec!["/src/Comp.vue"],);
+}

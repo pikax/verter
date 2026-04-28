@@ -10,11 +10,17 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
+use std::collections::BTreeSet;
+#[cfg(not(target_arch = "wasm32"))]
 use verter_scheduler::scheduler::Scheduler;
 #[cfg(not(target_arch = "wasm32"))]
 use verter_scheduler::source_loader::SourceLoader;
 #[cfg(not(target_arch = "wasm32"))]
 use verter_workspace::types::FileKind;
+#[cfg(not(target_arch = "wasm32"))]
+use verter_workspace::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
+#[cfg(not(target_arch = "wasm32"))]
+use verter_workspace::DependencySnapshotView;
 #[cfg(not(target_arch = "wasm32"))]
 use verter_workspace::WorkspaceAccess;
 
@@ -90,6 +96,45 @@ impl WorkspaceAccess for SchedulerBackedWorkspace {
             FileKind::NonSfc
         }
     }
+
+    // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
+    //
+    // Rationale (§2.16a/§2.16b): `SchedulerBackedWorkspace` is used only in
+    // scheduler test fixtures that exercise scheduler-level concerns (parsing,
+    // source loading); host integration tests use `MemoryWorkspace` instead.
+    // If a scheduler test begins exercising dep-flow, this shim must be
+    // replaced with a real `MemoryWorkspace` for that test. The explicit no-op
+    // bodies make the absence of edge tracking visible at impl-site.
+
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {
+        // No edge tracking. See §2.16b reader-only-stub rationale.
+    }
+
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn set_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _resolutions: Vec<ExactResolution>,
+    ) -> ExactResolutionResult {
+        ExactResolutionResult::default()
+    }
+
+    fn replace_semantic_transitive(&self, _canonical_id: &str, _deps: BTreeSet<String>) {}
+
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+
+    fn dependency_snapshot(&self, _canonical_id: &str) -> Option<DependencySnapshotView> {
+        None
+    }
+
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

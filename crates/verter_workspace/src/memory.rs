@@ -121,6 +121,11 @@ impl MemorySnapshot {
 pub struct MemoryOptions {
     /// Logical workspace roots (for project graph construction).
     pub roots: Vec<String>,
+    /// Initial workspace-default extension list. Merged with
+    /// `probe_extensions()` at engine construction; further merged on
+    /// `set_default_resolve_extensions`. `None` means engine defaults
+    /// (probe_extensions only).
+    pub default_resolve_extensions: Option<Vec<String>>,
 }
 
 /// Memory-only workspace. All files must be injected — no disk fallback.
@@ -141,9 +146,13 @@ impl std::fmt::Debug for MemoryWorkspace {
 }
 
 impl MemoryWorkspace {
-    pub fn new(_options: MemoryOptions) -> Self {
+    pub fn new(options: MemoryOptions) -> Self {
+        let engine = Engine::new();
+        if let Some(ref exts) = options.default_resolve_extensions {
+            engine.set_default_resolve_extensions(exts.clone());
+        }
         Self {
-            engine: Engine::new(),
+            engine,
             sinks: parking_lot::RwLock::new(Vec::new()),
             next_sink_id: AtomicU64::new(1),
         }
@@ -342,6 +351,25 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
         resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
         self.engine.set_exact_resolutions(canonical_id, resolutions)
+    }
+
+    fn replace_semantic_transitive(
+        &self,
+        canonical_id: &str,
+        deps: std::collections::BTreeSet<String>,
+    ) {
+        self.engine.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
+        self.engine.set_default_resolve_extensions(host_extensions);
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        self.engine.dependency_snapshot(canonical_id)
     }
 
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -601,10 +629,11 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     }
 
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
-        self.engine
-            .edges
-            .write()
-            .add_resolved_dep(consumer, virtual_id);
+        // F1.5 fix: route ambient deps through the dedicated
+        // `ambient_resolved` class so they survive `record_parsed_edges`
+        // re-records. Previously this routed to `lazy_resolved` which is
+        // cleared on every parse re-record.
+        self.engine.add_ambient_resolved_dep(consumer, virtual_id);
     }
 
     fn project_stable_key(

@@ -436,6 +436,25 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.set_exact_resolutions(canonical_id, resolutions)
     }
 
+    fn replace_semantic_transitive(
+        &self,
+        canonical_id: &str,
+        deps: std::collections::BTreeSet<String>,
+    ) {
+        self.engine.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
+        self.engine.set_default_resolve_extensions(host_extensions);
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        self.engine.dependency_snapshot(canonical_id)
+    }
+
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.engine.invalidate_package_manifest(canonical_id);
         self.engine
@@ -624,10 +643,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
-        self.engine
-            .edges
-            .write()
-            .add_resolved_dep(consumer, virtual_id);
+        // F1.5 fix: route ambient deps through the dedicated
+        // `ambient_resolved` class so they survive `record_parsed_edges`
+        // re-records.
+        self.engine.add_ambient_resolved_dep(consumer, virtual_id);
     }
 
     fn project_stable_key(

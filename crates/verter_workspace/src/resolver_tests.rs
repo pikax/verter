@@ -74,6 +74,33 @@ impl crate::traits::WorkspaceAccess for TestReader {
                     .then(|| normalize_canonical_id(canonical_id))
             })
     }
+
+    // Reader-only stub overrides (R6/R7). Rationale: `TestReader` is
+    // constructed only by resolver unit tests that exercise resolver-side
+    // concerns (file reads, realpath); they don't touch dep-flow.
+    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
+    fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn set_exact_resolutions(
+        &self,
+        _id: &str,
+        _resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        crate::types::ExactResolutionResult::default()
+    }
+    fn replace_semantic_transitive(&self, _id: &str, _deps: std::collections::BTreeSet<String>) {}
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+    fn dependency_snapshot(
+        &self,
+        _id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        None
+    }
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 // ── CountingReader: WorkspaceAccess with call counters ──
@@ -204,6 +231,33 @@ impl crate::traits::WorkspaceAccess for CountingReader {
             .insert(normalized, manifest.clone());
         Some(manifest)
     }
+
+    // Reader-only stub overrides (R6/R7). Rationale: `CountingReader` is a
+    // resolver unit-test fixture for read_file/file_exists call counting;
+    // it never participates in dep-flow.
+    fn record_parsed_edges(&self, _id: &str, _edges: &[crate::types::ParsedEdge]) {}
+    fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn set_exact_resolutions(
+        &self,
+        _id: &str,
+        _resolutions: Vec<crate::types::ExactResolution>,
+    ) -> crate::types::ExactResolutionResult {
+        crate::types::ExactResolutionResult::default()
+    }
+    fn replace_semantic_transitive(&self, _id: &str, _deps: std::collections::BTreeSet<String>) {}
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+    fn dependency_snapshot(
+        &self,
+        _id: &str,
+    ) -> Option<crate::exact_resolution::DependencySnapshotView> {
+        None
+    }
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 #[test]

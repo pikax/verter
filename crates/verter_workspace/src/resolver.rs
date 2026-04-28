@@ -942,7 +942,7 @@ fn resolve_existing_path(
     )
 }
 
-fn probe_extensions() -> &'static [&'static str] {
+pub(crate) fn probe_extensions() -> &'static [&'static str] {
     &[
         ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue", ".d.ts", ".d.mts",
         ".d.cts",

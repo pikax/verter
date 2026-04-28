@@ -182,6 +182,33 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.set_exact_resolutions(canonical_id, resolutions)
     }
 
+    // ── R6/R7: forwarding wrapper for new reverse-graph methods ──
+    // The compile-time enforcement ensures CountingWorkspace cannot drop
+    // edges silently; every workspace authority method is forwarded to
+    // the inner workspace.
+    fn replace_semantic_transitive(
+        &self,
+        canonical_id: &str,
+        deps: std::collections::BTreeSet<String>,
+    ) {
+        self.inner.replace_semantic_transitive(canonical_id, deps);
+    }
+
+    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
+        self.inner.set_default_resolve_extensions(host_extensions);
+    }
+
+    fn dependency_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        self.inner.dependency_snapshot(canonical_id)
+    }
+
+    fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
+        self.inner.record_ambient_dependency(consumer, virtual_id);
+    }
+
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
         self.inner.notify_upsert(canonical_id, source);
     }

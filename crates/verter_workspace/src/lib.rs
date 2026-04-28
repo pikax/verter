@@ -63,6 +63,7 @@ pub mod package_index;
 pub(crate) mod project_graph;
 pub mod project_key;
 pub mod published_state;
+pub mod relative_path;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;
@@ -101,7 +102,7 @@ pub use config::{
     raw_paths_json, resolve_tsconfig_extends, strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
 pub use error::{DirEntry, VfsError};
-pub use exact_resolution::EdgeStore;
+pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 pub use membership::{
     typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,

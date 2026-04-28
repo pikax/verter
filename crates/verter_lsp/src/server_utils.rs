@@ -254,6 +254,48 @@ impl verter_workspace::WorkspaceAccess for LspProjectResolverReader<'_> {
         }
         self.documents.host().workspace().realpath(canonical_id)
     }
+
+    // ── Reader-only stub overrides for reverse-graph methods (R6/R7) ──
+    //
+    // Rationale (§2.16b): `LspProjectResolverReader` is a thin file-read
+    // adapter passed to the project resolver for source/manifest reads
+    // during import resolution. It does not participate in dep-flow; the
+    // host's workspace owns those edges.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
+
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn set_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        verter_workspace::ExactResolutionResult::default()
+    }
+
+    fn replace_semantic_transitive(
+        &self,
+        _canonical_id: &str,
+        _deps: std::collections::BTreeSet<String>,
+    ) {
+    }
+
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
+
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 pub(crate) fn rewrite_non_vue_source_with_resolver(

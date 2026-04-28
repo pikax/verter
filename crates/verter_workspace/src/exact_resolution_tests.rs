@@ -1,7 +1,15 @@
+//! EdgeStore unit tests — sub-plan §4.1 (33 tests after R5: #33 deleted, #34 added).
+//!
+//! Tests are written against the new R4/R5 `DependencySnapshot` model with
+//! per-class writers (`replace_parsed_edges`, `replace_exact_resolutions`,
+//! `add_lazy_resolved_dep`, `replace_ambient_resolved`,
+//! `add_ambient_resolved_dep`, `replace_semantic_transitive`) and the
+//! two-axis reverse graph (`reverse_deps_for_target`).
+
 use super::*;
 use crate::types::{ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind};
+use std::collections::BTreeSet;
 
-/// Default context used by most tests (CodegenBlocker + EsmImport).
 fn default_ctx() -> ResolutionContext {
     ResolutionContext {
         phase: ResolvePhase::CodegenBlocker,
@@ -9,7 +17,6 @@ fn default_ctx() -> ResolutionContext {
     }
 }
 
-/// Helper to build an ExactResolution with default context.
 fn exact(specifier: &str, resolved: Option<&str>, possible: Vec<&str>) -> ExactResolution {
     ExactResolution {
         specifier: specifier.to_string(),
@@ -19,6 +26,855 @@ fn exact(specifier: &str, resolved: Option<&str>, possible: Vec<&str>) -> ExactR
         possible_canonical_ids: possible.into_iter().map(|s| s.to_string()).collect(),
     }
 }
+
+fn exact_with(
+    specifier: &str,
+    phase: ResolvePhase,
+    kind: ResolveRequestKind,
+    resolved: Option<&str>,
+) -> ExactResolution {
+    ExactResolution {
+        specifier: specifier.to_string(),
+        phase,
+        kind,
+        resolved_canonical_id: resolved.map(|s| s.to_string()),
+        possible_canonical_ids: vec![],
+    }
+}
+
+fn btree(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+// ── Test #1 ──
+#[test]
+fn replace_parsed_edges_records_resolved_in_canonical_axis() {
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/src/types.ts"]), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #2 ──
+#[test]
+fn replace_parsed_edges_records_unresolved_in_stem_axis() {
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    // Querying by stem (no extension stripping needed because stem is bare).
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #3 ──
+#[test]
+fn replace_parsed_edges_keys_unresolved_by_specifier_and_kind() {
+    // F14: same specifier with EsmImport + TypeImport produces two entries.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![
+            (
+                ("./types".to_string(), ResolveRequestKind::EsmImport),
+                "/src/types".to_string(),
+            ),
+            (
+                ("./types".to_string(), ResolveRequestKind::TypeImport),
+                "/src/types".to_string(),
+            ),
+        ],
+        vec![],
+    );
+    let snap = store.snapshot("/src/Comp.vue").expect("snapshot exists");
+    assert_eq!(
+        snap.parsed_unresolved_relatives.len(),
+        2,
+        "two distinct (specifier, kind) entries should coexist for the same specifier"
+    );
+    assert!(snap
+        .parsed_unresolved_relatives
+        .contains_key(&("./types".to_string(), ResolveRequestKind::EsmImport)));
+    assert!(snap
+        .parsed_unresolved_relatives
+        .contains_key(&("./types".to_string(), ResolveRequestKind::TypeImport)));
+}
+
+// ── Test #4 ──
+#[test]
+fn replace_parsed_edges_clears_lazy_resolved() {
+    // Trivially failing-first since the API name `replace_parsed_edges`
+    // doesn't exist pre-impl.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    store.add_lazy_resolved_dep("/src/Comp.vue", "/node_modules/vue/index.ts");
+    assert_eq!(
+        store.reverse_deps_for_target("/node_modules/vue/index.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Re-record clears lazy_resolved.
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert!(
+        store
+            .reverse_deps_for_target("/node_modules/vue/index.ts", None)
+            .is_empty(),
+        "lazy_resolved must be cleared on parse re-record"
+    );
+}
+
+// ── Test #5 ──
+#[test]
+fn replace_parsed_edges_clears_exact_resolved() {
+    // F11: matches host_upsert.rs:170 — every upsert clears bundler state.
+    let mut store = EdgeStore::new();
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./bar", Some("/src/bar.ts"), vec![])],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/bar.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Re-record clears exact_resolved + exact_resolutions.
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert!(
+        store
+            .reverse_deps_for_target("/src/bar.ts", None)
+            .is_empty(),
+        "exact_resolved must be cleared on parse re-record"
+    );
+    assert!(
+        !store.has_exact_resolutions("/src/Comp.vue"),
+        "exact_resolutions map must be cleared on parse re-record"
+    );
+}
+
+// ── Test #6 ──
+#[test]
+fn replace_parsed_edges_does_not_clear_ambient_resolved() {
+    // F1.5: ambient deps survive parse re-record.
+    let mut store = EdgeStore::new();
+    store.add_ambient_resolved_dep("/src/Comp.vue", "ambient:/Cabc/lib.es5.d.ts");
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("ambient:/Cabc/lib.es5.d.ts", None),
+        vec!["/src/Comp.vue"],
+        "ambient_resolved must SURVIVE parse re-record"
+    );
+}
+
+// ── Test #7 ──
+#[test]
+fn replace_parsed_edges_clears_semantic_transitive() {
+    // F11: semantic_transitive cleared on parse re-record (matches
+    // cc.dependencies reset; the macro resolver re-fires post-upsert).
+    let mut store = EdgeStore::new();
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/src/shared.ts"]));
+    assert_eq!(
+        store.reverse_deps_for_target("/src/shared.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    store.replace_parsed_edges("/src/Comp.vue", BTreeSet::new(), vec![], vec![]);
+    assert!(
+        store
+            .reverse_deps_for_target("/src/shared.ts", None)
+            .is_empty(),
+        "semantic_transitive must be cleared on parse re-record"
+    );
+}
+
+// ── Test #8 ──
+#[test]
+fn replace_parsed_edges_replaces_parsed_unresolved_set_symmetrically() {
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./old".to_string(), ResolveRequestKind::EsmImport),
+            "/src/old".to_string(),
+        )],
+        vec![],
+    );
+    // Re-record with new stem only.
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./new".to_string(), ResolveRequestKind::EsmImport),
+            "/src/new".to_string(),
+        )],
+        vec![],
+    );
+    assert!(
+        store.reverse_deps_for_target("/src/old", None).is_empty(),
+        "old stem must be removed"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/new", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #9 ──
+#[test]
+fn replace_exact_resolutions_dampens_matching_active_stem() {
+    // F18 active-stem: bundler resolution dampens stem (NOT destroys
+    // parsed_unresolved_relatives).
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "stem present before bundler resolves",
+    );
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types", Some("/lib/types.ts"), vec![])],
+    );
+    assert!(
+        store.reverse_deps_for_target("/src/types", None).is_empty(),
+        "stem must be dampened after bundler resolution"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/types.ts", None),
+        vec!["/src/Comp.vue"],
+        "canonical bucket populated by exact_resolved",
+    );
+    // Parsed-unresolved entry MUST still be present (R4 active-stem).
+    let snap = store.snapshot("/src/Comp.vue").unwrap();
+    assert!(
+        snap.parsed_unresolved_relatives
+            .contains_key(&("./types".to_string(), ResolveRequestKind::EsmImport)),
+        "F18: parsed_unresolved_relatives is permanent parser state",
+    );
+}
+
+// ── Test #10 ──
+#[test]
+fn replace_exact_resolutions_normalizes_specifier_for_dampening() {
+    // F16: `./types` and `./types/` match for dampening.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    // Bundler passes specifier with trailing slash.
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types/", Some("/lib/types.ts"), vec![])],
+    );
+    assert!(
+        store.reverse_deps_for_target("/src/types", None).is_empty(),
+        "F16: trailing-slash specifier must dampen the matching stem"
+    );
+}
+
+// ── Test #11 ──
+#[test]
+fn replace_exact_resolutions_replaces_canonical_axis_symmetrically() {
+    let mut store = EdgeStore::new();
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./bar", Some("/src/bar.ts"), vec![])],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/bar.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Re-set with different target.
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./baz", Some("/src/baz.ts"), vec![])],
+    );
+    assert!(
+        store
+            .reverse_deps_for_target("/src/bar.ts", None)
+            .is_empty(),
+        "old exact target must be removed from canonical axis"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/baz.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #12 ──
+#[test]
+fn add_lazy_resolved_dep_records_lazy_class_even_when_dep_exists_elsewhere() {
+    // R5 (Codex P1): idempotency is per-class, not cross-class.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/x.ts"]), vec![], vec![]);
+    // Even though /lib/x.ts is in parsed_resolved, lazy_resolved still inserts.
+    let inserted = store.add_lazy_resolved_dep("/src/Comp.vue", "/lib/x.ts");
+    assert!(
+        inserted,
+        "lazy_resolved must record the dep even when present in parsed_resolved",
+    );
+    let snap = store.snapshot("/src/Comp.vue").unwrap();
+    assert!(snap.parsed_resolved.contains("/lib/x.ts"));
+    assert!(snap.lazy_resolved.contains("/lib/x.ts"));
+    // Reverse bucket has the owner (union doesn't double-count).
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/x.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #13 ──
+#[test]
+fn add_ambient_resolved_dep_creates_canonical_reverse_bucket() {
+    // F1.5: ambient axis exists.
+    let mut store = EdgeStore::new();
+    let inserted = store.add_ambient_resolved_dep("/src/Comp.vue", "ambient:/Cabc/lib.es5.d.ts");
+    assert!(inserted);
+    assert_eq!(
+        store.reverse_deps_for_target("ambient:/Cabc/lib.es5.d.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #14 ──
+#[test]
+fn replace_ambient_resolved_replaces_set_symmetrically() {
+    let mut store = EdgeStore::new();
+    store.replace_ambient_resolved(
+        "/src/Comp.vue",
+        btree(&["ambient:/A/lib.es5.d.ts", "ambient:/A/lib.dom.d.ts"]),
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("ambient:/A/lib.es5.d.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    store.replace_ambient_resolved("/src/Comp.vue", btree(&["ambient:/A/lib.dom.d.ts"]));
+    assert!(
+        store
+            .reverse_deps_for_target("ambient:/A/lib.es5.d.ts", None)
+            .is_empty(),
+        "removed ambient dep must clear reverse bucket"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("ambient:/A/lib.dom.d.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #15 ──
+#[test]
+fn replace_semantic_transitive_creates_reverse_bucket() {
+    let mut store = EdgeStore::new();
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/shared.ts"]));
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/shared.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #16 ──
+#[test]
+fn replace_semantic_transitive_replaces_set_symmetrically() {
+    let mut store = EdgeStore::new();
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/old.ts"]));
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/new.ts"]));
+    assert!(
+        store
+            .reverse_deps_for_target("/lib/old.ts", None)
+            .is_empty(),
+        "removed transitive dep must clear reverse bucket"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/new.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+}
+
+// ── Test #17 ──
+#[test]
+fn replace_semantic_transitive_handles_promotion_to_direct() {
+    // F15: when a transitive dep also becomes direct (parsed), the owner
+    // stays in canonical bucket via the union.
+    let mut store = EdgeStore::new();
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/shared.ts"]));
+    // Parse re-record (clears semantic_transitive AND records direct).
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/shared.ts"]), vec![], vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/shared.ts", None),
+        vec!["/src/Comp.vue"],
+        "owner stays in canonical bucket after promotion to direct",
+    );
+}
+
+// ── Test #18 ──
+#[test]
+fn reverse_deps_for_target_unions_canonical_and_stem_axes() {
+    let mut store = EdgeStore::new();
+    // Owner A: canonical hit.
+    store.replace_parsed_edges("/src/A.vue", btree(&["/lib/types.ts"]), vec![], vec![]);
+    // Owner B: stem hit.
+    store.replace_parsed_edges(
+        "/src/B.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./other".to_string(), ResolveRequestKind::EsmImport),
+            "/lib/types".to_string(),
+        )],
+        vec![],
+    );
+    let mut got = store.reverse_deps_for_target("/lib/types.ts", Some("/lib/types"));
+    got.sort();
+    assert_eq!(
+        got,
+        vec!["/src/A.vue".to_string(), "/src/B.vue".to_string()],
+        "union of canonical and stem axes"
+    );
+}
+
+// ── Test #19 ──
+#[test]
+fn reverse_deps_for_target_dedupes_when_owner_in_both_axes() {
+    // Gemini #1: same importer in canonical AND stem returns once.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        btree(&["/lib/types.ts"]),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/lib/types".to_string(),
+        )],
+        vec![],
+    );
+    let got = store.reverse_deps_for_target("/lib/types.ts", Some("/lib/types"));
+    assert_eq!(
+        got,
+        vec!["/src/Comp.vue"],
+        "owner present in both axes returns once"
+    );
+}
+
+// ── Test #20 ──
+#[test]
+fn reverse_deps_for_target_short_circuits_single_axis() {
+    // F19: when only one bucket hits, no BTreeSet allocation. We can't
+    // assert on allocator behaviour; verify behavioural correctness.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/types.ts"]), vec![], vec![]);
+    // Only canonical axis hits; stem stripped is `/lib/types` but no stem
+    // bucket keyed there.
+    let got = store.reverse_deps_for_target("/lib/types.ts", Some("/lib/types"));
+    assert_eq!(got, vec!["/src/Comp.vue"]);
+}
+
+// ── Test #21 ──
+#[test]
+fn set_default_resolve_extensions_sorts_longest_first() {
+    // F4: sort happens at set-time. We verify by behavioural test through
+    // Engine::reverse_deps_for which uses default_resolve_extensions —
+    // covered in §4.2 #4 (memory_default_resolve_extensions). Here we
+    // verify the strip helper behaviour directly via relative_path.
+    let sorted = vec![
+        ".d.ts".to_string(),
+        ".d.mts".to_string(),
+        ".d.cts".to_string(),
+        ".tsx".to_string(),
+        ".ts".to_string(),
+    ];
+    // .d.ts (5 chars) must precede .ts (3 chars) in the sorted list.
+    let pos_dts = sorted.iter().position(|s| s == ".d.ts").unwrap();
+    let pos_ts = sorted.iter().position(|s| s == ".ts").unwrap();
+    assert!(
+        pos_dts < pos_ts,
+        ".d.ts must precede .ts in longest-first sort"
+    );
+    let stripped = crate::relative_path::strip_extension_first("/types.d.ts", &sorted);
+    assert_eq!(stripped, Some("/types"));
+}
+
+// ── Test #22 ──
+#[test]
+fn set_default_resolve_extensions_merges_with_probe_extensions() {
+    // F3: workspace merges its own probe list with host config; `.vue` is
+    // included (probe contains it); `.tsx` is included (probe contains it,
+    // regardless of host config).
+    use crate::engine::Engine;
+    let engine = Engine::new();
+    // Configure with a host-only set that lacks `.vue` and `.tsx`.
+    engine.set_default_resolve_extensions(vec![".ts".to_string()]);
+    let exts = engine.default_resolve_extensions.load_full();
+    assert!(
+        exts.iter().any(|e| e == ".vue"),
+        ".vue must be merged in from probe_extensions()"
+    );
+    assert!(
+        exts.iter().any(|e| e == ".tsx"),
+        ".tsx must be merged in from probe_extensions()"
+    );
+}
+
+// ── Test #23 ──
+#[test]
+fn reverse_deps_for_target_strips_d_ts_d_mts_d_cts() {
+    // F4: longest-suffix-first stripping for declaration files.
+    let sorted: Vec<String> = vec![
+        ".d.ts".to_string(),
+        ".d.mts".to_string(),
+        ".d.cts".to_string(),
+        ".tsx".to_string(),
+        ".ts".to_string(),
+    ];
+    assert_eq!(
+        crate::relative_path::strip_extension_first("/types.d.ts", &sorted),
+        Some("/types")
+    );
+    assert_eq!(
+        crate::relative_path::strip_extension_first("/types.d.mts", &sorted),
+        Some("/types")
+    );
+    assert_eq!(
+        crate::relative_path::strip_extension_first("/types.d.cts", &sorted),
+        Some("/types")
+    );
+}
+
+// ── Test #24 ──
+#[test]
+fn reverse_deps_for_target_returns_empty_for_unknown_extension() {
+    // Unknown extension (`.svelte`) falls through to canonical-only lookup.
+    let mut store = EdgeStore::new();
+    // Set up a stem bucket for /src/comp (no extension).
+    store.replace_parsed_edges(
+        "/src/A.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./comp".to_string(), ResolveRequestKind::EsmImport),
+            "/src/comp".to_string(),
+        )],
+        vec![],
+    );
+    // Querying with `.svelte` (not in extension list) — only canonical hit.
+    // Caller passes `None` for stripped_target since `.svelte` doesn't strip.
+    let got = store.reverse_deps_for_target("/src/comp.svelte", None);
+    assert!(
+        got.is_empty(),
+        ".svelte querying must not match a stem bucket"
+    );
+}
+
+// ── Test #25 ──
+#[test]
+fn remove_file_surgical_canonical_axis() {
+    // M1: surgical via canonical_dep_union.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/A.vue",
+        btree(&["/lib/x.ts", "/lib/y.ts"]),
+        vec![],
+        vec![],
+    );
+    store.replace_parsed_edges("/src/B.vue", btree(&["/lib/x.ts"]), vec![], vec![]);
+    store.remove_file("/src/A.vue");
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/x.ts", None),
+        vec!["/src/B.vue"],
+        "removed owner cleared from /lib/x.ts bucket; B remains"
+    );
+    assert!(
+        store.reverse_deps_for_target("/lib/y.ts", None).is_empty(),
+        "/lib/y.ts bucket fully cleared"
+    );
+}
+
+// ── Test #26 ──
+#[test]
+fn remove_file_surgical_stem_axis_via_active_stems() {
+    // M1: surgical via per-owner active stems.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/A.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    store.replace_parsed_edges(
+        "/src/B.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    store.remove_file("/src/A.vue");
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/B.vue"],
+        "removed owner cleared from stem bucket; B remains"
+    );
+}
+
+// ── Test #27 ──
+#[test]
+fn remove_file_clears_owner_as_target_in_both_axes() {
+    // Removing /foo.ts clears reverse_deps_*[/foo.ts].
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/A.vue", btree(&["/foo.ts"]), vec![], vec![]);
+    assert!(!store.reverse_deps_for_target("/foo.ts", None).is_empty());
+    store.remove_file("/foo.ts");
+    assert!(
+        store.reverse_deps_for_target("/foo.ts", None).is_empty(),
+        "removed file's reverse buckets must be cleared"
+    );
+    // But /src/A.vue's per-owner state is untouched.
+    let snap = store.snapshot("/src/A.vue").unwrap();
+    assert!(snap.parsed_resolved.contains("/foo.ts"));
+}
+
+// ── Test #28 ──
+#[test]
+fn dependency_snapshot_view_returns_full_state() {
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        btree(&["/lib/p.ts"]),
+        vec![(
+            ("./u".to_string(), ResolveRequestKind::EsmImport),
+            "/src/u".to_string(),
+        )],
+        vec![("vue".to_string(), ResolveRequestKind::EsmImport)],
+    );
+    store.add_lazy_resolved_dep("/src/Comp.vue", "/lib/lazy.ts");
+    store.add_ambient_resolved_dep("/src/Comp.vue", "ambient:/A/x.d.ts");
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/sem.ts"]));
+    let snap = store.snapshot("/src/Comp.vue").expect("snapshot");
+    assert!(snap.parsed_resolved.contains("/lib/p.ts"));
+    assert!(snap
+        .parsed_unresolved_relatives
+        .contains_key(&("./u".to_string(), ResolveRequestKind::EsmImport)));
+    assert!(snap.lazy_resolved.contains("/lib/lazy.ts"));
+    assert!(snap.ambient_resolved.contains("ambient:/A/x.d.ts"));
+    assert!(snap.semantic_transitive.contains("/lib/sem.ts"));
+    assert_eq!(snap.bare_specifiers.len(), 1);
+}
+
+// ── Test #29 ──
+#[test]
+fn replace_exact_resolutions_with_none_target_does_not_dampen_stem() {
+    // F18: resolved_canonical_id: None doesn't dampen; stem stays active.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types", None, vec!["/lib/types.ts"])],
+    );
+    // Stem still active.
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "None resolved_canonical_id must NOT dampen the stem"
+    );
+}
+
+// ── Test #30 ──
+#[test]
+fn replace_exact_resolutions_removed_resolution_restores_stem() {
+    // F18: bundler removes resolution; previously-dampened stem becomes
+    // active again.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types", Some("/lib/types.ts"), vec![])],
+    );
+    assert!(
+        store.reverse_deps_for_target("/src/types", None).is_empty(),
+        "stem dampened first"
+    );
+    // Bundler removes the resolution (passes empty list).
+    store.replace_exact_resolutions("/src/Comp.vue", vec![]);
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "stem RESTORED to active after bundler removes resolution"
+    );
+}
+
+// ── Test #31 ──
+#[test]
+fn replace_exact_resolutions_changed_to_none_restores_stem() {
+    // F18: bundler changes Some→None; stem reactivated.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types", Some("/lib/types.ts"), vec![])],
+    );
+    // Bundler changes Some -> None for same specifier.
+    store.replace_exact_resolutions("/src/Comp.vue", vec![exact("./types", None, vec![])]);
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "stem reactivated after Some→None change"
+    );
+}
+
+// ── Test #32 ──
+#[test]
+fn record_parsed_edges_followed_by_set_exact_round_trip() {
+    // Sequence: parse `./types` (stem present) → bundler resolves
+    // (stem dampened, canonical present) → parse re-record (per F11
+    // lifecycle: clears exact_resolutions, so stem becomes active again,
+    // canonical empty).
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+    );
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./types", Some("/lib/types.ts"), vec![])],
+    );
+    assert!(store.reverse_deps_for_target("/src/types", None).is_empty());
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/types.ts", None),
+        vec!["/src/Comp.vue"],
+    );
+    // Re-record: clears exact_resolutions; stem becomes active again.
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    assert!(
+        store
+            .reverse_deps_for_target("/lib/types.ts", None)
+            .is_empty(),
+        "F11: exact_resolved cleared on re-record"
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "stem reactivated after re-record (exact_resolutions cleared)"
+    );
+}
+
+// ── Test #34 (R5: replaces deleted #33) ──
+#[test]
+fn dampening_restricted_to_codegen_blocker_phase() {
+    // R5 (Codex 2 #6): a ProviderGraph-only exact does NOT dampen a
+    // parsed-unresolved CodegenBlocker stem.
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges(
+        "/src/Comp.vue",
+        BTreeSet::new(),
+        vec![(
+            ("./types".to_string(), ResolveRequestKind::EsmImport),
+            "/src/types".to_string(),
+        )],
+        vec![],
+    );
+    // Single ProviderGraph exact — does NOT dampen.
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact_with(
+            "./types",
+            ResolvePhase::ProviderGraph,
+            ResolveRequestKind::EsmImport,
+            Some("/lib/types.ts"),
+        )],
+    );
+    assert_eq!(
+        store.reverse_deps_for_target("/src/types", None),
+        vec!["/src/Comp.vue"],
+        "ProviderGraph-only exact must NOT dampen a CodegenBlocker stem"
+    );
+    // Add CodegenBlocker exact alongside — now stem IS dampened.
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![
+            exact_with(
+                "./types",
+                ResolvePhase::ProviderGraph,
+                ResolveRequestKind::EsmImport,
+                Some("/lib/types.ts"),
+            ),
+            exact_with(
+                "./types",
+                ResolvePhase::CodegenBlocker,
+                ResolveRequestKind::EsmImport,
+                Some("/lib/types.ts"),
+            ),
+        ],
+    );
+    assert!(
+        store.reverse_deps_for_target("/src/types", None).is_empty(),
+        "CodegenBlocker exact dampens the stem"
+    );
+}
+
+// ── Backward-compat smoke tests (existing API names retained) ──
 
 #[test]
 fn exact_resolution_not_found_for_unknown_file() {
@@ -30,461 +886,25 @@ fn exact_resolution_not_found_for_unknown_file() {
 }
 
 #[test]
-fn set_exact_resolutions_stores_and_retrieves() {
+fn forward_deps_includes_all_classes() {
     let mut store = EdgeStore::new();
-    let resolutions = vec![exact("./bar", Some("src/bar.vue"), vec!["src/bar.vue"])];
-
-    let result = store.set_exact_resolutions("src/foo.vue", resolutions);
-    assert_eq!(result.newly_resolved, vec!["src/bar.vue"]);
-    assert!(store.has_exact_resolutions("src/foo.vue"));
-
-    let res = store
-        .get_exact_resolution("src/foo.vue", "./bar", default_ctx())
-        .unwrap();
-    assert_eq!(res.resolved_canonical_id.as_deref(), Some("src/bar.vue"));
-}
-
-#[test]
-fn set_exact_resolutions_updates_forward_deps() {
-    let mut store = EdgeStore::new();
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![
-            exact("./bar", Some("src/bar.vue"), vec![]),
-            exact("./baz", Some("src/baz.vue"), vec![]),
-        ],
+    store.replace_parsed_edges("/src/Comp.vue", btree(&["/lib/p.ts"]), vec![], vec![]);
+    store.replace_exact_resolutions(
+        "/src/Comp.vue",
+        vec![exact("./e", Some("/lib/e.ts"), vec![])],
     );
-
-    let mut fwd = store.forward_deps("src/foo.vue");
-    fwd.sort();
-    assert_eq!(fwd, vec!["src/bar.vue", "src/baz.vue"]);
-}
-
-#[test]
-fn set_exact_resolutions_updates_reverse_deps() {
-    let mut store = EdgeStore::new();
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./bar", Some("src/bar.vue"), vec![])],
-    );
-
-    let rev = store.reverse_deps("src/bar.vue");
-    assert_eq!(rev, vec!["src/foo.vue"]);
-}
-
-#[test]
-fn record_parsed_edges_replaces_previous_state() {
-    let mut store = EdgeStore::new();
-
-    // First set of edges
-    store.record_parsed_edges("src/foo.vue", vec!["src/old_dep.vue".to_string()], vec![]);
-    assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/old_dep.vue"]);
-    assert_eq!(store.reverse_deps("src/old_dep.vue"), vec!["src/foo.vue"]);
-
-    // Replace with new edges
-    store.record_parsed_edges("src/foo.vue", vec!["src/new_dep.vue".to_string()], vec![]);
-    assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/new_dep.vue"]);
-    assert!(
-        store.reverse_deps("src/old_dep.vue").is_empty(),
-        "old dep should no longer have foo as reverse dep"
-    );
-    assert_eq!(store.reverse_deps("src/new_dep.vue"), vec!["src/foo.vue"]);
-}
-
-#[test]
-fn record_parsed_edges_clears_exact_resolutions() {
-    let mut store = EdgeStore::new();
-
-    // Set exact resolutions first
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./bar", Some("src/bar.vue"), vec![])],
-    );
-    assert!(store.has_exact_resolutions("src/foo.vue"));
-
-    // Record new edges — should clear exact resolutions
-    store.record_parsed_edges("src/foo.vue", vec!["src/baz.vue".to_string()], vec![]);
-    assert!(
-        !store.has_exact_resolutions("src/foo.vue"),
-        "exact resolutions should be cleared after recording parsed edges"
-    );
-}
-
-#[test]
-fn record_parsed_edges_stores_bare_specifiers() {
-    let mut store = EdgeStore::new();
-    store.record_parsed_edges(
-        "src/foo.vue",
-        vec![],
-        vec![
-            ("vue".to_string(), ResolveRequestKind::EsmImport),
-            ("lodash".to_string(), ResolveRequestKind::EsmImport),
-        ],
-    );
-
-    let bare = store.bare_specifiers("src/foo.vue");
-    assert_eq!(bare.len(), 2);
-    assert_eq!(bare[0].0, "vue");
-    assert_eq!(bare[1].0, "lodash");
-}
-
-#[test]
-fn add_resolved_dep() {
-    let mut store = EdgeStore::new();
-    assert!(store.add_resolved_dep("src/foo.vue", "src/bar.vue"));
-    assert!(
-        !store.add_resolved_dep("src/foo.vue", "src/bar.vue"),
-        "duplicate should return false"
-    );
-
-    assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/bar.vue"]);
-    assert_eq!(store.reverse_deps("src/bar.vue"), vec!["src/foo.vue"]);
-}
-
-#[test]
-fn remove_file_cleans_up_all_state() {
-    let mut store = EdgeStore::new();
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./bar", Some("src/bar.vue"), vec![])],
-    );
-
-    // Also make another file depend on foo
-    store.add_resolved_dep("src/other.vue", "src/foo.vue");
-
-    store.remove_file("src/foo.vue");
-
-    assert!(
-        store.forward_deps("src/foo.vue").is_empty(),
-        "forward deps should be empty"
-    );
-    assert!(
-        store.reverse_deps("src/bar.vue").is_empty(),
-        "bar should no longer have foo as reverse dep"
-    );
-    assert!(!store.has_exact_resolutions("src/foo.vue"));
-    // other's forward dep (foo) should still exist in other's state
-    assert_eq!(store.forward_deps("src/other.vue"), vec!["src/foo.vue"]);
-}
-
-#[test]
-fn multiple_files_share_dependency() {
-    let mut store = EdgeStore::new();
-    store.record_parsed_edges("src/a.vue", vec!["src/shared.vue".to_string()], vec![]);
-    store.record_parsed_edges("src/b.vue", vec!["src/shared.vue".to_string()], vec![]);
-
-    let mut rev = store.reverse_deps("src/shared.vue");
-    rev.sort();
-    assert_eq!(rev, vec!["src/a.vue", "src/b.vue"]);
-
-    // Remove a — b should still depend on shared
-    store.remove_file("src/a.vue");
-    assert_eq!(store.reverse_deps("src/shared.vue"), vec!["src/b.vue"]);
-}
-
-#[test]
-fn forward_deps_empty_for_unknown_file() {
-    let store = EdgeStore::new();
-    assert!(store.forward_deps("src/unknown.vue").is_empty());
-}
-
-#[test]
-fn reverse_deps_empty_for_unknown_file() {
-    let store = EdgeStore::new();
-    assert!(store.reverse_deps("src/unknown.vue").is_empty());
-}
-
-#[test]
-fn bare_specifiers_empty_for_unknown_file() {
-    let store = EdgeStore::new();
-    assert!(store.bare_specifiers("src/unknown.vue").is_empty());
-}
-
-#[test]
-fn exact_resolution_with_none_canonical_id() {
-    let mut store = EdgeStore::new();
-    let result = store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("nonexistent", None, vec!["maybe/a.ts"])],
-    );
-
-    assert!(
-        result.newly_resolved.is_empty(),
-        "None canonical_id should not produce forward dep"
-    );
-    assert!(store.forward_deps("src/foo.vue").is_empty());
-    assert!(store.has_exact_resolutions("src/foo.vue"));
-
-    let res = store
-        .get_exact_resolution("src/foo.vue", "nonexistent", default_ctx())
-        .unwrap();
-    assert!(res.resolved_canonical_id.is_none());
-    assert_eq!(res.possible_canonical_ids, vec!["maybe/a.ts"]);
-}
-
-// ── Regression: stale dep leak (P1 finding) ──
-
-#[test]
-fn set_exact_resolutions_replaces_old_exact_deps() {
-    let mut store = EdgeStore::new();
-
-    // First round: foo depends on bar via exact resolution
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./bar", Some("src/bar.vue"), vec![])],
-    );
-    assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/bar.vue"]);
-    assert_eq!(store.reverse_deps("src/bar.vue"), vec!["src/foo.vue"]);
-
-    // Second round: foo now depends on baz instead of bar
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./baz", Some("src/baz.vue"), vec![])],
-    );
-
-    // bar should be GONE from forward deps
-    let fwd = store.forward_deps("src/foo.vue");
-    assert_eq!(
-        fwd,
-        vec!["src/baz.vue"],
-        "old exact dep bar should be removed"
-    );
-    assert!(
-        !fwd.contains(&"src/bar.vue".to_string()),
-        "stale dep bar must not leak into forward deps"
-    );
-
-    // bar should be GONE from reverse deps
-    assert!(
-        store.reverse_deps("src/bar.vue").is_empty(),
-        "stale dep bar must not appear in reverse deps"
-    );
-    assert_eq!(store.reverse_deps("src/baz.vue"), vec!["src/foo.vue"]);
-}
-
-#[test]
-fn set_exact_resolutions_empty_clears_all_exact_deps() {
-    let mut store = EdgeStore::new();
-
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("./bar", Some("src/bar.vue"), vec![])],
-    );
-
-    // Replace with empty set
-    store.set_exact_resolutions("src/foo.vue", vec![]);
-
-    assert!(
-        store.forward_deps("src/foo.vue").is_empty(),
-        "empty exact resolutions should clear all exact deps"
-    );
-    assert!(
-        store.reverse_deps("src/bar.vue").is_empty(),
-        "old target should be removed from reverse deps"
-    );
-}
-
-#[test]
-fn exact_deps_and_eager_deps_are_independent() {
-    let mut store = EdgeStore::new();
-
-    // Record eagerly resolved deps
-    store.record_parsed_edges("src/foo.vue", vec!["src/eager.vue".to_string()], vec![]);
-
-    // Add exact resolutions on top
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![exact("lib", Some("node_modules/lib/index.ts"), vec![])],
-    );
-
-    let mut fwd = store.forward_deps("src/foo.vue");
-    fwd.sort();
-    assert_eq!(
-        fwd,
-        vec!["node_modules/lib/index.ts", "src/eager.vue"],
-        "both eager and exact deps should be present"
-    );
-
-    // Replace exact resolutions — eager deps survive
-    store.set_exact_resolutions("src/foo.vue", vec![]);
-
-    let fwd = store.forward_deps("src/foo.vue");
-    assert_eq!(
-        fwd,
-        vec!["src/eager.vue"],
-        "eager deps must survive exact resolution replacement"
-    );
-    assert!(
-        store.reverse_deps("node_modules/lib/index.ts").is_empty(),
-        "cleared exact target should be removed from reverse deps"
-    );
-    assert_eq!(
-        store.reverse_deps("src/eager.vue"),
-        vec!["src/foo.vue"],
-        "eager dep reverse entry must survive"
-    );
-}
-
-#[test]
-fn lazily_resolved_dep_appears_in_forward_and_reverse() {
-    let mut store = EdgeStore::new();
-    store.record_parsed_edges("src/foo.vue", vec![], vec![]);
-
-    // Simulate a lazy resolution of a bare import
-    assert!(store.add_lazily_resolved_dep("src/foo.vue", "node_modules/vue/index.ts"));
-
-    assert_eq!(
-        store.forward_deps("src/foo.vue"),
-        vec!["node_modules/vue/index.ts"]
-    );
-    assert_eq!(
-        store.reverse_deps("node_modules/vue/index.ts"),
-        vec!["src/foo.vue"]
-    );
-
-    // Duplicate is no-op
-    assert!(!store.add_lazily_resolved_dep("src/foo.vue", "node_modules/vue/index.ts"));
-}
-
-#[test]
-fn record_parsed_edges_clears_lazily_resolved_deps() {
-    let mut store = EdgeStore::new();
-    store.record_parsed_edges("src/foo.vue", vec![], vec![]);
-    store.add_lazily_resolved_dep("src/foo.vue", "node_modules/vue/index.ts");
-
-    // Re-record edges — lazy deps should be cleared
-    store.record_parsed_edges("src/foo.vue", vec!["src/new.vue".to_string()], vec![]);
-
-    assert_eq!(store.forward_deps("src/foo.vue"), vec!["src/new.vue"]);
-    assert!(
-        store.reverse_deps("node_modules/vue/index.ts").is_empty(),
-        "lazily resolved dep must be cleared on re-record"
-    );
-}
-
-// ── Context-keyed exact resolution tests ──
-
-#[test]
-fn same_specifier_different_context_resolves_differently() {
-    let mut store = EdgeStore::new();
-
-    // Set two resolutions for the same specifier but different (phase, kind)
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![
-            ExactResolution {
-                specifier: "pkg".to_string(),
-                phase: ResolvePhase::CodegenBlocker,
-                kind: ResolveRequestKind::EsmImport,
-                resolved_canonical_id: Some("node_modules/pkg/index.js".to_string()),
-                possible_canonical_ids: vec![],
-            },
-            ExactResolution {
-                specifier: "pkg".to_string(),
-                phase: ResolvePhase::ProviderGraph,
-                kind: ResolveRequestKind::EsmImport,
-                resolved_canonical_id: Some("node_modules/pkg/index.d.ts".to_string()),
-                possible_canonical_ids: vec![],
-            },
-        ],
-    );
-
-    // CodegenBlocker + EsmImport → index.js
-    let codegen_ctx = ResolutionContext {
-        phase: ResolvePhase::CodegenBlocker,
-        kind: ResolveRequestKind::EsmImport,
-    };
-    let codegen = store
-        .get_exact_resolution("src/foo.vue", "pkg", codegen_ctx)
-        .expect("CodegenBlocker exact should exist");
-    assert_eq!(
-        codegen.resolved_canonical_id.as_deref(),
-        Some("node_modules/pkg/index.js"),
-    );
-
-    // ProviderGraph + EsmImport → index.d.ts
-    let provider_ctx = ResolutionContext {
-        phase: ResolvePhase::ProviderGraph,
-        kind: ResolveRequestKind::EsmImport,
-    };
-    let provider = store
-        .get_exact_resolution("src/foo.vue", "pkg", provider_ctx)
-        .expect("ProviderGraph exact should exist");
-    assert_eq!(
-        provider.resolved_canonical_id.as_deref(),
-        Some("node_modules/pkg/index.d.ts"),
-    );
-
-    // A different kind should NOT match
-    let type_ctx = ResolutionContext {
-        phase: ResolvePhase::CodegenBlocker,
-        kind: ResolveRequestKind::TypeImport,
-    };
-    assert!(
-        store
-            .get_exact_resolution("src/foo.vue", "pkg", type_ctx)
-            .is_none(),
-        "TypeImport context should not match EsmImport resolutions"
-    );
-}
-
-#[test]
-fn context_keyed_replacement_only_affects_matching_context() {
-    let mut store = EdgeStore::new();
-
-    // Set codegen resolution
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![
-            ExactResolution {
-                specifier: "pkg".to_string(),
-                phase: ResolvePhase::CodegenBlocker,
-                kind: ResolveRequestKind::EsmImport,
-                resolved_canonical_id: Some("old.js".to_string()),
-                possible_canonical_ids: vec![],
-            },
-            ExactResolution {
-                specifier: "pkg".to_string(),
-                phase: ResolvePhase::ProviderGraph,
-                kind: ResolveRequestKind::EsmImport,
-                resolved_canonical_id: Some("old.d.ts".to_string()),
-                possible_canonical_ids: vec![],
-            },
-        ],
-    );
-
-    // Replace ALL exact resolutions (this replaces both)
-    store.set_exact_resolutions(
-        "src/foo.vue",
-        vec![ExactResolution {
-            specifier: "pkg".to_string(),
-            phase: ResolvePhase::CodegenBlocker,
-            kind: ResolveRequestKind::EsmImport,
-            resolved_canonical_id: Some("new.js".to_string()),
-            possible_canonical_ids: vec![],
-        }],
-    );
-
-    let codegen_ctx = ResolutionContext {
-        phase: ResolvePhase::CodegenBlocker,
-        kind: ResolveRequestKind::EsmImport,
-    };
-    let provider_ctx = ResolutionContext {
-        phase: ResolvePhase::ProviderGraph,
-        kind: ResolveRequestKind::EsmImport,
-    };
-
-    // CodegenBlocker should see the new value
-    let codegen = store
-        .get_exact_resolution("src/foo.vue", "pkg", codegen_ctx)
-        .expect("codegen should exist");
-    assert_eq!(codegen.resolved_canonical_id.as_deref(), Some("new.js"));
-
-    // ProviderGraph was cleared by set_exact_resolutions (it replaces ALL)
-    assert!(
-        store
-            .get_exact_resolution("src/foo.vue", "pkg", provider_ctx)
-            .is_none(),
-        "provider context should be cleared after full replacement"
-    );
+    store.add_lazy_resolved_dep("/src/Comp.vue", "/lib/l.ts");
+    store.add_ambient_resolved_dep("/src/Comp.vue", "ambient:/A/x.d.ts");
+    store.replace_semantic_transitive("/src/Comp.vue", btree(&["/lib/s.ts"]));
+    let mut got = store.forward_deps("/src/Comp.vue");
+    got.sort();
+    let mut want = vec![
+        "/lib/p.ts",
+        "/lib/e.ts",
+        "/lib/l.ts",
+        "ambient:/A/x.d.ts",
+        "/lib/s.ts",
+    ];
+    want.sort();
+    assert_eq!(got, want);
 }

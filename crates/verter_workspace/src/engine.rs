@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::ambient_lib::AmbientLibsByProject;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
-use crate::exact_resolution::EdgeStore;
+use crate::exact_resolution::{DependencySnapshotView, EdgeStore};
 use crate::memory::MemorySnapshot;
 use crate::overlay::OverlayStore;
 use crate::package_index::PackageIndex;
@@ -94,10 +95,17 @@ pub(crate) struct Engine {
     /// dep-fact validation) never block on concurrent registrations. Concrete
     /// workspaces mutate via CAS in `register_ambient_lib`.
     pub(crate) ambient_libs: ArcSwap<AmbientLibsByProject>,
+
+    /// Extension list used for reverse-dep stem stripping. Initialised to
+    /// the merged static `probe_extensions()` + initial host config, sorted
+    /// longest-first. `ArcSwap` so `set_default_resolve_extensions` does
+    /// not stall reverse queries on the hot path.
+    pub(crate) default_resolve_extensions: ArcSwap<Vec<String>>,
 }
 
 impl Engine {
     pub(crate) fn new() -> Self {
+        let initial_extensions: Vec<String> = Self::merge_extensions(&[]);
         let engine = Self {
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
@@ -110,6 +118,7 @@ impl Engine {
             vfs_provenance: VfsProvenance::default(),
             published_state: ArcSwapOption::new(None),
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
+            default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
         };
         // Publish an initial snapshot from the empty project graph so that
         // `published_state` is always `Some`. This ensures basic relative
@@ -117,6 +126,31 @@ impl Engine {
         // or `configure_resolver()` call populates real project configs.
         engine.rebuild_and_publish();
         engine
+    }
+
+    /// Merge `host_resolve_extensions` with the workspace's static
+    /// `probe_extensions()` list, dedupe, and sort by descending length
+    /// then ascending lex. Used by [`Engine::new`] and
+    /// [`Engine::set_default_resolve_extensions`] (single source of truth).
+    fn merge_extensions(host_resolve_extensions: &[String]) -> Vec<String> {
+        let mut merged: BTreeSet<String> = crate::resolver::probe_extensions()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for ext in host_resolve_extensions {
+            merged.insert(ext.clone());
+        }
+        let mut sorted: Vec<String> = merged.into_iter().collect();
+        sorted.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        sorted
+    }
+
+    /// Replace the workspace's reverse-dep extension list (additive: merges
+    /// with `probe_extensions()` and sorts longest-first at set-time per F4).
+    /// Lock-free swap; does not stall reverse queries.
+    pub(crate) fn set_default_resolve_extensions(&self, host_resolve_extensions: Vec<String>) {
+        let sorted = Self::merge_extensions(&host_resolve_extensions);
+        self.default_resolve_extensions.store(Arc::new(sorted));
     }
 
     /// Publish a workspace snapshot atomically.
@@ -327,7 +361,29 @@ impl Engine {
     ) -> ExactResolutionResult {
         self.edges
             .write()
-            .set_exact_resolutions(canonical_id, resolutions)
+            .replace_exact_resolutions(canonical_id, resolutions)
+    }
+
+    /// Replace owner's transitive-semantic dep set. Always fires; closes F15.
+    pub(crate) fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>) {
+        self.edges
+            .write()
+            .replace_semantic_transitive(canonical_id, deps);
+    }
+
+    /// Inspection — clone of an owner's dependency snapshot.
+    #[allow(dead_code)]
+    pub(crate) fn dependency_snapshot(&self, canonical_id: &str) -> Option<DependencySnapshotView> {
+        self.edges.read().snapshot(canonical_id)
+    }
+
+    /// Add a single ambient-resolved dep (incremental). Routes ambient
+    /// dependencies into the dedicated `ambient_resolved` class so they
+    /// survive `record_parsed_edges` re-records (closes F1.5).
+    pub(crate) fn add_ambient_resolved_dep(&self, canonical_id: &str, virtual_id: &str) -> bool {
+        self.edges
+            .write()
+            .add_ambient_resolved_dep(canonical_id, virtual_id)
     }
 
     /// Resolve an import using exact resolutions then the project resolver chain.
@@ -389,7 +445,7 @@ impl Engine {
             if let Some(ref result) = entry.result {
                 self.edges
                     .write()
-                    .add_lazily_resolved_dep(importer_id, &result.source_id);
+                    .add_lazy_resolved_dep(importer_id, &result.source_id);
             }
             return entry.result;
         }
@@ -415,7 +471,7 @@ impl Engine {
         if let Some(ref result) = result {
             self.edges
                 .write()
-                .add_lazily_resolved_dep(importer_id, &result.source_id);
+                .add_lazy_resolved_dep(importer_id, &result.source_id);
         }
 
         self.lazy_resolution_cache.write().insert(
@@ -474,15 +530,90 @@ impl Engine {
             .preferred_specifier(reader, importer_id, target_id)
     }
 
-    /// Record parsed edges, eagerly resolving relative/src edges via the resolver.
+    /// Resolve a parsed-edge import (relative specifier or non-relative
+    /// `ExternalSrc`) WITHOUT consulting `exact_resolutions` and WITHOUT
+    /// writing `lazy_resolved` side effects. Used exclusively by
+    /// [`Engine::record_parsed_edges`] (R5: parsed-edge resolver bypasses
+    /// exacts — closes Codex 2 #1).
+    ///
+    /// The R4 lifecycle requires that parsed-edge resolution is parser-
+    /// driven, not bundler-driven: bundler-injected exacts dampen unresolved
+    /// stems via the active-stem model but do NOT reclassify the relative as
+    /// resolved. [`Engine::resolve_import`] reads `exact_resolutions` first;
+    /// using it from `record_parsed_edges` would silently promote stale
+    /// exact targets into `parsed_resolved` after a re-upsert.
+    pub(crate) fn resolve_parsed_edge(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        importer_id: &str,
+        specifier: &str,
+        ctx: crate::types::ResolutionContext,
+    ) -> Option<crate::types::ResolveResult> {
+        // No exact_resolutions read.
+
+        let published = self.published_state.load_full();
+        let content_generation = self.current_content_generation();
+        let snapshot_generation = published
+            .as_ref()
+            .map(|root| root.snapshot.generation)
+            .unwrap_or_default();
+        let cache_key = LazyResolutionCacheKey {
+            importer_id: importer_id.to_string(),
+            specifier: specifier.to_string(),
+            phase: ctx.phase,
+            kind: ctx.kind,
+        };
+        if let Some(entry) = self
+            .lazy_resolution_cache
+            .read()
+            .get(&cache_key)
+            .cloned()
+            .filter(|entry| {
+                entry.content_generation == content_generation
+                    && entry.snapshot_generation == snapshot_generation
+            })
+        {
+            // Read-only cache hit. NO add_lazy_resolved_dep call (R5).
+            return entry.result;
+        }
+
+        let result = if let Some(root) = published {
+            let resolver = &root.snapshot.resolver;
+            let request = crate::types::ResolveRequest {
+                importer_id: importer_id.to_string(),
+                specifier: specifier.to_string(),
+                kind: ctx.kind,
+                phase: ctx.phase,
+            };
+            resolver.resolve_with_reader(reader, &request)
+        } else {
+            None
+        };
+
+        // Cache the resolution (perf), but NOT as a lazy_resolved dep.
+        self.lazy_resolution_cache.write().insert(
+            cache_key,
+            LazyResolutionCacheEntry {
+                content_generation,
+                snapshot_generation,
+                result: result.clone(),
+            },
+        );
+
+        result
+    }
+
+    /// Record parsed edges, eagerly resolving relative/src edges via the
+    /// parsed-edge resolver (R5 bypasses `exact_resolutions`).
     pub(crate) fn record_parsed_edges(
         &self,
         reader: &dyn crate::traits::WorkspaceAccess,
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
     ) {
-        let mut eagerly_resolved = Vec::new();
-        let mut bare_specifiers = Vec::new();
+        let mut parsed_resolved: BTreeSet<String> = BTreeSet::new();
+        let mut bare_specifiers: Vec<(String, ResolveRequestKind)> = Vec::new();
+        let mut unresolved_pairs: Vec<((String, ResolveRequestKind), String)> = Vec::new();
 
         for edge in edges {
             match edge {
@@ -491,9 +622,15 @@ impl Engine {
                         phase: crate::types::ResolvePhase::CodegenBlocker,
                         kind: *kind,
                     };
-                    if let Some(result) = self.resolve_import(reader, canonical_id, specifier, ctx)
+                    if let Some(result) =
+                        self.resolve_parsed_edge(reader, canonical_id, specifier, ctx)
                     {
-                        eagerly_resolved.push(result.source_id);
+                        parsed_resolved.insert(result.source_id);
+                    } else if specifier.starts_with('.') {
+                        let normalized =
+                            crate::relative_path::normalize_relative_specifier(specifier);
+                        let stem = crate::relative_path::join_relative(canonical_id, &normalized);
+                        unresolved_pairs.push(((normalized, *kind), stem));
                     }
                 }
                 crate::types::ParsedEdge::ExternalSrc {
@@ -501,16 +638,16 @@ impl Engine {
                     resolved_path,
                 } => {
                     if let Some(path) = resolved_path {
-                        eagerly_resolved.push(path.clone());
+                        parsed_resolved.insert(path.clone());
                     } else {
                         let ctx = crate::types::ResolutionContext {
                             phase: crate::types::ResolvePhase::CodegenBlocker,
                             kind: crate::types::ResolveRequestKind::SfcSrcAttr,
                         };
                         if let Some(result) =
-                            self.resolve_import(reader, canonical_id, specifier, ctx)
+                            self.resolve_parsed_edge(reader, canonical_id, specifier, ctx)
                         {
-                            eagerly_resolved.push(result.source_id);
+                            parsed_resolved.insert(result.source_id);
                         }
                     }
                 }
@@ -520,14 +657,29 @@ impl Engine {
             }
         }
 
-        self.edges
-            .write()
-            .record_parsed_edges(canonical_id, eagerly_resolved, bare_specifiers);
+        // Per R4 lifecycle: replace_parsed_edges CLEARS exact_resolved +
+        // exact_resolutions + lazy_resolved + semantic_transitive.
+        // ambient_resolved survives. Bundler must re-call
+        // set_import_dependencies after every upsert.
+        self.edges.write().replace_parsed_edges(
+            canonical_id,
+            parsed_resolved,
+            unresolved_pairs,
+            bare_specifiers,
+        );
     }
 
-    /// Query reverse deps (files that import this file).
+    /// Query reverse deps (files that import this file). Strips the
+    /// configured longest-suffix-first extension list and consults BOTH
+    /// the canonical and stem reverse axes.
     pub(crate) fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String> {
-        self.edges.read().reverse_deps(canonical_id)
+        // Lock-free read of the configured extension list (already sorted
+        // longest-first at set-time).
+        let exts = self.default_resolve_extensions.load();
+        let stripped = crate::relative_path::strip_extension_first(canonical_id, &exts);
+        self.edges
+            .read()
+            .reverse_deps_for_target(canonical_id, stripped)
     }
 
     /// Query forward deps (files this file imports).

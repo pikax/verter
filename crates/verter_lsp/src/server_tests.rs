@@ -1035,6 +1035,39 @@ impl verter_workspace::WorkspaceAccess for TestResolverReader {
         let normalized = canonical_id.replace('\\', "/");
         self.file_exists(&normalized).then_some(normalized)
     }
+
+    // Reader-only stub overrides (R6/R7). Rationale: `TestResolverReader`
+    // is an LSP test fixture that only feeds the resolver with file content
+    // for definition/hover/completion test plumbing; it never participates
+    // in the host's dep-flow.
+    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[verter_workspace::ParsedEdge]) {}
+    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn set_exact_resolutions(
+        &self,
+        _canonical_id: &str,
+        _resolutions: Vec<verter_workspace::ExactResolution>,
+    ) -> verter_workspace::ExactResolutionResult {
+        verter_workspace::ExactResolutionResult::default()
+    }
+    fn replace_semantic_transitive(
+        &self,
+        _canonical_id: &str,
+        _deps: std::collections::BTreeSet<String>,
+    ) {
+    }
+    fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+    fn dependency_snapshot(
+        &self,
+        _canonical_id: &str,
+    ) -> Option<verter_workspace::DependencySnapshotView> {
+        None
+    }
+    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
 }
 
 async fn make_definition_test_server(

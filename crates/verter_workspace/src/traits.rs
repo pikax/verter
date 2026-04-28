@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit};
+use crate::exact_resolution::DependencySnapshotView;
 use crate::project_key::ProjectStableKey;
 use crate::types::{
     ExactResolution, ExactResolutionResult, FileKind, PackageManifest, ParsedEdge,
@@ -154,39 +156,51 @@ pub trait WorkspaceAccess: Send + Sync {
         None
     }
 
-    // ── Edge recording (called by host during upsert) ──
+    // ── Reverse-graph authority methods (R6: NO DEFAULTS) ──
+    //
+    // Every WorkspaceAccess impl MUST explicitly implement these. A future
+    // impl that forgets to override would have silently dropped edges under
+    // a default-no-op design; R6's compile-time enforcement makes that
+    // impossible.
 
     /// Record parsed edges from a file's imports. Eagerly resolves
-    /// `Relative` and `ExternalSrc` edges via `resolve_import()`. Stores
-    /// `Bare` specifiers. Clears `exact_resolutions` for the file.
-    /// Replaces `resolved_deps`. Updates reverse-dep graph.
-    /// Default: no-op.
-    fn record_parsed_edges(&self, _canonical_id: &str, _edges: &[ParsedEdge]) {}
+    /// `Relative` and `ExternalSrc` edges via the parsed-edge resolver
+    /// (which bypasses `exact_resolutions` per R5). Stores `Bare` specifiers.
+    /// Per R4 lifecycle: clears `exact_resolutions`, `exact_resolved`,
+    /// `lazy_resolved`, and `semantic_transitive` for the file. **Does NOT
+    /// clear `ambient_resolved` (F1.5).**
+    fn record_parsed_edges(&self, canonical_id: &str, edges: &[ParsedEdge]);
 
-    /// Query reverse deps (files that import this file).
-    /// Default: empty.
-    fn reverse_deps_for(&self, _canonical_id: &str) -> Vec<String> {
-        Vec::new()
-    }
+    /// Query reverse deps (files that import this file). Returns the union
+    /// of canonical-axis and stem-axis hits, with the queried target
+    /// stripped longest-suffix-first against the workspace's configured
+    /// extension list.
+    fn reverse_deps_for(&self, canonical_id: &str) -> Vec<String>;
 
-    /// Query forward deps (files this file imports).
-    /// Default: empty.
-    fn forward_deps_for(&self, _canonical_id: &str) -> Vec<String> {
-        Vec::new()
-    }
+    /// Query forward deps (files this file imports). Union of all
+    /// canonical-axis dep classes (parsed + exact + lazy + ambient +
+    /// semantic_transitive). Stems are NOT included.
+    fn forward_deps_for(&self, canonical_id: &str) -> Vec<String>;
 
-    // ── Mutation methods (called by host for backward compat) ──
-
-    /// Set exact resolutions for a file (authoritative specifier->canonical_id).
-    /// Called by the host when `set_import_dependencies()` is used.
-    /// Default: no-op. Concrete workspaces override to delegate to EdgeStore.
+    /// Replace bundler-injected exact resolutions for a file. The active
+    /// stem set is recomputed AFTER the exact mutation; parsed-unresolved
+    /// entries are NOT destroyed (F18 active-stem model).
     fn set_exact_resolutions(
         &self,
-        _canonical_id: &str,
-        _resolutions: Vec<ExactResolution>,
-    ) -> ExactResolutionResult {
-        ExactResolutionResult::default()
-    }
+        canonical_id: &str,
+        resolutions: Vec<ExactResolution>,
+    ) -> ExactResolutionResult;
+
+    /// Replace owner's transitive-semantic dep set. Always fires regardless
+    /// of `cc.dependencies` union equality (closes F15).
+    fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>);
+
+    /// Set the workspace's reverse-dep-stripping extension list. Merges
+    /// with `probe_extensions()` and sorts longest-first at set-time (F4).
+    fn set_default_resolve_extensions(&self, host_extensions: Vec<String>);
+
+    /// Inspection: snapshot of an owner's dependency state.
+    fn dependency_snapshot(&self, canonical_id: &str) -> Option<DependencySnapshotView>;
 
     /// Notify the workspace that a file was upserted into the host.
     ///
@@ -349,10 +363,12 @@ pub trait WorkspaceAccess: Send + Sync {
     }
 
     /// Record a session-side reverse-dep edge from a consumer file to the
-    /// ambient virtual id. Re-registration of the lib bumps the content
-    /// generation so `HostFenceValidator` invalidates downstream caches.
-    /// Default: no-op.
-    fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
+    /// ambient virtual id. Routes to the dedicated `ambient_resolved`
+    /// dep class (F1.5: ambient deps survive parse re-records).
+    /// Re-registration of the lib bumps the content generation so
+    /// `HostFenceValidator` invalidates downstream caches.
+    /// **R6: no default; every workspace impl must override.**
+    fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str);
 
     /// Resolve a `ProjectId` (snapshot index) to its stable key for ambient
     /// lookups. Returns `None` when the workspace is not yet published or the
@@ -469,11 +485,13 @@ mod ambient_default_tests {
     //! `Err(NotBootstrapped)` / `None` from the defaults. These are
     //! discriminating: pre-change tree (no ambient methods on the trait) does
     //! not even compile.
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use super::WorkspaceAccess;
+    use super::{DependencySnapshotView, WorkspaceAccess};
     use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
     use crate::project_key::ProjectStableKey;
+    use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
 
     /// Minimal backend that opts out of ambient lib support — exercises the
     /// trait defaults.
@@ -489,6 +507,31 @@ mod ambient_default_tests {
         fn realpath(&self, _id: &str) -> Option<String> {
             None
         }
+
+        // Reader-only stub overrides (R6/R7). Rationale (§2.16b):
+        // `StubWs` lives inside a `#[cfg(test)]` ambient_default_tests module;
+        // constructed only by trait-default coverage tests that don't invoke
+        // VerterHost or any dep-flow path.
+        fn record_parsed_edges(&self, _id: &str, _edges: &[ParsedEdge]) {}
+        fn reverse_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn forward_deps_for(&self, _id: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn set_exact_resolutions(
+            &self,
+            _id: &str,
+            _resolutions: Vec<ExactResolution>,
+        ) -> ExactResolutionResult {
+            ExactResolutionResult::default()
+        }
+        fn replace_semantic_transitive(&self, _id: &str, _deps: BTreeSet<String>) {}
+        fn set_default_resolve_extensions(&self, _host_extensions: Vec<String>) {}
+        fn dependency_snapshot(&self, _id: &str) -> Option<DependencySnapshotView> {
+            None
+        }
+        fn record_ambient_dependency(&self, _consumer: &str, _virtual_id: &str) {}
     }
 
     #[test]
