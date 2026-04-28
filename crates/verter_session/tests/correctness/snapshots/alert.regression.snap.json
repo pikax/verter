@@ -1,0 +1,48 @@
+{
+  "component_name": "Alert",
+  "props": [
+    {
+      "name": "dismissible",
+      "type_signature": "boolean",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "title",
+      "type_signature": "string",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "variant",
+      "type_signature": "\"info\" | \"success\" | \"warning\" | \"error\"",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "dismiss",
+      "params_signature": "[]"
+    }
+  ],
+  "slots": [
+    {
+      "name": "default",
+      "payload_signature": "{}"
+    }
+  ],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

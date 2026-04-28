@@ -1,0 +1,35 @@
+{
+  "component_name": "AuthForm",
+  "props": [
+    {
+      "name": "fields",
+      "type_signature": "{ label: string; name: string; required?: boolean; type: \"text\" | \"email\" | \"password\" }[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "submit",
+      "type_signature": "{ label: string; loading?: boolean }",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "submit",
+      "params_signature": "[value: Record<string, string>]"
+    }
+  ],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

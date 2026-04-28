@@ -1,0 +1,47 @@
+{
+  "component_name": "EditorToolbar",
+  "props": [
+    {
+      "name": "items",
+      "type_signature": "({ icon?: string; id: string; label: string } | { icon?: string; id: string; label: string }[])[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "size",
+      "type_signature": "\"sm\" | \"md\" | \"lg\"",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "icon",
+      "params_signature": "string"
+    },
+    {
+      "name": "id",
+      "params_signature": "string"
+    },
+    {
+      "name": "item-click",
+      "params_signature": "[item: ToolbarItem]"
+    },
+    {
+      "name": "label",
+      "params_signature": "string"
+    }
+  ],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

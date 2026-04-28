@@ -1,0 +1,51 @@
+{
+  "component_name": "Table",
+  "props": [
+    {
+      "name": "columns",
+      "type_signature": "TableColumn<T>[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "loading",
+      "type_signature": "boolean",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "rows",
+      "type_signature": "T[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [
+    {
+      "name": "index",
+      "params_signature": "number"
+    },
+    {
+      "name": "row",
+      "params_signature": "T"
+    },
+    {
+      "name": "row-click",
+      "params_signature": "[event: TableRowClick<T>]"
+    }
+  ],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "component_name": "Avatar",
+  "props": [
+    {
+      "name": "alt",
+      "type_signature": "string",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "shape",
+      "type_signature": "\"circle\" | \"square\" | \"rounded\"",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "size",
+      "type_signature": "\"xs\" | \"sm\" | \"md\" | \"lg\" | \"xl\"",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "src",
+      "type_signature": "string",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [],
+  "slots": [
+    {
+      "name": "default",
+      "payload_signature": "{}"
+    }
+  ],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}

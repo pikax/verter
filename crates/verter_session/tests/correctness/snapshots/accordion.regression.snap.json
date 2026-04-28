@@ -1,0 +1,30 @@
+{
+  "component_name": "Accordion",
+  "props": [
+    {
+      "name": "items",
+      "type_signature": "{ content: string; disabled?: boolean; label: string }[]",
+      "required": true,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "multiple",
+      "type_signature": "boolean",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    }
+  ],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": null,
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}
