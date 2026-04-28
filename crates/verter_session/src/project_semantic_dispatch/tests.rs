@@ -4884,3 +4884,191 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
         );
     }
 }
+
+/// Phase 1B path-prefix peek + backfill (plan §1.B).
+///
+/// **Discriminating contract.** A `ProjectPath { base, [variants,
+/// loadingAnimation], Navigate }` dispatch followed by a sibling
+/// `ProjectPath { base, [variants, loadingColor], Navigate }` MUST:
+///
+/// - publish the intermediate prefix `(base, [variants], Navigate)` into
+///   the shared semantic graph memo on the FIRST dispatch (backfill);
+/// - reuse that warm prefix on the SECOND dispatch by peeking before
+///   constructing a fresh walker — surfaced via the `PREFIX_PEEK_HITS`
+///   per-call counter going from 0 to 1 across the sibling replay.
+///
+/// Pre-fix tree: `find_longest_warm_prefix` does not exist (or always
+/// returns `None`); the second dispatch starts a walker from `(base,
+/// path, mode)` exactly like the first. Counter delta = 0. **Test
+/// FAILS.**
+///
+/// Post-fix tree: prefix peek hits the warm `(base, [variants],
+/// Navigate)` entry and starts the walker at `(prefix_node, path[1..],
+/// mode)`. Counter delta = 1. **Test PASSES.**
+///
+/// Negative assertions (mandated by §1.B.2):
+/// - Before any dispatch, the prefix key is NOT warm.
+/// - After the first dispatch, the prefix key IS warm.
+/// - The second dispatch increments `PREFIX_PEEK_HITS` exactly once
+///   (not zero, not twice).
+#[test]
+fn project_path_prefix_peek_short_circuits_sibling_walk() {
+    use super::build::PREFIX_PEEK_HITS;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Build TableVariants = { loadingAnimation: 'spin' | 'pulse';
+    //                         loadingColor: 'primary' | 'secondary'; }
+    // Use Primitive(String) for the value types — the test exercises
+    // the path-walker prefix machinery, not literal-type matching.
+    let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let variants_surface = SurfaceView {
+        members: Arc::from(
+            vec![
+                SurfaceMember {
+                    name: Arc::from("loadingAnimation"),
+                    value: string_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                },
+                SurfaceMember {
+                    name: Arc::from("loadingColor"),
+                    value: string_id,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let variants_obj = graph.intern_node(SemanticNodeData::Object(variants_surface));
+
+    // Build Table = { variants: TableVariants; }
+    let table_surface = SurfaceView {
+        members: Arc::from(
+            vec![SurfaceMember {
+                name: Arc::from("variants"),
+                value: variants_obj,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let table_obj = graph.intern_node(SemanticNodeData::Object(table_surface));
+
+    let prefix_path: Arc<[PathSegment]> =
+        Arc::from(vec![PathSegment::Member(Arc::from("variants"))].into_boxed_slice());
+    let full_path_anim: Arc<[PathSegment]> = Arc::from(
+        vec![
+            PathSegment::Member(Arc::from("variants")),
+            PathSegment::Member(Arc::from("loadingAnimation")),
+        ]
+        .into_boxed_slice(),
+    );
+    let full_path_color: Arc<[PathSegment]> = Arc::from(
+        vec![
+            PathSegment::Member(Arc::from("variants")),
+            PathSegment::Member(Arc::from("loadingColor")),
+        ]
+        .into_boxed_slice(),
+    );
+
+    // Codex-2 r3: prefix entries are cached as Navigate regardless of
+    // the caller's mode (path-precise rule).
+    let prefix_key = SemanticQueryKey::ProjectPath {
+        base: table_obj,
+        path: Arc::clone(&prefix_path),
+        mode: ProjectionMode::Navigate,
+    };
+
+    // BEFORE any dispatch: prefix key is NOT warm.
+    assert!(
+        graph.get(&prefix_key).is_none(),
+        "prefix key must not be warm before any dispatch — graph memo must start empty for this prefix"
+    );
+
+    // Reset the per-call counter so the test runs deterministically
+    // regardless of prior tests in the same process.
+    PREFIX_PEEK_HITS.with(|c| *c.borrow_mut() = 0);
+
+    // FIRST dispatch — Navigate mode, full path. The walker descends
+    // through `variants` then `loadingAnimation` and returns
+    // `string_id`. Phase 1B backfill should publish the intermediate
+    // `(table_obj, [variants], Navigate)` prefix into the memo.
+    let first = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: table_obj,
+        path: Arc::clone(&full_path_anim),
+        mode: ProjectionMode::Navigate,
+    });
+    let first_id = match first {
+        QueryResult::Value(id) => id,
+        other => panic!("expected first dispatch to return a value, got {other:?}"),
+    };
+    assert_eq!(
+        first_id, string_id,
+        "first dispatch must reach string_id (variants.loadingAnimation)"
+    );
+
+    // AFTER the first dispatch: prefix IS warm. This is the backfill
+    // contract — the intermediate hop after consuming `variants` is
+    // `variants_obj`, which must be published under
+    // `(table_obj, [variants], Navigate)` so the sibling dispatch can
+    // peek it.
+    let warm_prefix = graph
+        .get(&prefix_key)
+        .expect("prefix key must be warm after first dispatch — Phase 1B backfill should have published it");
+    match warm_prefix.value {
+        QueryResult::Value(id) => assert_eq!(
+            id, variants_obj,
+            "warm prefix must point at the variants_obj (the node reached after consuming `variants`)"
+        ),
+        other => panic!("expected warm prefix Value, got {other:?}"),
+    }
+
+    // Snapshot the counter before the sibling dispatch so we can
+    // measure the per-call delta (not the global cumulative count).
+    let counter_before = PREFIX_PEEK_HITS.with(|c| *c.borrow());
+
+    // SECOND dispatch — sibling path. Phase 1B prefix-peek should find
+    // the warm `(table_obj, [variants], Navigate)` entry and start the
+    // walker at `(variants_obj, [loadingColor], Navigate)`. The peek
+    // counter must increment exactly once.
+    let second = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base: table_obj,
+        path: Arc::clone(&full_path_color),
+        mode: ProjectionMode::Navigate,
+    });
+    let second_id = match second {
+        QueryResult::Value(id) => id,
+        other => panic!("expected second dispatch to return a value, got {other:?}"),
+    };
+    assert_eq!(
+        second_id, string_id,
+        "second dispatch must reach string_id (variants.loadingColor)"
+    );
+
+    let counter_after = PREFIX_PEEK_HITS.with(|c| *c.borrow());
+    let delta = counter_after - counter_before;
+    assert_eq!(
+        delta, 1,
+        "second dispatch must increment PREFIX_PEEK_HITS exactly once (delta=1) — \
+         pre-fix tree never increments (peek helper missing or always returns None) \
+         while a delta > 1 would mean the peek fires more than once per call"
+    );
+}

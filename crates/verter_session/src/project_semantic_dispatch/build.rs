@@ -26,6 +26,21 @@ use crate::semantic_query::{
     SemanticQueryApi, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
+// Phase 1B per-call counter (test-only). Incremented every time
+// `find_longest_warm_prefix` returns `Some(_)` during a
+// `ProjectSemanticDispatch::build_project_path` invocation. Used by
+// `project_path_prefix_peek_short_circuits_sibling_walk` to discriminate
+// pre-fix (counter never increments — peek helper not yet wired) vs
+// post-fix (counter delta is exactly 1 across a sibling-prefix replay).
+//
+// Diagnostic-only — never read on the hot path. Tests using this
+// counter MUST reset it before measuring (`with(|c| *c.borrow_mut() = 0)`)
+// because the thread-local persists across tests in the same process.
+#[cfg(test)]
+thread_local! {
+    pub(super) static PREFIX_PEEK_HITS: std::cell::RefCell<u32> = const { std::cell::RefCell::new(0) };
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Resolve a top-level declaration lookup via the host's shallow state.
     ///
