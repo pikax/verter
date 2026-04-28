@@ -2837,3 +2837,112 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
         other => panic!("expected Value for multi-element normalization, got {other:?}"),
     }
 }
+
+// ============================================================================
+// §6.7 Phase 5e — route-loop + route-target migrations
+//
+// Sub-plan §5 commits 5+6: callers of the engine's route-loop helpers
+// (`lower_and_project_to_expanded`) and route-target helpers
+// (`project_route_surface_expr`, `instantiate_local_generic_ref`) inside
+// `meta_resolve.rs` and `fallthrough.rs` migrate to dispatch helpers.
+//
+// These tests are static-grep gates over the post-migration tree;
+// each is discriminating against the pre-Phase-5e tree (where the
+// engine helpers had multiple consumer callsites in the production
+// callsite files).
+// ============================================================================
+
+/// Phase 5e commit 5 — the callsite migration of the route-loop
+/// pattern (`engine.lower_and_project_to_expanded(scope, expr)`) inside
+/// `meta_resolve.rs` and `fallthrough.rs`. After commit 5, the
+/// route-loop pattern is funneled through the Class A dispatch helper
+/// (`project_expr_class_a_via_dispatch[_threaded]`) or, where the
+/// helper isn't usable, through `dispatch.execute_to_type_expr` on a
+/// `ProjectPath { mode: Expanded }` query directly.
+///
+/// **Pre-commit-5 (Phase 5d HEAD):** `meta_resolve.rs` has 5
+/// `.lower_and_project_to_expanded(` callsites and `fallthrough.rs`
+/// has 1 — total 6 consumer callsites in the route-loop / member-route
+/// production paths.
+///
+/// **Post-commit-5 expected:** the route-loop production callsites in
+/// `meta_resolve.rs` migrate (only the engine-threaded route fast-path
+/// inside the Class A helper at line ~138 may legitimately retain the
+/// engine call so that `project_route_surface_expr` callsites continue
+/// to receive engine-local fuse / scope-payload state — the route
+/// fast-path itself migrates in commit 6 alongside
+/// `instantiate_local_generic_ref`). `fallthrough.rs:963` migrates to
+/// the Class A helper, leaving 0 callsites there.
+///
+/// Discriminating in both directions:
+/// - Pre-commit-5 fails: `meta_resolve.rs` callsite count > 1
+///   (5 callsites pre-migration).
+/// - Post-commit-5 passes: `meta_resolve.rs` callsite count <= 1
+///   (only the Class A helper's route fast-path retained until
+///   commit 6); `fallthrough.rs` callsite count == 0.
+#[test]
+fn phase_05e_commit_5_route_loop_callers_migrate_to_dispatch() {
+    let meta_src = include_str!("meta_resolve.rs");
+    let fallthrough_src = include_str!("resolver_core/fallthrough.rs");
+
+    let meta_callsites = meta_src.matches(".lower_and_project_to_expanded(").count();
+    let fallthrough_callsites = fallthrough_src
+        .matches(".lower_and_project_to_expanded(")
+        .count();
+
+    // Post-commit-5 contract:
+    //
+    // - `meta_resolve.rs` retains AT MOST 1 callsite (the Class A
+    //   helper's engine-threaded route fast-path; migrates in
+    //   commit 6 with `instantiate_local_generic_ref` retirement).
+    // - `fallthrough.rs` retains 0 callsites (commit 5 migrates the
+    //   `evaluate_value_expression_via_env_or_dispatch` fallback).
+    assert!(
+        meta_callsites <= 1,
+        "Phase 5e commit 5: meta_resolve.rs must have <= 1 .lower_and_project_to_expanded( callsite post-migration; found {meta_callsites}",
+    );
+    assert_eq!(
+        fallthrough_callsites, 0,
+        "Phase 5e commit 5: fallthrough.rs must have 0 .lower_and_project_to_expanded( callsites post-migration; found {fallthrough_callsites}",
+    );
+
+    // Positive marker: the Class A helper (commit 5d) is the canonical
+    // dispatch entry, so its name must appear in fallthrough.rs after
+    // migration.
+    assert!(
+        fallthrough_src.contains("project_expr_class_a_via_dispatch"),
+        "Phase 5e commit 5: fallthrough.rs must call project_expr_class_a_via_dispatch post-migration",
+    );
+}
+
+/// Phase 5e commit 6 — `instantiate_local_generic_ref` engine method
+/// retires in commit 6 alongside the Class D route-target callsite
+/// migrations (`project_route_surface_expr` consumers in
+/// `meta_resolve.rs`). The retirement is enforced via a static-grep
+/// gate over `meta_resolve.rs`: post-commit-6, NO callsite of
+/// `engine.instantiate_local_generic_ref(...)` may remain there.
+///
+/// Discriminating in both directions:
+/// - Pre-commit-6 (Phase 5d HEAD): 3 callsites in meta_resolve.rs.
+/// - Post-commit-6 expected: 0 callsites in meta_resolve.rs (callers
+///   migrate to `dispatch.execute(SemanticQueryKey::Instantiate { .. })`
+///   per the sub-plan §C.3 D-T recipe).
+#[test]
+fn phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch() {
+    let meta_src = include_str!("meta_resolve.rs");
+
+    let meta_callsites = meta_src.matches(".instantiate_local_generic_ref(").count();
+    assert_eq!(
+        meta_callsites, 0,
+        "Phase 5e commit 6: meta_resolve.rs must have 0 .instantiate_local_generic_ref( callsites post-migration; found {meta_callsites}",
+    );
+
+    // Positive marker: callers route through dispatch's Instantiate
+    // family (the substitution-aware dispatch path that
+    // instantiate_local_generic_ref previously bridged synchronously).
+    let instantiate_dispatch_calls = meta_src.matches("SemanticQueryKey::Instantiate").count();
+    assert!(
+        instantiate_dispatch_calls >= 1,
+        "Phase 5e commit 6: meta_resolve.rs must dispatch SemanticQueryKey::Instantiate post-migration; found {instantiate_dispatch_calls}",
+    );
+}

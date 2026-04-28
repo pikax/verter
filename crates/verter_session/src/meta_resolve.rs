@@ -6206,19 +6206,30 @@ impl VerterHost {
                                                 &stabilized,
                                             )
                                             .unwrap_or_else(|| stabilized.clone());
-                                        query_engine
-                                            .lower_and_project_to_expanded(
+                                        // Phase 5e commit 5 — migrate the
+                                        // route-loop call to the Class A
+                                        // dispatch helper. The helper covers
+                                        // the registry-route fast-path AND
+                                        // the generic ProjectPath{[],Expanded}
+                                        // dispatch; preserving the engine
+                                        // thread keeps fuse / scope-payload
+                                        // continuity for the route fast-path
+                                        // (still on the engine until commit 6
+                                        // alongside instantiate_local_generic_ref).
+                                        project_expr_class_a_via_dispatch_threaded(
+                                            query_engine.host,
+                                            Some(query_engine),
+                                            materialize_scope.as_str(),
+                                            &expanded,
+                                        )
+                                        .map(|solved| {
+                                            query_engine.materialize_member_surface_expr(
                                                 materialize_scope.as_str(),
-                                                &expanded,
+                                                &solved,
+                                                true,
                                             )
-                                            .map(|solved| {
-                                                query_engine.materialize_member_surface_expr(
-                                                    materialize_scope.as_str(),
-                                                    &solved,
-                                                    true,
-                                                )
-                                            })
-                                            .unwrap_or_else(|| stabilized.clone())
+                                        })
+                                        .unwrap_or_else(|| stabilized.clone())
                                     }
                                     _ => stabilized.clone(),
                                 };
@@ -6510,12 +6521,15 @@ impl VerterHost {
                                         &stabilized_surface,
                                     )
                                     .unwrap_or_else(|| stabilized_surface.clone());
-                                let solved_opt = query_engine
-                                    .lower_and_project_to_expanded(
-                                        materialize_scope_canonical_id.as_str(),
-                                        &expanded,
-                                    )
-                                    .or(Some(expanded));
+                                // Phase 5e commit 5 — migrate the route-loop
+                                // call to the Class A dispatch helper.
+                                let solved_opt = project_expr_class_a_via_dispatch_threaded(
+                                    query_engine.host,
+                                    Some(query_engine),
+                                    materialize_scope_canonical_id.as_str(),
+                                    &expanded,
+                                )
+                                .or(Some(expanded));
                                 solved_opt.map(|solved| {
                                     query_engine.materialize_member_surface_expr(
                                         materialize_scope_canonical_id.as_str(),
@@ -6525,7 +6539,11 @@ impl VerterHost {
                                 })
                             }
                             TypeExpr::Mapped { .. } => {
-                                let solved_opt = query_engine.lower_and_project_to_expanded(
+                                // Phase 5e commit 5 — migrate the route-loop
+                                // call to the Class A dispatch helper.
+                                let solved_opt = project_expr_class_a_via_dispatch_threaded(
+                                    query_engine.host,
+                                    Some(query_engine),
                                     scope_canonical_id,
                                     &stabilized_surface,
                                 );
@@ -8545,7 +8563,19 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                         scope_canonical_id, member_name, candidate_scope, route_expr,
                     ),
                 );
-                query_engine.lower_and_project_to_expanded(candidate_scope.as_str(), &route_expr)
+                // Phase 5e commit 5 — migrate the route-loop call to the
+                // Class A dispatch helper. Preserve the engine's
+                // `lower_and_project_to_expanded` `reduced != *expr` filter
+                // (the helper omits that constraint by design — see
+                // `project_expr_class_a_via_dispatch_threaded` filter at
+                // `meta_resolve.rs` lines 156-157).
+                project_expr_class_a_via_dispatch_threaded(
+                    query_engine.host,
+                    Some(query_engine),
+                    candidate_scope.as_str(),
+                    &route_expr,
+                )
+                .filter(|reduced| reduced != &route_expr)
             };
             for candidate in [projected, solved].into_iter().flatten() {
                 acc.push(candidate);

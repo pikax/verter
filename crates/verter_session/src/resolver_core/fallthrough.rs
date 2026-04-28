@@ -940,9 +940,15 @@ pub fn structural_substitute_typeof_refs(
 ///
 /// Mirrors the pre-migration `evaluate_value_expression` contract:
 /// env-level substitutions (including injected prop-type overrides) take
-/// precedence; otherwise the lowered expression is routed through
-/// `ComponentMetaQueryEngine::project_expr_surface_expr` /
-/// `lower_and_project_to_expanded` in the owning canonical scope.
+/// precedence; otherwise the lowered expression is routed through the
+/// Class A dispatch helper in the owning canonical scope. Phase 5e
+/// commit 5 migrated the engine's
+/// `project_expr_surface_expr` / `lower_and_project_to_expanded`
+/// callsites to `project_expr_class_a_via_dispatch_threaded`, which
+/// covers BOTH the registry-route fast-path AND the generic
+/// `ProjectPath { [], Expanded }` dispatch — collapsing the two
+/// previous fallback layers (which both terminated at the same dispatch
+/// query under the Phase 5c trampolines).
 pub fn evaluate_value_expression_via_env_or_dispatch(
     expression: &str,
     canonical_id: &str,
@@ -957,10 +963,12 @@ pub fn evaluate_value_expression_via_env_or_dispatch(
             return Some(substituted);
         }
     }
-    if let Some(projected) = engine.project_expr_surface_expr(canonical_id, &lowered) {
-        return Some(projected);
-    }
-    engine.lower_and_project_to_expanded(canonical_id, &lowered)
+    crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
+        engine.host,
+        Some(engine),
+        canonical_id,
+        &lowered,
+    )
 }
 
 pub fn resolve_usage_prop_type<F>(
