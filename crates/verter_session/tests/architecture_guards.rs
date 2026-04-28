@@ -106,7 +106,6 @@ fn no_macro_string_heuristics_in_resolver_core() {
 }
 
 #[test]
-#[ignore = "phase-06 pending or unnecessary"]
 fn no_deprecated_workspace_reexports() {
     let src = read_workspace_file("crates/verter_session/src/lib.rs");
     for ty in ["ProjectGraph", "ProjectRank", "VfsProjectConfig"] {
