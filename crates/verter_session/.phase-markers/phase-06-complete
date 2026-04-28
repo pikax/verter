@@ -7,7 +7,7 @@
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests --verbose",
-      "passed": 10201,
+      "passed": 10207,
       "failed": 0
     },
     "correctness": {
