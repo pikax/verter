@@ -293,3 +293,50 @@ fn phase_05d_4a_class_a_props_callers_migrated_in_type_expansion_verter() {
          method invocations after 4a; found {invocations}"
     );
 }
+
+#[test]
+fn phase_05d_4b_class_a_slots_callers_migrated() {
+    // After 4b, the slot-only Class A sites in meta_resolve.rs are
+    // migrated. The slot-only sites live inside
+    // `produce_one_macro_object_shape_for_slots` (sub-plan §4.1
+    // lines 4940 / 4955 at the pre-5d HEAD).
+    //
+    // The §4.1 row also lists lines 4631, 4646, 4881 for migration
+    // in 4b. These live inside the GENERIC multi-macro-kind helper
+    // (`produce_one_macro_object_shape` and
+    // `project_named_ref_imported_scope_shape`) — they serve all
+    // macro kinds, not just slots, and the engine threads
+    // request-local fuse + scope-payload state that is load-bearing
+    // for `Partial<T>` optionality propagation. Migrating these
+    // sites without atomically promoting the engine state caused a
+    // regression in `solver_host_resolves_generic_imported_partial_props`
+    // and `evaluate_types_hydrates_transitive_imported_pick_dependencies_from_dual_script_vue_deps`.
+    // Per CLAUDE.md fix-quality, those sites stay on the engine
+    // helper with a TODO(phase-5g) comment in the code; they
+    // migrate in 5g atomically with the engine retirement.
+    //
+    // Allowed remainder POST-4b in meta_resolve.rs:
+    //   - 3 multi-macro-kind sites (deferred to 5g): the
+    //     `project_expr_surface_expr` in
+    //     `produce_one_macro_object_shape`, the
+    //     `project_expr_surface_shape` in same, and the
+    //     `project_expr_surface_shape` in
+    //     `project_named_ref_imported_scope_shape`.
+    //   - 1 deferred 4942 site (5e/5f scope per brief note).
+    // = 4.
+    let src = read_workspace_file("crates/verter_session/src/meta_resolve.rs");
+    let total_class_a = count_callsites(
+        &src,
+        &[
+            ".project_expr_surface_expr(",
+            ".project_expr_surface_shape(",
+            ".project_expr_surface_expr_with_compound_objects(",
+        ],
+    );
+    assert!(
+        total_class_a <= 4,
+        "Phase 5d 4b: meta_resolve.rs must have <= 4 Class A engine \
+         refs after 4b (3 multi-macro-kind sites deferred to 5g + 1 \
+         deferred 4942 site); found {total_class_a}"
+    );
+}

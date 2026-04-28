@@ -87,6 +87,25 @@ pub(crate) fn project_expr_class_a_via_dispatch(
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    project_expr_class_a_via_dispatch_threaded(host, None, scope_canonical_id, expr)
+}
+
+/// Engine-threaded variant of [`project_expr_class_a_via_dispatch`].
+///
+/// When `engine` is `Some(...)`, the route fast-path uses the
+/// caller's engine instance so engine-local fuse / scope-payload /
+/// request-local cache state persists across callsites that share an
+/// engine. This matters for utility shapes like `Partial<T>` whose
+/// optionality propagation is observed via the engine's prepared-decl
+/// fixed-point. When `engine` is `None`, a transient engine is
+/// created (suitable for top-level entry points without a caller
+/// engine).
+pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
+    host: &'host VerterHost,
+    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'host>>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::resolver_core::{
         component_meta_registry::{
@@ -97,25 +116,32 @@ pub(crate) fn project_expr_class_a_via_dispatch(
     };
     use crate::semantic_query::{PathSegment, QueryResult, SemanticQueryKey};
 
-    // Path 1: registry-route fast path. Class D route helpers stay on
-    // the engine for now (they retire in 5e/5f); we route through a
-    // transient engine instance so indexed-access / utility shapes
-    // still resolve via the route memo.
-    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-    {
-        let mut engine = ComponentMetaQueryEngine::new(host);
+    // Phase 1+2: registry-route fast path via caller's engine (or a
+    // transient engine when caller doesn't pass one). The Class D
+    // route helpers (`project_route_surface_expr`,
+    // `lower_and_project_to_expanded`) stay on the engine until 5e/5f
+    // per the brief; threading the engine preserves fuse and
+    // request-local cache continuity.
+    let route = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr));
+    if let Some((root_symbol, route)) = route {
+        let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
+        let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
+            Some(e) => e,
+            None => transient_engine.insert(ComponentMetaQueryEngine::new(host)),
+        };
         if let Some(projected) =
-            engine.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
+            engine_ref.project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
         {
             return Some(projected);
         }
-        if let Some(solved) = engine.lower_and_project_to_expanded(scope_canonical_id, expr) {
+        if let Some(solved) = engine_ref.lower_and_project_to_expanded(scope_canonical_id, expr) {
             return Some(solved);
         }
     }
 
-    // Path 2: generic ProjectPath dispatch.
+    // Phase 3: generic ProjectPath dispatch (host-cached, engine
+    // independent).
     let dispatch = ProjectSemanticDispatch::new(host);
     let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
     let read = dispatch.execute_to_type_expr(&SemanticQueryKey::ProjectPath {
@@ -142,7 +168,19 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch(
     scope_canonical_id: &str,
     expr: &verter_semantic::analysis::type_expr::TypeExpr,
 ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    let projected = project_expr_class_a_via_dispatch(host, scope_canonical_id, expr)?;
+    project_expr_class_a_shape_via_dispatch_threaded(host, None, scope_canonical_id, expr)
+}
+
+/// Engine-threaded variant of
+/// [`project_expr_class_a_shape_via_dispatch`].
+pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'host>(
+    host: &'host VerterHost,
+    engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'host>>,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    let projected =
+        project_expr_class_a_via_dispatch_threaded(host, engine, scope_canonical_id, expr)?;
     let shape = verter_semantic::analysis::type_expand::type_expr_to_object_shape(&projected);
     (!shape.properties.is_empty() || !shape.call_signatures.is_empty()).then_some(shape)
 }
@@ -4824,6 +4862,14 @@ fn produce_one_macro_object_shape(
         // now expands terminal DeclAnchors via `Instantiate(anchor, [])`
         // so non-generic aliases (including namespace-qualified
         // `Types.Props` → `Props`) emit their body surface here.
+        //
+        // TODO(phase-5g): retain the engine helper in this generic
+        // (multi-macro-kind) callsite — the engine threads
+        // request-local fuse + scope-payload state that is
+        // load-bearing for `Partial<T>` optionality propagation
+        // across props/emits/slots in the same request. Migrate
+        // alongside the engine retirement in 5g, when the engine's
+        // load-bearing state can be host-promoted atomically.
         let projected = query_engine
             .project_expr_surface_expr(owner_canonical, lowered)
             .unwrap_or_else(|| lowered.clone());
@@ -4839,6 +4885,8 @@ fn produce_one_macro_object_shape(
     let rescue_projection =
         solver_count == 0 || expr_needs_projection_rescue(query_engine, owner_canonical, lowered);
     let projected = if rescue_projection {
+        // TODO(phase-5g): see sibling `project_expr_surface_expr`
+        // engine retention rationale.
         query_engine
             .project_expr_surface_shape(owner_canonical, lowered)
             .and_then(|shape| {
@@ -5074,6 +5122,10 @@ fn project_named_ref_imported_scope_shape(
         return None;
     }
 
+    // TODO(phase-5g): same engine retention rationale as
+    // `produce_one_macro_object_shape` — request-local engine state
+    // is load-bearing for utility-shape `Partial<T>` optionality
+    // across multi-kind macro paths.
     query_engine
         .project_expr_surface_shape(defining_canonical, lowered)
         .and_then(|shape| {
@@ -5133,12 +5185,19 @@ fn produce_one_macro_object_shape_for_slots(
     // `solver_result_to_object_expansion`. The expansion's existing
     // Intersection-merging in [`type_expr_to_expanded_shape`] then
     // collects the explicit slot members from the compound shape.
-    let projected_body = query_engine
-        .project_expr_surface_expr(owner_canonical, lowered)
-        .or_else(|| {
-            query_engine.project_expr_surface_expr_with_compound_objects(owner_canonical, lowered)
-        })
-        .unwrap_or_else(|| lowered.clone());
+    // Phase 5d (sub-plan §4.1 slot-cluster row): the strict
+    // `project_expr_surface_expr` migrates to the shared dispatch
+    // helper. The lenient
+    // `project_expr_surface_expr_with_compound_objects` fallback is
+    // DEFERRED to 5e/5f per the brief note and stays on the engine
+    // for now.
+    let projected_body =
+        project_expr_class_a_via_dispatch(query_engine.host, owner_canonical, lowered)
+            .or_else(|| {
+                query_engine
+                    .project_expr_surface_expr_with_compound_objects(owner_canonical, lowered)
+            })
+            .unwrap_or_else(|| lowered.clone());
     let deeply_resolved =
         query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_body);
     let solver_result = verter_semantic::analysis::type_expand::solver_result_to_object_expansion(
@@ -5148,20 +5207,20 @@ fn produce_one_macro_object_shape_for_slots(
     );
     let solver_count = shape_surface_count(&solver_result);
 
-    let projected = query_engine
-        .project_expr_surface_shape(owner_canonical, lowered)
-        .and_then(|shape| {
-            let projected_expr = expanded_shape_to_type_expr(&shape);
-            let resolved_expr =
-                query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
-            registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
-                has_shape_surface(&resolved_shape).then(|| {
-                    verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                        resolved_shape,
-                    )
+    let projected =
+        project_expr_class_a_shape_via_dispatch(query_engine.host, owner_canonical, lowered)
+            .and_then(|shape| {
+                let projected_expr = expanded_shape_to_type_expr(&shape);
+                let resolved_expr =
+                    query_engine.deep_resolve_slot_function_refs(owner_canonical, &projected_expr);
+                registry_entry_to_expanded_shape(&resolved_expr).and_then(|resolved_shape| {
+                    has_shape_surface(&resolved_shape).then(|| {
+                        verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
+                            resolved_shape,
+                        )
+                    })
                 })
-            })
-        });
+            });
     let imported_scope_projected = project_named_ref_imported_scope_shape(
         query_engine,
         owner_canonical,
