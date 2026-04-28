@@ -3,29 +3,23 @@
   "phase": "phase-00a",
   "status": "partial-deferred",
   "base_commit": "3d228474d487429fe4d6942c2a4ee2ab547a63e8",
-  "head_commit": "0f040d514fac925c5d5e0980c4f8f6aa4e2a543c",
+  "work_head_before_marker": "194cae591b94c187d84f37a4384343005e2cc651",
   "test_results": {
-    "workspace_excluding_verter_session": {
-      "test_scope": "cargo test --workspace --tests --no-fail-fast --exclude verter_session",
-      "passed": 7938,
-      "failed": 0,
-      "note": "workspace-wide scope with verter_session excluded because that crate's nuxt-ui-dependent test targets (corpus_audit_tests, component_meta_audit_corpus) cannot compile in this worktree (.integration-tests/repos/nuxt-ui/ is not checked out). Pre-existing environmental condition, verified by running on the base commit 3d228474. Sum of 21 per-target test result lines from /tmp/p00a-other-results.txt."
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10116,
+      "failed": 0
     },
     "correctness": {
       "test_scope": "cargo test -p verter_session --test correctness",
       "passed": 11,
-      "failed": 0,
-      "note": "Phase 0a's primary deliverable: correctness gate. 1 test is #[ignore]'d (the author-first generator, which runs on demand via --include-ignored)."
+      "failed": 0
     }
   },
   "snapshot_drift": "none",
   "guards_un_ignored": [],
   "deferred": [
-    "mapped_exclude (Verter defect: Exclude<> not evaluated)",
-    "mapped_extract (Verter defect: Extract<> not evaluated)",
-    "template_literal_as_key (Verter defect: template-literal key iteration loses props)",
-    "generic_substitution_via_typeof (Verter defect: typeof substitution skipped)",
-    "userland_shadowing_pick (Verter defect: TS-first userland shadow not honoured)",
+    "5 utility-type fixtures (mapped_exclude, mapped_extract, template_literal_as_key, generic_substitution_via_typeof, userland_shadowing_pick) deferred to Phase 5 §5.B.5; rule-correct expected preserved in phase-00-tier1-mismatches.md per r9 reviewer consensus.",
     "Phase 0b: 7 component-meta property fixtures + Class B+C regression baselines (separate worker)"
   ],
   "report_path": "phase-00a-report.md",

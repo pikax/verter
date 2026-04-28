@@ -186,5 +186,5 @@ on this basis.
 | 0f040d51     | docs(correctness): Phase 0a report                                                |
 | b29fe547     | chore(orchestrator): mark phase 00a complete (initial — superseded by review)     |
 | 309dbe71     | fix(phase-00a-review): drop 5 utility-type fixtures deferred to Phase 5 §5.B.5    |
-| (next)       | fix(phase-00a-review): refresh phase-00a-report for 11-fixture scope (r9)         |
-| (next)       | fix(phase-00a-review): rewrite marker for r9 R7 schema                            |
+| 194cae59     | fix(phase-00a-review): refresh phase-00a-report for 11-fixture scope (r9)         |
+| (this commit)| fix(phase-00a-review): rewrite marker for r9 R7 schema (workspace, work_head_before_marker) |
