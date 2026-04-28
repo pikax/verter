@@ -1,0 +1,16 @@
+{
+  "component_name": "C",
+  "props": [],
+  "events": [],
+  "slots": [],
+  "models": [],
+  "exposed": [],
+  "fallthrough": {
+    "inherit_attrs": true,
+    "surface_signature": "{ label: string /* from component:/inner.vue */ }"
+  },
+  "flags": {
+    "async_setup": false,
+    "has_inherit_attrs_false": false
+  }
+}
