@@ -242,7 +242,6 @@ pub struct VerterHost {
     /// lock and always read through the latest workspace after `set_workspace()`.
     pub(crate) workspace: Arc<parking_lot::RwLock<Arc<dyn verter_workspace::WorkspaceAccess>>>,
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
-    pub(crate) reverse_dependencies: Shared<FxHashMap<String, BTreeSet<String>>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
     /// Coarse semantic mutation epoch used for snapshot-coherent resolver views.
     ///
@@ -400,7 +399,6 @@ impl VerterHost {
             config,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
-            reverse_dependencies: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             store_view_epoch: std::sync::atomic::AtomicU64::new(1),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
@@ -882,14 +880,16 @@ impl VerterHost {
     /// it updates `compile_cache` identity/dependency state without re-submitting
     /// source back into the scheduler.
     ///
-    /// Sub-plan §2.12 / R7: writes parsed edges into the workspace alongside
-    /// the legacy mirror (`update_reverse_deps`). Per the lib.rs:1284-1287
-    /// pre-load route flow contract, `cc.import_routes` are PRESERVED across
-    /// integrate (bundlers may have populated them via `set_import_dependencies`
-    /// before the source was loaded). After `record_parsed_edges` clears the
-    /// workspace's exact_resolved set, exacts are re-applied via
-    /// `set_exact_resolutions` from preserved `cc.import_routes` so the
-    /// workspace mirrors host bundler state (closes Codex 2 round 7 #1).
+    /// Sub-plan §2.12 / R7: writes parsed edges into the workspace (workspace
+    /// is sole authority for reverse-dep tracking; legacy host-side
+    /// `reverse_dependencies` mirror deleted in Commit 3 of this sub-plan).
+    /// Per the lib.rs:1284-1287 pre-load route flow contract,
+    /// `cc.import_routes` are PRESERVED across integrate (bundlers may have
+    /// populated them via `set_import_dependencies` before the source was
+    /// loaded). After `record_parsed_edges` clears the workspace's
+    /// `exact_resolved` set, exacts are re-applied via `set_exact_resolutions`
+    /// from preserved `cc.import_routes` so the workspace mirrors host
+    /// bundler state (closes Codex 2 round 7 #1).
     ///
     /// **Caller invariant** (closes Claude L2): `integrate_scheduler_snapshot`
     /// is called from exactly one site today: `lib.rs` `ensure_loaded`
@@ -932,32 +932,31 @@ impl VerterHost {
             )
             .collect();
 
-        let (old_aliases, old_deps, preserved_routes) = {
+        let (old_aliases, preserved_routes) = {
             let mut cc_ref = self
                 .compile_cache
                 .entry(canonical_id.to_string())
                 .or_default();
             let cc = cc_ref.value_mut();
             let old_aliases = cc.aliases.clone();
-            let old_deps = cc.dependencies.clone();
             // R7 (Codex 2 round 7 #1): PRESERVE cc.import_routes. Bundler may
             // have set them via set_import_dependencies before source was
             // loaded. Cloning here so we can re-apply to workspace below
             // without holding the cc lock.
             let preserved_routes = cc.import_routes.clone();
             cc.aliases = aliases.clone();
-            cc.dependencies = deps.clone();
+            cc.dependencies = deps;
             cc.generation = snap.generation;
             cc.evicted = false;
             // R7: cc.import_routes is NOT cleared (preserves bundler pre-load
             // route flow per lib.rs:1284-1287 contract).
-            (old_aliases, old_deps, preserved_routes)
+            (old_aliases, preserved_routes)
         };
 
         self.update_alias_map(canonical_id, &old_aliases, &aliases);
 
-        // Sub-plan §2.12 Commit-2: ADDITIVE workspace edge write alongside
-        // legacy mirror. record_parsed_edges CLEARS workspace
+        // Sub-plan §2.12 Commit-3: workspace is sole authority — legacy
+        // mirror deleted. record_parsed_edges CLEARS workspace
         // exact_resolved/exact_resolutions/lazy_resolved/semantic_transitive
         // (per R4 lifecycle). ambient_resolved survives (F1.5).
         self.ws().record_parsed_edges(canonical_id, &parsed_edges);
@@ -972,9 +971,8 @@ impl VerterHost {
             self.ws()
                 .set_exact_resolutions(canonical_id, exact_resolutions);
         }
-
-        // Sub-plan §2.12 Commit-2: legacy mirror RETAINED. Deleted in Commit 3.
-        self.update_reverse_deps(canonical_id, &old_deps, &deps);
+        // Publish-fence: EdgeStore is RwLock-protected; concurrent readers
+        // see pre-write or post-write state, never torn.
         true
     }
 
@@ -1101,7 +1099,6 @@ impl VerterHost {
         }
 
         write_lock(&self.alias_to_canonical).clear();
-        write_lock(&self.reverse_dependencies).clear();
         write_lock(&self.last_const_prop_overrides).clear();
 
         {
@@ -1470,113 +1467,54 @@ impl VerterHost {
         }
     }
 
-    /// Sync the reverse dependency graph: remove stale edges, insert current ones.
-    pub(crate) fn update_reverse_deps(
-        &self,
-        canonical_id: &str,
-        old_deps: &BTreeSet<String>,
-        new_deps: &BTreeSet<String>,
-    ) {
-        let mut rev = write_lock(&self.reverse_dependencies);
-        for dep in old_deps {
-            if !new_deps.contains(dep) {
-                if let Some(owners) = rev.get_mut(dep) {
-                    owners.remove(canonical_id);
-                    if owners.is_empty() {
-                        rev.remove(dep);
-                    }
-                }
-            }
-        }
-        for dep in new_deps {
-            rev.entry(dep.clone())
-                .or_default()
-                .insert(canonical_id.to_string());
-        }
-    }
-
     /// Smart invalidation: when a dependency changes, only invalidate dependent
     /// SFCs whose macro-consumed types were actually affected.
+    ///
+    /// Sub-plan §2.15: workspace `reverse_deps_for` is the sole authority.
+    /// The workspace internally handles longest-suffix-first stem stripping
+    /// against the configured `default_resolve_extensions`, so a single call
+    /// covers both canonical and stem-axis hits. Legacy `reverse_dependencies`
+    /// mirror was deleted in this sub-plan (§3.1-3.5).
     pub(crate) fn smart_invalidate_dependents(
         &self,
         dependency_id: &str,
         old_export_signatures: &[verter_semantic::analysis::ExportSignature],
         new_export_signatures: &[verter_semantic::analysis::ExportSignature],
     ) {
-        // Native path: read reverse deps from workspace (authoritative source),
-        // then merge with the legacy reverse_dependencies map for backward
-        // compatibility (standalone hosts, tests without exact resolutions).
-        {
-            let ws = self.ws();
-            let mut owners: BTreeSet<String> =
-                ws.reverse_deps_for(dependency_id).into_iter().collect();
-            // Also check extensionless variant
-            if let Some(stem) = deps::strip_configured_extension(
-                dependency_id,
-                &self.config.resolve_extensions,
-                None,
-            ) {
-                for o in ws.reverse_deps_for(stem) {
-                    owners.insert(o);
-                }
-            }
+        let ws = self.ws();
+        let owners: BTreeSet<String> = ws.reverse_deps_for(dependency_id).into_iter().collect();
 
-            // Merge with legacy reverse_dependencies (captures deps from
-            // update_reverse_deps that the workspace may not have).
-            {
-                let rev = shared::read_lock(&self.reverse_dependencies);
-                if let Some(legacy) = rev.get(dependency_id) {
-                    for o in legacy {
-                        owners.insert(o.clone());
-                    }
-                }
-                if let Some(stem) = deps::strip_configured_extension(
-                    dependency_id,
-                    &self.config.resolve_extensions,
-                    None,
-                ) {
-                    if let Some(more) = rev.get(stem) {
-                        for o in more {
-                            owners.insert(o.clone());
-                        }
-                    }
-                }
-            }
+        // When a genuinely new dependency arrives (old signatures empty,
+        // new non-empty), dependents may have cached "miss" import routes
+        // for this dep. Evict their project-store entries unconditionally
+        // so fresh accesses re-resolve import routes. For existing deps
+        // where only the export surface changed, scope eviction to the
+        // owners that were actually invalidated.
+        let dep_is_newly_added =
+            old_export_signatures.is_empty() && !new_export_signatures.is_empty();
 
-            // When a genuinely new dependency arrives (old signatures empty,
-            // new non-empty), dependents may have cached "miss" import routes
-            // for this dep. Evict their project-store entries unconditionally
-            // so fresh accesses re-resolve import routes. For existing deps
-            // where only the export surface changed, scope eviction to the
-            // owners that were actually invalidated.
-            let dep_is_newly_added =
-                old_export_signatures.is_empty() && !new_export_signatures.is_empty();
-
-            {
-                let ws = self.workspace.read();
-                let cleared = deps::smart_invalidate_dependents_via_scheduler(
-                    &self.scheduler,
-                    &self.compile_cache,
-                    owners.clone(),
-                    Some(ws.as_ref()),
-                    &self.config,
-                    dependency_id,
-                    old_export_signatures,
-                    new_export_signatures,
-                );
-                let evict_targets = if dep_is_newly_added || cleared.is_empty() {
-                    &owners
-                } else {
-                    &cleared
-                };
-                if !evict_targets.is_empty() {
-                    self.eval_env_cache.lock().clear();
-                }
-                for owner in evict_targets {
-                    self.resolver.runtime.invalidate_canonical(owner);
-                    self.project_type_store.evict_canonical(owner);
-                }
-            }
+        let ws_ref = self.workspace.read();
+        let cleared = deps::smart_invalidate_dependents_via_scheduler(
+            &self.scheduler,
+            &self.compile_cache,
+            owners.clone(),
+            Some(ws_ref.as_ref()),
+            &self.config,
+            dependency_id,
+            old_export_signatures,
+            new_export_signatures,
+        );
+        let evict_targets = if dep_is_newly_added || cleared.is_empty() {
+            &owners
+        } else {
+            &cleared
+        };
+        if !evict_targets.is_empty() {
+            self.eval_env_cache.lock().clear();
+        }
+        for owner in evict_targets {
+            self.resolver.runtime.invalidate_canonical(owner);
+            self.project_type_store.evict_canonical(owner);
         }
     }
 }

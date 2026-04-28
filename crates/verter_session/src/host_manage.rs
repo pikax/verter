@@ -29,7 +29,7 @@ use crate::resolver_core::{
     FallthroughResolverHost, ImportedRuntimeValueResolver, RequestSource, ResolvedConsumedBindings,
     SingleflightRole, StoreView,
 };
-use crate::shared::{read_lock, write_lock};
+use crate::shared::write_lock;
 use crate::types::*;
 use crate::VerterHost;
 
@@ -6431,14 +6431,18 @@ impl VerterHost {
             .collect()
     }
 
+    /// Sync transitive macro/type dependencies for a file. Sub-plan §2.14:
+    /// the workspace's `replace_semantic_transitive` is called UNCONDITIONALLY
+    /// (closes F15 — even when `cc.dependencies` union is unchanged, the
+    /// semantic-class slice may have changed; e.g., a dep moves from
+    /// semantic-only to direct-import).
     pub(crate) fn sync_transitive_macro_type_dependencies(
         &self,
         canonical_id: &str,
         transitive_deps: &std::collections::BTreeSet<String>,
     ) {
         let mut new_deps = self.parse_dependency_set_for_file(canonical_id);
-
-        let old_deps = {
+        {
             let mut cc_ref = self
                 .compile_cache
                 .entry(canonical_id.to_string())
@@ -6446,14 +6450,12 @@ impl VerterHost {
             let cc = cc_ref.value_mut();
             new_deps.extend(Self::resolved_dependency_targets(&cc.import_routes));
             new_deps.extend(transitive_deps.iter().cloned());
-            let old_deps = cc.dependencies.clone();
-            cc.dependencies = new_deps.clone();
-            old_deps
-        };
-
-        if old_deps != new_deps {
-            self.update_reverse_deps(canonical_id, &old_deps, &new_deps);
+            cc.dependencies = new_deps;
         }
+        // ALWAYS fires — even when cc.dependencies union is unchanged, the
+        // semantic-class slice may have changed (closes F15).
+        self.ws()
+            .replace_semantic_transitive(canonical_id, transitive_deps.clone());
     }
 
     /// Returns the original source for a file by canonical ID or alias.
@@ -7364,69 +7366,58 @@ impl VerterHost {
 
     /// Remove a file from the host, cleaning up aliases, dependencies,
     /// and invalidating compile slots of any dependents.
+    ///
+    /// Sub-plan §2.16: workspace-authoritative — read dependents via
+    /// `ws().reverse_deps_for(canonical)` BEFORE `notify_delete` fires
+    /// (which clears the workspace's per-owner state and reverse-axis
+    /// entries via `EdgeStore::remove_file`).
     pub fn remove(&self, canonical_or_alias: &str) -> Option<HostRemoveResult> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
+        // Read aliases from compile_cache before removing.
+        let aliases = {
+            let cc = self.compile_cache.get(&canonical)?;
+            cc.aliases.clone()
+        };
+
         {
-            // Read aliases and dependencies from compile_cache before removing.
-            let (aliases, deps) = {
-                let cc = self.compile_cache.get(&canonical)?;
-                (cc.aliases.clone(), cc.dependencies.clone())
-            };
-
-            {
-                let mut alias_map = write_lock(&self.alias_to_canonical);
-                for alias in &aliases {
-                    alias_map.remove(alias);
-                }
+            let mut alias_map = write_lock(&self.alias_to_canonical);
+            for alias in &aliases {
+                alias_map.remove(alias);
             }
-
-            let dependents = {
-                let rev = read_lock(&self.reverse_dependencies);
-                rev.get(&canonical).cloned().unwrap_or_default()
-            };
-
-            {
-                let mut rev = write_lock(&self.reverse_dependencies);
-                for dep in &deps {
-                    if let Some(owners) = rev.get_mut(dep) {
-                        owners.remove(&canonical);
-                        if owners.is_empty() {
-                            rev.remove(dep);
-                        }
-                    }
-                }
-                rev.remove(&canonical);
-            }
-
-            // Invalidate compile_cache slots for dependents.
-            for owner in &dependents {
-                if let Some(mut cc) = self.compile_cache.get_mut(owner) {
-                    cc.compile_slots.clear();
-                    cc.cached_resolved_meta.clear();
-                    cc.cached_meta_payloads.clear();
-                }
-            }
-
-            self.ws().notify_delete(&canonical);
-            self.compile_cache.remove(&canonical);
-            self.scheduler.remove(&canonical);
-            // Evict all resolver caches so that untracked-file acceptance in
-            // the store view's `validates` method does not return stale facts
-            // for a deleted file.
-            self.resolver.runtime.hard_evict_canonical(&canonical);
-            self.project_type_store.evict_canonical(&canonical);
-            // Also evict component_meta results keyed by this canonical.
-            self.resolver
-                .runtime
-                .component_meta
-                .retain(|key| key.symbol_id != canonical);
-
-            self.bump_store_view_epoch();
-            Some(HostRemoveResult {
-                canonical_id: canonical,
-            })
         }
+
+        // Workspace-authoritative: read dependents BEFORE notify_delete.
+        let dependents = self.ws().reverse_deps_for(&canonical);
+        for owner in &dependents {
+            if let Some(mut cc) = self.compile_cache.get_mut(owner) {
+                cc.compile_slots.clear();
+                cc.cached_resolved_meta.clear();
+                cc.cached_meta_payloads.clear();
+            }
+        }
+
+        // notify_delete fires EdgeStore::remove_file (surgical per-owner
+        // canonical-axis + active-stem cleanup; closes Gemini CRITICAL
+        // PERFORMANCE).
+        self.ws().notify_delete(&canonical);
+        self.compile_cache.remove(&canonical);
+        self.scheduler.remove(&canonical);
+        // Evict all resolver caches so that untracked-file acceptance in
+        // the store view's `validates` method does not return stale facts
+        // for a deleted file.
+        self.resolver.runtime.hard_evict_canonical(&canonical);
+        self.project_type_store.evict_canonical(&canonical);
+        // Also evict component_meta results keyed by this canonical.
+        self.resolver
+            .runtime
+            .component_meta
+            .retain(|key| key.symbol_id != canonical);
+
+        self.bump_store_view_epoch();
+        Some(HostRemoveResult {
+            canonical_id: canonical,
+        })
     }
 
     /// Returns the list of virtual node kinds for a file.

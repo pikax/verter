@@ -314,8 +314,9 @@ pub(crate) fn should_invalidate_dependent_view(
 /// Smart invalidation using a pre-computed set of owner canonical IDs.
 ///
 /// Used by the native (non-WASM) path where reverse deps are read from the
-/// workspace's authoritative EdgeStore instead of the host's legacy
-/// `reverse_dependencies` map.
+/// workspace's authoritative `EdgeStore` (Phase 6 §6.2.1a — workspace is
+/// the sole authority; the legacy host-side `reverse_dependencies` mirror
+/// was deleted in Commit 3 of the cutover sub-plan).
 /// Scheduler-backed smart invalidation. Reads analysis from scheduler snapshots
 /// and dependency metadata from compile_cache. Clears compile_cache slots directly.
 #[allow(clippy::too_many_arguments)]

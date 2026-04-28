@@ -1076,12 +1076,12 @@ fn set_import_dependencies_adds_to_reverse_deps() {
         }],
     );
 
-    // Check that reverse dependency was added
-    let rev = read_lock(&host.reverse_dependencies);
-    let owners = rev.get("/src/utils.ts");
+    // Check that reverse dependency was added — workspace is the
+    // sole authority post-Commit-3.
+    let owners = host.workspace().reverse_deps_for("/src/utils.ts");
     assert!(
-        owners.is_some() && owners.unwrap().contains("Comp.vue"),
-        "reverse dep should be registered"
+        owners.contains(&"Comp.vue".to_string()),
+        "reverse dep should be registered (got {owners:?})"
     );
 }
 
@@ -1871,58 +1871,6 @@ fn update_alias_map_removes_old_adds_new() {
     assert_eq!(map.get("Comp.vue"), Some(&"Comp.vue".to_string()));
 }
 
-/// @ai-generated - update_reverse_deps: keeps shared deps when another owner exists
-#[test]
-fn update_reverse_deps_keeps_shared_dep() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    // shared-dep.ts is owned by both Comp.vue and Other.vue
-    {
-        let mut rev = write_lock(&host.reverse_dependencies);
-        let owners = rev.entry("shared-dep.ts".to_string()).or_default();
-        owners.insert("Comp.vue".to_string());
-        owners.insert("Other.vue".to_string());
-    }
-
-    // Comp.vue drops shared-dep.ts
-    let old_deps: BTreeSet<String> = ["shared-dep.ts".to_string()].into();
-    let new_deps: BTreeSet<String> = BTreeSet::new();
-    host.update_reverse_deps("Comp.vue", &old_deps, &new_deps);
-
-    let rev = read_lock(&host.reverse_dependencies);
-    // shared-dep.ts should still exist because Other.vue still depends on it
-    let owners = rev.get("shared-dep.ts").unwrap();
-    assert!(!owners.contains("Comp.vue"));
-    assert!(owners.contains("Other.vue"));
-}
-
-/// @ai-generated - update_reverse_deps: removes stale deps, adds new ones
-#[test]
-fn update_reverse_deps_removes_stale_adds_new() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    let old_deps: BTreeSet<String> = ["old-dep.ts".to_string()].into();
-    let new_deps: BTreeSet<String> = ["new-dep.ts".to_string()].into();
-
-    // Pre-populate old reverse dep
-    {
-        let mut rev = write_lock(&host.reverse_dependencies);
-        rev.entry("old-dep.ts".to_string())
-            .or_default()
-            .insert("Comp.vue".to_string());
-    }
-
-    host.update_reverse_deps("Comp.vue", &old_deps, &new_deps);
-
-    let rev = read_lock(&host.reverse_dependencies);
-    assert!(
-        !rev.contains_key("old-dep.ts"),
-        "old dependency should be removed"
-    );
-    let new_owners = rev.get("new-dep.ts").unwrap();
-    assert!(new_owners.contains("Comp.vue"));
-}
-
 /// @ai-generated - FileMeta::virtual_nodes: empty meta produces only Main
 #[test]
 fn virtual_nodes_empty() {
@@ -2470,9 +2418,21 @@ fn close_clears_all_caches() {
         read_lock(&host.alias_to_canonical).is_empty(),
         "alias_to_canonical should be empty after close"
     );
-    assert!(
-        read_lock(&host.reverse_dependencies).is_empty(),
-        "reverse_dependencies should be empty after close"
+    // Workspace-authoritative reverse-dep graph (Commit-3 cutover): close()
+    // calls `notify_delete` for every tracked file, which fires
+    // `EdgeStore::remove_file` and clears the per-owner state and
+    // reverse-axis entries. Verify there are no lingering reverse-dep
+    // edges for the previously-tracked files.
+    let resource = host.workspace().resource_snapshot();
+    assert_eq!(
+        resource.edge_file_count, 0,
+        "workspace edge store should be empty after close (got {})",
+        resource.edge_file_count
+    );
+    assert_eq!(
+        resource.reverse_dep_bucket_count, 0,
+        "workspace reverse-dep buckets should be empty after close (got {})",
+        resource.reverse_dep_bucket_count
     );
     assert!(
         read_lock(&host.last_const_prop_overrides).is_empty(),
@@ -4130,7 +4090,11 @@ mod phase2a_upsert_tests {
             "compile_cache should be empty after close"
         );
         assert!(crate::shared::read_lock(&host.alias_to_canonical).is_empty());
-        assert!(crate::shared::read_lock(&host.reverse_dependencies).is_empty());
+        // Workspace-authoritative reverse-dep graph (Commit-3): close()
+        // fires notify_delete for every tracked file, clearing EdgeStore.
+        let resource = host.workspace().resource_snapshot();
+        assert_eq!(resource.edge_file_count, 0);
+        assert_eq!(resource.reverse_dep_bucket_count, 0);
     }
 
     #[test]
@@ -4497,6 +4461,363 @@ mod phase2a_upsert_tests {
             cc.import_routes.contains_key("./alias"),
             "cc.import_routes must be preserved across integrate (Codex 2 round 7 #1 fix); got: {:?}",
             cc.import_routes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── §4.3 Commit-3 host-level tests (sub-plan §6.2.1a) ──
+
+    /// §4.3 #2 (F5/F18): Comp.vue parses with `./types` (stem present).
+    /// Then `set_import_dependencies` resolves it. Stem axis no longer
+    /// reports Comp.vue for the previous stem; canonical axis now
+    /// reports for the resolved target.
+    #[test]
+    fn host_set_import_dependencies_dampens_stale_unresolved_stems() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>",
+        );
+        // Stem present (matches via .ts strip).
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Bundler resolves the import.
+        host.set_import_dependencies(
+            "/src/Comp.vue",
+            vec![DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/lib/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+
+        // Stem dampened.
+        assert!(
+            !host
+                .workspace()
+                .reverse_deps_for("/src/types.ts")
+                .contains(&"/src/Comp.vue".to_string()),
+            "stem must be dampened after bundler resolution"
+        );
+        // Canonical axis populated.
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/lib/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+    }
+
+    /// §4.3 #5 (F1.6, F9): Transitive macro chain
+    /// `Comp.vue → ./types → ./shared`. After compile,
+    /// `reverse_deps_for("/src/shared.ts")` returns Comp.vue.
+    /// Mutating shared.ts increments Comp.vue's diagnostics generation.
+    /// **Pre-§2.14 fails** — sync_transitive_macro_type_dependencies was
+    /// gated on `cc.dependencies` union equality and did not always
+    /// publish the semantic-axis edge.
+    #[test]
+    fn host_transitive_macro_chain_invalidates_via_semantic_axis() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+
+        // Set up chain: Comp.vue → ./types → ./shared
+        let comp_src = "<script setup lang=\"ts\">import type { Foo } from './types'\ndefineProps<Foo>()</script>\n<template /></template>";
+        let types_src =
+            "import type { Shared } from './shared'\nexport interface Foo { x: Shared }";
+        let shared_src = "export interface Shared { v: number }";
+
+        host.workspace()
+            .notify_upsert("/src/types.ts", std::sync::Arc::from(types_src));
+        host.workspace()
+            .notify_upsert("/src/shared.ts", std::sync::Arc::from(shared_src));
+
+        let _ = upsert_vue(&host, "/src/Comp.vue", comp_src);
+
+        // Drive a compile-path query so transitive deps are populated.
+        let _ = host.list_virtual_nodes("/src/Comp.vue");
+
+        // Manually exercise sync_transitive_macro_type_dependencies via
+        // a compile request, then check the workspace semantic-axis.
+        let transitive: std::collections::BTreeSet<String> =
+            std::iter::once("/src/shared.ts".to_string()).collect();
+        host.sync_transitive_macro_type_dependencies("/src/Comp.vue", &transitive);
+
+        let owners = host.workspace().reverse_deps_for("/src/shared.ts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "workspace semantic-axis must report Comp.vue for /src/shared.ts (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #6 (F15): After test #5's setup, mutate types.ts to no longer
+    /// reference shared.ts. Recompile Comp.vue (re-fire transitive walk
+    /// with empty set). Assert workspace no longer reports Comp.vue for
+    /// /src/shared.ts. **Pre-fix the semantic axis is stale because the
+    /// legacy mirror gated on cc.dependencies union.**
+    #[test]
+    fn host_transitive_dep_removal_clears_stale_semantic_axis() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(&host, "/src/Comp.vue", "<template><div /></template>");
+
+        // Initial transitive set.
+        let initial: std::collections::BTreeSet<String> =
+            std::iter::once("/src/shared.ts".to_string()).collect();
+        host.sync_transitive_macro_type_dependencies("/src/Comp.vue", &initial);
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/shared.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Empty transitive set (mutation removed shared.ts reference).
+        let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        host.sync_transitive_macro_type_dependencies("/src/Comp.vue", &empty);
+
+        let owners = host.workspace().reverse_deps_for("/src/shared.ts");
+        assert!(
+            !owners.contains(&"/src/Comp.vue".to_string()),
+            "stale semantic-axis edge must be cleared (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #7 (F15): After #5, mutate Comp.vue to import shared directly.
+    /// Recompile. Assert reverse-dep still reports Comp.vue (now via
+    /// parsed_resolved instead of semantic_transitive). The owner stays
+    /// in the canonical bucket via the dep-class union.
+    #[test]
+    fn host_transitive_to_direct_promotion_keeps_owner_in_axis() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(&host, "/src/Comp.vue", "<template><div /></template>");
+
+        // Transitive first.
+        let transitive: std::collections::BTreeSet<String> =
+            std::iter::once("/src/shared.ts".to_string()).collect();
+        host.sync_transitive_macro_type_dependencies("/src/Comp.vue", &transitive);
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/shared.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Promote to direct: re-upsert Comp.vue with a direct import.
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import { Shared } from './shared'</script>\n<template /></template>",
+        );
+
+        // Owner still in axis (via parsed_resolved/parsed_unresolved stem).
+        let owners = host.workspace().reverse_deps_for("/src/shared.ts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "owner must stay in canonical axis after promotion to direct (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #8 (F1, surgical removal): Three files A, B import X; C imports
+    /// Y. Remove A. Workspace reverse-dep graph still reports B for X and
+    /// C for Y; only A's edges are cleared.
+    #[test]
+    fn host_remove_file_clears_dependents_without_touching_unrelated_buckets() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/A.vue",
+            "<script setup lang=\"ts\">import { X } from './x'</script>\n<template /></template>",
+        );
+        let _ = upsert_vue(
+            &host,
+            "/src/B.vue",
+            "<script setup lang=\"ts\">import { X } from './x'</script>\n<template /></template>",
+        );
+        let _ = upsert_vue(
+            &host,
+            "/src/C.vue",
+            "<script setup lang=\"ts\">import { Y } from './y'</script>\n<template /></template>",
+        );
+        // /src/x.ts strips to /src/x → stem axis hit.
+        assert_eq!(
+            host.workspace()
+                .reverse_deps_for("/src/x.ts")
+                .into_iter()
+                .filter(|o| o == "/src/A.vue" || o == "/src/B.vue")
+                .count(),
+            2
+        );
+        host.remove("/src/A.vue");
+        let x_owners = host.workspace().reverse_deps_for("/src/x.ts");
+        assert!(
+            !x_owners.contains(&"/src/A.vue".to_string()),
+            "A removed; X bucket must not report A (got {x_owners:?})"
+        );
+        assert!(
+            x_owners.contains(&"/src/B.vue".to_string()),
+            "B still depends on X (got {x_owners:?})"
+        );
+        let y_owners = host.workspace().reverse_deps_for("/src/y.ts");
+        assert!(
+            y_owners.contains(&"/src/C.vue".to_string()),
+            "C's dependency on Y must be untouched (got {y_owners:?})"
+        );
+    }
+
+    /// §4.3 #9 (F4): `import type { X } from './lib'` records stem
+    /// `/src/lib`. `lib.d.mts` arrives. `reverse_deps_for("/src/lib.d.mts")`
+    /// strips `.d.mts` → `/src/lib` → finds the importer.
+    #[test]
+    fn host_d_mts_dep_arrival_invalidates_importer() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import type { X } from './lib'</script>\n<template /></template>",
+        );
+        // .d.mts is in probe_extensions; stem strip succeeds.
+        let owners = host.workspace().reverse_deps_for("/src/lib.d.mts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            ".d.mts dep arrival must invalidate importer via stem strip (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #10 (F3): `import './Child'` (Vue importer) records stem
+    /// `/src/Child`. `Child.vue` arrives. `reverse_deps_for("/src/Child.vue")`
+    /// strips `.vue` → `/src/Child` → finds the importer.
+    #[test]
+    fn host_vue_dep_arrival_invalidates_importer() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import './Child'</script>\n<template /></template>",
+        );
+        let owners = host.workspace().reverse_deps_for("/src/Child.vue");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            ".vue dep arrival must invalidate importer via stem strip (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #11 (regression guard for F12): SFC `<script src="./logic.ts"
+    /// lang="ts">`. Workspace records canonical via syntactic resolution
+    /// (parser pre-resolves `./logic.ts` to `/src/logic.ts`).
+    #[test]
+    fn host_workspace_records_canonical_for_external_src() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script src=\"./logic.ts\" lang=\"ts\"></script>\n<template><div /></template>",
+        );
+        let owners = host.workspace().reverse_deps_for("/src/logic.ts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "ExternalSrc must populate canonical axis via syntactic pre-resolution (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #12 (F1.5): Register ambient lib. Bare-name resolver fires for
+    /// Comp.vue, recording ambient dep. Re-upsert Comp.vue. Assert
+    /// `reverse_deps_for(virtual_id)` STILL returns Comp.vue.
+    /// **Pre-fix this FAILS on main** because ambient deps lived in
+    /// lazily_resolved_deps (cleared by record_parsed_edges).
+    #[test]
+    fn host_ambient_dep_survives_parse_reupsert() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        // Directly invoke the workspace's record_ambient_dependency to
+        // simulate the bare-name resolver hit.
+        let virtual_id = "ambient:/Cabc/lib.es5.d.ts";
+        host.workspace()
+            .record_ambient_dependency("/src/Comp.vue", virtual_id);
+        // Confirm initial edge.
+        assert!(host
+            .workspace()
+            .reverse_deps_for(virtual_id)
+            .contains(&"/src/Comp.vue".to_string()));
+        // Re-upsert Comp.vue (parse re-record fires).
+        let _ = upsert_vue(&host, "/src/Comp.vue", "<template><div>v2</div></template>");
+        // Ambient edge must SURVIVE.
+        let owners = host.workspace().reverse_deps_for(virtual_id);
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "F1.5: ambient dep must survive parse re-record (got {owners:?})"
+        );
+    }
+
+    /// §4.3 #14 (F16): Comp.vue parsed with specifier `./types`. Then
+    /// `set_import_dependencies` passes specifier `./types/` (trailing
+    /// slash). Stem dampened identically to no-trailing-slash variant.
+    #[test]
+    fn host_specifier_normalization_for_stem_dampening() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>",
+        );
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+        // Bundler passes trailing-slash variant.
+        host.set_import_dependencies(
+            "/src/Comp.vue",
+            vec![DependencyResolution {
+                specifier: "./types/".to_string(),
+                resolved_canonical_id: Some("/lib/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        // Stem dampened (F16: normalize_relative_specifier trims trailing /).
+        assert!(
+            !host
+                .workspace()
+                .reverse_deps_for("/src/types.ts")
+                .contains(&"/src/Comp.vue".to_string()),
+            "trailing-slash specifier must dampen stem (F16 fix)"
+        );
+    }
+
+    /// §4.3 #15 (F18): Comp.vue parsed with `./types` (stem present) →
+    /// bundler `set_import_dependencies` resolves it (stem dampened,
+    /// canonical present) → bundler called WITHOUT `./types` → assert
+    /// stem RESTORED to active.
+    /// **Pre-R4 active-stem model fails** because R3 destroyed
+    /// parsed-unresolved on first bundler resolution.
+    #[test]
+    fn host_bundler_resolution_removal_restores_stem() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = upsert_vue(
+            &host,
+            "/src/Comp.vue",
+            "<script setup lang=\"ts\">import { Foo } from './types'</script>\n<template /></template>",
+        );
+        // Stem present.
+        assert!(host
+            .workspace()
+            .reverse_deps_for("/src/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Bundler resolves it.
+        host.set_import_dependencies(
+            "/src/Comp.vue",
+            vec![DependencyResolution {
+                specifier: "./types".to_string(),
+                resolved_canonical_id: Some("/lib/types.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            }],
+        );
+        assert!(!host
+            .workspace()
+            .reverse_deps_for("/src/types.ts")
+            .contains(&"/src/Comp.vue".to_string()));
+
+        // Bundler called with empty resolutions (config change).
+        host.set_import_dependencies("/src/Comp.vue", vec![]);
+
+        // Stem RESTORED to active (F18 active-stem model).
+        let owners = host.workspace().reverse_deps_for("/src/types.ts");
+        assert!(
+            owners.contains(&"/src/Comp.vue".to_string()),
+            "F18: stem must be RESTORED after bundler removes resolution (got {owners:?})"
         );
     }
 }

@@ -157,11 +157,10 @@ impl VerterHost {
         // ── Fast path: byte-identical source ──
         let old_whole_hash = old_host_data.map(|h| h.parse.whole_hash);
         if !changes.changed && old_whole_hash == Some(parse.whole_hash) {
-            let (old_aliases, old_deps) = {
+            let old_aliases = {
                 let mut cc_ref = self.compile_cache.entry(canonical_id.clone()).or_default();
                 let cc = cc_ref.value_mut();
                 let old_aliases = cc.aliases.clone();
-                let old_deps = cc.dependencies.clone();
                 cc.evicted = false;
                 cc.compile_slots.clear();
                 cc.cached_resolved_meta.clear();
@@ -171,10 +170,9 @@ impl VerterHost {
                 cc.aliases = alias_set.clone();
                 cc.dependencies = new_deps.clone();
                 cc.generation = new_source_snap.generation;
-                (old_aliases, old_deps)
+                old_aliases
             };
             self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
-            self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
 
             // Sub-plan §2.13: byte-identical fast-path workspace-edge write
             // (closes F7 — fast path used to be a separate writer that
@@ -222,7 +220,6 @@ impl VerterHost {
         let whole_hash_changed = old_whole_hash != Some(parse.whole_hash);
         let old_export_signatures;
         let old_aliases;
-        let old_deps;
         let prev_nodes;
         {
             let mut cc_ref = self.compile_cache.entry(canonical_id.clone()).or_default();
@@ -230,7 +227,6 @@ impl VerterHost {
 
             // Read old state before mutation
             old_aliases = cc.aliases.clone();
-            old_deps = cc.dependencies.clone();
             old_export_signatures = old_host_data
                 .map(|h| h.parse.export_signatures.clone())
                 .unwrap_or_default();
@@ -305,15 +301,18 @@ impl VerterHost {
         self.semantic_invalidate(&canonical_id);
 
         self.update_alias_map(&canonical_id, &old_aliases, &alias_set);
-        self.update_reverse_deps(&canonical_id, &old_deps, &new_deps);
+
+        // Sync parsed edges to VFS BEFORE smart_invalidate_dependents so the
+        // workspace's reverse-dep graph reflects the new edges before
+        // dependents are queried (Commit-3 cutover: workspace is sole
+        // authority for reverse-dep tracking).
+        self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
+
         self.smart_invalidate_dependents(
             &canonical_id,
             &old_export_signatures,
             &new_export_signatures,
         );
-
-        // Sync parsed edges to VFS
-        self.record_parsed_edges_to_vfs(&canonical_id, &result_data);
         self.ws().notify_upsert(&canonical_id, req.source.clone());
 
         let result = build_upsert_result(
