@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "phase": "phase-05b",
+  "status": "success",
+  "base_commit": "62e6d210dc876e5dc580796b7620482e89bd8e5b",
+  "work_head_before_marker": "b110f6cc",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests",
+      "passed": 10160,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [
+    "seed-resolver_coverage_mapped_types-closes-in-5e-commit-6",
+    "seed-resolver_coverage_inherited_emits-closes-in-5f-commit-7",
+    "seed-resolver_coverage_indexed_paths-closes-in-5f-commit-8",
+    "seed-resolver_coverage_package_backed-closes-in-5f-commit-9",
+    "seed-resolver_coverage_slot_shapes-closes-in-callsite-migration-5e-or-5f-via-meta_resolve.rs-define_slots-arm"
+  ],
+  "report_path": "phase-05b-report.md"
+}
