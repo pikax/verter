@@ -2054,68 +2054,14 @@ impl SemanticGraphStore {
         //    completed but BEFORE phase 2 set `aborted=true` — a stale
         //    slot whose dep-sig does NOT reference the invalidated
         //    canonical (so even HostFenceValidator does not catch it).
-        let publishable = matches!(&result, QueryResult::Value(_));
-        if publishable {
-            let (family, slot) = family_and_slot(&key);
-            // ResolvedNamedType bypasses the family memo entirely
-            // (§7.16) — its DashMap-backed identity map is the cache.
-            if !matches!(family, FamilyKey::ResolvedNamedType { .. }) {
-                let entry = MemoEntry {
-                    result: result.clone(),
-                    dep_signature: dep_signature.clone(),
-                };
-                let mut entries = self.entries.lock();
-                // Test-only forcing: simulate a concurrent sweep that
-                // aborted this in-flight entry just before the TOCTOU
-                // re-check. Deterministically drives the `cold_aborts_swept`
-                // counter in `..._when_forced` tests without needing a
-                // racy real invalidation.
-                #[cfg(test)]
-                if FORCE_COLD_ABORT_SWEEP.load(Ordering::Relaxed) {
-                    inflight.state.lock().aborted = true;
-                }
-                // Atomic re-check under the entries lock — see the
-                // TOCTOU comment above. `state` is briefly locked nested
-                // inside `entries`; no AB-BA deadlock risk because no
-                // path holds `state` then acquires `entries`.
-                let aborted = inflight.state.lock().aborted;
-                if aborted {
-                    // Canonical invalidation swept this slot during the
-                    // cold build; skip warm publish and record the sweep.
-                    self.stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-                    if let Some(ctx) = verter_scheduler::request_context::current_context() {
-                        ctx.0.record_cache_event(
-                            verter_scheduler::request_context::CacheEventKind::ColdAbortSwept,
-                        );
-                    }
-                } else {
-                    let populated_slots = entries
-                        .entry(family.clone())
-                        .or_default()
-                        .publish(slot, entry);
-                    // Phase 4 — Γ.B reverse-index registration. For
-                    // each populated slot (the primary plus any
-                    // backfilled narrower slots), register the
-                    // (family, slot) → dep_signature mapping under
-                    // every canonical the dep_signature references.
-                    // Lock order is `entries → canonical_to_entries
-                    // shards`: drop the entries lock before acquiring
-                    // any per-canonical mutex.
-                    drop(entries);
-                    for populated in &populated_slots {
-                        for (canonical, _) in dep_signature.iter() {
-                            crate::host_manage::record_family_map_lock_acquisition();
-                            let shard = self
-                                .canonical_to_entries
-                                .entry(Arc::clone(canonical))
-                                .or_insert_with(|| Mutex::new(FxHashMap::default()));
-                            let mut map = shard.value().lock();
-                            map.insert((family.clone(), *populated), Arc::clone(&dep_signature));
-                        }
-                    }
-                }
-            }
-        }
+        // Phase 1B refactor: cold-winner publish path is encapsulated in
+        // `warm_publish_one` so that `publish_warm_if_absent` (used by
+        // the §1.B prefix-backfill in `build_project_path`) can reuse the
+        // same family/slot mapping + reverse-index registration without
+        // duplicating the publish primitives. Pure refactor — TOCTOU
+        // semantics, ResolvedNamedType bypass, and reverse-index
+        // semantics all live inside the helper.
+        self.warm_publish_one(&key, &result, &dep_signature, &inflight);
 
         // 6. Finalize in-flight and wake joiners. The completed flag
         //    guarantees any thread that acquired the flight before step 7
@@ -2152,6 +2098,203 @@ impl SemanticGraphStore {
             value: result,
             dep_signature,
         }
+    }
+
+    /// Cold-winner publish path. Extracted from
+    /// [`Self::execute_cooperative`] step 5 (Phase 1B refactor — pure
+    /// extraction, no behaviour change). Skips publish when the result is
+    /// not a [`QueryResult::Value`] (errors / recursion sentinels never
+    /// promote to warm cache entries — plan §2 cache population). Skips
+    /// the family memo for [`FamilyKey::ResolvedNamedType`] (§7.16 —
+    /// ResolvedNamedType bypasses the family memo entirely; its
+    /// DashMap-backed identity map is the cache).
+    ///
+    /// **TOCTOU contract.** Acquires `entries` lock first, then
+    /// re-checks `inflight.state.aborted` under the entries lock. If
+    /// invalidation's phase 1 acquired `entries` first and aborted this
+    /// in-flight via phase 2, the re-check sees `aborted = true` and
+    /// skips publish. If this caller got `entries` first, publishes and
+    /// releases; invalidation then evicts the fresh publish in its phase
+    /// 1. Either interleaving leaves the slot empty post-invalidation.
+    ///
+    /// Test-only forcing flag [`FORCE_COLD_ABORT_SWEEP`] simulates a
+    /// concurrent sweep without racing a real invalidation window.
+    fn warm_publish_one(
+        &self,
+        key: &SemanticQueryKey,
+        result: &QueryResult<SemanticNodeId>,
+        dep_signature: &DepSignature,
+        inflight: &Arc<InflightEntry>,
+    ) {
+        let publishable = matches!(result, QueryResult::Value(_));
+        if !publishable {
+            return;
+        }
+        let (family, slot) = family_and_slot(key);
+        // ResolvedNamedType bypasses the family memo entirely (§7.16) —
+        // its DashMap-backed identity map is the cache.
+        if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
+            return;
+        }
+        let entry = MemoEntry {
+            result: result.clone(),
+            dep_signature: dep_signature.clone(),
+        };
+        let mut entries = self.entries.lock();
+        // Test-only forcing: simulate a concurrent sweep that aborted
+        // this in-flight entry just before the TOCTOU re-check.
+        // Deterministically drives the `cold_aborts_swept` counter in
+        // `..._when_forced` tests without needing a racy real invalidation.
+        #[cfg(test)]
+        if FORCE_COLD_ABORT_SWEEP.load(Ordering::Relaxed) {
+            inflight.state.lock().aborted = true;
+        }
+        // Atomic re-check under the entries lock — `state` is briefly
+        // locked nested inside `entries`; no AB-BA deadlock risk because
+        // no path holds `state` then acquires `entries`.
+        let aborted = inflight.state.lock().aborted;
+        if aborted {
+            drop(entries);
+            // Canonical invalidation swept this slot during the cold
+            // build; skip warm publish and record the sweep.
+            self.stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+            if let Some(ctx) = verter_scheduler::request_context::current_context() {
+                ctx.0.record_cache_event(
+                    verter_scheduler::request_context::CacheEventKind::ColdAbortSwept,
+                );
+            }
+            return;
+        }
+        let populated_slots = entries
+            .entry(family.clone())
+            .or_default()
+            .publish(slot, entry);
+        // Phase 4 — Γ.B reverse-index registration. For each populated
+        // slot (the primary plus any backfilled narrower slots),
+        // register the (family, slot) → dep_signature mapping under
+        // every canonical the dep_signature references. Lock order is
+        // `entries → canonical_to_entries shards`: drop the entries lock
+        // before acquiring any per-canonical mutex.
+        drop(entries);
+        Self::register_reverse_index(
+            &self.canonical_to_entries,
+            &family,
+            &populated_slots,
+            dep_signature,
+        );
+    }
+
+    /// Phase 1B variant of [`Self::warm_publish_one`]: publish
+    /// `(key, result, dep_signature)` into the warm map only when no
+    /// entry already exists AND no concurrent in-flight build owns the
+    /// key. No TOCTOU re-check (the caller does not own an in-flight
+    /// entry). Used by the prefix-backfill path in
+    /// [`crate::project_semantic_dispatch`]'s `build_project_path` so
+    /// intermediate `(base, path[..k], Navigate)` hops land in the same
+    /// warm map and reverse index as cooperative-admission publishes,
+    /// without racing past a concurrent cold winner that might publish
+    /// a different value for the same key.
+    ///
+    /// Skip rules (any of which short-circuits without publishing):
+    /// 1. `result` is not [`QueryResult::Value`].
+    /// 2. The family is [`FamilyKey::ResolvedNamedType`] (per §7.16).
+    /// 3. `self.get(&key).is_some()` — slot is already warm.
+    /// 4. The in-flight table contains `key` — a cold winner is
+    ///    currently building this exact key; let it publish.
+    pub(crate) fn warm_publish_one_if_absent(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        dep_signature: DepSignature,
+    ) {
+        if !matches!(result, QueryResult::Value(_)) {
+            return;
+        }
+        let (family, slot) = family_and_slot(&key);
+        if matches!(family, FamilyKey::ResolvedNamedType { .. }) {
+            return;
+        }
+        // Skip if already warm OR currently in flight. Both checks
+        // happen BEFORE acquiring the entries lock; a concurrent cold
+        // winner publish that lands between this check and the publish
+        // is benign (FamilySlots::publish overrides; both are computing
+        // the same canonical prefix node so values agree).
+        if self.get(&key).is_some() {
+            return;
+        }
+        if self.inflight.lock().contains_key(&key) {
+            return;
+        }
+        let entry = MemoEntry {
+            result,
+            dep_signature: dep_signature.clone(),
+        };
+        let mut entries = self.entries.lock();
+        let populated_slots = entries
+            .entry(family.clone())
+            .or_default()
+            .publish(slot, entry);
+        drop(entries);
+        Self::register_reverse_index(
+            &self.canonical_to_entries,
+            &family,
+            &populated_slots,
+            &dep_signature,
+        );
+    }
+
+    /// Phase 1B Γ.B reverse-index registration helper. Shared by
+    /// [`Self::warm_publish_one`] and
+    /// [`Self::warm_publish_one_if_absent`]. Caller must have dropped
+    /// the `entries` lock before calling per the `entries →
+    /// canonical_to_entries shards` lock order.
+    fn register_reverse_index(
+        canonical_to_entries: &CanonicalToEntries,
+        family: &FamilyKey,
+        populated_slots: &[ModeSlot],
+        dep_signature: &DepSignature,
+    ) {
+        for populated in populated_slots {
+            for (canonical, _) in dep_signature.iter() {
+                crate::host_manage::record_family_map_lock_acquisition();
+                let shard = canonical_to_entries
+                    .entry(Arc::clone(canonical))
+                    .or_insert_with(|| Mutex::new(FxHashMap::default()));
+                let mut map = shard.value().lock();
+                map.insert((family.clone(), *populated), Arc::clone(dep_signature));
+            }
+        }
+    }
+
+    /// Phase 1B path-prefix backfill API (plan §1.B). Publishes a
+    /// `(key, value, dep_signature)` triple via the same warm-publish
+    /// helper that [`Self::execute_cooperative`] uses (extracted as
+    /// [`Self::warm_publish_one_if_absent`]), gated by the "absent
+    /// only" check. Never blocks, never starts compute, never
+    /// participates in the in-flight admission flow.
+    ///
+    /// **PRECONDITION:** `key.mode == ProjectionMode::Navigate`. Phase
+    /// 1B only backfills intermediate path hops, which by the
+    /// path-precise rule (CLAUDE.md "Macro Type Traversal Rule") must
+    /// be Navigate-mode entries. Calling this with any other mode is a
+    /// programming error and trips a debug assertion.
+    pub(crate) fn publish_warm_if_absent(
+        &self,
+        key: SemanticQueryKey,
+        value: SemanticNodeId,
+        dep_signature: DepSignature,
+    ) {
+        debug_assert!(
+            matches!(
+                &key,
+                SemanticQueryKey::ProjectPath {
+                    mode: crate::semantic_query::ProjectionMode::Navigate,
+                    ..
+                }
+            ),
+            "publish_warm_if_absent only takes ProjectPath{{Navigate}} keys (path-precise rule)"
+        );
+        self.warm_publish_one_if_absent(key, QueryResult::Value(value), dep_signature);
     }
 }
 
@@ -2934,6 +3077,78 @@ mod tests {
             store.canonical_to_entries_count("/w/missing.ts"),
             0,
             "unrelated canonicals must NOT have a reverse-index entry"
+        );
+    }
+
+    /// Phase 1B refactor invariant — the helper extracted from
+    /// `execute_cooperative` step 5 (`warm_publish_one`) must:
+    ///   1. Insert into the warm map (slot becomes `get`-readable).
+    ///   2. Register the `(family, slot) → dep_signature` reverse-index
+    ///      entry under every canonical the dep_signature references.
+    ///
+    /// This is a TARGETED unit test (per §1.B.4 brief invariant) that
+    /// invokes `warm_publish_one` directly with a synthetic
+    /// `InflightEntry` so the assertion is on the helper's surface,
+    /// not the full cooperative-admission flow.
+    ///
+    /// Discriminating: with the refactor, the helper does the publish
+    /// and reverse-index registration. If the refactor accidentally
+    /// dropped the reverse-index registration (e.g. by inlining
+    /// publish without the per-canonical loop), the
+    /// `canonical_to_entries_count` assertion would FAIL.
+    #[test]
+    fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
+        let store = SemanticGraphStore::new();
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: scope("/w/helper_test.ts"),
+            name: Arc::from("Helper"),
+        });
+        let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let dep_sig = dep_sig_for("/w/helper_test.ts", 7);
+        let inflight = Arc::new(InflightEntry::new());
+
+        // Pre-condition: warm map empty for this key, reverse index
+        // empty for the canonical.
+        assert!(
+            store.get(&key).is_none(),
+            "warm map must start empty for the test key"
+        );
+        assert_eq!(
+            store.canonical_to_entries_count("/w/helper_test.ts"),
+            0,
+            "reverse index must start empty for the test canonical"
+        );
+
+        // Direct invocation of the extracted helper.
+        store.warm_publish_one(&key, &QueryResult::Value(value), &dep_sig, &inflight);
+
+        // Post-condition 1: warm map contains the slot.
+        let hit = store
+            .get(&key)
+            .expect("warm map must contain the published key after warm_publish_one");
+        match hit.value {
+            QueryResult::Value(id) => assert_eq!(
+                id, value,
+                "the published value must round-trip through the warm map"
+            ),
+            other => panic!("expected published Value, got {other:?}"),
+        }
+
+        // Post-condition 2: reverse index contains at least one
+        // (family, slot) registration under the canonical.
+        assert!(
+            store.canonical_to_entries_count("/w/helper_test.ts") >= 1,
+            "warm_publish_one must register the (family, slot) → dep_signature \
+             mapping in canonical_to_entries[\"/w/helper_test.ts\"] (Γ.B reverse index)"
+        );
+
+        // Negative: an unrelated canonical must have NO reverse-index
+        // entry — registration is per-canonical-in-dep-signature, not
+        // a global broadcast.
+        assert_eq!(
+            store.canonical_to_entries_count("/w/unrelated.ts"),
+            0,
+            "unrelated canonicals must NOT receive reverse-index entries"
         );
     }
 

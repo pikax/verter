@@ -53,6 +53,13 @@ pub(super) struct PathWalker<'a, 'b> {
     /// re-entry, so linear-chain walks cost O(n) set inserts, not O(n^2)
     /// depth checks.
     visited_nodes: rustc_hash::FxHashSet<SemanticNodeId>,
+    /// Phase 1B2: per-step intermediate nodes for backfill.
+    /// `intermediate_nodes[i]` = node reached after consuming path[..i+1].
+    /// `Some(node)` only on linear `Object` member-step transitions.
+    /// `None` marks Union/Intersection/Conditional arm-splits — backfill
+    /// skips those positions because the per-arm result is not the
+    /// canonical answer for `(base, path[..k], mode)`.
+    pub(super) intermediate_nodes: Vec<Option<SemanticNodeId>>,
 }
 
 impl<'a, 'b> PathWalker<'a, 'b> {
@@ -67,6 +74,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             fence,
             visited_aliases: smallvec::SmallVec::new(),
             visited_nodes: rustc_hash::FxHashSet::default(),
+            intermediate_nodes: Vec::new(),
         }
     }
 
@@ -214,6 +222,10 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             );
                             current = m.value;
                             index += 1;
+                            // Phase 1B2: record the linear member-step
+                            // intermediate. `intermediate_nodes[i]` is the
+                            // node reached after consuming path[..i+1].
+                            self.intermediate_nodes.push(Some(current));
                         }
                         None => {
                             results.push(self.opaque_miss());
@@ -239,6 +251,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
+                    // Phase 1B2: arm-split — backfill cannot publish a
+                    // single canonical answer for `path[..k]` here.
+                    self.intermediate_nodes.push(None);
                     return;
                 }
                 SemanticNodeData::Intersection(arms) => {
@@ -257,6 +272,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                             index,
                         });
                     }
+                    // Phase 1B2: arm-split — backfill cannot publish a
+                    // single canonical answer for `path[..k]` here.
+                    self.intermediate_nodes.push(None);
                     return;
                 }
                 SemanticNodeData::Conditional {
@@ -312,6 +330,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
+                    // Phase 1B2: open-conditional arm-split — backfill
+                    // cannot publish a single canonical answer for
+                    // `path[..k]` here (the wrapper Conditional is the
+                    // terminal result for the rest of the path, not an
+                    // intermediate hop the prefix peek can reuse).
+                    self.intermediate_nodes.push(None);
                     return;
                 }
                 SemanticNodeData::KeyOf { base } => {

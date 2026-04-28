@@ -1130,6 +1130,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Arc::clone(&fence),
             );
         }
+        // Phase 1B2: backfill intermediate path prefixes so a sibling
+        // dispatch sharing the same prefix can short-circuit through
+        // `find_longest_warm_prefix`. Backfill always targets Navigate
+        // (path-precise rule — intermediate hops are Navigate-mode
+        // entries). The terminal full-path key keeps the caller's mode
+        // and is published by `execute_cooperative`'s admission flow,
+        // not by this helper.
+        backfill_prefixes(
+            self.graph(),
+            start_base,
+            &walker_path,
+            &walker.intermediate_nodes,
+            &fence,
+        );
         (QueryResult::Value(result), fence)
     }
 
@@ -1926,4 +1940,62 @@ fn find_longest_warm_prefix(
         }
     }
     None
+}
+
+/// Phase 1B2 backfill helper (plan §1.B). For each linear-member-step
+/// intermediate captured by the [`PathWalker`] in `intermediates`,
+/// publish the corresponding `(base, path[..i+1], Navigate)` key into
+/// the warm map via the shared
+/// [`SemanticGraphStore::publish_warm_if_absent`] helper (which
+/// internally reuses the same warm-publish path that
+/// `execute_cooperative` uses, gated by an "absent only" check).
+///
+/// Skips the last index — the full key is owned by
+/// `execute_cooperative` (it carries the caller's mode, not Navigate;
+/// the path-precise rule places terminal hops at the caller's mode).
+///
+/// Skips `None` entries (arm-splits at Union / Intersection /
+/// open-Conditional positions); those positions have no single
+/// canonical answer for `(base, path[..k], Navigate)`.
+fn backfill_prefixes(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    base: SemanticNodeId,
+    path: &Arc<[PathSegment]>,
+    intermediates: &[Option<SemanticNodeId>],
+    full_dep_signature: &DepSignature,
+) {
+    // Backfill is only meaningful for the contiguous LINEAR prefix of
+    // the walk — the leading run of `Some(node)` entries before any
+    // arm-split. Once the walker hits a Union / Intersection /
+    // Conditional, subsequent intermediates may belong to per-arm
+    // sub-walks (which the iterative worklist runs as their own
+    // advance_step calls) and no longer line up with the trunk's
+    // path index.
+    //
+    // Bound `i` so that:
+    //   - `i < intermediates.len() - 1` — skip the last intermediate;
+    //     the terminal full-path key is owned by `execute_cooperative`
+    //     (it carries the caller's mode, not Navigate).
+    //   - `i < path.len() - 1` — keep `path[..i + 1]` strictly shorter
+    //     than the full path (sibling-sharable prefixes only) and avoid
+    //     out-of-range slicing when arm-split sub-walks pushed extra
+    //     entries past `path.len()`.
+    //   - Break at the first `None` — after an arm-split the index no
+    //     longer lines up with `path[..i + 1]` so subsequent entries
+    //     are not canonical answers for that key.
+    let max_i = intermediates
+        .len()
+        .min(path.len())
+        .saturating_sub(1);
+    for i in 0..max_i {
+        let Some(node) = intermediates[i] else { break };
+        let prefix_path: Arc<[PathSegment]> =
+            Arc::from(path[..i + 1].to_vec().into_boxed_slice());
+        let prefix_key = SemanticQueryKey::ProjectPath {
+            base,
+            path: prefix_path,
+            mode: ProjectionMode::Navigate,
+        };
+        graph.publish_warm_if_absent(prefix_key, node, Arc::clone(full_dep_signature));
+    }
 }
