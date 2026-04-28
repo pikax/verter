@@ -3725,6 +3725,28 @@ impl VerterHost {
         }
     }
 
+    /// Phase 5 §A14 — O(1) lookup of an `AnalyzedMacro` from the
+    /// sidecar by its stable index in
+    /// `ScriptAnalysisSnapshot.macros`. Returns `None` when the file
+    /// is not indexed, has no script analysis, or `macro_index` is
+    /// out of range.
+    ///
+    /// Reads cache-only via `ensure_indexed_ready` — no AST re-walk.
+    /// Used by `build_resolve_macro_payload` to consult the analysed
+    /// macro for emit field walks (`DefineEmits`) and model name
+    /// extraction (`DefineModel`).
+    ///
+    /// Returns an `Arc<ScriptAnalysisSnapshot>` so the caller holds
+    /// the snapshot alive while it reads the macro entry. The macro
+    /// is accessed via `snapshot.macros.get(macro_index)`.
+    pub(crate) fn analyzed_macro_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>> {
+        let indexed = self.ensure_indexed_ready(canonical_id)?;
+        indexed.script_analysis.clone()
+    }
+
     pub(crate) fn resolve_external_type_from_indexed_ready(
         &self,
         dep_canonical: &str,

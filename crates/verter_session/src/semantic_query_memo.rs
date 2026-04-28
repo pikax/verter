@@ -616,6 +616,15 @@ enum FamilyKey {
     ResolvedNamedType {
         key: Arc<HostResolvedNamedTypeKey>,
     },
+    /// Phase 5 §5.0 binding amendment — `ResolveMacroPayload`. Mode-erased
+    /// for the family memo; the per-mode result lives in the matching
+    /// `FamilySlots` slot.
+    ResolveMacroPayload {
+        owner: DeclIdentity,
+        macro_index: usize,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        type_args: Arc<[SemanticNodeId]>,
+    },
 }
 
 /// Per-family slot selector. For non-mode variants only `Single` is used;
@@ -1080,6 +1089,25 @@ fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 index: crate::semantic_query::IndexKey::TypeNode(*target),
             },
             ModeSlot::Single,
+        ),
+        // Phase 5 §5.0 binding amendment — `ResolveMacroPayload`. The
+        // mode is stripped into the slot per the standard mode-bearing
+        // pattern; the family identity is the (owner, macro_index,
+        // macro_kind, type_args) tuple.
+        SemanticQueryKey::ResolveMacroPayload {
+            owner,
+            macro_index,
+            macro_kind,
+            type_args,
+            mode,
+        } => (
+            FamilyKey::ResolveMacroPayload {
+                owner: owner.clone(),
+                macro_index: *macro_index,
+                macro_kind: *macro_kind,
+                type_args: Arc::clone(type_args),
+            },
+            mode_to_slot(*mode),
         ),
     }
 }

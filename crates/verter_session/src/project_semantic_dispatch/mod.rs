@@ -519,6 +519,16 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
                 let fence = self.project_generation_signature();
                 (QueryResult::Error(QueryError::Miss), fence)
             }
+            // Phase 5 §5.0 binding amendment — `ResolveMacroPayload`.
+            SemanticQueryKey::ResolveMacroPayload {
+                owner,
+                macro_index,
+                macro_kind,
+                type_args,
+                mode,
+            } => {
+                self.build_resolve_macro_payload(owner, *macro_index, *macro_kind, type_args, *mode)
+            }
         };
         let CacheRead { value, .. } = graph.execute_cooperative(key, sentinel, build);
         value

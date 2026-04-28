@@ -839,6 +839,49 @@ pub enum SemanticQueryKey {
         source: SemanticNodeId,
         target: SemanticNodeId,
     },
+    /// Resolve a Vue macro (`defineProps`, `defineEmits`, `defineSlots`,
+    /// `defineModel`, `defineExpose`, `defineOptions`, `withDefaults`)
+    /// payload to a single `SemanticNodeId` representing the macro's
+    /// effective TypeExpr.
+    ///
+    /// Phase 5 §5.0 binding amendment. This is the SOLE new variant
+    /// introduced in Phase 5 — the other 3 originally proposed
+    /// (`MaterializeSurface`, `ResolvePublicInstance`,
+    /// `ResolveFallthroughSurface`) are non-variant dispatch helpers
+    /// that compose existing variants and read the
+    /// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar.
+    ///
+    /// `owner` is the synthetic SFC declaration identity (`canonical_id`
+    /// = the SFC file path, `decl_name` per repo convention).
+    /// `macro_index` is the stable index into `ScriptAnalysisSnapshot.macros`
+    /// per Phase 5 §A14. `macro_kind` is the semantic-level
+    /// [`AnalyzedMacroKind`], NOT [`verter_semantic::analysis::template::MacroKind`].
+    /// `type_args` carries the macro's type arguments (already lowered to
+    /// `SemanticNodeId`s by the caller). `mode` selects the projection
+    /// mode for downstream type lowering inside the macro body.
+    ///
+    /// The body reuses the sidecar's `AnalyzedMacro` (no AST re-walk per
+    /// §A14) for emit/model construction. Per `ResolveMacroPayload`'s
+    /// closure rules, dispatch resolves to:
+    /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`; 1 arg
+    ///   → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    /// - `DefineEmits`: build `Object` whose members are
+    ///   `name → tuple-of-params` from the parsed type-argument's
+    ///   properties + call signatures.
+    /// - `DefineSlots`: build `Object` from slot members (function-shape
+    ///   values).
+    /// - `DefineModel`: build `Object` with `model_name → T` and
+    ///   `update:<model_name> → (val: T) -> void` from `analyzed.model_name`
+    ///   and `type_args[0]`.
+    /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
+    ///   else `type_args[0]` unchanged.
+    ResolveMacroPayload {
+        owner: DeclIdentity,
+        macro_index: usize,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        type_args: Arc<[SemanticNodeId]>,
+        mode: ProjectionMode,
+    },
 }
 
 /// One inference binding produced by a successful `Relate` judgement (plan

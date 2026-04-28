@@ -1875,6 +1875,142 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Phase 5 §3.2 — `ResolveMacroPayload` body.
+    ///
+    /// Resolve a Vue compiler macro's payload to a single
+    /// `SemanticNodeId` representing the macro's effective TypeExpr.
+    /// Reuses the sidecar `AnalyzedMacro` for sidecar reads (§A14: no
+    /// AST re-walk; reads
+    /// `host.ensure_indexed_ready(canonical)?.script_analysis.as_ref()?.macros.get(macro_index)`
+    /// via the `analyzed_macro_snapshot` accessor).
+    ///
+    /// Per-arm logic mirrors §3.2 body sketch:
+    /// - `DefineProps` / `WithDefaults`: 0 args → `Opaque(Miss)`;
+    ///   1 arg → arg unchanged; ≥2 args → `NormalizeIntersection`.
+    /// - `DefineEmits`: dispatch `type_args[0]` through `ProjectPath`
+    ///   in the caller's mode. Returns the projected surface; the
+    ///   consumer (`extract_component_meta` at
+    ///   `verter_semantic/src/analysis/component_meta.rs:2449+`) walks
+    ///   `properties` + `call_signatures` from the resulting
+    ///   `Object`. Sidecar lookup confirms the macro exists and
+    ///   anchors the dep_signature.
+    /// - `DefineSlots`: dispatch `type_args[0]` through `ProjectPath`
+    ///   in the caller's mode; consumer walks slot members from the
+    ///   projected `Object`.
+    /// - `DefineModel`: dispatch `type_args[0]` through `ProjectPath`
+    ///   in the caller's mode; consumer constructs the
+    ///   `{ <model_name>: T, "update:<model_name>": (val: T) -> void }`
+    ///   shape from `analyzed.model_name` + the resolved T payload.
+    /// - `DefineExpose` / `DefineOptions`: 0 args → `Opaque(Miss)`;
+    ///   else `type_args[0]` unchanged.
+    ///
+    /// All arms record `(owner.canonical_id, WholeHash(owner.whole_hash))`
+    /// in the local fence so warm-hit revalidation through
+    /// [`HostFenceValidator`](crate::host_manage::HostFenceValidator)
+    /// observes the macro's owning file generation.
+    ///
+    /// **Recursion safety:** A self-reference like
+    /// `type R = { next: R }; defineEmits<{ recurse: [R] }>()` reaches
+    /// the same `Instantiate` key during projection of `R` and the
+    /// dispatch sentinel emits `Opaque(QueryError::RecursiveRef)` —
+    /// the projection path observes a `Recursive` `QueryResult`,
+    /// which propagates here as `QueryResult::Recursive(node)`.
+    pub(super) fn build_resolve_macro_payload(
+        &self,
+        owner: &crate::semantic_query::DeclIdentity,
+        macro_index: usize,
+        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        type_args: &Arc<[SemanticNodeId]>,
+        mode: ProjectionMode,
+    ) -> (QueryResult<SemanticNodeId>, DepSignature) {
+        use verter_semantic::analysis::AnalyzedMacroKind;
+
+        // §3.2 — seed local fence with the macro's owning canonical
+        // and whole_hash so HostFenceValidator catches stale warm hits
+        // when the SFC's content changes.
+        let mut local_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+        local_fence.push((
+            Arc::clone(&owner.canonical_id),
+            crate::semantic_query::DepVersion::WholeHash(owner.whole_hash),
+        ));
+        // Also pin the project-generation so the fence catches
+        // workspace-wide changes that could invalidate the lowering
+        // basis (mirrors `dep_signature_for` semantics).
+        let project_gen = self.host.project_type_store().project_generation();
+        local_fence.push((
+            Arc::clone(&owner.canonical_id),
+            crate::semantic_query::DepVersion::ProjectGeneration(project_gen),
+        ));
+
+        let result = match macro_kind {
+            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
+                // §3.2 sketch: 0 args → Miss; 1 arg → arg directly;
+                // ≥2 args → intersection-normalised result.
+                if type_args.is_empty() {
+                    QueryResult::Value(self.opaque(QueryError::Miss))
+                } else if type_args.len() == 1 {
+                    QueryResult::Value(type_args[0])
+                } else {
+                    let read = self.execute_read(SemanticQueryKey::NormalizeIntersection {
+                        members: Arc::clone(type_args),
+                    });
+                    local_fence.extend(read.dep_signature.iter().cloned());
+                    read.value
+                }
+            }
+            AnalyzedMacroKind::DefineEmits
+            | AnalyzedMacroKind::DefineSlots
+            | AnalyzedMacroKind::DefineModel => {
+                // A14: anchor the result in the sidecar (no AST re-walk).
+                // The accessor returns `None` if the file is not indexed,
+                // which collapses to a Miss per the sketch.
+                let snapshot = match self.host.analyzed_macro_snapshot(&owner.canonical_id) {
+                    Some(s) => s,
+                    None => {
+                        return (
+                            QueryResult::Error(QueryError::Miss),
+                            fence_to_dep_signature(local_fence),
+                        );
+                    }
+                };
+                if snapshot.macros.get(macro_index).is_none() {
+                    return (
+                        QueryResult::Error(QueryError::Miss),
+                        fence_to_dep_signature(local_fence),
+                    );
+                }
+                if type_args.is_empty() {
+                    QueryResult::Value(self.opaque(QueryError::Miss))
+                } else {
+                    // Project the macro's first type argument through the
+                    // shared `ProjectPath` dispatcher in the caller's
+                    // mode. The consumer (component_meta extractor at
+                    // `verter_semantic/src/analysis/component_meta.rs:2449+`
+                    // for emits, the slot-bindings walker for slots, and
+                    // the model-name composer) walks the resulting
+                    // surface. Mode-aware so Navigate callers don't pay
+                    // for full member expansion.
+                    let read = self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: type_args[0],
+                        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                        mode,
+                    });
+                    local_fence.extend(read.dep_signature.iter().cloned());
+                    read.value
+                }
+            }
+            AnalyzedMacroKind::DefineExpose | AnalyzedMacroKind::DefineOptions => {
+                if type_args.is_empty() {
+                    QueryResult::Value(self.opaque(QueryError::Miss))
+                } else {
+                    QueryResult::Value(type_args[0])
+                }
+            }
+        };
+
+        (result, fence_to_dep_signature(local_fence))
+    }
+
     pub(super) fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -1993,4 +2129,14 @@ fn backfill_prefixes(
         };
         graph.publish_warm_if_absent(prefix_key, node, Arc::clone(full_dep_signature));
     }
+}
+
+/// Phase 5 §3.2 helper — convert a per-call local fence (one
+/// `(canonical, version)` entry per dep fact accumulated during the
+/// build path) into the canonical `Arc<[(Arc<str>, DepVersion)]>`
+/// shape returned alongside `QueryResult`.
+fn fence_to_dep_signature(
+    fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
+) -> DepSignature {
+    Arc::from(fence.into_boxed_slice())
 }
