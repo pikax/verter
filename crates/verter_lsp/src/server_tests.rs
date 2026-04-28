@@ -7053,7 +7053,7 @@ import Child from '@/components/Child.vue'
 
     // Phase 2: Build and populate project registry with tsconfig alias
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
     let build_result =
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
     let registry = build_result.registry;
@@ -7174,7 +7174,7 @@ import Child from '@/components/Child.vue'
             .to_string(),
     });
 
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
     let build_result =
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);
@@ -7280,7 +7280,7 @@ import { Overlay } from './components'
             .to_string(),
     });
 
-    let vite_opts = crate::vite_config::ViteConfigOptions::default();
+    let vite_opts = verter_workspace::ViteConfigOptions::default();
     let workspace_uri = crate::uri::path_to_file_uri_string(&workspace_id);
     let build_result =
         crate::config::ProjectRegistry::from_workspace_roots(&[workspace_uri], &vite_opts);

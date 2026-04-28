@@ -14,7 +14,6 @@ pub mod sync_coordinator;
 pub mod tsgo;
 pub mod tsserver;
 pub mod utils;
-pub mod vite_config;
 pub mod workspace_scanner;
 pub mod workspace_state;
 

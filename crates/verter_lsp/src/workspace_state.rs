@@ -20,7 +20,7 @@ use std::path::Path;
 use verter_diagnostics::{Linter, ResolvedLintConfig};
 use verter_workspace::workspace_snapshot::ProjectId;
 
-use crate::vite_config::ViteConfigTrustInfo;
+use verter_workspace::ViteConfigTrustInfo;
 
 /// LSP-specific per-project view.
 ///
@@ -225,7 +225,7 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vite_config::ViteConfigTrustInfo;
+    use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };

@@ -227,7 +227,7 @@ pub struct VerterLanguageServer {
     /// Lint options from initializationOptions, stored during initialize() for use in initialized().
     init_lint_options: tokio::sync::Mutex<Option<serde_json::Value>>,
     /// Vite config options (enabled, trusted files, node path).
-    vite_config_options: tokio::sync::Mutex<crate::vite_config::ViteConfigOptions>,
+    vite_config_options: tokio::sync::Mutex<verter_workspace::ViteConfigOptions>,
     /// Whether type provider inlay hints are enabled (from initializationOptions).
     inlay_hints_enabled: std::sync::atomic::AtomicBool,
     /// Cached verter diagnostics per document:
@@ -361,7 +361,7 @@ impl VerterLanguageServer {
             action_engine: verter_actions::ActionEngine::default(),
             init_lint_options: tokio::sync::Mutex::new(None),
             vite_config_options: tokio::sync::Mutex::new(
-                crate::vite_config::ViteConfigOptions::default(),
+                verter_workspace::ViteConfigOptions::default(),
             ),
             inlay_hints_enabled: std::sync::atomic::AtomicBool::new(true),
             cached_verter_diags,

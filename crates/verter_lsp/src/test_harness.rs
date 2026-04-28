@@ -179,7 +179,7 @@ impl TestSessionBuilder {
         // definition handlers can resolve path aliases (e.g. "@/*" → "./src/*").
         let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
         let tsconfig_path_str = format!("{workspace_id}/tsconfig.json");
-        let vite_opts = crate::vite_config::ViteConfigOptions::default();
+        let vite_opts = verter_workspace::ViteConfigOptions::default();
         let build_result =
             crate::config::ProjectRegistry::from_workspace_roots(&[root_uri.clone()], &vite_opts);
         // Sync resolver to host's VFS so resolve_import_via_workspace works

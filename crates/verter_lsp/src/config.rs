@@ -348,7 +348,7 @@ pub struct ProjectConfig {
 pub struct RegistryBuildResult {
     pub registry: ProjectRegistry,
     /// Configs that need user trust before their aliases can be used.
-    pub trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
+    pub trust_required: Vec<verter_workspace::ViteConfigTrustInfo>,
 }
 
 /// Detect whether a project root is an SSR project.
@@ -425,7 +425,7 @@ impl ProjectRegistry {
     /// analysis or trusted execution.
     pub fn from_workspace_roots(
         roots: &[String],
-        vite_opts: &crate::vite_config::ViteConfigOptions,
+        vite_opts: &verter_workspace::ViteConfigOptions,
     ) -> RegistryBuildResult {
         let mut projects = Vec::new();
         let mut trust_required = Vec::new();
@@ -487,8 +487,11 @@ impl ProjectRegistry {
             let mut fallback_vite_config_deps = Vec::new();
 
             if vite_opts.enabled && !has_tsconfigs {
-                use crate::vite_config::{analyze_vite_config, ViteConfigAnalysis};
-                match analyze_vite_config(&root_path) {
+                use verter_workspace::{analyze_vite_config, ViteConfigAnalysis};
+                let ws = verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions::default(),
+                );
+                match analyze_vite_config(&ws, &canonical) {
                     ViteConfigAnalysis::Resolved {
                         config_path,
                         aliases,
@@ -527,7 +530,7 @@ impl ProjectRegistry {
                             if let Some(np) = &vite_opts.node_path {
                                 let config_path_buf = PathBuf::from(&config_path);
                                 if let Some(result) =
-                                    crate::vite_config::execute_trusted_vite_config(
+                                    verter_workspace::execute_trusted_vite_config(
                                         &config_path_buf,
                                         &root_path,
                                         np,
@@ -553,7 +556,7 @@ impl ProjectRegistry {
                                     fallback_vite_config_deps = result.dependency_files;
                                 } else {
                                     // Execution failed, try LKG
-                                    let lkg = crate::vite_config::get_lkg_or_empty(&config_path);
+                                    let lkg = verter_workspace::get_lkg_or_empty(&config_path);
                                     if !lkg.is_empty() {
                                         fallback_workspace_aliases = lkg
                                             .iter()
@@ -570,7 +573,7 @@ impl ProjectRegistry {
                             }
                         } else {
                             // Not trusted → add to trust_required
-                            trust_required.push(crate::vite_config::ViteConfigTrustInfo {
+                            trust_required.push(verter_workspace::ViteConfigTrustInfo {
                                 config_path: config_path.clone(),
                                 workspace_root: canonical.clone(),
                                 reason,
@@ -1106,7 +1109,7 @@ mod tests {
         let root = tmp.to_string_lossy().replace('\\', "/");
         let registry = ProjectRegistry::from_workspace_roots(
             &[root.clone()],
-            &crate::vite_config::ViteConfigOptions {
+            &verter_workspace::ViteConfigOptions {
                 enabled: true,
                 trusted_files: Vec::new(),
                 node_path: Some("node".to_string()),
@@ -1156,7 +1159,7 @@ mod tests {
         let root = tmp.to_string_lossy().replace('\\', "/");
         let build_result = ProjectRegistry::from_workspace_roots(
             &[root.clone()],
-            &crate::vite_config::ViteConfigOptions {
+            &verter_workspace::ViteConfigOptions {
                 enabled: true,
                 trusted_files: Vec::new(),
                 node_path: None,
@@ -1219,7 +1222,7 @@ export default defineConfig(({ mode }) => ({
         let root = tmp.to_string_lossy().replace('\\', "/");
         let build_result = ProjectRegistry::from_workspace_roots(
             &[root.clone()],
-            &crate::vite_config::ViteConfigOptions {
+            &verter_workspace::ViteConfigOptions {
                 enabled: true,
                 trusted_files: Vec::new(),
                 node_path: None,
@@ -1272,7 +1275,7 @@ export default defineConfig(({ mode }) => ({
         let root = tmp.to_string_lossy().replace('\\', "/");
         let build_result = ProjectRegistry::from_workspace_roots(
             &[root.clone()],
-            &crate::vite_config::ViteConfigOptions {
+            &verter_workspace::ViteConfigOptions {
                 enabled: true,
                 trusted_files: Vec::new(),
                 node_path: None,
@@ -1314,7 +1317,7 @@ export default defineConfig(({ mode }) => ({
         let root = tmp.to_string_lossy().replace('\\', "/");
         let build_result = ProjectRegistry::from_workspace_roots(
             &[root.clone()],
-            &crate::vite_config::ViteConfigOptions {
+            &verter_workspace::ViteConfigOptions {
                 enabled: false,
                 trusted_files: Vec::new(),
                 node_path: None,

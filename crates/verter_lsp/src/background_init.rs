@@ -31,7 +31,7 @@ pub(super) fn spawn_heartbeat(client: Client) {
 /// All fields are owned or Arc-wrapped so the task can run independently.
 pub(super) struct BackgroundInitArgs {
     pub(super) roots: Vec<String>,
-    pub(super) vite_opts: crate::vite_config::ViteConfigOptions,
+    pub(super) vite_opts: verter_workspace::ViteConfigOptions,
     pub(super) init_lint_opts: Option<serde_json::Value>,
     pub(super) my_gen: u64,
     pub(super) client: Client,
@@ -55,38 +55,26 @@ pub(super) struct BackgroundInitArgs {
 
 struct PublishedWorkspaceBuild {
     root: verter_workspace::PublishedRoot,
-    trust_required: Vec<crate::vite_config::ViteConfigTrustInfo>,
+    trust_required: Vec<verter_workspace::ViteConfigTrustInfo>,
     configured_projects: Vec<(String, String)>,
 }
 
 fn build_published_workspace(
     ws: &verter_workspace::FilesystemWorkspace,
     canonical_roots: &[String],
-    vite_opts: &crate::vite_config::ViteConfigOptions,
+    vite_opts: &verter_workspace::ViteConfigOptions,
     generation: u64,
     init_lint_opts: Option<serde_json::Value>,
     conditional_root_narrowing: bool,
 ) -> PublishedWorkspaceBuild {
-    let vfs_vite_opts = verter_workspace::ViteConfigOptions {
-        enabled: vite_opts.enabled,
-        trusted_files: vite_opts.trusted_files.clone(),
-        node_path: vite_opts.node_path.clone(),
-    };
     let build = verter_workspace::build_workspace_snapshot(
         ws,
         canonical_roots,
         verter_workspace::workspace_snapshot::SnapshotGeneration(generation),
-        &vfs_vite_opts,
+        vite_opts,
     );
-    let trust_required: Vec<crate::vite_config::ViteConfigTrustInfo> = build
-        .trust_required
-        .iter()
-        .map(|info| crate::vite_config::ViteConfigTrustInfo {
-            config_path: info.config_path.clone(),
-            workspace_root: info.workspace_root.clone(),
-            reason: info.reason.clone(),
-        })
-        .collect();
+    let trust_required: Vec<verter_workspace::ViteConfigTrustInfo> =
+        build.trust_required.clone();
     let snapshot = Arc::new(build.snapshot);
     let mut views = crate::workspace_state::build_lsp_views(&snapshot, trust_required.clone());
 
@@ -1410,7 +1398,7 @@ mod tests {
         let build = build_published_workspace(
             &ws,
             std::slice::from_ref(&root),
-            &crate::vite_config::ViteConfigOptions::default(),
+            &verter_workspace::ViteConfigOptions::default(),
             7,
             None,
             false,
