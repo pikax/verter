@@ -2490,25 +2490,59 @@ fn migrate_engine_project_expr_surface_shape_preserves_env() {
     );
 }
 
-/// Plan §9 row 5: `engine.instantiate_local_generic_ref` never
-/// routed through `owner_engine` — it directly consumes
-/// `prepared_type_decl` + `apply_type_param_substitutions` on a
-/// `TypeExpr::Ref`. Post-migration the function body is unchanged
-/// structurally; verified by asserting its key call sites remain.
+/// Plan §9 row 5 → Phase 5e commit 6 production-caller migration:
+/// the engine's `instantiate_local_generic_ref` method's PRODUCTION
+/// callers in `meta_resolve.rs` migrate to a freestanding dispatch
+/// helper. The engine method itself is RETAINED for engine-internal
+/// callers (which depend on `resolve_final_prepared_type_target`'s
+/// re-export chain walk — a 5g-scope retirement); Phase 5e commit 6
+/// is scoped to the production-caller migration per the brief
+/// ("its callers in `meta_resolve.rs` ... migrate"). The complete
+/// engine-method retirement happens in 5g alongside the engine
+/// deletion gate (sub-plan §4.3).
+///
+/// Discriminating in both directions:
+/// - Pre-Phase-5e tree: `meta_resolve.rs` has 3 callsites of
+///   `engine.instantiate_local_generic_ref(...)`.
+/// - Post-Phase-5e (commit 6) tree: those 3 callsites migrated to
+///   the freestanding dispatch helper
+///   `crate::meta_resolve::instantiate_local_generic_ref_via_dispatch`,
+///   which routes through `ProjectSemanticDispatch::lower_type_expr_in_scope`
+///   (Expanded mode → `SemanticQueryKey::Instantiate { base, args, body_mode }`).
+///   The freestanding dispatch helper IS in place and routes through
+///   `dispatch.lower_type_expr_in_scope`.
 #[test]
-fn migrate_engine_instantiate_local_generic_ref_preserves_env_and_args() {
+fn instantiate_local_generic_ref_production_callers_migrated_to_dispatch_helper() {
+    let meta_src = include_str!("meta_resolve.rs");
+
+    // Positive: the freestanding dispatch helper must be in place
+    // and route through dispatch's shallow lower (which executes
+    // SemanticQueryKey::Instantiate internally).
+    assert!(
+        meta_src.contains("pub(crate) fn instantiate_local_generic_ref_via_dispatch"),
+        "Phase 5e commit 6: instantiate_local_generic_ref_via_dispatch must be defined in meta_resolve.rs",
+    );
+    assert!(
+        meta_src.contains("dispatch.lower_type_expr_in_scope"),
+        "Phase 5e commit 6: instantiate_local_generic_ref_via_dispatch must route through dispatch.lower_type_expr_in_scope",
+    );
+
+    // Engine-internal callers RETAIN the engine method until 5g
+    // engine retirement; the engine method's body remains in cmqe.rs
+    // and continues to drive build_default_type_param_substitutions /
+    // apply_type_param_substitutions through the prepared-decl resolver.
     let cmqe_src = include_str!("resolver_core/component_meta_query_engine.rs");
     assert!(
-        cmqe_src.contains("fn instantiate_local_generic_ref"),
-        "instantiate_local_generic_ref must survive post-migration (row 5)"
+        cmqe_src.contains("pub fn instantiate_local_generic_ref"),
+        "Phase 5e commit 6: engine method retained for engine-internal callers (5g retirement)",
     );
     assert!(
         cmqe_src.contains("build_default_type_param_substitutions"),
-        "instantiate_local_generic_ref must still drive through build_default_type_param_substitutions"
+        "Phase 5e commit 6: engine method body must still drive build_default_type_param_substitutions",
     );
     assert!(
         cmqe_src.contains("apply_type_param_substitutions"),
-        "instantiate_local_generic_ref must still call apply_type_param_substitutions"
+        "Phase 5e commit 6: engine method body must still drive apply_type_param_substitutions",
     );
 }
 

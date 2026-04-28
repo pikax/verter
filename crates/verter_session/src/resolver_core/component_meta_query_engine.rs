@@ -3597,6 +3597,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             )
             .unwrap_or_else(|| expr.clone());
         if matches!(projected_expr, TypeExpr::Unknown { .. }) {
+            // Phase 5e commit 6 — engine-internal caller retained on
+            // engine method until 5g (depends on
+            // `resolve_final_prepared_type_target` re-export chain).
             if let Some(expanded) = self
                 .instantiate_local_generic_ref(resolution_scope_canonical_id, expr)
                 .or_else(|| self.instantiate_local_generic_ref(active_scope_canonical_id, expr))
@@ -3840,6 +3843,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // Try expanding the alias's body (substituting
                         // type arguments), then retry the indexed access
                         // against the substituted body.
+                        // Phase 5e commit 6 — engine-internal caller retained
+                        // on engine method until 5g (re-export chain semantics).
                         let expanded = if !type_arguments.is_empty() {
                             self.instantiate_local_generic_ref(
                                 resolution_scope_canonical_id,
@@ -4104,6 +4109,21 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .then_some(reduced)
     }
 
+    /// Phase 5e commit 6 — engine-internal callers RETAINED on this
+    /// method until 5g engine retirement. The production callers in
+    /// `meta_resolve.rs` migrated to
+    /// `crate::meta_resolve::instantiate_local_generic_ref_via_dispatch`
+    /// (the dispatch helper goes through the shared memo and
+    /// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`).
+    /// Engine-internal callers (lines 3601, 3844, 3849, 4256) retain
+    /// the engine method because they depend on
+    /// `resolve_final_prepared_type_target`'s re-export chain walk
+    /// (which the dispatch's `lower_type_expr_in_scope` does NOT
+    /// inherit verbatim — bare-name resolution and final-target
+    /// walking are distinct resolution layers; threading the
+    /// re-export walk through dispatch is a 5g-scope change). Method
+    /// retires fully in 5g once the engine-internal callers retire
+    /// alongside engine deletion (§4.3 deletion gate).
     pub fn instantiate_local_generic_ref(
         &mut self,
         scope_canonical_id: &str,
@@ -4234,6 +4254,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     return Some(shape);
                 }
             }
+            // Phase 5e commit 6 — engine-internal caller retained on
+            // engine method until 5g (re-export chain semantics).
             if let Some(expanded_ref) =
                 query_engine.instantiate_local_generic_ref(scope_canonical_id, target)
             {

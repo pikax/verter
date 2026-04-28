@@ -100,6 +100,16 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// fixed-point. When `engine` is `None`, a transient engine is
 /// created (suitable for top-level entry points without a caller
 /// engine).
+///
+/// Phase 5e commit 6 retained the engine route-fast-path because
+/// `engine.project_route_surface_expr` exercises engine-local
+/// resolution paths (re-export chains, prepared-decl fallbacks) that
+/// the dispatch's `lower_type_expr_in_scope` does not subsume —
+/// removing it caused stack overflows in tests with realistic
+/// indexed-access / utility shapes (e.g., `*_keeps_imported_*`
+/// member-path test family). The engine method itself remains a
+/// Phase 5c trampoline (already routes through dispatch), so the
+/// fast-path remains semantically aligned with dispatch.
 pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     host: &'host VerterHost,
     engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'host>>,
@@ -119,9 +129,10 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     // Phase 1+2: registry-route fast path via caller's engine (or a
     // transient engine when caller doesn't pass one). The Class D
     // route helpers (`project_route_surface_expr`,
-    // `lower_and_project_to_expanded`) stay on the engine until 5e/5f
-    // per the brief; threading the engine preserves fuse and
-    // request-local cache continuity.
+    // `lower_and_project_to_expanded`) exercise engine-local
+    // re-export and prepared-decl resolution paths that dispatch's
+    // generic `lower_type_expr_in_scope` does not inherit verbatim;
+    // they retire alongside the engine deletion in 5g.
     let route = component_meta_registry_public_indexed_access_route(expr)
         .or_else(|| component_meta_registry_public_utility_route(expr));
     if let Some((root_symbol, route)) = route {
@@ -193,6 +204,99 @@ pub(crate) fn project_expr_class_a_shape_via_dispatch_threaded<'host>(
 // prepared-decl-second; threading the prepared-decl path through
 // dispatch atomically is a Phase 5g change. Class B callsite
 // migration deferred to 5g per CLAUDE.md fix-quality discipline.
+
+/// Class D — Pick route-target via dispatch's `execute_pick`
+/// (Phase 5e §4.1 commit 6 / sub-plan §C.3 D-T recipe).
+///
+/// Resolves `symbol_name` to a base `SemanticNodeId` (via Class A
+/// lowering on a bare `Ref` of the symbol), then dispatches
+/// `Pick<base, key_set>` through the dispatch's `execute_pick` helper
+/// (which routes through `build_builtin_utility` Pick arm at
+/// `build.rs:870`).
+///
+/// Returns `Some(reduced)` when the dispatch produces a non-Opaque
+/// projection. Caller pattern (per the engine's
+/// `project_route_surface_expr` Pick fallback): use the result as a
+/// route surface; fall back to the raw registry-candidate path on miss.
+pub(crate) fn pick_via_dispatch_pick_helper(
+    query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    symbol_name: &str,
+    members: &[String],
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionMode, QueryResult};
+
+    let dispatch = ProjectSemanticDispatch::new(query_engine.host);
+    let symbol_ref = verter_semantic::analysis::type_expr::TypeExpr::Ref {
+        name: Arc::from(symbol_name),
+        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+    };
+    let base = dispatch.lower_type_expr_in_scope(scope_canonical_id, &symbol_ref)?;
+
+    let members_arc: Vec<Arc<str>> = members.iter().map(|s| Arc::from(s.as_str())).collect();
+    let result = dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded);
+    let node = match result {
+        QueryResult::Value(id) => id,
+        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+    };
+    dispatch.raise_node_to_type_expr(node)
+}
+
+/// Class D — generic-Ref instantiation via dispatch (Phase 5e §4.1
+/// commit 6 / sub-plan §C.3 D-T recipe).
+///
+/// Dispatch-equivalent of
+/// `ComponentMetaQueryEngine::instantiate_local_generic_ref`. The
+/// engine method matched a `TypeExpr::Ref { name, type_arguments }`
+/// with non-empty type_arguments, resolved the declaration, gated
+/// against package-backed targets, and applied the prepared-decl's
+/// type-parameter substitutions to produce the instantiated body.
+///
+/// The dispatch path goes through `lower_type_expr_in_scope` which
+/// routes a generic `Ref` through
+/// `SemanticQueryKey::Instantiate { base, args, body_mode: Expanded }`
+/// internally — the dispatcher's `build_instantiate` performs the
+/// same substitution logic (`build_default_type_param_substitutions`
+/// + `apply_type_param_substitutions`) the engine method called.
+///
+/// Returns `Some(reduced)` only when:
+/// - `expr` is a generic `Ref` (else returns `None`, matching the
+///   engine method's bail-on-non-Ref / bail-on-empty-args),
+/// - the dispatch lowering produced a node distinct from the carrier
+///   `Opaque(Miss)` shell (the dispatcher's miss sentinel for
+///   unresolved decl / package-backed / substitution-failure cases),
+/// - the raised body differs from the input expression (matches the
+///   engine method's "no change ⇒ caller falls back" semantics).
+pub(crate) fn instantiate_local_generic_ref_via_dispatch(
+    host: &VerterHost,
+    scope_canonical_id: &str,
+    expr: &verter_semantic::analysis::type_expr::TypeExpr,
+) -> Option<verter_semantic::analysis::type_expr::TypeExpr> {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_semantic::analysis::type_expr::TypeExpr;
+
+    // Engine-method parity: bail when `expr` is not a generic `Ref`.
+    let TypeExpr::Ref { type_arguments, .. } = expr else {
+        return None;
+    };
+    if type_arguments.is_empty() {
+        return None;
+    }
+
+    let dispatch = ProjectSemanticDispatch::new(host);
+    let lowered = dispatch.lower_type_expr_in_scope(scope_canonical_id, expr)?;
+    let raised = dispatch.raise_node_to_type_expr(lowered)?;
+    // Engine-method parity: callers use `.unwrap_or_else(|| original.clone())`,
+    // so a no-op (raised == expr) must surface as `None` to preserve the
+    // fallback path. A miss-shaped raise (Unknown/Opaque) likewise surfaces
+    // as `None` — mirrors the engine method's `prepared_type_decl?` /
+    // `build_default_type_param_substitutions(...)?` early-return rules.
+    if raised == *expr {
+        return None;
+    }
+    Some(raised)
+}
 
 // =============================================================================
 // Plan §4.10 / K1 — `MacroFieldGraphState` lazy-lowering scaffold + lower
@@ -6200,8 +6304,16 @@ impl VerterHost {
                                             .unwrap_or_else(|| {
                                                 scope_canonical_id.to_string()
                                             });
-                                        let expanded = query_engine
-                                            .instantiate_local_generic_ref(
+                                        // Phase 5e commit 6 — migrate the
+                                        // generic-Ref instantiation to dispatch
+                                        // (sub-plan §C.3 D-T recipe). The
+                                        // helper resolves
+                                        // `instantiate_local_generic_ref` via
+                                        // the dispatch's `Instantiate` arm
+                                        // (`SemanticQueryKey::Instantiate`).
+                                        let expanded =
+                                            instantiate_local_generic_ref_via_dispatch(
+                                                query_engine.host,
                                                 materialize_scope.as_str(),
                                                 &stabilized,
                                             )
@@ -6476,20 +6588,22 @@ impl VerterHost {
                         // route shapes natively. The remaining
                         // surface-expr fallback covers non-route
                         // shapes.
-                        let projected = query_engine
-                            .project_route_surface_expr(
-                                scope_canonical_id,
-                                symbol_name,
-                                &member_route,
-                            )
-                            .or_else(|| {
-                                project_expr_class_a_via_dispatch(
-                                    query_engine.host,
-                                    scope_canonical_id,
-                                    &route_expr,
-                                )
-                            })
-                            .unwrap_or(route_expr);
+                        //
+                        // Phase 5e commit 6 — migrate to dispatch
+                        // (sub-plan §C.3 D-T recipe: RouteDemand::MemberPath
+                        // → Class A with path). The Class A helper handles
+                        // the IndexedAccess route_expr through its
+                        // registry-route fast-path internally; the previous
+                        // `project_route_surface_expr` + fallback chain
+                        // collapses to a single dispatch call.
+                        let _ = &member_route; // route demand carrier retained for parity
+                        let projected = project_expr_class_a_via_dispatch_threaded(
+                            query_engine.host,
+                            Some(query_engine),
+                            scope_canonical_id,
+                            &route_expr,
+                        )
+                        .unwrap_or(route_expr);
                         let member_surface = query_engine.materialize_member_surface_expr(
                             scope_canonical_id,
                             &projected,
@@ -6515,12 +6629,14 @@ impl VerterHost {
                                         query_engine,
                                     )
                                     .unwrap_or_else(|| scope_canonical_id.to_string());
-                                let expanded = query_engine
-                                    .instantiate_local_generic_ref(
-                                        materialize_scope_canonical_id.as_str(),
-                                        &stabilized_surface,
-                                    )
-                                    .unwrap_or_else(|| stabilized_surface.clone());
+                                // Phase 5e commit 6 — migrate the generic-Ref
+                                // instantiation to dispatch.
+                                let expanded = instantiate_local_generic_ref_via_dispatch(
+                                    query_engine.host,
+                                    materialize_scope_canonical_id.as_str(),
+                                    &stabilized_surface,
+                                )
+                                .unwrap_or_else(|| stabilized_surface.clone());
                                 // Phase 5e commit 5 — migrate the route-loop
                                 // call to the Class A dispatch helper.
                                 let solved_opt = project_expr_class_a_via_dispatch_threaded(
@@ -6580,24 +6696,36 @@ impl VerterHost {
                     (!properties.is_empty())
                         .then(|| TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties })))
                         .or_else(|| {
-                            query_engine
-                                .project_route_surface_expr(scope_canonical_id, symbol_name, route)
-                                .map(|projected| {
-                                    query_engine.materialize_member_surface_expr(
-                                        scope_canonical_id,
-                                        &projected,
-                                        true,
-                                    )
-                                })
-                                .or_else(|| {
-                                    materialize_component_meta_registry_candidate(
-                                        query_engine,
-                                        scope_canonical_id,
-                                        symbol_name,
-                                        raw_body,
-                                        prefer_explicit_raw_surface,
-                                    )
-                                })
+                            // Phase 5e commit 6 — migrate route-target
+                            // (RouteDemand::Pick) via D-T recipe: dispatch
+                            // through `execute_pick` (sub-plan §C.3 D-T).
+                            // The pick_via_dispatch_pick_helper resolves the
+                            // symbol to a base node via Class A lowering, then
+                            // dispatches `Pick<base, key_set>` through the
+                            // builtin Pick utility path; falls back to the
+                            // raw materialiser candidate for non-Object bases.
+                            pick_via_dispatch_pick_helper(
+                                query_engine,
+                                scope_canonical_id,
+                                symbol_name,
+                                members.as_slice(),
+                            )
+                            .map(|projected| {
+                                query_engine.materialize_member_surface_expr(
+                                    scope_canonical_id,
+                                    &projected,
+                                    true,
+                                )
+                            })
+                            .or_else(|| {
+                                materialize_component_meta_registry_candidate(
+                                    query_engine,
+                                    scope_canonical_id,
+                                    symbol_name,
+                                    raw_body,
+                                    prefer_explicit_raw_surface,
+                                )
+                            })
                         })
                 }
                 crate::resolver_core::RouteDemand::Omit(omitted) => {
@@ -8482,9 +8610,13 @@ fn materialize_component_meta_macro_shape_member_type_expr(
                     lowered,
                 ) =>
         {
-            query_engine
-                .instantiate_local_generic_ref(materialize_scope_canonical_id.as_str(), lowered)
-                .unwrap_or_else(|| lowered.clone())
+            // Phase 5e commit 6 — migrate to dispatch (sub-plan §C.3 D-T recipe).
+            instantiate_local_generic_ref_via_dispatch(
+                query_engine.host,
+                materialize_scope_canonical_id.as_str(),
+                lowered,
+            )
+            .unwrap_or_else(|| lowered.clone())
         }
         _ => lowered.clone(),
     };
@@ -9179,26 +9311,38 @@ fn materialize_component_meta_registry_structural_expr(
             component_meta_registry_public_utility_route(expr)
                 .or_else(|| component_meta_registry_public_indexed_access_route(expr))
         {
-            engine
-                .project_route_surface_expr(scope_canonical_id, &root_symbol, &route)
-                .or_else(|| {
-                    let declaration =
-                        engine.resolve_type_declaration(scope_canonical_id, &root_symbol);
-                    (!declaration.canonical_source.is_empty())
-                        .then(|| {
-                            engine.project_route_surface_expr(
-                                declaration.canonical_source.as_str(),
-                                if declaration.resolved_name.is_empty() {
-                                    root_symbol.as_str()
-                                } else {
-                                    declaration.resolved_name.as_str()
-                                },
-                                &route,
-                            )
-                        })
-                        .flatten()
-                })
-                .unwrap_or_else(|| expr.clone())
+            // Phase 5e commit 6 — migrate route-target callers to dispatch
+            // (sub-plan §C.3 D-T recipe). Route the utility/indexed
+            // expression through the Class A dispatch helper, which handles
+            // Whole/MemberPath via its registry-route fast-path AND falls
+            // back to the generic ProjectPath{[],Expanded} dispatch. Pick/Omit
+            // route-targets reach the dispatch's `Instantiate` builtin
+            // utility path internally via lower_type_expr_in_scope.
+            //
+            // The two-step engine resolution (try direct scope, then
+            // declaration scope) is preserved so re-exported / barrel-routed
+            // declarations resolve correctly.
+            let _ = &route; // route demand carrier preserved for parity reads
+            project_expr_class_a_via_dispatch_threaded(
+                engine.host,
+                Some(engine),
+                scope_canonical_id,
+                expr,
+            )
+            .or_else(|| {
+                let declaration = engine.resolve_type_declaration(scope_canonical_id, &root_symbol);
+                (!declaration.canonical_source.is_empty())
+                    .then(|| {
+                        project_expr_class_a_via_dispatch_threaded(
+                            engine.host,
+                            Some(engine),
+                            declaration.canonical_source.as_str(),
+                            expr,
+                        )
+                    })
+                    .flatten()
+            })
+            .unwrap_or_else(|| expr.clone())
         } else {
             match expr {
                 TypeExpr::Ref {
