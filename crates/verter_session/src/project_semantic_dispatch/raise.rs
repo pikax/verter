@@ -67,6 +67,55 @@ pub(crate) fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
     DispatchTraceGuard
 }
 
+// =====================================================================
+// Plan §1.C — Per-key dispatch traffic counter (diagnostic only).
+//
+// Counts how many times `execute_read` is invoked with each
+// `SemanticQueryKey`, keyed by a (variant_discriminant, content_hash)
+// digest. Diagnostic-only, `#[cfg(test)]`-gated, zero footprint outside
+// test builds.
+//
+// F18 (r2 review): variant identity uses std::mem::discriminant so the
+// digest does NOT need to be updated when Phase 5 adds new
+// SemanticQueryKey variants. The discriminant is opaque but stable
+// per-variant; pairs with the hash for full key identity.
+// =====================================================================
+
+#[cfg(test)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SemanticQueryKeyDigest {
+    pub variant: std::mem::Discriminant<crate::semantic_query::SemanticQueryKey>,
+    pub hash: u64,
+}
+
+#[cfg(test)]
+impl SemanticQueryKeyDigest {
+    fn from_key(key: &crate::semantic_query::SemanticQueryKey) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        key.hash(&mut hasher);
+        Self {
+            variant: std::mem::discriminant(key),
+            hash: hasher.finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DISPATCH_KEY_COUNTS:
+        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+#[cfg(test)]
+pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey) {
+    let digest = SemanticQueryKeyDigest::from_key(key);
+    DISPATCH_KEY_COUNTS.with(|c| {
+        *c.borrow_mut().entry(digest).or_insert(0) += 1;
+    });
+}
+
 #[cfg(test)]
 fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
     match key {
@@ -456,6 +505,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // variants are recorded as the caller wrote them).
         #[cfg(test)]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
+
+        // Plan §1.C — per-key dispatch traffic counter. Records a
+        // (variant_discriminant, content_hash) digest so diagnostic
+        // tests can dump the top-N most-dispatched keys (deferred per
+        // §1.C.3 pending an InputMenu corpus fixture).
+        #[cfg(test)]
+        record_dispatch_key(&key);
 
         // Mirror the canonicalisation done by `execute` so the cache key
         // identity is stable across the sugar variants.
