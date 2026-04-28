@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "phase": "phase-06",
-  "status": "partial-deferred",
-  "base_commit": "6b1cd1e967bca2d0993c67bae220608e4429fecd",
-  "work_head_before_marker": "7368e9922052d1ee3ea949e158ffb92339d97e63",
+  "status": "success",
+  "base_commit": "87ffe437ab9e3de7507311530c36b7bc0756d540",
+  "work_head_before_marker": "0d232cf8",
   "test_results": {
     "workspace": {
       "test_scope": "cargo test --workspace --tests --verbose",
-      "passed": 10117,
+      "passed": 10201,
       "failed": 0
     },
     "correctness": {
@@ -19,7 +19,6 @@
   "snapshot_drift": "none",
   "guards_un_ignored": ["no_deprecated_workspace_reexports"],
   "deferred": [
-    "6.2.1 reverse_dependencies legacy mirror deletion — STOPPED per §6.3 (4 pre-existing tests regressed). Workspace EdgeStore lacks stem-keyed reverse-dep buckets for unresolved Relative imports, so MemoryWorkspace test setups (no published IdeProjectConfig root) cannot reproduce the legacy mirror's behaviour for not-yet-loaded deps. Needs §0.6.2 sub-plan: extend EdgeStore stem-matching, or migrate ~130 new_standalone() tests to publish workspace roots.",
     "6.2.2 SchedulerBackedWorkspace removal — needs sub-plan; production callers in scheduler_shim.rs"
   ],
   "report_path": "phase-06-report.md"
