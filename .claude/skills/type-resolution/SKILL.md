@@ -504,11 +504,12 @@ All type expansion (macro types, component-meta, imported type aliases) goes thr
 When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, and other shared host-backed queries), only follow the import graph reachable from the requested type's declaration graph.
 
 - There is one shared cross-file type resolver. Consumer-specific ownership rules live in `/component-meta`.
-- The resolver has exactly four query modes (see "Query Mode Contract" above):
+- The resolver has exactly four public query modes (see "Query Mode Contract" above):
   - `Identity`: declaration identity and canonical source location only. No body read, no shape materialization.
   - `Navigate`: minimum semantic work needed to continue a requested path. Intermediate hops run in this mode.
   - `Shallow`: one surface level of the requested node without recursive expansion.
   - `Expanded`: recursive materialization of the requested result.
+- A fifth mode, `Skeleton`, is internal and **scoped to cycle detection only**. `build_instantiate` synthesizes `TypeParam` shells for unbound type parameters when invoked with `body_mode: Skeleton`, preserving Conditional branches that would otherwise collapse for `args: []` calls against generic decls. Used exclusively by `ref_root_reaches_transitive_cycle_node`'s BFS step to discover recursive references through nested mapped/template-literal/conditional bodies. Public callers MUST use the four modes above; do not invoke `Skeleton` from non-cycle code paths.
 - Do not introduce ad hoc navigate/shallow flags; use the canonical four modes and the path-precise projection surface.
 - Do not walk unrelated imports from the same file.
 - Do not treat plain imports as implicit exports.
