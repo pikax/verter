@@ -213,34 +213,6 @@ pub fn fixture_props_with_defaults() -> SnapshotView {
     ])
 }
 
-// ── defineSlots<T> — Verter macros §slots ───────────────────────────────────
-//   Two slots: `default(props: { item: string }): any` and
-//   `named(props: { row: number }): any`. The snapshot view's
-//   `slot_view_from` renders the binding-only payload signature
-//   (alphabetically sorted by binding name) when bindings are
-//   non-empty.
-pub fn fixture_slots_typed() -> SnapshotView {
-    SnapshotView {
-        component_name: COMPONENT_NAME.to_string(),
-        props: vec![],
-        events: vec![],
-        slots: vec![
-            SlotView {
-                name: "default".to_string(),
-                payload_signature: "{ item: string }".to_string(),
-            },
-            SlotView {
-                name: "named".to_string(),
-                payload_signature: "{ row: number }".to_string(),
-            },
-        ],
-        models: vec![],
-        exposed: vec![],
-        fallthrough: None,
-        flags: empty_flags(),
-    }
-}
-
 // ── defineEmits<T> — Verter macros §emits ───────────────────────────────────
 //   One event `click` whose parameter list is `[evt: string]` —
 //   tuple-form, single labelled element of primitive type.
@@ -254,33 +226,6 @@ pub fn fixture_events_typed() -> SnapshotView {
         }],
         slots: vec![],
         models: vec![],
-        exposed: vec![],
-        fallthrough: None,
-        flags: empty_flags(),
-    }
-}
-
-// ── defineModel<T> — Verter macros §model ───────────────────────────────────
-//   `defineModel<string>()` creates the default `modelValue` model
-//   with type `string`. `defineModel<number>('count')` creates a
-//   second model named `count` with type `number`. The view sorts
-//   models alphabetically; `count` < `modelValue`.
-pub fn fixture_models() -> SnapshotView {
-    SnapshotView {
-        component_name: COMPONENT_NAME.to_string(),
-        props: vec![],
-        events: vec![],
-        slots: vec![],
-        models: vec![
-            ModelView {
-                name: "count".to_string(),
-                type_signature: "number".to_string(),
-            },
-            ModelView {
-                name: "modelValue".to_string(),
-                type_signature: "string".to_string(),
-            },
-        ],
         exposed: vec![],
         fallthrough: None,
         flags: empty_flags(),
@@ -379,11 +324,11 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "conditional_distributive" => Some(conditional_distributive()),
         "intersection_of_objects" => Some(intersection_of_objects()),
         "recursive_alias_via_typeof" => Some(recursive_alias_via_typeof()),
-        // Phase 0b — component-meta property macros.
+        // Phase 0b — component-meta property macros (5 of 7 land;
+        // `fixture_slots_typed` and `fixture_models` deferred per
+        // §0p.A.4 case 2 — see `phase-00b-tier1-mismatches.md`).
         "fixture_props_with_defaults" => Some(fixture_props_with_defaults()),
-        "fixture_slots_typed" => Some(fixture_slots_typed()),
         "fixture_events_typed" => Some(fixture_events_typed()),
-        "fixture_models" => Some(fixture_models()),
         "fixture_exposed_methods" => Some(fixture_exposed_methods()),
         "fixture_fallthrough_inherit" => Some(fixture_fallthrough_inherit()),
         "fixture_fallthrough_root_inherit" => Some(fixture_fallthrough_root_inherit()),

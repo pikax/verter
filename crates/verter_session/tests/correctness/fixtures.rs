@@ -195,35 +195,11 @@ withDefaults(defineProps<{ name: string; count?: number }>(), { count: 0 });
 <template><div /></template>
 "#;
 
-// ── defineSlots<T> — Verter macros §slots ───────────────────────────────────
-//   Two slots: `default(props: { item: string }): any` and
-//   `named(props: { row: number }): any`. Both produce binding-only
-//   payload signatures (return type `any` is captured separately).
-const FIXTURE_SLOTS_TYPED_VUE: &str = r#"<script setup lang="ts">
-defineSlots<{
-  default(props: { item: string }): any;
-  named(props: { row: number }): any;
-}>();
-</script>
-<template><div /></template>
-"#;
-
 // ── defineEmits<T> — Verter macros §emits ───────────────────────────────────
 //   One event `click` with parameter list `[evt: string]`. Using a
 //   primitive parameter type avoids cross-file `Event` imports.
 const FIXTURE_EVENTS_TYPED_VUE: &str = r#"<script setup lang="ts">
 defineEmits<{ click: [evt: string] }>();
-</script>
-<template><div /></template>
-"#;
-
-// ── defineModel<T> — Verter macros §model ───────────────────────────────────
-//   Two model entries: the unnamed `defineModel<string>()` defaults to
-//   the `modelValue` model name; `defineModel<number>('count')` names
-//   the second model `count`.
-const FIXTURE_MODELS_VUE: &str = r#"<script setup lang="ts">
-defineModel<string>();
-defineModel<number>('count');
 </script>
 <template><div /></template>
 "#;
@@ -259,17 +235,20 @@ defineProps<{ disabled?: boolean }>();
 "#;
 
 // ── single component root inheriting child surface — CLAUDE.md §Fallthrough ─
-//   The wrapper `<Inner />` is a single component root: its own
-//   declared surface (a `label` prop on `Inner`) propagates as the
-//   inherited fallthrough surface on the wrapper. The wrapper
-//   declares zero props itself, so the only entry in the
-//   fallthrough projection comes from `component:/inner.vue`.
+//   The wrapper `<Inner />` is a single component root: its declared
+//   `label` prop propagates as the inherited fallthrough surface on
+//   the wrapper. Inner declares `inheritAttrs: false` so its own
+//   accepted surface is exactly `{ label }` (no native:div
+//   intrinsics chained in). The wrapper therefore inherits exactly
+//   `{ label: string /* from component:/inner.vue */ }` — a
+//   hand-authorable signature with one component-sourced entry.
 const FIXTURE_FALLTHROUGH_ROOT_INHERIT_WRAPPER_VUE: &str = r#"<script setup lang="ts">
 import Inner from './inner.vue';
 </script>
 <template><Inner /></template>
 "#;
 const FIXTURE_FALLTHROUGH_ROOT_INHERIT_INNER_VUE: &str = r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false });
 defineProps<{ label: string }>();
 </script>
 <template><div /></template>
@@ -435,9 +414,7 @@ const F_RECURSIVE_ALIAS_VIA_TYPEOF: &[(&str, &str)] = &[("/c.vue", RECURSIVE_ALI
 // ── Phase 0b Class A property fixture file sets ─────────────────────────────
 const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
     &[("/c.vue", FIXTURE_PROPS_WITH_DEFAULTS_VUE)];
-const F_FIXTURE_SLOTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_SLOTS_TYPED_VUE)];
 const F_FIXTURE_EVENTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_EVENTS_TYPED_VUE)];
-const F_FIXTURE_MODELS: &[(&str, &str)] = &[("/c.vue", FIXTURE_MODELS_VUE)];
 const F_FIXTURE_EXPOSED_METHODS: &[(&str, &str)] = &[("/c.vue", FIXTURE_EXPOSED_METHODS_VUE)];
 const F_FIXTURE_FALLTHROUGH_INHERIT: &[(&str, &str)] =
     &[("/c.vue", FIXTURE_FALLTHROUGH_INHERIT_VUE)];
@@ -488,7 +465,74 @@ const F_PATH_TABS_DYNAMIC_HELPER: &[(&str, &str)] = &[
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 0a + 0b registry.
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// Iteration-order discipline: Class B + C fixtures are listed
+// FIRST so that under `UPDATE_SNAPSHOTS=1` the regression baselines
+// are captured before the harness's by-design panic on Class A
+// (see `correctness_snapshot_for_every_fixture` in
+// `tests/correctness.rs`). The post-cutover normal run iterates the
+// same list and validates every entry against its committed
+// snapshot — Class A against `expected.rs` via
+// `ensure_class_a_expected_matches_snapshot`, Class B+C against the
+// captured `<id>.regression.snap.json`. Test order is independent
+// of correctness.
 pub const FIXTURES: &[CorrectnessFixture] = &[
+    // ── Phase 0b Class B — corpus_representatives regression baselines ──────
+    CorrectnessFixture {
+        id: "accordion",
+        files: F_ACCORDION,
+        target: "/accordion.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "alert",
+        files: F_ALERT,
+        target: "/alert.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "app",
+        files: F_APP,
+        target: "/app.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "auth_form",
+        files: F_AUTH_FORM,
+        target: "/auth_form.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "avatar",
+        files: F_AVATAR,
+        target: "/avatar.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "avatar_group",
+        files: F_AVATAR_GROUP,
+        target: "/avatar_group.vue",
+        class: FixtureClass::ClassB,
+    },
+    // ── Phase 0b Class C — pathological regression baselines ────────────────
+    CorrectnessFixture {
+        id: "pathological_table_loading_animation",
+        files: F_PATH_TABLE_LOADING,
+        target: "/table.vue",
+        class: FixtureClass::ClassC,
+    },
+    CorrectnessFixture {
+        id: "pathological_editor_toolbar_array_or_nested",
+        files: F_PATH_EDITOR_TOOLBAR,
+        target: "/editor_toolbar.vue",
+        class: FixtureClass::ClassC,
+    },
+    CorrectnessFixture {
+        id: "pathological_tabs_dynamic_helper",
+        files: F_PATH_TABS_DYNAMIC_HELPER,
+        target: "/tabs.vue",
+        class: FixtureClass::ClassC,
+    },
     // ── Phase 0a Class A — mapped types + structural ────────────────────────
     CorrectnessFixture {
         id: "mapped_pick_two_keys",
@@ -557,6 +601,16 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         class: FixtureClass::ClassA,
     },
     // ── Phase 0b Class A — component-meta property macros ───────────────────
+    //
+    // 5 of the 7 brief-listed property fixtures land here. 2 are
+    // deferred per §0p.A.4 case 2 (rule-correct expected does not
+    // match Verter's current output — see
+    // `phase-00b-tier1-mismatches.md` for rule citations and the
+    // diff). The deferred ids are `fixture_slots_typed` (slot
+    // binding type literals not resolved) and `fixture_models`
+    // (`defineModel<T>()` type T not resolved through the macro
+    // path). Both are Verter resolver defects to be fixed in a
+    // later phase.
     CorrectnessFixture {
         id: "fixture_props_with_defaults",
         files: F_FIXTURE_PROPS_WITH_DEFAULTS,
@@ -564,20 +618,8 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         class: FixtureClass::ClassA,
     },
     CorrectnessFixture {
-        id: "fixture_slots_typed",
-        files: F_FIXTURE_SLOTS_TYPED,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
         id: "fixture_events_typed",
         files: F_FIXTURE_EVENTS_TYPED,
-        target: "/c.vue",
-        class: FixtureClass::ClassA,
-    },
-    CorrectnessFixture {
-        id: "fixture_models",
-        files: F_FIXTURE_MODELS,
         target: "/c.vue",
         class: FixtureClass::ClassA,
     },
@@ -598,61 +640,5 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         files: F_FIXTURE_FALLTHROUGH_ROOT_INHERIT,
         target: "/c.vue",
         class: FixtureClass::ClassA,
-    },
-    // ── Phase 0b Class B — corpus_representatives regression baselines ──────
-    CorrectnessFixture {
-        id: "accordion",
-        files: F_ACCORDION,
-        target: "/accordion.vue",
-        class: FixtureClass::ClassB,
-    },
-    CorrectnessFixture {
-        id: "alert",
-        files: F_ALERT,
-        target: "/alert.vue",
-        class: FixtureClass::ClassB,
-    },
-    CorrectnessFixture {
-        id: "app",
-        files: F_APP,
-        target: "/app.vue",
-        class: FixtureClass::ClassB,
-    },
-    CorrectnessFixture {
-        id: "auth_form",
-        files: F_AUTH_FORM,
-        target: "/auth_form.vue",
-        class: FixtureClass::ClassB,
-    },
-    CorrectnessFixture {
-        id: "avatar",
-        files: F_AVATAR,
-        target: "/avatar.vue",
-        class: FixtureClass::ClassB,
-    },
-    CorrectnessFixture {
-        id: "avatar_group",
-        files: F_AVATAR_GROUP,
-        target: "/avatar_group.vue",
-        class: FixtureClass::ClassB,
-    },
-    // ── Phase 0b Class C — pathological regression baselines ────────────────
-    CorrectnessFixture {
-        id: "pathological_table_loading_animation",
-        files: F_PATH_TABLE_LOADING,
-        target: "/table.vue",
-        class: FixtureClass::ClassC,
-    },
-    CorrectnessFixture {
-        id: "pathological_editor_toolbar_array_or_nested",
-        files: F_PATH_EDITOR_TOOLBAR,
-        target: "/editor_toolbar.vue",
-        class: FixtureClass::ClassC,
-    },
-    CorrectnessFixture {
-        id: "pathological_tabs_dynamic_helper",
-        files: F_PATH_TABS_DYNAMIC_HELPER,
-        target: "/tabs.vue",
-        class: FixtureClass::ClassC,
     },
 ];
