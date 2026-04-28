@@ -470,6 +470,13 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
     fn validate(&self, canonical_id: &str, version: &crate::semantic_query::DepVersion) -> bool {
         match version {
             crate::semantic_query::DepVersion::WholeHash(expected) => {
+                // Phase 5a §6.6 / A8: ambient virtual ids
+                // (`ambient:/<tag>/<canonical>`) bypass the shallow-file
+                // map (they have no `ShallowFileState`) and route to the
+                // workspace's ambient lib registry.
+                if canonical_id.starts_with("ambient:/") {
+                    return self.validate_ambient_whole_hash(canonical_id, *expected);
+                }
                 match self.host.shallow_file_state(canonical_id) {
                     Some(state) => state.whole_hash == *expected,
                     None => false,
@@ -484,6 +491,37 @@ impl crate::completion_fence::FenceValidator for HostFenceValidator<'_> {
             // site exists, no cache entry can carry this variant.
             crate::semantic_query::DepVersion::RouteGeneration(_) => true,
         }
+    }
+}
+
+impl HostFenceValidator<'_> {
+    /// Phase 5a §6.6 / A8: validate an ambient virtual id against the
+    /// workspace's ambient lib registry. Returns `true` iff the parsed
+    /// `ProjectStableKey + canonical` pair points at an entry whose
+    /// content_hash matches `expected`.
+    ///
+    /// Returns `false` when the virtual id is malformed, the project is
+    /// gone (re-registration with new content), or the entry was unregistered.
+    fn validate_ambient_whole_hash(
+        &self,
+        virtual_id: &str,
+        expected: crate::semantic_query::HashValue,
+    ) -> bool {
+        let Some(stripped) = virtual_id.strip_prefix("ambient:/") else {
+            return false;
+        };
+        let Some((tag, canonical)) = stripped.split_once('/') else {
+            return false;
+        };
+        let Some(stable_key) = verter_workspace::ProjectStableKey::parse_hex_tag(tag) else {
+            return false;
+        };
+        let view = self.host.workspace().ambient_libs_view();
+        view.by_project
+            .get(&stable_key)
+            .and_then(|p| p.libs.get(canonical))
+            .map(|entry| entry.content_hash == expected)
+            .unwrap_or(false)
     }
 }
 

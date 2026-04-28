@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
+pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;
 pub(crate) mod cache_keys;
 pub(crate) mod component_meta;
