@@ -1924,8 +1924,7 @@ fn find_longest_warm_prefix(
     path: &Arc<[PathSegment]>,
 ) -> Option<(SemanticNodeId, usize)> {
     for k in (1..path.len()).rev() {
-        let prefix_path: Arc<[PathSegment]> =
-            Arc::from(path[..k].to_vec().into_boxed_slice());
+        let prefix_path: Arc<[PathSegment]> = Arc::from(path[..k].to_vec().into_boxed_slice());
         let prefix_key = SemanticQueryKey::ProjectPath {
             base,
             path: prefix_path,
@@ -1983,14 +1982,10 @@ fn backfill_prefixes(
     //   - Break at the first `None` — after an arm-split the index no
     //     longer lines up with `path[..i + 1]` so subsequent entries
     //     are not canonical answers for that key.
-    let max_i = intermediates
-        .len()
-        .min(path.len())
-        .saturating_sub(1);
+    let max_i = intermediates.len().min(path.len()).saturating_sub(1);
     for i in 0..max_i {
         let Some(node) = intermediates[i] else { break };
-        let prefix_path: Arc<[PathSegment]> =
-            Arc::from(path[..i + 1].to_vec().into_boxed_slice());
+        let prefix_path: Arc<[PathSegment]> = Arc::from(path[..i + 1].to_vec().into_boxed_slice());
         let prefix_key = SemanticQueryKey::ProjectPath {
             base,
             path: prefix_path,

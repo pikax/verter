@@ -5030,9 +5030,9 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // `variants_obj`, which must be published under
     // `(table_obj, [variants], Navigate)` so the sibling dispatch can
     // peek it.
-    let warm_prefix = graph
-        .get(&prefix_key)
-        .expect("prefix key must be warm after first dispatch — Phase 1B backfill should have published it");
+    let warm_prefix = graph.get(&prefix_key).expect(
+        "prefix key must be warm after first dispatch — Phase 1B backfill should have published it",
+    );
     match warm_prefix.value {
         QueryResult::Value(id) => assert_eq!(
             id, variants_obj,
