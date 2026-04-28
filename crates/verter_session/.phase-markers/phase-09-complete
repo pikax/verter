@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "phase": "phase-09",
+  "status": "partial-deferred",
+  "base_commit": "6b1cd1e967bca2d0993c67bae220608e4429fecd",
+  "work_head_before_marker": "3da99c0501728632bed284bed4d5acb987e3b8f0",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 7417,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [],
+  "deferred": [
+    "phase-09-breaking-sub-plan-needed",
+    "phase-09.2-mcp-direction-inventory"
+  ],
+  "report_path": "phase-09-report.md"
+}
