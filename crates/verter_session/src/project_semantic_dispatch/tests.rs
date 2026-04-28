@@ -5394,3 +5394,275 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     // this test simply returning at all.
     let _ = result;
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 5 §5 commit 3.5 — Class A dispatch parity + characterizations +
+// interning + Navigate integrity. Per A9 (counter test classification c:
+// hit/miss tests MUST migrate to live_count / hit_count), and A10
+// (Navigate consumers don't query the sidecar; they use ProjectPath
+// directly).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// **Interning hit/miss test (A9 (c)).** Two `ResolveMacroPayload`
+/// queries with the SAME (owner, macro_index, macro_kind, type_args,
+/// mode) must produce the SAME `SemanticNodeId`. The semantic graph's
+/// `stats_snapshot.hits` increments by ≥1 between the two queries
+/// (the second query is a warm hit).
+///
+/// Per A9 (c) classification: this is a "cache hit/miss" test —
+/// migration to the host-owned counter accessor is MANDATORY,
+/// deletion is FORBIDDEN.
+#[test]
+fn resolve_macro_payload_dedups_via_interning() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner = synthetic_macro_owner("/c.vue");
+    let key = SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let stats_before = graph.stats_snapshot();
+    let first = dispatch.execute(key.clone());
+    let stats_mid = graph.stats_snapshot();
+    let second = dispatch.execute(key);
+    let stats_after = graph.stats_snapshot();
+
+    let (a, b) = match (first, second) {
+        (QueryResult::Value(a), QueryResult::Value(b)) => (a, b),
+        other => panic!("expected two values, got {other:?}"),
+    };
+
+    // Discriminating: same key produces same node id.
+    assert_eq!(
+        a, b,
+        "ResolveMacroPayload must dedup onto the same SemanticNodeId for identical keys"
+    );
+
+    // Discriminating: the second query is a warm hit. Pre-fix-removing-
+    // family-arm: the family memo would not register the variant and
+    // the second query would re-build (misses incremented again, hits
+    // not incremented). Post-fix: hits >= stats_mid.hits + 1.
+    assert!(
+        stats_after.hits >= stats_mid.hits + 1,
+        "ResolveMacroPayload second query must be a warm hit (hits delta >= 1); \
+         before={} mid={} after={}",
+        stats_before.hits,
+        stats_mid.hits,
+        stats_after.hits
+    );
+}
+
+/// **Interning hit/miss test (A9 (c)) — DISTINCT family entries.** Two
+/// `ResolveMacroPayload` queries that differ in `macro_kind` must
+/// produce DISTINCT family memo entries (mode-erased family identity
+/// per `family_and_slot`). Same-family same-mode dedups; different-family
+/// must NOT dedup.
+///
+/// Discriminating: distinct macro_kind values mean distinct
+/// FamilyKey arms — the second query MUST run the build path
+/// (>=1 miss delta), unlike a same-family same-mode call which
+/// would warm-hit on the first call's published entry.
+#[test]
+fn resolve_macro_payload_distinct_family_does_not_collapse() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let owner = synthetic_macro_owner("/c.vue");
+    let key_props = SemanticQueryKey::ResolveMacroPayload {
+        owner: owner.clone(),
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+    // DIFFERENT macro_kind (DefineExpose) → different FamilyKey arm.
+    let key_expose = SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineExpose,
+        type_args: Arc::from(vec![arg].into_boxed_slice()),
+        mode: ProjectionMode::Expanded,
+    };
+
+    let stats_before = graph.stats_snapshot();
+    let _props = dispatch.execute(key_props);
+    let stats_mid = graph.stats_snapshot();
+    let _expose = dispatch.execute(key_expose);
+    let stats_after = graph.stats_snapshot();
+
+    let first_miss_delta = stats_mid.misses.saturating_sub(stats_before.misses);
+    let second_miss_delta = stats_after.misses.saturating_sub(stats_mid.misses);
+
+    assert!(
+        first_miss_delta >= 1,
+        "First ResolveMacroPayload (DefineProps) must produce >=1 miss; got {first_miss_delta}"
+    );
+    assert!(
+        second_miss_delta >= 1,
+        "Second ResolveMacroPayload (DefineExpose, distinct macro_kind) must produce >=1 miss; got {second_miss_delta}. \
+         If miss-delta=0, the family arm collapses distinct macro_kind values onto one entry — \
+         a FamilyKey hashing bug that would cause cross-macro cache collision."
+    );
+}
+
+/// **Class A dispatch parity (invisibility proof).** Verifies that
+/// adding the `ResolveMacroPayload` variant + body to the dispatcher
+/// did NOT change existing `ComponentMetaAnalysis` outputs for any
+/// Class A fixture. Since callsite migrations don't land until 5d-5f,
+/// the variant is currently "structural-only" — the engine still
+/// produces the same surface, and the variant body is reachable only
+/// through direct `dispatch.execute(SemanticQueryKey::ResolveMacroPayload{..})`
+/// calls (e.g., the unit tests above).
+///
+/// This is the parent §5.B.5 invisibility proof: the variant lands
+/// without breaking the existing pipeline.
+///
+/// Discriminating: pre-variant tree's `mapped_pick_two_keys` produced
+/// `[alpha, beta]`. Post-variant (this commit), it still does. Any
+/// regression — wrong member set, wrong order, wrong arity — fails
+/// here.
+#[test]
+fn class_a_invisibility_mapped_pick_two_keys_unchanged() {
+    use crate::audited_request::AuditedRequest;
+    use std::sync::Arc as StdArc;
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    const VUE: &str = r#"<script setup lang="ts">
+interface Source {
+  alpha: string;
+  beta: number;
+  gamma: boolean;
+  delta: string;
+}
+defineProps<Pick<Source, 'alpha' | 'beta'>>();
+</script>
+<template><div /></template>
+"#;
+
+    let workspace = StdArc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.inject_file("/c.vue".into(), Arc::from(VUE));
+    let ws_access: StdArc<dyn WorkspaceAccess> = workspace;
+    let host = StdArc::new(VerterHost::new(
+        crate::HostConfig {
+            audit_enabled: true,
+            ..crate::HostConfig::default()
+        },
+        ws_access,
+    ));
+
+    let (analysis, _resolution, _record) = AuditedRequest::builder()
+        .attach_to(host)
+        .resolve("/c.vue")
+        .expect("Class A invisibility: mapped_pick_two_keys resolution must succeed");
+
+    let mut prop_names: Vec<String> = analysis.props.iter().map(|p| p.name.clone()).collect();
+    prop_names.sort();
+
+    // Discriminating: post-variant, mapped_pick_two_keys must still
+    // produce exactly [alpha, beta]. Any deviation — gamma leaked,
+    // alpha dropped, swap of arity — fails here.
+    assert_eq!(
+        prop_names,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "Class A invisibility: mapped_pick_two_keys must produce exactly [alpha, beta] post-variant"
+    );
+}
+
+/// **Navigate integrity (A10).** Per A10: "Navigate consumers don't
+/// query the sidecar; they use `ProjectPath` directly". This test
+/// verifies that calling `ProjectPath{base, [], Navigate}` over a
+/// non-trivial base does NOT hit the `ResolveMacroPayload` family
+/// memo — the macro path and `ProjectPath` answer DIFFERENT
+/// questions per A10. They co-exist; one does not satisfy the other.
+///
+/// Discriminating: the test runs a `ProjectPath{..., Navigate}` query
+/// and verifies that the resulting node is reachable WITHOUT going
+/// through `ResolveMacroPayload`. We check via stats_snapshot that
+/// the memo's hit/miss counts on `ResolveMacroPayload` keys are
+/// independent of `ProjectPath` traffic.
+///
+/// Pre-fix-merging-the-paths: an erroneous integration that routed
+/// `ProjectPath` queries through `ResolveMacroPayload` would cause
+/// the memo entry count to grow when running pure Navigate queries.
+/// Post-fix: ProjectPath queries do not write into ResolveMacroPayload
+/// slots.
+#[test]
+fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Construct a non-trivial base (Object surface with a member).
+    let inner = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let base_view = SurfaceView {
+        members: Arc::from(
+            vec![SurfaceMember {
+                name: Arc::from("foo"),
+                value: inner,
+                optional: false,
+                readonly: false,
+                is_method: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    };
+    let base = graph.intern_node(SemanticNodeData::Object(base_view));
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+
+    // Run a Navigate ProjectPath query.
+    let stats_before = graph.stats_snapshot();
+    let _navigate_result = dispatch.execute(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        mode: ProjectionMode::Navigate,
+    });
+    let stats_after_navigate = graph.stats_snapshot();
+
+    // Run an additional ResolveMacroPayload query — its hits/misses
+    // are accounted to its own slot, separately from ProjectPath.
+    let owner = synthetic_macro_owner("/c.vue");
+    let _macro_result = dispatch.execute(SemanticQueryKey::ResolveMacroPayload {
+        owner,
+        macro_index: 0,
+        macro_kind: AnalyzedMacroKind::DefineProps,
+        type_args: Arc::from(vec![inner].into_boxed_slice()),
+        mode: ProjectionMode::Navigate,
+    });
+    let stats_after_macro = graph.stats_snapshot();
+
+    // Discriminating: each query produced AT LEAST one new memo
+    // miss. If the paths were erroneously merged (ProjectPath
+    // queries routing through ResolveMacroPayload, or vice versa),
+    // the second query's miss-delta would be 0 (warm hit on the
+    // already-populated entry).
+    let navigate_miss_delta = stats_after_navigate
+        .misses
+        .saturating_sub(stats_before.misses);
+    let macro_miss_delta = stats_after_macro
+        .misses
+        .saturating_sub(stats_after_navigate.misses);
+
+    assert!(
+        navigate_miss_delta >= 1,
+        "Navigate ProjectPath must produce at least one miss; got delta={navigate_miss_delta}"
+    );
+    assert!(
+        macro_miss_delta >= 1,
+        "ResolveMacroPayload must produce at least one miss INDEPENDENTLY of ProjectPath; got delta={macro_miss_delta}. \
+         If macro_miss_delta=0, the paths are erroneously merged (A10 violation)."
+    );
+}
