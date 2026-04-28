@@ -129,6 +129,136 @@ pub fn compute_ambient_hash16(bytes: &[u8]) -> Hash16 {
     xxhash_rust::xxh3::xxh3_128(bytes).to_le_bytes()
 }
 
+/// CAS-loop swap of an entry into the ambient-libs registry.
+///
+/// Returns `true` if the swap occurred (i.e. content_hash differed from any
+/// existing entry — caller must bump content_generation in that case).
+/// Returns `false` if the existing entry already had matching content_hash
+/// (idempotent re-registration is a no-op).
+///
+/// Lock-free CAS retry — if a concurrent writer races us, we re-read and
+/// retry. Worst case the registry grows monotonically; at steady state the
+/// number of retries equals the number of contending writers.
+pub(crate) fn cas_register(
+    storage: &arc_swap::ArcSwap<AmbientLibsByProject>,
+    stable_key: ProjectStableKey,
+    canonical: Arc<str>,
+    source: Arc<str>,
+    content_hash: Hash16,
+    top_level_exports: Arc<[Arc<str>]>,
+) -> bool {
+    loop {
+        let current = storage.load_full();
+        // Fast path: idempotent re-registration with matching content_hash.
+        if let Some(p) = current.by_project.get(&stable_key) {
+            if let Some(existing) = p.libs.get(canonical.as_ref()) {
+                if existing.content_hash == content_hash {
+                    return false;
+                }
+            }
+        }
+
+        let mut new_state: AmbientLibsByProject = (*current).clone();
+        let p = new_state.by_project.entry(stable_key).or_default();
+
+        // lib_order: max existing + 1 (registration order). If the canonical
+        // is being replaced, it KEEPS its existing lib_order so symbol
+        // precedence stays stable across re-registration.
+        let lib_order = match p.libs.get(canonical.as_ref()) {
+            Some(existing) => existing.lib_order,
+            None => p
+                .libs
+                .values()
+                .map(|e| e.lib_order)
+                .max()
+                .map_or(0, |m| m + 1),
+        };
+
+        // Update symbol_index: remove old entry's symbols, add new ones.
+        if let Some(old) = p.libs.get(canonical.as_ref()) {
+            for sym in old.top_level_exports.iter() {
+                if let Some(list) = p.symbol_index.get_mut(sym) {
+                    list.retain(|(cid, _)| cid != &canonical);
+                    if list.is_empty() {
+                        // Drop empty symbol_index keys to avoid leaks across
+                        // many re-registrations.
+                        p.symbol_index.remove(sym);
+                    }
+                }
+            }
+        }
+        for sym in top_level_exports.iter() {
+            p.symbol_index
+                .entry(Arc::clone(sym))
+                .or_default()
+                .push((Arc::clone(&canonical), lib_order));
+        }
+        // Keep symbol lists sorted ascending by lib_order so first wins on
+        // duplicate symbols.
+        for list in p.symbol_index.values_mut() {
+            list.sort_by_key(|(_, ord)| *ord);
+        }
+
+        p.libs.insert(
+            Arc::clone(&canonical),
+            AmbientLibEntry {
+                source: Arc::clone(&source),
+                content_hash,
+                lib_order,
+                top_level_exports: Arc::clone(&top_level_exports),
+            },
+        );
+
+        let new_arc = std::sync::Arc::new(new_state);
+        let prev = storage.compare_and_swap(&current, new_arc);
+        if std::sync::Arc::ptr_eq(&prev, &current) {
+            return true;
+        }
+        // Lost the race — retry.
+    }
+}
+
+/// CAS-loop unregistration. Returns `true` if an entry was removed.
+pub(crate) fn cas_unregister(
+    storage: &arc_swap::ArcSwap<AmbientLibsByProject>,
+    stable_key: ProjectStableKey,
+    canonical: Arc<str>,
+) -> bool {
+    loop {
+        let current = storage.load_full();
+        let exists = current
+            .by_project
+            .get(&stable_key)
+            .and_then(|p| p.libs.get(canonical.as_ref()))
+            .is_some();
+        if !exists {
+            return false;
+        }
+        let mut new_state: AmbientLibsByProject = (*current).clone();
+        if let Some(p) = new_state.by_project.get_mut(&stable_key) {
+            if let Some(old) = p.libs.remove(canonical.as_ref()) {
+                for sym in old.top_level_exports.iter() {
+                    if let Some(list) = p.symbol_index.get_mut(sym) {
+                        list.retain(|(cid, _)| cid != &canonical);
+                        if list.is_empty() {
+                            p.symbol_index.remove(sym);
+                        }
+                    }
+                }
+            }
+            // GC empty project entries.
+            if p.libs.is_empty() {
+                new_state.by_project.remove(&stable_key);
+            }
+        }
+        let new_arc = std::sync::Arc::new(new_state);
+        let prev = storage.compare_and_swap(&current, new_arc);
+        if std::sync::Arc::ptr_eq(&prev, &current) {
+            return true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

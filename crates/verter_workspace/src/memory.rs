@@ -571,6 +571,60 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
             Err(crate::audit_sink::AuditSinkError::HandleNotFound)
         }
     }
+
+    // ── Ambient lib registry (Phase 5 §6.5) ──
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn register_ambient_lib(
+        &self,
+        spec: crate::ambient_lib::AmbientLibSpec,
+    ) -> Result<(), crate::ambient_lib::AmbientLibError> {
+        self.engine.register_ambient_lib(self, spec)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn unregister_ambient_lib(
+        &self,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Result<(), crate::ambient_lib::AmbientLibError> {
+        self.engine.unregister_ambient_lib(stable_key, canonical_id)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_ambient_lib(
+        &self,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        self.engine.read_ambient_lib(self, stable_key, canonical_id)
+    }
+
+    fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
+        self.engine
+            .edges
+            .write()
+            .add_resolved_dep(consumer, virtual_id);
+    }
+
+    fn project_stable_key(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<crate::project_key::ProjectStableKey> {
+        self.engine.project_stable_key(project_id)
+    }
+
+    fn lookup_ambient_symbol(
+        &self,
+        consumer_project: crate::project_key::ProjectStableKey,
+        symbol: &str,
+    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+        self.engine.lookup_ambient_symbol(consumer_project, symbol)
+    }
+
+    fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
+        self.engine.ambient_libs_view()
+    }
 }
 
 #[cfg(test)]

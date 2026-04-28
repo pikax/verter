@@ -93,10 +93,6 @@ pub(crate) struct Engine {
     /// Lock-free `ArcSwap` so reads (file shadowing checks, symbol lookup,
     /// dep-fact validation) never block on concurrent registrations. Concrete
     /// workspaces mutate via CAS in `register_ambient_lib`.
-    // Initialized in `Engine::new()`. Concrete workspace impls land in the
-    // next commit (Phase 5 §6.5 — `MemoryWorkspace::register_ambient_lib`,
-    // `FilesystemWorkspace::register_ambient_lib`).
-    #[allow(dead_code)]
     pub(crate) ambient_libs: ArcSwap<AmbientLibsByProject>,
 }
 
@@ -537,6 +533,158 @@ impl Engine {
     /// Query forward deps (files this file imports).
     pub(crate) fn forward_deps_for(&self, canonical_id: &str) -> Vec<String> {
         self.edges.read().forward_deps(canonical_id)
+    }
+
+    // ── Ambient lib registration (Phase 5 §6.5) ──
+
+    /// Register an ambient lib via the CAS loop (`ambient_lib::cas_register`).
+    ///
+    /// Resolves `spec.project_id` against the published snapshot to compute a
+    /// `ProjectStableKey`. Honors A5 user-wins shadowing by querying
+    /// `WorkspaceAccess::file_exists` for non-ambient collisions. Bumps
+    /// `content_generation` on actual content change so dep validators
+    /// invalidate downstream caches.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn register_ambient_lib(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        spec: crate::ambient_lib::AmbientLibSpec,
+    ) -> Result<(), crate::ambient_lib::AmbientLibError> {
+        use crate::ambient_lib::{
+            cas_register, compute_ambient_hash16, normalize_canonical_id, AmbientLibError,
+        };
+
+        let published = self.load_published().ok_or(AmbientLibError::NotPublished)?;
+        if published.snapshot.projects.is_empty() {
+            return Err(AmbientLibError::NotPublished);
+        }
+        let stable_key = match spec.project_id {
+            Some(pid) => published
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root))
+                .ok_or(AmbientLibError::UnknownOrAmbiguousProject)?,
+            None if published.snapshot.projects.len() == 1 => {
+                let p = &published.snapshot.projects[0];
+                crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root)
+            }
+            None => return Err(AmbientLibError::UnknownOrAmbiguousProject),
+        };
+
+        let canonical = normalize_canonical_id(&spec.canonical_id);
+
+        // A5: shadowing check — a real user file at this canonical_id wins.
+        if reader.file_exists(canonical.as_ref()) {
+            return Err(AmbientLibError::NonAmbientCollision(canonical));
+        }
+
+        // A6 eager step: cheap shallow parse for top-level export names.
+        let top_level_exports: Arc<[Arc<str>]> = {
+            let names = crate::ambient_parse::parse_top_level_exports(
+                canonical.as_ref(),
+                spec.source.as_ref(),
+            )
+            .map_err(AmbientLibError::ParseFailure)?;
+            names.into_boxed_slice().into()
+        };
+
+        let content_hash = compute_ambient_hash16(spec.source.as_bytes());
+        let changed = cas_register(
+            &self.ambient_libs,
+            stable_key,
+            canonical,
+            Arc::clone(&spec.source),
+            content_hash,
+            top_level_exports,
+        );
+        if changed {
+            self.bump_content_generation();
+        }
+        Ok(())
+    }
+
+    /// Unregister an ambient lib by `(stable_key, canonical_id)`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unregister_ambient_lib(
+        &self,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Result<(), crate::ambient_lib::AmbientLibError> {
+        use crate::ambient_lib::{cas_unregister, normalize_canonical_id};
+
+        let canonical = normalize_canonical_id(canonical_id);
+        let removed = cas_unregister(&self.ambient_libs, stable_key, canonical);
+        if removed {
+            self.bump_content_generation();
+        }
+        Ok(())
+    }
+
+    /// Read an ambient lib's source. A5: returns `None` when a non-ambient
+    /// user file exists at the canonical_id (shadowing).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_ambient_lib(
+        &self,
+        reader: &dyn crate::traits::WorkspaceAccess,
+        stable_key: crate::project_key::ProjectStableKey,
+        canonical_id: &str,
+    ) -> Option<Arc<str>> {
+        let canonical = crate::ambient_lib::normalize_canonical_id(canonical_id);
+        if reader.file_exists(canonical.as_ref()) {
+            return None;
+        }
+        let ambient = self.ambient_libs.load_full();
+        ambient
+            .by_project
+            .get(&stable_key)?
+            .libs
+            .get(canonical.as_ref())
+            .map(|entry| Arc::clone(&entry.source))
+    }
+
+    /// O(1) symbol → `(stable_key, canonical, lib_order)` lookup against the
+    /// project's registered ambient libs (A2). Returns the first lib (by
+    /// `lib_order`) that exposes the symbol.
+    pub(crate) fn lookup_ambient_symbol(
+        &self,
+        consumer_project: crate::project_key::ProjectStableKey,
+        symbol: &str,
+    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+        let ambient = self.ambient_libs.load_full();
+        let p = ambient.by_project.get(&consumer_project)?;
+        let candidates = p.symbol_index.get(symbol)?;
+        let (canonical_id, lib_order) = candidates.first()?.clone();
+        let virtual_id = crate::ambient_lib::ambient_virtual_canonical_id(
+            consumer_project,
+            canonical_id.as_ref(),
+        );
+        Some(crate::ambient_lib::AmbientSymbolHit {
+            project: consumer_project,
+            canonical_id,
+            virtual_id,
+            lib_order,
+        })
+    }
+
+    /// Resolve a `ProjectId` to its stable key against the published snapshot.
+    pub(crate) fn project_stable_key(
+        &self,
+        project_id: crate::workspace_snapshot::ProjectId,
+    ) -> Option<crate::project_key::ProjectStableKey> {
+        let published = self.load_published()?;
+        published
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root))
+    }
+
+    /// Lock-free read of the ambient lib registry — used by validators.
+    pub(crate) fn ambient_libs_view(&self) -> Arc<crate::ambient_lib::AmbientLibsByProject> {
+        self.ambient_libs.load_full()
     }
 }
 

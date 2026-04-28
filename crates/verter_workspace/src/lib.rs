@@ -39,6 +39,11 @@
 //! 3. Disk via `NativeFs`
 
 pub mod ambient_lib;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "ambient_lib_tests.rs"]
+mod ambient_lib_tests;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ambient_parse;
 pub mod audit_sink;
 pub mod canonical_path;
 pub mod changes;
