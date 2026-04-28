@@ -181,11 +181,193 @@ pub fn recursive_alias_via_typeof() -> SnapshotView {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 0b — Class A property fixtures (component-meta macros).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convenience for non-required props that have a default value
+/// declared via `withDefaults`. Vue's contract: a prop with a
+/// withDefaults entry is no longer required (the default makes the
+/// prop's runtime value present).
+fn defaulted_prop(name: &str, type_signature: &str, default_signature: &str) -> PropView {
+    PropView {
+        name: name.to_string(),
+        type_signature: type_signature.to_string(),
+        required: false,
+        has_default: true,
+        default_signature: Some(default_signature.to_string()),
+        doc: None,
+    }
+}
+
+// ── defineProps + withDefaults — Verter macros §props ───────────────────────
+//   `name: string` is required; `count?: number` becomes non-required
+//   with `has_default = true` and `default_value = "0"` because
+//   `withDefaults({ count: 0 })` populates the default. The original
+//   optional marker is preserved in the type system but the
+//   component-meta surface uses `required: false` because the
+//   runtime value is always defined.
+pub fn fixture_props_with_defaults() -> SnapshotView {
+    shell(vec![
+        defaulted_prop("count", "number", "0"),
+        required_prop("name", "string"),
+    ])
+}
+
+// ── defineSlots<T> — Verter macros §slots ───────────────────────────────────
+//   Two slots: `default(props: { item: string }): any` and
+//   `named(props: { row: number }): any`. The snapshot view's
+//   `slot_view_from` renders the binding-only payload signature
+//   (alphabetically sorted by binding name) when bindings are
+//   non-empty.
+pub fn fixture_slots_typed() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![],
+        slots: vec![
+            SlotView {
+                name: "default".to_string(),
+                payload_signature: "{ item: string }".to_string(),
+            },
+            SlotView {
+                name: "named".to_string(),
+                payload_signature: "{ row: number }".to_string(),
+            },
+        ],
+        models: vec![],
+        exposed: vec![],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
+// ── defineEmits<T> — Verter macros §emits ───────────────────────────────────
+//   One event `click` whose parameter list is `[evt: string]` —
+//   tuple-form, single labelled element of primitive type.
+pub fn fixture_events_typed() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![EventView {
+            name: "click".to_string(),
+            params_signature: "[evt: string]".to_string(),
+        }],
+        slots: vec![],
+        models: vec![],
+        exposed: vec![],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
+// ── defineModel<T> — Verter macros §model ───────────────────────────────────
+//   `defineModel<string>()` creates the default `modelValue` model
+//   with type `string`. `defineModel<number>('count')` creates a
+//   second model named `count` with type `number`. The view sorts
+//   models alphabetically; `count` < `modelValue`.
+pub fn fixture_models() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![],
+        slots: vec![],
+        models: vec![
+            ModelView {
+                name: "count".to_string(),
+                type_signature: "number".to_string(),
+            },
+            ModelView {
+                name: "modelValue".to_string(),
+                type_signature: "string".to_string(),
+            },
+        ],
+        exposed: vec![],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
+// ── defineExpose — Verter macros §expose ────────────────────────────────────
+//   §0.6.1: Vue's documented public API uses the value form
+//   `defineExpose({ ... })`. Each exposed binding declares its
+//   function type explicitly so the resolver surfaces a typed
+//   signature. The view sorts exposed entries alphabetically.
+pub fn fixture_exposed_methods() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![],
+        slots: vec![],
+        models: vec![],
+        exposed: vec![
+            ExposedView {
+                name: "focus".to_string(),
+                type_signature: "() => void".to_string(),
+            },
+            ExposedView {
+                name: "reset".to_string(),
+                type_signature: "() => void".to_string(),
+            },
+        ],
+        fallthrough: None,
+        flags: empty_flags(),
+    }
+}
+
+// ── inheritAttrs: false — CLAUDE.md §Fallthrough ────────────────────────────
+//   `defineOptions({ inheritAttrs: false })` zeros the fallthrough
+//   surface. The single declared prop (`disabled`) survives on
+//   `props`; the projection emits `Some(FallthroughView { inherit_attrs: false, ... })`
+//   with surface_signature `{}` (no inherited members).
+pub fn fixture_fallthrough_inherit() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![optional_prop("disabled", "boolean")],
+        events: vec![],
+        slots: vec![],
+        models: vec![],
+        exposed: vec![],
+        fallthrough: Some(FallthroughView {
+            inherit_attrs: false,
+            surface_signature: "{}".to_string(),
+        }),
+        flags: FlagsView {
+            async_setup: false,
+            has_inherit_attrs_false: true,
+        },
+    }
+}
+
+// ── single component root inheriting child surface — CLAUDE.md §Fallthrough ─
+//   The wrapper has zero declared props. Its single component root
+//   `<Inner />` exposes one prop `label: string`. That prop
+//   propagates as the inherited fallthrough surface. The projection
+//   emits `Some(FallthroughView { inherit_attrs: true, surface_signature: "{ label: string ... }" })`
+//   where the signature carries a `from component:/inner.vue` source
+//   tag from `format_inherited_sources`.
+pub fn fixture_fallthrough_root_inherit() -> SnapshotView {
+    SnapshotView {
+        component_name: COMPONENT_NAME.to_string(),
+        props: vec![],
+        events: vec![],
+        slots: vec![],
+        models: vec![],
+        exposed: vec![],
+        fallthrough: Some(FallthroughView {
+            inherit_attrs: true,
+            surface_signature: "{ label: string /* from component:/inner.vue */ }".to_string(),
+        }),
+        flags: empty_flags(),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Class A dispatch: lookup_class_a_expected
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
     match fixture_id {
+        // Phase 0a — mapped + structural.
         "mapped_pick_two_keys" => Some(mapped_pick_two_keys()),
         "mapped_omit_two_keys" => Some(mapped_omit_two_keys()),
         "mapped_partial" => Some(mapped_partial()),
@@ -197,6 +379,14 @@ pub fn lookup_class_a_expected(fixture_id: &str) -> Option<SnapshotView> {
         "conditional_distributive" => Some(conditional_distributive()),
         "intersection_of_objects" => Some(intersection_of_objects()),
         "recursive_alias_via_typeof" => Some(recursive_alias_via_typeof()),
+        // Phase 0b — component-meta property macros.
+        "fixture_props_with_defaults" => Some(fixture_props_with_defaults()),
+        "fixture_slots_typed" => Some(fixture_slots_typed()),
+        "fixture_events_typed" => Some(fixture_events_typed()),
+        "fixture_models" => Some(fixture_models()),
+        "fixture_exposed_methods" => Some(fixture_exposed_methods()),
+        "fixture_fallthrough_inherit" => Some(fixture_fallthrough_inherit()),
+        "fixture_fallthrough_root_inherit" => Some(fixture_fallthrough_root_inherit()),
         _ => None,
     }
 }

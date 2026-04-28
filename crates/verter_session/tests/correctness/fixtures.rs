@@ -3,9 +3,9 @@
 //! correctness ground-truth tier (Class A) from the regression
 //! baselines (Class B + C).
 //!
-//! Phase 0a authors the 11 Class A fixtures listed below (6
-//! mapped-type + 5 structural). Per §0p.A.2 r9 reviewer consensus,
-//! 5 utility-type fixtures (`mapped_exclude`, `mapped_extract`,
+//! Phase 0a authored the 11 Class A fixtures (6 mapped-type + 5
+//! structural). Per §0p.A.2 r9 reviewer consensus, 5 utility-type
+//! fixtures (`mapped_exclude`, `mapped_extract`,
 //! `template_literal_as_key`, `generic_substitution_via_typeof`,
 //! `userland_shadowing_pick`) are deferred to Phase 5 §5.B.5 — those
 //! fixtures' rule-correct expected outputs Verter does not currently
@@ -14,8 +14,11 @@
 //! output IS the intended behaviour). Phase 5 will author them with
 //! rule-correct expected once the resolver variants close the gaps.
 //!
-//! Phase 0b will append the 7 Class A component-meta property
-//! fixtures plus the Class B + C regression baselines.
+//! Phase 0b appends 7 Class A component-meta property fixtures plus
+//! Class B + C regression baselines (6 corpus_representatives + 3
+//! pathologicals). Class B + C capture Verter's current output via
+//! `UPDATE_SNAPSHOTS=1` per §0p.A.2 — they are regression baselines
+//! only, not rule-derived.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixtureClass {
@@ -25,11 +28,9 @@ pub enum FixtureClass {
     /// Existing corpus_representatives — regression baseline (Verter's
     /// current output captured to lock in non-drift, NOT validated
     /// from rules).
-    #[allow(dead_code)] // Phase 0a does not author Class B fixtures.
     ClassB,
     /// Pathological recursive-generic fixtures — same regression
     /// baseline treatment as Class B.
-    #[allow(dead_code)] // Phase 0a does not author Class C fixtures.
     ClassC,
 }
 
@@ -176,6 +177,241 @@ defineProps<{ root: Tree }>();
 "#;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 0b — Class A property fixtures (component-meta macros).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each fixture exercises one component-meta macro surface so the
+// §0p.A.5 discriminating self-test can target one MutationKind per
+// row. Sources are minimal and hermetic — no cross-file imports —
+// and the rule citation is in the companion derivation note.
+
+// ── defineProps + withDefaults — Verter macros §props ───────────────────────
+//   `name: string` is required (no default); `count?: number` becomes
+//   non-required with `has_default = true` and `default_value = "0"`
+//   when `withDefaults` provides `{ count: 0 }`.
+const FIXTURE_PROPS_WITH_DEFAULTS_VUE: &str = r#"<script setup lang="ts">
+withDefaults(defineProps<{ name: string; count?: number }>(), { count: 0 });
+</script>
+<template><div /></template>
+"#;
+
+// ── defineSlots<T> — Verter macros §slots ───────────────────────────────────
+//   Two slots: `default(props: { item: string }): any` and
+//   `named(props: { row: number }): any`. Both produce binding-only
+//   payload signatures (return type `any` is captured separately).
+const FIXTURE_SLOTS_TYPED_VUE: &str = r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { item: string }): any;
+  named(props: { row: number }): any;
+}>();
+</script>
+<template><div /></template>
+"#;
+
+// ── defineEmits<T> — Verter macros §emits ───────────────────────────────────
+//   One event `click` with parameter list `[evt: string]`. Using a
+//   primitive parameter type avoids cross-file `Event` imports.
+const FIXTURE_EVENTS_TYPED_VUE: &str = r#"<script setup lang="ts">
+defineEmits<{ click: [evt: string] }>();
+</script>
+<template><div /></template>
+"#;
+
+// ── defineModel<T> — Verter macros §model ───────────────────────────────────
+//   Two model entries: the unnamed `defineModel<string>()` defaults to
+//   the `modelValue` model name; `defineModel<number>('count')` names
+//   the second model `count`.
+const FIXTURE_MODELS_VUE: &str = r#"<script setup lang="ts">
+defineModel<string>();
+defineModel<number>('count');
+</script>
+<template><div /></template>
+"#;
+
+// ── defineExpose — Verter macros §expose ────────────────────────────────────
+//   §0.6.1 small decision: Vue's documented public API uses the value
+//   form `defineExpose({ ... })`; type-only `defineExpose<T>()` is
+//   not part of the documented Vue 3 surface. The discriminating
+//   self-test only checks `ExposedDropped` (the rule "every key of T
+//   surfaces as exposed"), which is form-agnostic. Each exposed
+//   binding declares its function type explicitly so the binding's
+//   `type_annotation` is non-empty (otherwise the resolver returns
+//   `Unknown` and the snapshot signature drifts).
+const FIXTURE_EXPOSED_METHODS_VUE: &str = r#"<script setup lang="ts">
+const focus: () => void = () => {};
+const reset: () => void = () => {};
+defineExpose({ focus, reset });
+</script>
+<template><div /></template>
+"#;
+
+// ── inheritAttrs: false — CLAUDE.md §Fallthrough ────────────────────────────
+//   `defineOptions({ inheritAttrs: false })` zeros out the
+//   fallthrough surface. The single declared prop is preserved on
+//   `props`; the `fallthrough` projection becomes
+//   `Some(FallthroughView { inherit_attrs: false, ... })` with an
+//   empty surface signature.
+const FIXTURE_FALLTHROUGH_INHERIT_VUE: &str = r#"<script setup lang="ts">
+defineOptions({ inheritAttrs: false });
+defineProps<{ disabled?: boolean }>();
+</script>
+<template><button /></template>
+"#;
+
+// ── single component root inheriting child surface — CLAUDE.md §Fallthrough ─
+//   The wrapper `<Inner />` is a single component root: its own
+//   declared surface (a `label` prop on `Inner`) propagates as the
+//   inherited fallthrough surface on the wrapper. The wrapper
+//   declares zero props itself, so the only entry in the
+//   fallthrough projection comes from `component:/inner.vue`.
+const FIXTURE_FALLTHROUGH_ROOT_INHERIT_WRAPPER_VUE: &str = r#"<script setup lang="ts">
+import Inner from './inner.vue';
+</script>
+<template><Inner /></template>
+"#;
+const FIXTURE_FALLTHROUGH_ROOT_INHERIT_INNER_VUE: &str = r#"<script setup lang="ts">
+defineProps<{ label: string }>();
+</script>
+<template><div /></template>
+"#;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 0b — Class B regression sources (corpus_representatives).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each source is the same SFC + cross-file types pair used by the
+// `component_meta_audit/corpus_representatives/*.rs` tests. The Class
+// B baseline captures Verter's current output as the regression
+// reference; rule-derivation is deliberately out of scope.
+
+const ACCORDION_VUE: &str = r#"<script setup lang="ts">
+import type { AccordionItem } from './accordion_types';
+defineProps<{ items: AccordionItem[]; multiple?: boolean }>();
+</script>
+<template>
+  <div class="accordion">
+    <details v-for="(item, i) in items" :key="i" :open="!multiple">
+      <summary>{{ item.label }}</summary>
+      <div>{{ item.content }}</div>
+    </details>
+  </div>
+</template>
+"#;
+const ACCORDION_TYPES_TS: &str = r#"export interface AccordionItem {
+  label: string;
+  content: string;
+  disabled?: boolean;
+}
+"#;
+
+const ALERT_VUE: &str = r#"<script setup lang="ts">
+import type { AlertVariant } from './alert_types';
+defineProps<{ variant?: AlertVariant; title: string; dismissible?: boolean }>();
+defineEmits<{ dismiss: [] }>();
+</script>
+<template>
+  <div class="alert" :class="variant">
+    <h3>{{ title }}</h3>
+    <slot />
+    <button v-if="dismissible" @click="$emit('dismiss')">&times;</button>
+  </div>
+</template>
+"#;
+const ALERT_TYPES_TS: &str =
+    r#"export type AlertVariant = 'info' | 'success' | 'warning' | 'error';
+"#;
+
+const APP_VUE: &str = r#"<script setup lang="ts">
+defineProps<{ title: string; mode?: 'light' | 'dark' }>();
+</script>
+<template>
+  <div class="app" :class="mode">
+    <header>{{ title }}</header>
+    <main><slot /></main>
+  </div>
+</template>
+"#;
+
+const AUTH_FORM_VUE: &str = r#"<script setup lang="ts">
+import type { AuthFormField, AuthFormSubmit } from './auth_form_types';
+defineProps<{ fields: AuthFormField[]; submit: AuthFormSubmit }>();
+defineEmits<{ submit: [value: Record<string, string>] }>();
+</script>
+<template>
+  <form @submit.prevent="$emit('submit', {})">
+    <div v-for="f in fields" :key="f.name">
+      <label>{{ f.label }}</label>
+      <input :type="f.type" :name="f.name" :required="f.required" />
+    </div>
+    <button type="submit">{{ submit.label }}</button>
+  </form>
+</template>
+"#;
+const AUTH_FORM_TYPES_TS: &str = r#"export interface AuthFormField {
+  name: string;
+  label: string;
+  type: 'text' | 'email' | 'password';
+  required?: boolean;
+}
+export interface AuthFormSubmit {
+  label: string;
+  loading?: boolean;
+}
+"#;
+
+const AVATAR_VUE: &str = r#"<script setup lang="ts">
+import type { AvatarSize, AvatarShape } from './avatar_types';
+defineProps<{ src?: string; alt?: string; size?: AvatarSize; shape?: AvatarShape }>();
+</script>
+<template>
+  <span class="avatar" :class="[size, shape]">
+    <img v-if="src" :src="src" :alt="alt" />
+    <slot v-else />
+  </span>
+</template>
+"#;
+const AVATAR_TYPES_TS: &str = r#"export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
+export type AvatarShape = 'circle' | 'square' | 'rounded';
+"#;
+
+const AVATAR_GROUP_VUE: &str = r#"<script setup lang="ts">
+import type { AvatarSize } from './avatar_types';
+import type { AvatarGroupItem } from './avatar_group_types';
+defineProps<{ items: AvatarGroupItem[]; size?: AvatarSize; max?: number }>();
+</script>
+<template>
+  <div class="avatar-group" :class="size">
+    <span v-for="(item, i) in items.slice(0, max)" :key="i">
+      <img :src="item.src" :alt="item.alt" />
+    </span>
+  </div>
+</template>
+"#;
+const AVATAR_GROUP_TYPES_TS: &str = r#"export interface AvatarGroupItem {
+  src: string;
+  alt?: string;
+}
+"#;
+const AVATAR_GROUP_AVATAR_TYPES_TS: &str =
+    r#"export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
+"#;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 0b — Class C regression sources (pathological fixtures).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PATH_TABLE_VUE: &str = include_str!("../../test_fixtures/table.vue");
+const PATH_TABLE_TYPES_TS: &str = include_str!("../../test_fixtures/table_types.ts");
+
+const PATH_EDITOR_TOOLBAR_VUE: &str = include_str!("../../test_fixtures/editor_toolbar.vue");
+const PATH_EDITOR_TOOLBAR_TYPES_TS: &str =
+    include_str!("../../test_fixtures/editor_toolbar_types.ts");
+
+const PATH_TABS_VUE: &str = include_str!("../../test_fixtures/tabs.vue");
+const PATH_TABS_TYPES_TS: &str = include_str!("../../test_fixtures/tabs_types.ts");
+const PATH_TABS_HELPER_TS: &str = include_str!("../../test_fixtures/tabs_helper.ts");
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Per-fixture file sets.
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -196,10 +432,64 @@ const F_CONDITIONAL_DISTRIBUTIVE: &[(&str, &str)] = &[("/c.vue", CONDITIONAL_DIS
 const F_INTERSECTION_OF_OBJECTS: &[(&str, &str)] = &[("/c.vue", INTERSECTION_OF_OBJECTS_VUE)];
 const F_RECURSIVE_ALIAS_VIA_TYPEOF: &[(&str, &str)] = &[("/c.vue", RECURSIVE_ALIAS_VIA_TYPEOF_VUE)];
 
+// ── Phase 0b Class A property fixture file sets ─────────────────────────────
+const F_FIXTURE_PROPS_WITH_DEFAULTS: &[(&str, &str)] =
+    &[("/c.vue", FIXTURE_PROPS_WITH_DEFAULTS_VUE)];
+const F_FIXTURE_SLOTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_SLOTS_TYPED_VUE)];
+const F_FIXTURE_EVENTS_TYPED: &[(&str, &str)] = &[("/c.vue", FIXTURE_EVENTS_TYPED_VUE)];
+const F_FIXTURE_MODELS: &[(&str, &str)] = &[("/c.vue", FIXTURE_MODELS_VUE)];
+const F_FIXTURE_EXPOSED_METHODS: &[(&str, &str)] = &[("/c.vue", FIXTURE_EXPOSED_METHODS_VUE)];
+const F_FIXTURE_FALLTHROUGH_INHERIT: &[(&str, &str)] =
+    &[("/c.vue", FIXTURE_FALLTHROUGH_INHERIT_VUE)];
+const F_FIXTURE_FALLTHROUGH_ROOT_INHERIT: &[(&str, &str)] = &[
+    ("/c.vue", FIXTURE_FALLTHROUGH_ROOT_INHERIT_WRAPPER_VUE),
+    ("/inner.vue", FIXTURE_FALLTHROUGH_ROOT_INHERIT_INNER_VUE),
+];
+
+// ── Phase 0b Class B regression file sets ───────────────────────────────────
+const F_ACCORDION: &[(&str, &str)] = &[
+    ("/accordion.vue", ACCORDION_VUE),
+    ("/accordion_types.ts", ACCORDION_TYPES_TS),
+];
+const F_ALERT: &[(&str, &str)] = &[
+    ("/alert.vue", ALERT_VUE),
+    ("/alert_types.ts", ALERT_TYPES_TS),
+];
+const F_APP: &[(&str, &str)] = &[("/app.vue", APP_VUE)];
+const F_AUTH_FORM: &[(&str, &str)] = &[
+    ("/auth_form.vue", AUTH_FORM_VUE),
+    ("/auth_form_types.ts", AUTH_FORM_TYPES_TS),
+];
+const F_AVATAR: &[(&str, &str)] = &[
+    ("/avatar.vue", AVATAR_VUE),
+    ("/avatar_types.ts", AVATAR_TYPES_TS),
+];
+const F_AVATAR_GROUP: &[(&str, &str)] = &[
+    ("/avatar_group.vue", AVATAR_GROUP_VUE),
+    ("/avatar_group_types.ts", AVATAR_GROUP_TYPES_TS),
+    ("/avatar_types.ts", AVATAR_GROUP_AVATAR_TYPES_TS),
+];
+
+// ── Phase 0b Class C regression file sets ───────────────────────────────────
+const F_PATH_TABLE_LOADING: &[(&str, &str)] = &[
+    ("/table.vue", PATH_TABLE_VUE),
+    ("/table_types.ts", PATH_TABLE_TYPES_TS),
+];
+const F_PATH_EDITOR_TOOLBAR: &[(&str, &str)] = &[
+    ("/editor_toolbar.vue", PATH_EDITOR_TOOLBAR_VUE),
+    ("/editor_toolbar_types.ts", PATH_EDITOR_TOOLBAR_TYPES_TS),
+];
+const F_PATH_TABS_DYNAMIC_HELPER: &[(&str, &str)] = &[
+    ("/tabs.vue", PATH_TABS_VUE),
+    ("/tabs_types.ts", PATH_TABS_TYPES_TS),
+    ("/tabs_helper.ts", PATH_TABS_HELPER_TS),
+];
+
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 0a Class A registry.
+// Phase 0a + 0b registry.
 // ═══════════════════════════════════════════════════════════════════════════
 pub const FIXTURES: &[CorrectnessFixture] = &[
+    // ── Phase 0a Class A — mapped types + structural ────────────────────────
     CorrectnessFixture {
         id: "mapped_pick_two_keys",
         files: F_MAPPED_PICK_TWO_KEYS,
@@ -265,5 +555,104 @@ pub const FIXTURES: &[CorrectnessFixture] = &[
         files: F_RECURSIVE_ALIAS_VIA_TYPEOF,
         target: "/c.vue",
         class: FixtureClass::ClassA,
+    },
+    // ── Phase 0b Class A — component-meta property macros ───────────────────
+    CorrectnessFixture {
+        id: "fixture_props_with_defaults",
+        files: F_FIXTURE_PROPS_WITH_DEFAULTS,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_slots_typed",
+        files: F_FIXTURE_SLOTS_TYPED,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_events_typed",
+        files: F_FIXTURE_EVENTS_TYPED,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_models",
+        files: F_FIXTURE_MODELS,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_exposed_methods",
+        files: F_FIXTURE_EXPOSED_METHODS,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_fallthrough_inherit",
+        files: F_FIXTURE_FALLTHROUGH_INHERIT,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    CorrectnessFixture {
+        id: "fixture_fallthrough_root_inherit",
+        files: F_FIXTURE_FALLTHROUGH_ROOT_INHERIT,
+        target: "/c.vue",
+        class: FixtureClass::ClassA,
+    },
+    // ── Phase 0b Class B — corpus_representatives regression baselines ──────
+    CorrectnessFixture {
+        id: "accordion",
+        files: F_ACCORDION,
+        target: "/accordion.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "alert",
+        files: F_ALERT,
+        target: "/alert.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "app",
+        files: F_APP,
+        target: "/app.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "auth_form",
+        files: F_AUTH_FORM,
+        target: "/auth_form.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "avatar",
+        files: F_AVATAR,
+        target: "/avatar.vue",
+        class: FixtureClass::ClassB,
+    },
+    CorrectnessFixture {
+        id: "avatar_group",
+        files: F_AVATAR_GROUP,
+        target: "/avatar_group.vue",
+        class: FixtureClass::ClassB,
+    },
+    // ── Phase 0b Class C — pathological regression baselines ────────────────
+    CorrectnessFixture {
+        id: "pathological_table_loading_animation",
+        files: F_PATH_TABLE_LOADING,
+        target: "/table.vue",
+        class: FixtureClass::ClassC,
+    },
+    CorrectnessFixture {
+        id: "pathological_editor_toolbar_array_or_nested",
+        files: F_PATH_EDITOR_TOOLBAR,
+        target: "/editor_toolbar.vue",
+        class: FixtureClass::ClassC,
+    },
+    CorrectnessFixture {
+        id: "pathological_tabs_dynamic_helper",
+        files: F_PATH_TABS_DYNAMIC_HELPER,
+        target: "/tabs.vue",
+        class: FixtureClass::ClassC,
     },
 ];
