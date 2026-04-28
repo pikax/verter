@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "phase": "phase-05e",
+  "status": "success",
+  "base_commit": "70137968b4eee39c679fda8301e5ffaf85c0717d",
+  "work_head_before_marker": "011afe1e",
+  "test_results": {
+    "workspace": {
+      "test_scope": "cargo test --workspace --tests --verbose --no-fail-fast",
+      "passed": 10168,
+      "failed": 0
+    },
+    "correctness": {
+      "test_scope": "cargo test -p verter_session --test correctness",
+      "passed": 11,
+      "failed": 0
+    }
+  },
+  "snapshot_drift": "none",
+  "guards_un_ignored": [
+    "phase_05e_commit_5_route_loop_callers_migrate_to_dispatch",
+    "phase_05e_commit_6_instantiate_local_generic_ref_callers_migrate_to_dispatch",
+    "instantiate_local_generic_ref_production_callers_migrated_to_dispatch_helper"
+  ],
+  "deferred": [
+    "seed-resolver_coverage_mapped_types-closes-when-Exclude-deferred-utility-implementation-lands-projection-authority-cutover-D3-or-later",
+    "seed-resolver_coverage_inherited_emits-closes-in-5f-commit-7",
+    "seed-resolver_coverage_indexed_paths-closes-in-5f-commit-8",
+    "seed-resolver_coverage_package_backed-closes-in-5f-commit-9",
+    "seed-resolver_coverage_slot_shapes-closes-in-callsite-migration-5f-via-meta_resolve.rs-define_slots-arm",
+    "phase-5e-engine-method-instantiate_local_generic_ref-retained-for-4-engine-internal-callsites-cmqe.rs-3601-3844-3849-4256-due-to-resolve_final_prepared_type_target-re-export-chain-semantics-retires-in-5g-engine-deletion-gate",
+    "phase-5e-helper-internal-route-fast-path-inside-project_expr_class_a_via_dispatch_threaded-meta_resolve.rs-138-retained-due-to-engine-route-resolution-correctness-retires-in-5g-engine-retirement"
+  ],
+  "report_path": "phase-05e-report.md"
+}
