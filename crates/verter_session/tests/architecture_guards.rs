@@ -119,7 +119,6 @@ fn no_deprecated_workspace_reexports() {
 }
 
 #[test]
-#[ignore = "phase-07 pending or unnecessary"]
 fn no_local_vite_helpers_in_lsp() {
     for rel in [
         "crates/verter_lsp/src/server.rs",
