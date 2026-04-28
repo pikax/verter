@@ -803,6 +803,47 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 }
                 work.push(ExpandFrame::Expand(materialised));
             }
+            // Phase 5f §7: open Conditional at empty-path terminal in
+            // Expanded mode. Per CLAUDE.md "Macro Type Traversal Rule"
+            // — open conditionals distribute the remaining path into
+            // both branches; with empty path the "remaining path" is
+            // empty so distribution becomes Union(true_branch,
+            // false_branch) after each branch is itself expanded.
+            //
+            // Mirrors the Conditional arm in `advance_step` (lines
+            // 280-336) which handles open conditionals at non-empty
+            // path positions. Closes the inherited-emits seed
+            // (`defineEmits<Mode extends 'editor' ? EditorEmits :
+            // ViewerEmits>` with `Mode` unbound) by surfacing both
+            // branches' emit shapes through dispatch's
+            // `ProjectPath{[],Expanded}` instead of leaving a
+            // top-level Conditional shell that the trampoline filter
+            // `type_expr_is_expanded_surface` rejects.
+            //
+            // Pre-evaluation guard: do not redistribute closed
+            // conditionals (already reduced by `build_conditional`'s
+            // distributive arm before the shell was interned). The
+            // shell exists ONLY when the check is unbound (TypeParam
+            // / Infer / etc.), so distribution is safe — both
+            // branches are independently meaningful surfaces.
+            SemanticNodeData::Conditional {
+                true_branch_ref,
+                false_branch_ref,
+                ..
+            } if matches!(self.mode, ProjectionMode::Expanded) => {
+                let true_branch = *true_branch_ref;
+                let false_branch = *false_branch_ref;
+                drop(data);
+                let arms: Arc<[SemanticNodeId]> =
+                    Arc::from(vec![true_branch, false_branch].into_boxed_slice());
+                work.push(ExpandFrame::CombineUnion {
+                    parent: node,
+                    originals: Arc::clone(&arms),
+                });
+                for arm in arms.iter().rev() {
+                    work.push(ExpandFrame::Expand(*arm));
+                }
+            }
             SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);

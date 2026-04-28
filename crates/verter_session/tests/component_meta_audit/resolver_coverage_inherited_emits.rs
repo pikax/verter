@@ -53,7 +53,6 @@ defineEmits<ConditionalEmits>();
 "#;
 
 #[test]
-#[ignore = "Phase 5b §5.A seed: closes in Phase 5f (commit 7) via fallthrough resolver migration to ProjectPath{[],Expanded} dispatch. Verified FAIL pre-impl on commit 1."]
 fn resolver_coverage_inherited_emits_branch_merged_surface() {
     let host = build_hermetic_host_with_lib(
         &[("/parent.vue", PARENT_VUE), ("/child.vue", CHILD_VUE)],
