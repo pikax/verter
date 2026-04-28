@@ -6,8 +6,8 @@
   "work_head_before_marker": "011afe1e",
   "test_results": {
     "workspace": {
-      "test_scope": "cargo test --workspace --tests --verbose --no-fail-fast",
-      "passed": 10168,
+      "test_scope": "cargo test --workspace --tests --verbose",
+      "passed": 10209,
       "failed": 0
     },
     "correctness": {
