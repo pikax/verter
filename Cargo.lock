@@ -3975,6 +3975,7 @@ dependencies = [
  "tracing",
  "verter_scheduler",
  "walkdir",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -55,6 +55,7 @@ pub mod normalized_glob;
 pub mod overlay;
 pub mod package_index;
 pub(crate) mod project_graph;
+pub mod project_key;
 pub mod published_state;
 pub mod resolver;
 pub mod snapshot_builder;
@@ -98,6 +99,7 @@ pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
 pub use normalized_glob::NormalizedGlob;
 pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
+pub use project_key::ProjectStableKey;
 pub use published_state::PublishedRoot;
 pub use resolver::{
     IdeProjectCompilerOptions, IdeProjectConfig, NativeProjectResolver, ProjectMembership,
