@@ -62,14 +62,14 @@ use verter_semantic::analysis::type_solver::host::{
 use verter_semantic::analysis::type_solver::PreparedTypeDecl;
 
 use crate::semantic_query::{
-    BranchSelection, CacheRead, DepSignature, DepVersion, IndexKey, NodeScopeId, OriginEdgeKind,
-    OriginMeta, PathSegment, PrimitiveKind, ProjectionMode, QueryError, QueryResult,
-    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-    SurfaceView,
+    BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, LiteralValue,
+    NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
+    QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SurfaceView,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::VerterHost;
-use verter_semantic::analysis::type_expr::PrimitiveName;
+use verter_semantic::analysis::type_expr::{PrimitiveName, TypeExpr};
 
 // Phase D §5.2 WIP-Split — module tree. Extracted sub-modules are `pub(crate)`
 // so external callers see only the `ProjectSemanticDispatch` struct / trait
@@ -571,6 +571,197 @@ fn find_member(surface: &SurfaceView, needle: &str) -> Option<SemanticNodeId> {
         .iter()
         .find(|m| m.name.as_ref() == needle)
         .map(|m| m.value)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 5 §3.3 — Dispatch helpers (NON-variant; compose existing variants
+// + read sidecars). These are the 3 helpers that replace the 3 originally
+// proposed `SemanticQueryKey` variants per the §0 binding amendment
+// (`MaterializeSurface`, `ResolvePublicInstance`, `ResolveFallthroughSurface`)
+// + 1 extra utility helper (`execute_to_type_expr`).
+//
+// Per §0 amendment: these are NON-variant — `ProjectSemanticDispatch` does
+// not gain new variants; instead, it exposes plain methods that compose
+// existing dispatchers and read the
+// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar at
+// `verter_semantic/src/analysis/component_meta.rs:83-110`.
+//
+// **No callsite changes in this commit** — callsite migrations (4a/4b/4c
+// classes A/B/C, 5/6/7/8/9 classes D + R) land in 5d-5f.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Phase 5 §3.4 — `__builtin__` decl identity for the `Pick` utility.
+///
+/// Used by [`ProjectSemanticDispatch::execute_pick`] to dispatch through
+/// the existing `Instantiate` variant's built-in utility branch
+/// (`build_builtin_utility` Pick arm at `build.rs:870`). The
+/// `canonical_id = "__builtin__"` sentinel matches the convention at
+/// `meta_resolve.rs:9959/9977/9998` and the route through `UtilitySource::Builtin`
+/// per the existing `adapter.utility_source(base, "Pick")` code path.
+#[must_use]
+pub fn pick_builtin_decl_identity() -> DeclIdentity {
+    DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: [0u8; 16],
+        decl_name: Arc::from("Pick"),
+    }
+}
+
+/// Phase 5 §3.4 — `__builtin__` decl identity for the `Omit` utility.
+///
+/// Used by [`ProjectSemanticDispatch::execute_omit`]. Mirrors the Pick
+/// helper above, dispatching through the existing
+/// `build_builtin_utility` Omit arm at `build.rs:911` (which preserves
+/// call/construct/index signatures per `:937-939`).
+#[must_use]
+pub fn omit_builtin_decl_identity() -> DeclIdentity {
+    DeclIdentity {
+        canonical_id: Arc::from("__builtin__"),
+        whole_hash: [0u8; 16],
+        decl_name: Arc::from("Omit"),
+    }
+}
+
+impl<'a> ProjectSemanticDispatch<'a> {
+    /// Phase 5 §3.3 — Direct mirror of
+    /// [`materialize_component_meta_structure`](crate::component_meta_materialize::materialize_component_meta_structure).
+    ///
+    /// Caller pattern-matches `MaterializeOutcome` directly — no
+    /// conversion to `QueryResult`. Use this when callers need
+    /// `PackageRefTopLevel` / `FunctionPropertyAtNested` /
+    /// `RecursiveHelperCycleGuard` / `MAX_DEPTH` gates (which
+    /// `ProjectPath` does NOT inherit).
+    ///
+    /// **Why not a `SemanticQueryKey` variant?** Per §0 binding
+    /// amendment, `MaterializeSurface` is redundant with the existing
+    /// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar +
+    /// `MaterializeStructureDb` cache. This helper exposes the
+    /// existing function as a method on the dispatcher so consumers
+    /// can route policy-gated materialisations through dispatch
+    /// without inflating the variant set.
+    pub fn materialize_surface(
+        &self,
+        key: crate::component_meta_materialize::MaterializeStructureCacheKey,
+    ) -> CacheRead<crate::component_meta_materialize::MaterializeOutcome> {
+        crate::component_meta_materialize::materialize_component_meta_structure(self.host, key)
+    }
+
+    /// Phase 5 §3.3 — `Pick<base, members>` via the existing builtin
+    /// Pick dispatch (`build_builtin_utility` Pick arm at `build.rs:870`).
+    ///
+    /// Inherits TS Pick semantics including modifier preservation
+    /// (`optional`/`readonly` flow through). The members slice is
+    /// interned as a `Union` of string literals via
+    /// [`Self::intern_string_literal_union`] before dispatch — empty
+    /// members produce a `Primitive(Never)` keyspace which the Pick
+    /// arm reduces to an empty Object (TS spec §4.4 Pick semantics).
+    ///
+    /// **Why not a variant?** Per §0 binding amendment, `Pick` /
+    /// `Omit` are already routed through the
+    /// `build_builtin_utility` path under
+    /// `SemanticQueryKey::Instantiate`. This helper is a typed
+    /// convenience wrapper — the underlying memo entry is the same
+    /// `Instantiate` family/slot.
+    pub fn execute_pick(
+        &self,
+        base: SemanticNodeId,
+        members: &[Arc<str>],
+        mode: ProjectionMode,
+    ) -> QueryResult<SemanticNodeId> {
+        let key_set = self.intern_string_literal_union(members);
+        self.execute(SemanticQueryKey::Instantiate {
+            base: pick_builtin_decl_identity(),
+            args: Arc::from(vec![base, key_set].into_boxed_slice()),
+            body_mode: mode,
+        })
+    }
+
+    /// Phase 5 §3.3 — `Omit<base, members>` via the existing builtin
+    /// Omit dispatch (`build_builtin_utility` Omit arm at `build.rs:911`).
+    ///
+    /// Inherits TS Omit semantics including the "Omit preserves
+    /// source signatures" rule (per `build.rs:937-939` doc) — call /
+    /// construct / index signatures of the base are kept when the
+    /// keys-to-omit don't shadow them.
+    pub fn execute_omit(
+        &self,
+        base: SemanticNodeId,
+        members: &[Arc<str>],
+        mode: ProjectionMode,
+    ) -> QueryResult<SemanticNodeId> {
+        let key_set = self.intern_string_literal_union(members);
+        self.execute(SemanticQueryKey::Instantiate {
+            base: omit_builtin_decl_identity(),
+            args: Arc::from(vec![base, key_set].into_boxed_slice()),
+            body_mode: mode,
+        })
+    }
+
+    /// Phase 5 §3.3 — `execute(key)` + `raise_node_to_type_expr` in
+    /// one call, returning the full `CacheRead` so dep_signature is
+    /// preserved for the caller's fence merge (Codex round 7 P1
+    /// rejected lossy `Option<TypeExpr>` returns).
+    ///
+    /// Used by trampoline conversions (commit 3.7) and consumer
+    /// migrations that need a `TypeExpr` for downstream
+    /// `ComponentMetaAnalysis` field shape consumption.
+    pub fn execute_to_type_expr(&self, key: &SemanticQueryKey) -> CacheRead<QueryResult<TypeExpr>> {
+        let read = self.execute_read(key.clone());
+        let typed_value = match read.value {
+            QueryResult::Value(node) => match self.raise_node_to_type_expr(node) {
+                Some(expr) => QueryResult::Value(expr),
+                None => QueryResult::Error(QueryError::Miss),
+            },
+            QueryResult::Recursive(id) => QueryResult::Recursive(id),
+            QueryResult::Error(e) => QueryResult::Error(e),
+        };
+        CacheRead {
+            value: typed_value,
+            dep_signature: read.dep_signature,
+        }
+    }
+
+    /// Phase 5 §3.4 — Trivial helper: lower a `[String]` member-name
+    /// list to an `Arc<[PathSegment]>` for `ProjectPath` queries.
+    ///
+    /// Each member name becomes a `PathSegment::Member(Arc<str>)`. The
+    /// result has the same length and order as the input.
+    #[must_use]
+    pub fn lower_path_segments(p: &[String]) -> Arc<[PathSegment]> {
+        let segs: Vec<PathSegment> = p
+            .iter()
+            .map(|s| PathSegment::Member(Arc::from(s.as_str())))
+            .collect();
+        Arc::from(segs.into_boxed_slice())
+    }
+
+    /// Phase 5 §3.4 — Trivial helper: intern a `[Arc<str>]` member-name
+    /// list as a `Union` of string-literal nodes.
+    ///
+    /// Empty input produces `Primitive(Never)` — caller-side pickup of
+    /// the TS spec §4.4 rule that `Pick<T, never>` reduces to `{}`.
+    /// Single-element input produces a `Union<[lit]>` (always
+    /// uniformly `Union` even at arity 1, for caller uniformity).
+    /// `Pick` / `Omit` callers can pass the result directly as the
+    /// 2nd argument of `Instantiate`.
+    #[must_use]
+    pub fn intern_string_literal_union(&self, members: &[Arc<str>]) -> SemanticNodeId {
+        let graph = self.graph();
+        if members.is_empty() {
+            return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+        }
+        let lit_ids: Vec<SemanticNodeId> = members
+            .iter()
+            .map(|m| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    m.to_string(),
+                )))
+            })
+            .collect();
+        graph.intern_node(SemanticNodeData::Union(Arc::from(
+            lit_ids.into_boxed_slice(),
+        )))
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
