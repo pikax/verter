@@ -133,8 +133,25 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'host>(
     // re-export and prepared-decl resolution paths that dispatch's
     // generic `lower_type_expr_in_scope` does not inherit verbatim;
     // they retire alongside the engine deletion in 5g.
+    //
+    // Phase 5h §5.10 r15/F11 — scope-shadowing gate. The TypeExpr
+    // route extractors recognise `Pick<…>` / `Omit<…>` syntactically;
+    // they do not consult the owner scope. When the SFC's same-file
+    // scope already declares a userland `type Pick<T,_K> = T`
+    // (ScopeShadowing::is_shadowing_lib returns true), the registry
+    // fast-path MUST be suppressed so the bare-name walk below
+    // resolves `Pick` to the userland declaration via dispatch's
+    // standard `ResolveDecl` path — preserving the "user shadowing
+    // wins" rule across BOTH lowering entry points. Constructed once
+    // per call from the same prepared-decl bundle the dispatch path
+    // consumes, so the two paths observe identical shadow sets.
+    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+        host,
+        scope_canonical_id,
+    );
     let route = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr));
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+        .filter(|(root_symbol, _)| !shadowing.is_shadowing_lib(root_symbol));
     if let Some((root_symbol, route)) = route {
         let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
         let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
