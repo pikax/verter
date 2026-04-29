@@ -1539,14 +1539,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     evaluated
                 }
             };
+            // Phase 5i: apply `name_remap` (the `as <expr>` clause) to
+            // produce the member's surface name. When unset, the
+            // produced name is the iteration key directly. When set,
+            // substitute the mapper binder → `Literal(name)` into the
+            // remap expression and evaluate; the resolved literal
+            // string becomes the member name (template-literal
+            // interpolation closes via the Literal/TemplateLiteral
+            // evaluator). When the remap fails to resolve to a
+            // string literal, the iteration falls back to the bare
+            // key name so the surface stays addressable — a regression
+            // in the remap evaluator surfaces as keys that match the
+            // pre-remap shape rather than silently dropping members.
+            let produced_name = match mapper.name_remap {
+                None => Arc::clone(name),
+                Some(remap_node) => {
+                    let key_literal =
+                        self.graph()
+                            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                                name.as_ref().to_string(),
+                            )));
+                    let substituted_remap = self.substitute_semantic_type_param(
+                        remap_node,
+                        mapper.parameter_node,
+                        key_literal,
+                    );
+                    let evaluated_remap =
+                        self.evaluate_deferred_semantic_node(substituted_remap);
+                    match graph.node_data(evaluated_remap).as_deref() {
+                        Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                            Arc::from(text.as_str())
+                        }
+                        _ => Arc::clone(name),
+                    }
+                }
+            };
             produced.push(SurfaceMember {
-                name: Arc::clone(name),
+                name: Arc::clone(&produced_name),
                 value,
                 optional,
                 readonly,
                 is_method: false,
             });
-            project_member_edges.push((value, Arc::clone(name)));
+            project_member_edges.push((value, produced_name));
         }
 
         let view = SurfaceView {

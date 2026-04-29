@@ -126,6 +126,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     QueryResult::Value(id) => id,
                     _ => return self.opaque(QueryError::Miss),
                 },
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                } => {
+                    // Phase 5i: when every expression resolves to a
+                    // single string literal, fold the template into a
+                    // `Literal::String` by concatenating
+                    // `quasis[0] expr[0] quasis[1] expr[1] … quasis[n]`.
+                    // This closes the `template_literal_as_key` mapped-
+                    // type case where a mapper's `name_remap` carries
+                    // a template-literal expression — the post-
+                    // substitution `${K}` resolves to a string literal,
+                    // and the surrounding template can be folded into
+                    // a single name. When any expression resolves to a
+                    // non-string-literal shape (Primitive, Union, an
+                    // unresolved deferred shell), the template stays
+                    // deferred — caller falls back to the iteration key.
+                    let quasis = Arc::clone(quasis);
+                    let expressions = Arc::clone(expressions);
+                    drop(data);
+                    let mut literals: Vec<Arc<str>> = Vec::with_capacity(expressions.len());
+                    let mut all_literal = true;
+                    for expr in expressions.iter() {
+                        let resolved = self.evaluate_deferred_semantic_node(*expr);
+                        match self.graph().node_data(resolved).as_deref() {
+                            Some(SemanticNodeData::Literal(LiteralValue::String(s))) => {
+                                literals.push(Arc::from(s.as_str()));
+                            }
+                            _ => {
+                                all_literal = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !all_literal {
+                        return node;
+                    }
+                    let mut buf = String::new();
+                    for (idx, quasi) in quasis.iter().enumerate() {
+                        buf.push_str(quasi);
+                        if let Some(lit) = literals.get(idx) {
+                            buf.push_str(lit);
+                        }
+                    }
+                    self.graph()
+                        .intern_node(SemanticNodeData::Literal(LiteralValue::String(buf)))
+                }
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                     canonical_id,
                     name,
