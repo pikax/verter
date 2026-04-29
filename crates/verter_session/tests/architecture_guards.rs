@@ -490,3 +490,82 @@ fn phase_05d_4c_class_b_callers_documented_for_5g_engine_retirement() {
          at 1 (deferred-to-5g); found {host_manage_b}"
     );
 }
+
+#[test]
+#[ignore = "phase-05l pending"]
+fn no_unbounded_recursion_in_resolver_core() {
+    // r15/F15 (Claude review) — static guard for §0.6.5 stack-depth
+    // discipline. Flags any `fn` body in resolver_core/ that calls
+    // itself by name without going through an explicit
+    // depth_budget/iterative-frame helper. False positives are
+    // acceptable; the allow-list below carries auditied exceptions
+    // with phase-report citations.
+    //
+    // The pattern: a fn declared as `fn foo(...) ... { ... foo( ... }`
+    // or `fn foo(...) ... { ... self.foo( ... }` is flagged unless
+    // the body also contains a `depth_budget` or `iterative_frame`
+    // accessor reference.
+    //
+    // The guard is intentionally permissive in regex form — its
+    // purpose is to surface candidates for audit, not to gate at
+    // arbitrary precision. Phase 5l's owner reviews the violations
+    // list and either (a) adds the auditied case to the allow-list
+    // with a citation, or (b) refactors to a depth-budgeted shape.
+    use regex::Regex;
+    use std::collections::HashSet;
+    use walkdir::WalkDir;
+    let allow_list: HashSet<&str> = [
+        // (function-name, justified-by-report)
+        // Add entries here ONLY with a phase-report citation.
+    ]
+    .iter()
+    .copied()
+    .collect();
+    let resolver_dir = workspace_root().join("crates/verter_session/src/resolver_core");
+    let fn_decl_re =
+        Regex::new(r"(?m)^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+([a-z_][a-z0-9_]*)\s*[(<]")
+            .unwrap();
+    let mut violations = Vec::<String>::new();
+    for entry in WalkDir::new(&resolver_dir) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap();
+        for cap in fn_decl_re.captures_iter(&src) {
+            let fn_name = cap.get(1).unwrap().as_str();
+            if allow_list.contains(fn_name) {
+                continue;
+            }
+            // Heuristic: the file references the fn name elsewhere AND has no depth-budget marker.
+            let self_call = format!("self.{fn_name}(");
+            let direct_call = format!("{fn_name}(");
+            let recursion_call_count =
+                src.matches(&self_call).count() + src.matches(&direct_call).count();
+            // Subtract one for the declaration itself.
+            if recursion_call_count > 1
+                && !src.contains("depth_budget")
+                && !src.contains("iterative_frame")
+                && !src.contains("MAX_DEPTH")
+            {
+                let rel = path
+                    .strip_prefix(workspace_root())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                violations.push(format!(
+                    "{rel}: fn {fn_name} appears recursive without depth budget"
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "no_unbounded_recursion_in_resolver_core (Phase 5l flips this):\n{}",
+        violations.join("\n")
+    );
+}
