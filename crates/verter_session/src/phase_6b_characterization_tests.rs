@@ -927,6 +927,66 @@ fn host_notify_close_evicts_route_owned_shallow() {
     );
 }
 
+// ─── 6b.D3 — REGRESSION: upsert-invalidation matrix preserved ────────────
+//
+// Per §6b.D3 final regression sweep — the upsert-invalidation cascade
+// already routes through `project_type_store.evict_canonical` at
+// `host_upsert.rs:192/298`. Now that `evict_canonical` cascades to
+// `route_owned_shallow.remove(canonical)` (extension landed in 6b.D1
+// at `project_type_store.rs:1176`), an upsert that triggers the
+// content-hash-changed cascade must evict route_owned_shallow entries
+// for the upserted canonical alongside IndexedReadyDb.
+//
+// REGRESSION classification — only post-migration green required.
+#[test]
+fn upsert_invalidation_matrix_evicts_route_owned_shallow() {
+    use crate::project_type_store::RouteOwnedShallowEntry;
+
+    let host = host();
+    let store = host.project_type_store();
+
+    let canonical_str = "/lib/upsert_target.ts";
+    let canonical: Arc<str> = Arc::from(canonical_str);
+    let entry = Arc::new(RouteOwnedShallowEntry::test_stub(canonical.clone()));
+
+    // Seed an entry directly into the new DB.
+    store
+        .route_owned_shallow()
+        .publish(canonical.clone(), Arc::clone(&entry));
+    assert!(
+        store.route_owned_shallow().get_any(canonical_str).is_some(),
+        "PRE-UPSERT: route_owned_shallow entry must be present",
+    );
+
+    // Trigger the upsert-invalidation cascade via per-canonical
+    // `evict_canonical` (the same primitive `host_upsert.rs:192/298`
+    // calls when the file's whole_hash changes).
+    store.evict_canonical(canonical_str);
+
+    // POST: route_owned_shallow entry evicted.
+    assert!(
+        store.route_owned_shallow().get_any(canonical_str).is_none(),
+        "POST-EVICT: project_type_store.evict_canonical must cascade to \
+         route_owned_shallow.remove (extension landed in 6b.D1)",
+    );
+
+    // Negative regression: an unrelated canonical's route_owned_shallow
+    // entry survives an upsert-invalidation that targets only the
+    // upserted file.
+    let unrelated_str = "/lib/unrelated.ts";
+    let unrelated: Arc<str> = Arc::from(unrelated_str);
+    let unrelated_entry = Arc::new(RouteOwnedShallowEntry::test_stub(unrelated.clone()));
+    store
+        .route_owned_shallow()
+        .publish(unrelated.clone(), Arc::clone(&unrelated_entry));
+    store.evict_canonical(canonical_str);
+    assert!(
+        store.route_owned_shallow().get_any(unrelated_str).is_some(),
+        "POST-EVICT: per-canonical evict_canonical must NOT touch other \
+         canonicals' route_owned_shallow entries",
+    );
+}
+
 // ─── T13 — REGRESSION: tier-3 project-generation gate rejects stale ──────
 //
 // Per §6b.0.2 row T13 (tenth-pass Codex P0): tier-3 covers route-resolution
